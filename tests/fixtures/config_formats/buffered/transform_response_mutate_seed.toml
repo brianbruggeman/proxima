@@ -1,0 +1,5 @@
+[[response_pipeline]]
+op = "mutate"
+kind = "bit_flip"
+bits = 1
+seed = 42

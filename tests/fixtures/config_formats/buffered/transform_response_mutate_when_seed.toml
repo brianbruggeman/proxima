@@ -1,0 +1,9 @@
+[[response_pipeline]]
+op = "mutate"
+kind = "bit_flip"
+bits = 1
+seed = 0
+
+[response_pipeline.when]
+prob = 0.0
+seed = 7

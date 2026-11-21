@@ -1,0 +1,5 @@
+[[request_pipeline]]
+op = "mutate"
+kind = "bit_flip"
+bits = 3
+seed = 0

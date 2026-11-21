@@ -1,0 +1,1 @@
+<config><command>/usr/local/bin/worker</command><ready_probe><type>stdout_line</type><pattern>listening on</pattern><timeout_ms>7500</timeout_ms></ready_probe></config>

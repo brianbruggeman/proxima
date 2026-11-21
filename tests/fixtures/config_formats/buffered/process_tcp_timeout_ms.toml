@@ -1,0 +1,6 @@
+command = "/usr/local/bin/worker"
+
+[ready_probe]
+type = "tcp"
+addr = "127.0.0.1:9000"
+timeout_ms = 4500

@@ -511,3 +511,320 @@ async fn ctl_format_client_toml() {
     let body = response.bytes().await.expect("body");
     assert_eq!(&body[..], b"created");
 }
+
+use crate::upstreams::kv_cache::SizeValue;
+#[cfg(feature = "tokio")]
+use crate::upstreams::process::ProbeConfig;
+use proxima_patterns::middleware::client_auth::ClientAuthScheme;
+use proxima_primitives::pipe::delay::Dist;
+use proxima_primitives::pipe::filter::Predicate;
+use proxima_primitives::pipe::mutate::{MutateOp, Mutation};
+use proxima_primitives::pipe::transform::{RequestOpConfig, ResponseOpConfig};
+use proxima_primitives::pipe::when::When;
+
+const CLIENT_AUTH_REFRESH_AHEAD_MS: u64 = 30000;
+const DELAY_CONST_MS: u64 = 40;
+const DELAY_RANGE_MIN_MS: u64 = 10;
+const DELAY_RANGE_MAX_MS: u64 = 250;
+const DELAY_RANGE_SEED: u64 = 99;
+const MUTATE_BITS: u32 = 3;
+const MUTATE_SEED: u64 = 42;
+const MUTATE_WHEN_PROB: f64 = 0.5;
+const MUTATE_WHEN_SEED: u64 = 7;
+const FILTER_GATE_PROB: f64 = 0.25;
+const FILTER_GATE_SEED: u64 = 11;
+const PROCESS_STDOUT_LINE_TIMEOUT_MS: u64 = 7500;
+const PROCESS_TCP_TIMEOUT_MS: u64 = 4500;
+
+fn sized_64mb() -> Option<SizeValue> {
+    Some(SizeValue::Sized("64MB".into()))
+}
+
+macro_rules! buffered_fixture {
+    ($name:literal, $ext:literal) => {
+        include_str!(concat!(
+            "../tests/fixtures/config_formats/buffered/",
+            $name,
+            ".",
+            $ext
+        ))
+    };
+}
+
+fn buffered_toml<T: DeserializeOwned>(name: &str) -> T {
+    let raw = match name {
+        "client_auth_refresh_ahead_ms" => buffered_fixture!("client_auth_refresh_ahead_ms", "toml"),
+        "delay_const_ms" => buffered_fixture!("delay_const_ms", "toml"),
+        "delay_range_min_ms" => buffered_fixture!("delay_range_min_ms", "toml"),
+        "delay_range_max_ms" => buffered_fixture!("delay_range_max_ms", "toml"),
+        "delay_range_seed" => buffered_fixture!("delay_range_seed", "toml"),
+        "transform_request_mutate_bits" => {
+            buffered_fixture!("transform_request_mutate_bits", "toml")
+        }
+        "transform_request_mutate_seed" => {
+            buffered_fixture!("transform_request_mutate_seed", "toml")
+        }
+        "transform_request_mutate_when_prob" => {
+            buffered_fixture!("transform_request_mutate_when_prob", "toml")
+        }
+        "transform_request_mutate_when_seed" => {
+            buffered_fixture!("transform_request_mutate_when_seed", "toml")
+        }
+        "transform_response_mutate_bits" => {
+            buffered_fixture!("transform_response_mutate_bits", "toml")
+        }
+        "transform_response_mutate_seed" => {
+            buffered_fixture!("transform_response_mutate_seed", "toml")
+        }
+        "transform_response_mutate_when_prob" => {
+            buffered_fixture!("transform_response_mutate_when_prob", "toml")
+        }
+        "transform_response_mutate_when_seed" => {
+            buffered_fixture!("transform_response_mutate_when_seed", "toml")
+        }
+        "filter_when_prob" => buffered_fixture!("filter_when_prob", "toml"),
+        "filter_when_seed" => buffered_fixture!("filter_when_seed", "toml"),
+        "filter_unless_prob" => buffered_fixture!("filter_unless_prob", "toml"),
+        "filter_unless_seed" => buffered_fixture!("filter_unless_seed", "toml"),
+        "kv_cache_max_bytes" => buffered_fixture!("kv_cache_max_bytes", "toml"),
+        "kv_file_max_bytes" => buffered_fixture!("kv_file_max_bytes", "toml"),
+        "process_stdout_line_timeout_ms" => {
+            buffered_fixture!("process_stdout_line_timeout_ms", "toml")
+        }
+        "process_tcp_timeout_ms" => buffered_fixture!("process_tcp_timeout_ms", "toml"),
+        other => panic!("{other}: no buffered toml fixture"),
+    };
+    today_read(name, raw)
+}
+
+fn request_mutate(config: &TransformConfig) -> &MutateOp {
+    match config.request_pipeline.first() {
+        Some(RequestOpConfig::Mutate { mutate }) => mutate,
+        other => panic!("first request op is not mutate: {other:?}"),
+    }
+}
+
+fn response_mutate(config: &TransformConfig) -> &MutateOp {
+    match config.response_pipeline.first() {
+        Some(ResponseOpConfig::Mutate { mutate }) => mutate,
+        other => panic!("first response op is not mutate: {other:?}"),
+    }
+}
+
+fn mutate_bits(op: &MutateOp) -> u32 {
+    match op.mutation() {
+        Mutation::BitFlip { bits } => *bits,
+        other => panic!("mutation is not bit_flip: {other:?}"),
+    }
+}
+
+fn mutate_when(op: &MutateOp) -> When {
+    let value = serde_json::to_value(op).expect("mutate op serializes");
+    serde_json::from_value(value["when"].clone()).expect("when reads back")
+}
+
+fn predicate_gate(config: &FilterConfig, unless: bool) -> When {
+    match (&config.predicate, unless) {
+        (Predicate::When { gate, .. }, false) | (Predicate::Unless { gate, .. }, true) => *gate,
+        (other, _) => panic!("predicate is not the expected variant: {other:?}"),
+    }
+}
+
+fn delay_range(config: &DelayConfig) -> (u64, u64, u64) {
+    match config.dist {
+        Dist::Range {
+            min_ms,
+            max_ms,
+            seed,
+        } => (min_ms, max_ms, seed),
+        other => panic!("dist is not range: {other:?}"),
+    }
+}
+
+#[test]
+fn ctl_format_buffered_client_auth_refresh_ahead_ms() {
+    let config: ClientAuthConfig = buffered_toml("client_auth_refresh_ahead_ms");
+    match config.scheme {
+        ClientAuthScheme::Oauth {
+            refresh_ahead_ms, ..
+        } => assert_eq!(refresh_ahead_ms, CLIENT_AUTH_REFRESH_AHEAD_MS),
+        other => panic!("scheme is not oauth: {other:?}"),
+    }
+}
+
+#[test]
+fn ctl_format_buffered_delay_const_ms() {
+    let config: DelayConfig = buffered_toml("delay_const_ms");
+    assert_eq!(config.dist, Dist::Const { ms: DELAY_CONST_MS });
+}
+
+#[test]
+fn ctl_format_buffered_delay_range_min_ms() {
+    let config: DelayConfig = buffered_toml("delay_range_min_ms");
+    assert_eq!(delay_range(&config).0, DELAY_RANGE_MIN_MS);
+}
+
+#[test]
+fn ctl_format_buffered_delay_range_max_ms() {
+    let config: DelayConfig = buffered_toml("delay_range_max_ms");
+    assert_eq!(delay_range(&config).1, DELAY_RANGE_MAX_MS);
+}
+
+#[test]
+fn ctl_format_buffered_delay_range_seed() {
+    let config: DelayConfig = buffered_toml("delay_range_seed");
+    assert_eq!(delay_range(&config).2, DELAY_RANGE_SEED);
+}
+
+#[test]
+fn ctl_format_buffered_transform_request_mutate_bits() {
+    let config: TransformConfig = buffered_toml("transform_request_mutate_bits");
+    assert_eq!(mutate_bits(request_mutate(&config)), MUTATE_BITS);
+}
+
+#[test]
+fn ctl_format_buffered_transform_request_mutate_seed() {
+    let config: TransformConfig = buffered_toml("transform_request_mutate_seed");
+    assert_eq!(request_mutate(&config).seed(), MUTATE_SEED);
+}
+
+#[test]
+fn ctl_format_buffered_transform_request_mutate_when_prob() {
+    let config: TransformConfig = buffered_toml("transform_request_mutate_when_prob");
+    assert_eq!(mutate_when(request_mutate(&config)).prob, MUTATE_WHEN_PROB);
+}
+
+#[test]
+fn ctl_format_buffered_transform_request_mutate_when_seed() {
+    let config: TransformConfig = buffered_toml("transform_request_mutate_when_seed");
+    assert_eq!(mutate_when(request_mutate(&config)).seed, MUTATE_WHEN_SEED);
+}
+
+#[test]
+fn ctl_format_buffered_transform_response_mutate_bits() {
+    let config: TransformConfig = buffered_toml("transform_response_mutate_bits");
+    assert_eq!(mutate_bits(response_mutate(&config)), MUTATE_BITS);
+}
+
+#[test]
+fn ctl_format_buffered_transform_response_mutate_seed() {
+    let config: TransformConfig = buffered_toml("transform_response_mutate_seed");
+    assert_eq!(response_mutate(&config).seed(), MUTATE_SEED);
+}
+
+#[test]
+fn ctl_format_buffered_transform_response_mutate_when_prob() {
+    let config: TransformConfig = buffered_toml("transform_response_mutate_when_prob");
+    assert_eq!(mutate_when(response_mutate(&config)).prob, MUTATE_WHEN_PROB);
+}
+
+#[test]
+fn ctl_format_buffered_transform_response_mutate_when_seed() {
+    let config: TransformConfig = buffered_toml("transform_response_mutate_when_seed");
+    assert_eq!(mutate_when(response_mutate(&config)).seed, MUTATE_WHEN_SEED);
+}
+
+#[test]
+fn ctl_format_buffered_filter_when_prob() {
+    let config: FilterConfig = buffered_toml("filter_when_prob");
+    assert_eq!(predicate_gate(&config, false).prob, FILTER_GATE_PROB);
+}
+
+#[test]
+fn ctl_format_buffered_filter_when_seed() {
+    let config: FilterConfig = buffered_toml("filter_when_seed");
+    assert_eq!(predicate_gate(&config, false).seed, FILTER_GATE_SEED);
+}
+
+#[test]
+fn ctl_format_buffered_filter_unless_prob() {
+    let config: FilterConfig = buffered_toml("filter_unless_prob");
+    assert_eq!(predicate_gate(&config, true).prob, FILTER_GATE_PROB);
+}
+
+#[test]
+fn ctl_format_buffered_filter_unless_seed() {
+    let config: FilterConfig = buffered_toml("filter_unless_seed");
+    assert_eq!(predicate_gate(&config, true).seed, FILTER_GATE_SEED);
+}
+
+#[test]
+fn ctl_format_buffered_kv_cache_max_bytes() {
+    let config: KvCacheConfig = buffered_toml("kv_cache_max_bytes");
+    assert_eq!(config.max_bytes, sized_64mb());
+}
+
+#[test]
+fn ctl_format_buffered_kv_file_max_bytes() {
+    let config: KvFileConfig = buffered_toml("kv_file_max_bytes");
+    assert_eq!(config.max_bytes, sized_64mb());
+}
+
+#[cfg(feature = "tokio")]
+#[test]
+fn ctl_format_buffered_process_stdout_line_timeout_ms() {
+    let config: ProcessConfig = buffered_toml("process_stdout_line_timeout_ms");
+    match config.ready_probe {
+        ProbeConfig::StdoutLine { timeout_ms, .. } => {
+            assert_eq!(timeout_ms, PROCESS_STDOUT_LINE_TIMEOUT_MS)
+        }
+        other => panic!("ready_probe is not stdout_line: {other:?}"),
+    }
+}
+
+#[cfg(feature = "tokio")]
+#[test]
+fn ctl_format_buffered_process_tcp_timeout_ms() {
+    let config: ProcessConfig = buffered_toml("process_tcp_timeout_ms");
+    match config.ready_probe {
+        ProbeConfig::Tcp { timeout_ms, .. } => assert_eq!(timeout_ms, PROCESS_TCP_TIMEOUT_MS),
+        other => panic!("ready_probe is not tcp: {other:?}"),
+    }
+}
+
+fn assert_xml_c2_is_err<T: DeserializeOwned>(member: &str, raw: &str) {
+    let registry = proxima_config::default_config_format_registry().expect("registry");
+    let value = registry
+        .get_by_extension("xml")
+        .expect("xml arm registered")
+        .parse(raw)
+        .unwrap_or_else(|err| panic!("{member}: xml parse failed: {err}"));
+    assert!(
+        serde_json::from_value::<T>(value.clone()).is_err(),
+        "{member}: from_value accepted the xml tree {value}"
+    );
+}
+
+#[test]
+fn config_format_ctl_client_auth() {
+    assert_xml_c2_is_err::<ClientAuthConfig>(
+        "client_auth",
+        buffered_fixture!("client_auth_c2", "xml"),
+    );
+}
+
+#[test]
+fn config_format_ctl_delay() {
+    assert_xml_c2_is_err::<DelayConfig>("delay", buffered_fixture!("delay_c2", "xml"));
+}
+
+#[test]
+fn config_format_ctl_transform() {
+    assert_xml_c2_is_err::<TransformConfig>("transform", buffered_fixture!("transform_c2", "xml"));
+}
+
+#[test]
+fn config_format_ctl_filter() {
+    assert_xml_c2_is_err::<FilterConfig>("filter", buffered_fixture!("filter_c2", "xml"));
+}
+
+#[test]
+fn config_format_ctl_validate() {
+    assert_xml_c2_is_err::<ValidateConfig>("validate", buffered_fixture!("validate_c2", "xml"));
+}
+
+#[cfg(feature = "tokio")]
+#[test]
+fn config_format_ctl_process() {
+    assert_xml_c2_is_err::<ProcessConfig>("process", buffered_fixture!("process_c2", "xml"));
+}

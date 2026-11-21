@@ -1,0 +1,1 @@
+<config><scheme>oauth</scheme><token_url>https://idp.example.com/token</token_url><client_id>edge</client_id><client_secret>s3cr3t</client_secret><refresh_ahead_ms>30000</refresh_ahead_ms></config>

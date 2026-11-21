@@ -1,0 +1,4 @@
+<config>
+<request_pipeline><op>mutate</op><kind>bit_flip</kind><bits>3</bits><seed>42</seed><when><prob>0.5</prob><seed>7</seed></when></request_pipeline>
+<response_pipeline><op>mutate</op><kind>bit_flip</kind><bits>2</bits><seed>11</seed><when><prob>0.125</prob><seed>9</seed></when></response_pipeline>
+</config>

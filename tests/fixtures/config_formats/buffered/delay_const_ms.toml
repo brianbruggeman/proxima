@@ -1,0 +1,3 @@
+[dist]
+kind = "const"
+ms = 40

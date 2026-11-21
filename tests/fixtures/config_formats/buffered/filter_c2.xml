@@ -1,0 +1,1 @@
+<config><on_reject>error</on_reject><predicate><kind>when</kind><prob>0.25</prob><seed>11</seed></predicate></config>

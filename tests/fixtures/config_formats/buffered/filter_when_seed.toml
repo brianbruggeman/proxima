@@ -1,0 +1,6 @@
+on_reject = "error"
+
+[predicate]
+kind = "when"
+prob = 0.0
+seed = 11

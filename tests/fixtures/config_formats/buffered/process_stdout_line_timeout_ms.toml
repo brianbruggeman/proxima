@@ -1,0 +1,6 @@
+command = "/usr/local/bin/worker"
+
+[ready_probe]
+type = "stdout_line"
+pattern = "listening on"
+timeout_ms = 7500

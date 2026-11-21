@@ -1,0 +1,2 @@
+path = "/var/cache/proxima"
+max_bytes = "64MB"

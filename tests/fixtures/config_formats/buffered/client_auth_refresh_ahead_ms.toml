@@ -1,0 +1,5 @@
+scheme = "oauth"
+token_url = "https://idp.example.com/token"
+client_id = "edge"
+client_secret = "s3cr3t"
+refresh_ahead_ms = 30000
