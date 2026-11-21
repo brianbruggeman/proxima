@@ -1,0 +1,5 @@
+host = "mq.internal"
+port = 5673
+username = "worker"
+password = "s3cret-amqp"
+virtual_host = "/jobs"

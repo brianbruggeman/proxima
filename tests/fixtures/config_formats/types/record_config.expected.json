@@ -1,0 +1,11 @@
+{
+  "sink": {
+    "path": "/var/lib/proxima/recordings/orders.jsonl",
+    "type": "jsonl",
+    "zstd_level": 3
+  },
+  "inner": { "http": "http://127.0.0.1:8080" },
+  "name": "orders-record",
+  "pipe": "orders",
+  "protocol": "http"
+}

@@ -1,0 +1,18 @@
+kernel_path = "/boot/vmlinuz-linux"
+image = "traefik/whoami@sha256:14e4e3c8a1f5c0b8d6a1b1f2d0e3a9c7b5d4e6f8a0b2c4d6e8f0a1b3c5d7e9f1"
+oci_init_path = "/opt/proxima/guests/oci-init"
+image_cache_dir = "/var/cache/proxima-oci"
+cmdline = "console=ttyS0 reboot=t panic=-1 quiet"
+ram_mib = 256
+watchdog_millis = 30000
+name = "whoami-vm"
+max_hypercalls = 64
+output_capacity = 131072
+guest_memory_size = 4194304
+resident = true
+guest_port = 8080
+connect_timeout_millis = 90000
+modules_root = "/usr/lib/modules"
+restart = "on_failure"
+restart_delay_ms = 2500
+max_restart_attempts = 5

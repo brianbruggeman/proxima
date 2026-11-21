@@ -1,0 +1,8 @@
+{
+  "host": "cache.internal",
+  "port": 6380,
+  "username": "svc",
+  "password": "s3cret-redis",
+  "db": 3,
+  "resp3": false
+}

@@ -21,12 +21,48 @@ use crate::upstreams::kv_file::KvFileConfig;
 use crate::upstreams::process::ProcessConfig;
 #[cfg(unix)]
 use crate::upstreams::process_rpc::ProcessRpcConfig;
+#[cfg(feature = "recording")]
+use crate::upstreams::record::RecordConfig;
+#[cfg(any(feature = "tcp", feature = "unix"))]
+use crate::upstreams::stream_passthrough::StreamPassthroughSettings;
 use crate::upstreams::synth::SynthConfig;
+#[cfg(feature = "vm")]
+use crate::upstreams::vm::VmConfig;
+#[cfg(all(
+    feature = "amqp-client",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+use proxima_amqp::AmqpClientConfig;
 use proxima_config::{ConfigFormatFactory, TomlConfigFormat};
+#[cfg(all(
+    feature = "dns-client",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+use proxima_dns::DnsResolverConfig;
 #[cfg(feature = "http1")]
 use proxima_http::http1::HttpConfig;
+#[cfg(all(
+    feature = "kafka-client",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+use proxima_kafka::KafkaClientConfig;
+#[cfg(all(
+    feature = "memcached-client",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+use proxima_memcached::MemcachedClientConfig;
+#[cfg(all(
+    feature = "mqtt-client",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+use proxima_mqtt::MqttClientConfig;
 use proxima_patterns::middleware::auth::AuthConfig;
 use proxima_patterns::middleware::client_auth::ClientAuthConfig;
+#[cfg(all(
+    feature = "pgwire-client",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+use proxima_pgwire::PgClientConfig;
 use proxima_primitives::pipe::delay::DelayConfig;
 use proxima_primitives::pipe::filter::FilterConfig;
 use proxima_primitives::pipe::isolate::IsolateConfig;
@@ -34,6 +70,11 @@ use proxima_primitives::pipe::rate_limit::RateLimitConfig;
 use proxima_primitives::pipe::retry::RetryConfig;
 use proxima_primitives::pipe::transform::TransformConfig;
 use proxima_primitives::pipe::validate::ValidateConfig;
+#[cfg(all(
+    feature = "redis-client",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+use proxima_redis::RedisClientConfig;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -272,5 +313,126 @@ fn ctl_format_member_kv_file_config() {
         "kv_file_config",
         fixture!("kv_file_config", "toml"),
         fixture!("kv_file_config", "expected.json"),
+    );
+}
+
+#[test]
+#[cfg(any(feature = "tcp", feature = "unix"))]
+fn ctl_format_member_stream_passthrough_settings() {
+    assert_typed_twin::<StreamPassthroughSettings>(
+        "stream_passthrough_settings",
+        fixture!("stream_passthrough_settings", "toml"),
+        fixture!("stream_passthrough_settings", "expected.json"),
+    );
+}
+
+#[test]
+#[cfg(feature = "vm")]
+fn ctl_format_member_vm_config() {
+    assert_typed_twin::<VmConfig>(
+        "vm_config",
+        fixture!("vm_config", "toml"),
+        fixture!("vm_config", "expected.json"),
+    );
+}
+
+#[test]
+#[cfg(feature = "recording")]
+fn ctl_format_member_record_config() {
+    assert_serialized_twin::<RecordConfig>(
+        "record_config",
+        fixture!("record_config", "toml"),
+        fixture!("record_config", "expected.json"),
+    );
+}
+
+#[test]
+#[cfg(all(
+    feature = "mqtt-client",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+fn ctl_format_member_mqtt_client_config() {
+    assert_typed_twin::<MqttClientConfig>(
+        "mqtt_client_config",
+        fixture!("mqtt_client_config", "toml"),
+        fixture!("mqtt_client_config", "expected.json"),
+    );
+}
+
+#[test]
+#[cfg(all(
+    feature = "dns-client",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+fn ctl_format_member_dns_resolver_config() {
+    assert_typed_twin::<DnsResolverConfig>(
+        "dns_resolver_config",
+        fixture!("dns_resolver_config", "toml"),
+        fixture!("dns_resolver_config", "expected.json"),
+    );
+}
+
+#[test]
+#[cfg(all(
+    feature = "pgwire-client",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+fn ctl_format_member_pg_client_config() {
+    assert_typed_twin::<PgClientConfig>(
+        "pg_client_config",
+        fixture!("pg_client_config", "toml"),
+        fixture!("pg_client_config", "expected.json"),
+    );
+}
+
+#[test]
+#[cfg(all(
+    feature = "amqp-client",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+fn ctl_format_member_amqp_client_config() {
+    assert_typed_twin::<AmqpClientConfig>(
+        "amqp_client_config",
+        fixture!("amqp_client_config", "toml"),
+        fixture!("amqp_client_config", "expected.json"),
+    );
+}
+
+#[test]
+#[cfg(all(
+    feature = "redis-client",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+fn ctl_format_member_redis_client_config() {
+    assert_typed_twin::<RedisClientConfig>(
+        "redis_client_config",
+        fixture!("redis_client_config", "toml"),
+        fixture!("redis_client_config", "expected.json"),
+    );
+}
+
+#[test]
+#[cfg(all(
+    feature = "memcached-client",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+fn ctl_format_member_memcached_client_config() {
+    assert_typed_twin::<MemcachedClientConfig>(
+        "memcached_client_config",
+        fixture!("memcached_client_config", "toml"),
+        fixture!("memcached_client_config", "expected.json"),
+    );
+}
+
+#[test]
+#[cfg(all(
+    feature = "kafka-client",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+fn ctl_format_member_kafka_client_config() {
+    assert_typed_twin::<KafkaClientConfig>(
+        "kafka_client_config",
+        fixture!("kafka_client_config", "toml"),
+        fixture!("kafka_client_config", "expected.json"),
     );
 }

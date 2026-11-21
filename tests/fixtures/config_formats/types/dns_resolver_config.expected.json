@@ -1,0 +1,6 @@
+{
+  "resolver_ip": "9.9.9.9",
+  "port": 5353,
+  "query_timeout_ms": 1500,
+  "max_attempts": 4
+}

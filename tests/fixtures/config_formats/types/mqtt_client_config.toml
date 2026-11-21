@@ -1,0 +1,7 @@
+host = "broker.internal"
+port = 1884
+client_id = "edge-gw-7"
+clean_session = false
+keep_alive = 30
+username = "edge"
+password = "s3cret-mqtt"

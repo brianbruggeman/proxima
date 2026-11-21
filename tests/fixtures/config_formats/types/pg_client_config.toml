@@ -1,0 +1,5 @@
+host = "db.internal"
+port = 6432
+user = "app"
+password = "s3cret-pg"
+database = "orders"

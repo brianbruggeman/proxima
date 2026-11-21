@@ -1,0 +1,5 @@
+{
+  "host": "kafka.internal",
+  "port": 9093,
+  "client_id": "orders-producer"
+}
