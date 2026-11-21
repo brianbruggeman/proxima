@@ -65,7 +65,7 @@ use proxima_numeric::block_layout::BlockLayout;
 use proxima_tensor::{
     ActivationLimits, BoundOp, BoundOpKind, ComposedBody, DeviceMemory, Executes, Form, Keep, Layout, Lookup, NodeId, Op, ReduceInit, Refusal, ScalarOp, StepArg,
 };
-use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
+use proxima_numeric::{DType, FloatLayout, NumericPolicy, NumericRewrite, admit};
 
 use crate::cuda_cached_attention::{
     cached_attention_entry_name, cached_attention_runtime_bounds, render_cached_attention_cuda,
@@ -525,9 +525,9 @@ const Q8_1_QUANTIZE_ENTRY: &str = "omega_cuda_q8_1_quantize";
 
 
 const Q8_1_QUANTIZE_ENTRY_TEXT: &str = r#"
-extern "C" __global__ void omega_cuda_q8_1_quantize(const float *in, float *out, const int *u) {
-    long gid = (long)blockIdx.x * blockDim.x + threadIdx.x;
-    long block = gid / 32;
+extern "C" __global__ void omega_cuda_q8_1_quantize(const float *in, float *out, const long long *u) {
+    long long gid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    long long block = gid / 32;
     if (block >= u[0]) return;
     omega_q8_1_quantize_block(in, out, block, (unsigned int)(gid & 31));
 }
@@ -926,16 +926,52 @@ fn refit_extent_fields_in_place(
     kernel.prologue = prologue;
     Ok(())
 }
+/// The numeric format of every runtime `Uniforms` word and every 64-bit index in
+/// emitted card-C. The host writes `WORD.width() / 8` bytes per field; the device
+/// struct must spell a type of exactly that width.
+///
+/// `long` is never that type. HIP and CUDA device compilation inherits the host
+/// (aux) triple's C data model, so on a 64-bit Windows host the device's `long`
+/// is 4 bytes under LLP64 while this word is 8: every field after the first is
+/// read four bytes early, extents become zero, offsets wrap, and the mismatch
+/// surfaces later as a failed copy after a launch that already ran. `long long`
+/// is 8 bytes on every card-C target.
+pub const WORD: FloatLayout = FloatLayout::INT64;
+
+/// The card-C spelling of [`WORD`], derived from the layout rather than written
+/// twice. `long long` is 64 bits on every card-C target; `long` is not.
+pub const WORD_C: &str = match card_c_integer(&WORD) {
+    Some(spelling) => spelling,
+    None => panic!("the uniform word must be an integer layout"),
+};
+
+const _: () = assert!(WORD.width() == 64);
+const _: () = assert!(WORD.width() as usize / 8 == core::mem::size_of::<i64>());
+const _: () = assert!(WORD.is_signed_integer());
+
+/// The fixed-width card-C spelling of the signed 64-bit integer word. The
+/// mapping is deliberately narrow: a caller that needs another width adds the
+/// arm with its caller, rather than carrying an untested table. The number
+/// still comes from its own [`FloatLayout`], never from a hand-written string.
+pub(crate) const fn card_c_integer(layout: &FloatLayout) -> Option<&'static str> {
+    if layout.is_integer() && layout.width() == 64 && layout.is_signed_integer() {
+        Some("long long")
+    } else {
+        None
+    }
+}
+
 /// Packs the runtime ABI for the f32 elementwise CUDA kernels.
 ///
-/// CUDA's emitted `Uniforms` uses native-width `long` fields, so this is
-/// deliberately separate from the wgpu i32 packer. Keeping the packer beside
-/// the emitter makes the source layout and the host layout one contract.
-/// `cuda_driver::launch` (this crate's own `cuda-driver` feature) is the one
-/// non-test caller — the `cuda` feature alone is the dependency-free emitter
-/// this module's own doc describes, with no binding/argument packer wired to
-/// it yet, so this stays test-only in that build rather than dead code the
-/// lint has to be silenced around.
+/// The host and device words are both derived from [`WORD`], so the two sides
+/// cannot drift: every field is `WORD.width() / 8` bytes on the host and
+/// [`WORD_C`] in the emitted struct. Keeping the packer beside the emitter makes
+/// the source layout and the host layout one contract. `cuda_driver::launch`
+/// (this crate's own `cuda-driver` feature) is the one non-test caller — the
+/// `cuda` feature alone is the dependency-free emitter this module's own doc
+/// describes, with no binding/argument packer wired to it yet, so this stays
+/// test-only in that build rather than dead code the lint has to be silenced
+/// around.
 #[cfg(any(test, feature = "cuda-driver"))]
 pub(crate) fn pack_elementwise_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, EmitError> {
     if !matches!(resolved.kind, BoundOpKind::Elementwise { .. }) {
@@ -947,20 +983,19 @@ pub(crate) fn pack_elementwise_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, E
     }
     let rank_len = resolved.extents.len().max(1);
     let mut bytes = Vec::new();
-    let push_i64 = |bytes: &mut Vec<u8>, value: i64| bytes.extend_from_slice(&value.to_ne_bytes());
-    push_i64(&mut bytes, resolved.extents.iter().product::<u64>() as i64);
+    push_cuda_i64(&mut bytes, resolved.extents.iter().product::<u64>() as i64);
     for slot in 0..rank_len {
-        push_i64(
+        push_cuda_i64(
             &mut bytes,
             resolved.extents.get(slot).copied().unwrap_or(0) as i64,
         );
     }
     for (_, layout, _) in resolved.operands() {
-        push_i64(&mut bytes, layout.base);
+        push_cuda_i64(&mut bytes, layout.base);
     }
     for (_, layout, _) in resolved.operands() {
         for slot in 0..rank_len {
-            push_i64(&mut bytes, layout.strides.get(slot).copied().unwrap_or(0));
+            push_cuda_i64(&mut bytes, layout.strides.get(slot).copied().unwrap_or(0));
         }
     }
     push_cuda_gather_uniforms(&mut bytes, resolved, rank_len);
@@ -1018,13 +1053,14 @@ fn push_cuda_gather_uniforms(bytes: &mut Vec<u8>, bound: &BoundOp, rank_len: usi
     }
 }
 
-/// Packs every non-attention CUDA graph ABI currently emitted by this module.
-/// The field order mirrors the `Uniforms` declarations in the three renderers;
-/// all fields are `long`, so the host representation is fixed at i64 words.
-/// See [`pack_elementwise_uniforms`]'s own doc for why this is test-only
-/// without the `cuda-driver` feature.
+/// Packs every CUDA/HIP graph ABI currently emitted by this module.
+/// The field order mirrors the `Uniforms` declarations in the renderers;
+/// every field is [`WORD_C`], so the host representation is fixed at
+/// `WORD.width() / 8`-byte words. This is the host half of the ABI contract and
+/// is available with the `cuda-driver` feature (or in this crate's tests), which
+/// is what a conformance benchmark or an external driver calls.
 #[cfg(any(test, feature = "cuda-driver"))]
-pub(crate) fn pack_cuda_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, EmitError> {
+pub fn pack_cuda_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, EmitError> {
     let rank_len = resolved.extents.len().max(1);
     let mut bytes = Vec::new();
     match &resolved.kind {
@@ -1161,6 +1197,96 @@ pub(crate) fn pack_cuda_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, EmitErro
     Ok(bytes)
 }
 
+/// The `struct Uniforms` body between its braces, or `None` for a helper kernel
+/// that has no runtime struct.
+#[cfg(any(test, feature = "cuda-driver"))]
+fn uniform_struct_body(source: &str) -> Option<&str> {
+    let marker = "struct Uniforms {";
+    let start = source.find(marker)? + marker.len();
+    let rest = &source[start..];
+    let end = rest.find("};")?;
+    Some(&rest[..end])
+}
+
+/// Fails on a `long` that is not the first token of `long long`: card-C's
+/// `long` follows the host ABI (32 bits under LLP64), so it must never carry a
+/// uniform field or a 64-bit index.
+#[cfg(any(test, feature = "cuda-driver"))]
+fn assert_no_host_width_long(source: &str) -> Result<(), String> {
+    let tokens: Vec<&str> = source
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .collect();
+    let mut index = 0;
+    while index < tokens.len() {
+        if tokens[index] == "long" {
+            if tokens.get(index + 1).copied() != Some("long") {
+                return Err(String::from("host-width `long` in emitted card-C"));
+            }
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    Ok(())
+}
+
+/// The number of [`WORD`]-sized fields a `struct Uniforms` body declares.
+#[cfg(any(test, feature = "cuda-driver"))]
+fn uniform_word_count(source: &str) -> Result<usize, String> {
+    let Some(body) = uniform_struct_body(source) else {
+        return Ok(0);
+    };
+    let mut total = 0usize;
+    for field in body.split(';').map(str::trim).filter(|field| !field.is_empty()) {
+        if !field.starts_with(WORD_C) {
+            return Err(format!(
+                "a uniform field is not {WORD_C}: `{field}`"
+            ));
+        }
+        let mut count = 1usize;
+        let mut rest = field;
+        while let Some(open) = rest.find('[') {
+            let Some(close) = rest[open..].find(']').map(|close| close + open) else {
+                return Err(format!("an array field has no closing extent: `{field}`"));
+            };
+            let Ok(extent) = rest[open + 1..close].parse::<usize>() else {
+                return Err(format!(
+                    "an array extent is not a literal: `{field}`"
+                ));
+            };
+            count *= extent;
+            rest = &rest[close + 1..];
+        }
+        total += count;
+    }
+    Ok(total)
+}
+
+/// Checks one emitted kernel's `Uniforms` against its host pack: every field is
+/// [`WORD_C`], every 64-bit index is `long long`, and the packed byte length is
+/// the struct's word count times [`WORD`]'s width. Shared by the crate's tests
+/// and the public conformance benchmark so the two cannot drift.
+///
+/// # Errors
+/// A named field, a bare `long`, or a packed length that disagrees.
+#[cfg(any(test, feature = "cuda-driver"))]
+pub fn check_uniform_abi(kernel: &CudaKernel, packed: &[u8]) -> Result<usize, String> {
+    assert_no_host_width_long(&kernel.source)?;
+    for stage in &kernel.prologue {
+        assert_no_host_width_long(&stage.source)?;
+    }
+    let words = uniform_word_count(&kernel.source)?;
+    let expected = words * (WORD.width() as usize / 8);
+    if expected != packed.len() {
+        return Err(format!(
+            "{words} device words of {} bytes, {} host bytes",
+            WORD.width() as usize / 8,
+            packed.len()
+        ));
+    }
+    Ok(words)
+}
+
 fn render_leaf(
     target: Target,
     resolved: &BoundOp,
@@ -1170,7 +1296,7 @@ fn render_leaf(
     let element_type = type_token(target, resolved.node, resolved.dtype)?;
     let mut source = String::new();
     preamble(target, &mut source, element_type);
-    source.push_str("struct Uniforms { long total_elements; };\n\n");
+    source.push_str(&format!("struct Uniforms {{ {WORD_C} total_elements; }};\n\n"));
     kernel_signature(&mut source, &[], 0, 0, entry, element_type);
     source.push_str("    if (gid >= u.total_elements) { return; }\n");
     match constant {
@@ -1243,7 +1369,7 @@ fn render_moe_topk(target: Target, resolved: &BoundOp, entry: &str) -> Result<St
     let mask = target.lane_mask();
     let mut source = String::new();
     preamble(target, &mut source, "float");
-    source.push_str("struct Uniforms { long unused; };\n\n");
+    source.push_str(&format!("struct Uniforms {{ {WORD_C} unused; }};\n\n"));
     let weight_scores_parameter = if selected_score {
         "    const float* __restrict__ weight_scores,\n"
     } else {
@@ -1265,8 +1391,8 @@ fn render_moe_topk(target: Target, resolved: &BoundOp, entry: &str) -> Result<St
         .map(|index| format!("extra{index}"))
         .collect();
     let stacked_writes = if stacked.is_some() {
-        "            stacked_routes[(long)token * top_k + round] = (float)winner_index;\n\
-         \x20           stacked_weights[(long)token * top_k + round] = weight;\n"
+        "            stacked_routes[(long long)token * top_k + round] = (float)winner_index;\n\
+         \x20           stacked_weights[(long long)token * top_k + round] = weight;\n"
     } else {
         ""
     };
@@ -1275,7 +1401,7 @@ fn render_moe_topk(target: Target, resolved: &BoundOp, entry: &str) -> Result<St
     let (weight_declarations, weight_load, weight_publish, weight_expression) = if selected_score {
         (
             "    __shared__ float warp_weight[num_warps];\n",
-            "    const float weight_score = (tid < expert_count) ? weight_scores[(long)token * expert_count + tid] : 0.0f;\n",
+            "    const float weight_score = (tid < expert_count) ? weight_scores[(long long)token * expert_count + tid] : 0.0f;\n",
             format!(
                 "        float lane_weight = (masked == max_value && tid < expert_count) ? weight_score : 0.0f;\n\
                  \x20       for (int offset = {shuffle_start}; offset > 0; offset >>= 1) {{ lane_weight += __shfl_xor_sync({mask}, lane_weight, offset); }}\n\
@@ -1299,7 +1425,7 @@ fn render_moe_topk(target: Target, resolved: &BoundOp, entry: &str) -> Result<St
          \x20   const unsigned int tid = threadIdx.x;\n\
          \x20   const unsigned int warp_id = tid >> {warp_shift};\n\
          \x20   const unsigned int lane = tid & {lane_bits}u;\n\
-         \x20   float masked = (tid < expert_count) ? scores[(long)token * expert_count + tid] : negative_infinity;\n\
+         \x20   float masked = (tid < expert_count) ? scores[(long long)token * expert_count + tid] : negative_infinity;\n\
          {weight_load}\
          \x20   float max0 = 0.0f;\n\
          \x20   float weight_total = 0.0f;\n\
@@ -1702,7 +1828,7 @@ fn shuffle_combine_expr(
 /// element_expr` already renders a distinct body for, and dtype width
 /// class — this census's own finding, neither was folded in before.
 ///
-/// The `_gid64` suffix names the index form the emitted text carries (`long gid`
+/// The `_gid64` suffix names the index form the emitted text carries (`long long gid`
 /// built from `blockIdx.x * blockDim.x` in 64 bits). The entry name doubles as
 /// the cache identity a driver keys compiled modules on, and this text changed
 /// for every kernel at every size when the 32-bit multiply was widened, so a
@@ -1971,21 +2097,21 @@ fn push_unit_stride_broadcast_loop(
     lane_start: &str,
     lane_step: &str,
 ) {
-    source.push_str("    long out_row_base = u.out_base;\n");
+    source.push_str("    long long out_row_base = u.out_base;\n");
     for dim in output_axes {
         source.push_str(&format!(
             "    out_row_base += full_coord[{dim}] * u.broadcast_out_strides[{dim}];\n"
         ));
     }
     source.push_str(&format!(
-        "    long out_reduce_stride = u.broadcast_out_strides[{reduce_dim}];\n"
+        "    long long out_reduce_stride = u.broadcast_out_strides[{reduce_dim}];\n"
     ));
     source.push_str(&format!(
         "    #pragma unroll 8\n    for (unsigned int r = {lane_start}; r < (unsigned int)u.reduction_total; r += {lane_step}) {{\n"
     ));
     source.push_str(&hoisted.in_loop);
     source.push_str(&format!(
-        "        out[out_row_base + (long)r * out_reduce_stride] = {};\n    }}\n",
+        "        out[out_row_base + (long long)r * out_reduce_stride] = {};\n    }}\n",
         hoisted.value
     ));
 }
@@ -1999,7 +2125,7 @@ fn push_unit_stride_fold_header(
 ) {
     for index in 0..resolved.operands().len() {
         source.push_str(&format!(
-            "    long off_base{index} = u.operand_base[{index}];\n"
+            "    long long off_base{index} = u.operand_base[{index}];\n"
         ));
         for dim in output_axes {
             source.push_str(&format!(
@@ -2026,7 +2152,7 @@ fn push_epilogue_operand_load(
     coord: &impl Fn(usize) -> String,
 ) {
     source.push_str(&format!(
-        "{indent}long epi_off{index} = u.epilogue_operand_base[{index}];\n"
+        "{indent}long long epi_off{index} = u.epilogue_operand_base[{index}];\n"
     ));
     for dim in 0..rank {
         source.push_str(&format!(
@@ -2063,9 +2189,9 @@ fn hoisted_broadcast_epilogue(
         } else if unit_reduce {
             let reduce_dim = reduce_dims[0];
             push_epilogue_operand_load(&mut before_loop, index, rank, "    ", &outer_coord);
-            before_loop.push_str(&format!("    long epi_base{index} = epi_off{index};\n"));
+            before_loop.push_str(&format!("    long long epi_base{index} = epi_off{index};\n"));
             in_loop.push_str(&format!(
-                "{indent}epi_scratch[{index}] = epi{index}[epi_base{index} + (long)r * u.epilogue_operand_strides[{index}][{reduce_dim}]];\n"
+                "{indent}epi_scratch[{index}] = epi{index}[epi_base{index} + (long long)r * u.epilogue_operand_strides[{index}][{reduce_dim}]];\n"
             ));
         } else {
             push_epilogue_operand_load(&mut in_loop, index, rank, indent, &inner_coord);
@@ -2123,7 +2249,7 @@ fn push_reduce_epilogue_write(
     ));
     for index in 0..epilogue_operand_count {
         source.push_str(&format!(
-            "{indent}long epi_off{index} = u.epilogue_operand_base[{index}];\n"
+            "{indent}long long epi_off{index} = u.epilogue_operand_base[{index}];\n"
         ));
         for dim in 0..output_rank {
             source.push_str(&format!(
@@ -2300,21 +2426,21 @@ fn kernel_signature(
     }
     source.push_str(") {\n");
     source.push_str("    const Uniforms u = *u_ptr;\n");
-    source.push_str("    long gid = (long)blockIdx.x * (long)blockDim.x + (long)threadIdx.x;\n");
+    source.push_str("    long long gid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;\n");
 }
 
 fn push_gather_uniform_fields(source: &mut String, gather_count: usize, rank_len: usize) {
     if gather_count == 0 {
         return;
     }
-    source.push_str(&format!("    long gather_index_base[{gather_count}];\n"));
+    source.push_str(&format!("    {WORD_C} gather_index_base[{gather_count}];\n"));
     source.push_str(&format!(
-        "    long gather_index_strides[{gather_count}][{rank_len}];\n"
+        "    {WORD_C} gather_index_strides[{gather_count}][{rank_len}];\n"
     ));
     source.push_str(&format!(
-        "    long gather_element_stride[{gather_count}];\n"
+        "    {WORD_C} gather_element_stride[{gather_count}];\n"
     ));
-    source.push_str(&format!("    long gather_extent[{gather_count}];\n"));
+    source.push_str(&format!("    {WORD_C} gather_extent[{gather_count}];\n"));
 }
 
 /// Emits the out-of-range check for one just-fetched, not-yet-clamped
@@ -2350,7 +2476,7 @@ fn push_gather_fetch(
     offset_var: &str,
 ) {
     source.push_str(&format!(
-        "    long gather_off{operand_index} = u.gather_index_base[{gather_slot}];\n"
+        "    long long gather_off{operand_index} = u.gather_index_base[{gather_slot}];\n"
     ));
     for dim in 0..rank {
         source.push_str(&format!(
@@ -2358,11 +2484,11 @@ fn push_gather_fetch(
         ));
     }
     source.push_str(&format!(
-        "    long fetched{operand_index} = (long)gather_idx{gather_slot}[gather_off{operand_index}];\n"
+        "    long long fetched{operand_index} = (long long)gather_idx{gather_slot}[gather_off{operand_index}];\n"
     ));
     push_gather_fault_check(source, operand_index, gather_slot, "    ");
     source.push_str(&format!(
-        "    fetched{operand_index} = max((long)0, min(fetched{operand_index}, u.gather_extent[{gather_slot}] - 1));\n"
+        "    fetched{operand_index} = max((long long)0, min(fetched{operand_index}, u.gather_extent[{gather_slot}] - 1));\n"
     ));
     source.push_str(&format!(
         "    {offset_var} += fetched{operand_index} * u.gather_element_stride[{gather_slot}];\n"
@@ -2380,7 +2506,7 @@ fn push_hoisted_gather_fetch(
     rank: usize,
 ) {
     source.push_str(&format!(
-        "    long gather_off{operand_index} = u.gather_index_base[{gather_slot}];\n"
+        "    long long gather_off{operand_index} = u.gather_index_base[{gather_slot}];\n"
     ));
     for dim in 0..rank {
         source.push_str(&format!(
@@ -2388,16 +2514,16 @@ fn push_hoisted_gather_fetch(
         ));
     }
     source.push_str(&format!(
-        "    long fetched{operand_index} = (long)gather_idx{gather_slot}[gather_off{operand_index}];\n"
+        "    long long fetched{operand_index} = (long long)gather_idx{gather_slot}[gather_off{operand_index}];\n"
     ));
     source.push_str("    if (lane == 0u && u.reduction_total > 0) {\n");
     push_gather_fault_check(source, operand_index, gather_slot, "        ");
     source.push_str("    }\n");
     source.push_str(&format!(
-        "    fetched{operand_index} = max((long)0, min(fetched{operand_index}, u.gather_extent[{gather_slot}] - 1));\n"
+        "    fetched{operand_index} = max((long long)0, min(fetched{operand_index}, u.gather_extent[{gather_slot}] - 1));\n"
     ));
     source.push_str(&format!(
-        "    long gather_base{operand_index} = fetched{operand_index} * u.gather_element_stride[{gather_slot}];\n"
+        "    long long gather_base{operand_index} = fetched{operand_index} * u.gather_element_stride[{gather_slot}];\n"
     ));
 }
 
@@ -2511,11 +2637,11 @@ fn render_elementwise(
     preamble(target, &mut source, element_type);
 
     source.push_str("struct Uniforms {\n");
-    source.push_str("    long total_elements;\n");
-    source.push_str(&format!("    long extents[{rank_len}];\n"));
-    source.push_str(&format!("    long operand_base[{operand_count}];\n"));
+    source.push_str(&format!("    {WORD_C} total_elements;\n"));
+    source.push_str(&format!("    {WORD_C} extents[{rank_len}];\n"));
+    source.push_str(&format!("    {WORD_C} operand_base[{operand_count}];\n"));
     source.push_str(&format!(
-        "    long operand_strides[{operand_count}][{rank_len}];\n"
+        "    {WORD_C} operand_strides[{operand_count}][{rank_len}];\n"
     ));
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
@@ -2524,8 +2650,8 @@ fn render_elementwise(
     source.push_str("    if (gid >= u.total_elements) { return; }\n");
 
     if rank > 0 {
-        source.push_str(&format!("    long coord[{rank_len}];\n"));
-        source.push_str("    long remaining = gid;\n");
+        source.push_str(&format!("    long long coord[{rank_len}];\n"));
+        source.push_str("    long long remaining = gid;\n");
         for dim in (0..rank).rev() {
             source.push_str(&format!(
                 "    coord[{dim}] = remaining % u.extents[{dim}]; remaining /= u.extents[{dim}];\n"
@@ -2534,7 +2660,7 @@ fn render_elementwise(
     }
 
     for (index, gather_slot) in gather_slots.iter().enumerate() {
-        source.push_str(&format!("    long off{index} = u.operand_base[{index}];\n"));
+        source.push_str(&format!("    long long off{index} = u.operand_base[{index}];\n"));
         for dim in 0..rank {
             source.push_str(&format!(
                 "    off{index} += coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
@@ -2588,7 +2714,7 @@ fn push_packed_matmul_offset(
     #[cfg(feature = "std")]
     if std::env::var_os("PROXIMA_CUDA_LOGICAL_PACKED_ADDRESS").is_some() {
         source.push_str(&format!(
-            "{indent}long off{index} = u.operand_base[{index}];\n"
+            "{indent}long long off{index} = u.operand_base[{index}];\n"
         ));
         for dim in 0..resolved.extents.len() {
             source.push_str(&format!(
@@ -2597,7 +2723,7 @@ fn push_packed_matmul_offset(
         }
         return;
     }
-    source.push_str(&format!("{indent}long packed_row{index} = 0;\n"));
+    source.push_str(&format!("{indent}long long packed_row{index} = 0;\n"));
     for axis in output_axes {
         let axis_usize = *axis as usize;
         if layout.stride(*axis) != 0 {
@@ -2608,7 +2734,7 @@ fn push_packed_matmul_offset(
         }
     }
     source.push_str(&format!(
-        "{indent}long off{index} = u.operand_base[{index}] + packed_row{index} * u.reduction_total + {};\n",
+        "{indent}long long off{index} = u.operand_base[{index}] + packed_row{index} * u.reduction_total + {};\n",
         packed_reduction_term(index, layout, output_axes, resolved)
     ));
 }
@@ -2698,14 +2824,14 @@ fn push_serial_reduce_body(
 ) -> Result<(), EmitError> {
     source.push_str("    if (gid >= u.output_total) { return; }\n");
 
-    source.push_str(&format!("    long full_coord[{rank_len}];\n"));
+    source.push_str(&format!("    long long full_coord[{rank_len}];\n"));
     for dim in 0..rank {
         source.push_str(&format!("    full_coord[{dim}] = 0;\n"));
     }
 
     if output_rank > 0 {
-        source.push_str(&format!("    long output_coord[{output_rank_len}];\n"));
-        source.push_str("    long remaining = gid;\n");
+        source.push_str(&format!("    long long output_coord[{output_rank_len}];\n"));
+        source.push_str("    long long remaining = gid;\n");
         for index in (0..output_rank).rev() {
             source.push_str(&format!(
                 "    output_coord[{index}] = remaining % u.output_extents[{index}]; \
@@ -2727,12 +2853,12 @@ fn push_serial_reduce_body(
     source.push_str(&format!("    {element_type} accumulator = {init_expr};\n"));
     source.push_str(&format!("    bool seeded = {seeded_init};\n"));
 
-    source.push_str("    for (long r = 0; r < u.reduction_total; r++) {\n");
+    source.push_str("    for (long long r = 0; r < u.reduction_total; r++) {\n");
     if reduce_rank > 0 {
         source.push_str(&format!(
-            "        long reduction_coord[{reduce_rank_len}];\n"
+            "        long long reduction_coord[{reduce_rank_len}];\n"
         ));
-        source.push_str("        long remaining_r = r;\n");
+        source.push_str("        long long remaining_r = r;\n");
         for index in (0..reduce_rank).rev() {
             source.push_str(&format!(
                 "        reduction_coord[{index}] = remaining_r % u.reduction_extents[{index}]; \
@@ -2753,7 +2879,7 @@ fn push_serial_reduce_body(
             let _ = codec;
         } else {
             source.push_str(&format!(
-                "        long off{index} = u.operand_base[{index}];\n"
+                "        long long off{index} = u.operand_base[{index}];\n"
             ));
             for dim in 0..rank {
                 source.push_str(&format!(
@@ -2796,7 +2922,7 @@ fn push_serial_reduce_body(
         // broadcast epilogue must write that value over every reduced axis.
         // Rebuild each full coordinate after the fold; the fold loop leaves
         // `full_coord` at its final reduction coordinate.
-        source.push_str("    long broadcast_full_coord[");
+        source.push_str("    long long broadcast_full_coord[");
         source.push_str(&format!("{rank_len}];\n"));
         for dim in 0..rank {
             source.push_str(&format!(
@@ -2804,13 +2930,13 @@ fn push_serial_reduce_body(
             ));
         }
         source.push_str(
-            "    for (long broadcast_r = 0; broadcast_r < u.reduction_total; broadcast_r++) {\n",
+            "    for (long long broadcast_r = 0; broadcast_r < u.reduction_total; broadcast_r++) {\n",
         );
         if reduce_rank > 0 {
-            source.push_str("        long broadcast_remaining = broadcast_r;\n");
+            source.push_str("        long long broadcast_remaining = broadcast_r;\n");
             for index in (0..reduce_rank).rev() {
                 source.push_str(&format!(
-                    "        long broadcast_coord_{index} = broadcast_remaining % u.reduction_extents[{index}]; broadcast_remaining /= u.reduction_extents[{index}];\n"
+                    "        long long broadcast_coord_{index} = broadcast_remaining % u.reduction_extents[{index}]; broadcast_remaining /= u.reduction_extents[{index}];\n"
                 ));
             }
             for (index, dim) in reduce_dims.iter().enumerate() {
@@ -2819,7 +2945,7 @@ fn push_serial_reduce_body(
                 ));
             }
         }
-        source.push_str("        long broadcast_out_offset = u.out_base;\n");
+        source.push_str("        long long broadcast_out_offset = u.out_base;\n");
         for dim in 0..rank {
             source.push_str(&format!(
                 "        broadcast_out_offset += broadcast_full_coord[{dim}] * u.broadcast_out_strides[{dim}];\n"
@@ -2839,7 +2965,7 @@ fn push_serial_reduce_body(
         source.push_str("    }\n");
         return Ok(());
     }
-    source.push_str("    long out_offset = u.out_base;\n");
+    source.push_str("    long long out_offset = u.out_base;\n");
     for dim in 0..rank {
         source.push_str(&format!(
             "    out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"
@@ -2883,12 +3009,12 @@ fn push_reduction_coord_decompose(
     reduce_rank_len: usize,
     indent: &str,
 ) {
-    source.push_str(&format!("{indent}long reduction_coord[{reduce_rank_len}];\n"));
+    source.push_str(&format!("{indent}long long reduction_coord[{reduce_rank_len}];\n"));
     if reduce_rank == 1 {
         source.push_str(&format!("{indent}reduction_coord[0] = {from};\n"));
         return;
     }
-    source.push_str(&format!("{indent}long remaining_r = {from};\n"));
+    source.push_str(&format!("{indent}long long remaining_r = {from};\n"));
     for index in (0..reduce_rank).rev() {
         source.push_str(&format!(
             "{indent}reduction_coord[{index}] = remaining_r % u.reduction_extents[{index}]; \
@@ -2957,7 +3083,7 @@ fn push_chunk_decode(source: &mut String, index: usize, spec: ChunkCodec) {
          (unsigned int)(off{index} % {block_elements}), {name}_chunk{index});\n\
          \x20       }} else {{\n\
          \x20           for (int slot = 0; slot < 8 && chunk + slot < u.reduction_total; slot++) {{\n\
-         \x20               long element = off{index} + slot;\n\
+         \x20               long long element = off{index} + slot;\n\
          \x20               {name}_chunk{index}[slot] = {name}_element(in{index} + (element / {block_elements}) * {block_bytes}, \
          (unsigned int)(element % {block_elements}));\n\
          \x20           }}\n\
@@ -2972,7 +3098,7 @@ fn push_packed_row_base(
     output_axes: &[u16],
     resolved: &BoundOp,
 ) {
-    source.push_str(&format!("    long packed_row{index} = 0;\n"));
+    source.push_str(&format!("    long long packed_row{index} = 0;\n"));
     for axis in output_axes {
         let axis_usize = *axis as usize;
         if layout.stride(*axis) != 0 {
@@ -2988,7 +3114,7 @@ fn push_packed_row_base(
         String::new()
     };
     source.push_str(&format!(
-        "    const long row{index} = u.operand_base[{index}] + packed_row{index} * u.reduction_total{gather_term};\n"
+        "    const long long row{index} = u.operand_base[{index}] + packed_row{index} * u.reduction_total{gather_term};\n"
     ));
 }
 
@@ -3031,7 +3157,7 @@ fn lean_gathered_reduce(resolved: &BoundOp, quantized: &[Option<Codec>]) -> bool
 
 fn push_plain_row_base(source: &mut String, index: usize, rank: usize, reduce_dim: u16) {
     source.push_str(&format!(
-        "    long lane_base{index} = u.operand_base[{index}];\n"
+        "    long long lane_base{index} = u.operand_base[{index}];\n"
     ));
     for dim in 0..rank {
         source.push_str(&format!(
@@ -3039,7 +3165,7 @@ fn push_plain_row_base(source: &mut String, index: usize, rank: usize, reduce_di
         ));
     }
     source.push_str(&format!(
-        "    const long lane_step{index} = u.operand_strides[{index}][{reduce_dim}];\n"
+        "    const long long lane_step{index} = u.operand_strides[{index}][{reduce_dim}];\n"
     ));
 }
 
@@ -3099,7 +3225,7 @@ fn push_lean_chunk_loops(
             push_plain_row_base(source, index, rank, reduce_dim);
         }
     }
-    source.push_str("    long start = 0;\n");
+    source.push_str("    long long start = 0;\n");
     let plain_vectors: Vec<usize> = if element_type == "float" {
         quantized
             .iter()
@@ -3129,7 +3255,7 @@ fn push_lean_chunk_loops(
         ));
         for step in 0..LEAN_UNROLL {
             source.push_str(&format!(
-                "            const long chunk{step} = start + {} + (long)lane * 8;\n",
+                "            const long long chunk{step} = start + {} + (long long)lane * 8;\n",
                 step * span
             ));
             for &(index, spec) in chunk_slots {
@@ -3139,7 +3265,7 @@ fn push_lean_chunk_loops(
                     block_bytes,
                 } = spec;
                 source.push_str(&format!(
-                    "            const long off{index}_{step} = row{index} + chunk{step};\n\
+                    "            const long long off{index}_{step} = row{index} + chunk{step};\n\
                      \x20           float {name}_chunk{index}_{step}[8];\n\
                      \x20           {name}_chunk8(in{index} + (off{index}_{step} / {block_elements}) * {block_bytes}, \
                      (unsigned int)(off{index}_{step} % {block_elements}), {name}_chunk{index}_{step});\n"
@@ -3179,16 +3305,16 @@ fn push_lean_chunk_loops(
         source.push_str("        }\n    }\n");
     }
     source.push_str(&format!(
-        "    for (long chunk = start + (long)lane * 8; chunk < u.reduction_total; chunk += {span}) {{\n"
+        "    for (long long chunk = start + (long long)lane * 8; chunk < u.reduction_total; chunk += {span}) {{\n"
     ));
     if !chunk_slots.is_empty() {
-        source.push_str("        long r = chunk;\n");
+        source.push_str("        long long r = chunk;\n");
     }
     for &(index, spec) in chunk_slots {
-        source.push_str(&format!("        long off{index} = row{index} + r;\n"));
+        source.push_str(&format!("        long long off{index} = row{index} + r;\n"));
         push_chunk_decode(source, index, spec);
     }
-    source.push_str("        for (long inner = 0; inner < 8 && chunk + inner < u.reduction_total; inner++) {\n");
+    source.push_str("        for (long long inner = 0; inner < 8 && chunk + inner < u.reduction_total; inner++) {\n");
     push_lean_fold(
         source,
         resolved,
@@ -3216,7 +3342,7 @@ fn push_lean_fold(
     suffix: &str,
     plain_vectors: &[usize],
 ) -> Result<(), EmitError> {
-    source.push_str(&format!("            long r = {chunk_var} + inner;\n"));
+    source.push_str(&format!("            long long r = {chunk_var} + inner;\n"));
     let chunk_spec = |index: usize| {
         chunk_slots
             .iter()
@@ -3228,10 +3354,10 @@ fn push_lean_fold(
             continue;
         }
         if codec.is_some() {
-            source.push_str(&format!("            long off{index} = row{index} + r;\n"));
+            source.push_str(&format!("            long long off{index} = row{index} + r;\n"));
         } else {
             source.push_str(&format!(
-                "            long off{index} = lane_base{index} + r * lane_step{index};\n"
+                "            long long off{index} = lane_base{index} + r * lane_step{index};\n"
             ));
         }
     }
@@ -3385,42 +3511,42 @@ fn push_cooperative_reduce_body(
     let lane_bits = target.lane_bits();
     let warp_shift = target.warp_shift();
     let (leader, lane_start, lane_stride) = if lane_major {
-        ("fold_warp == 0u", "(long)fold_warp", format!("{LANE_MAJOR_WARPS}"))
+        ("fold_warp == 0u", "(long long)fold_warp", format!("{LANE_MAJOR_WARPS}"))
     } else if block_reduce {
-        ("tid == 0u", "(long)tid", "(long)blockDim.x".to_string())
+        ("tid == 0u", "(long long)tid", "(long long)blockDim.x".to_string())
     } else {
-        ("lane == 0u", "(long)lane", wave.to_string())
+        ("lane == 0u", "(long long)lane", wave.to_string())
     };
     if lane_major {
         source.push_str("    unsigned int tid = threadIdx.x;\n");
         source.push_str(&format!("    unsigned int lane = tid & {lane_bits}u;\n"));
         source.push_str(&format!("    unsigned int fold_warp = tid >> {warp_shift}u;\n"));
         source.push_str(&format!(
-            "    long output_index = (long)blockIdx.x * {wave}L + (long)lane;\n"
+            "    long long output_index = (long long)blockIdx.x * {wave}LL + (long long)lane;\n"
         ));
         source.push_str("    bool in_range = output_index < u.output_total;\n");
         source.push_str("    if (!in_range) { output_index = 0; }\n");
     } else if block_reduce {
-        source.push_str("    long output_index = (long)blockIdx.x;\n");
+        source.push_str("    long long output_index = (long long)blockIdx.x;\n");
         source.push_str("    if (output_index >= u.output_total) { return; }\n");
         source.push_str("    unsigned int tid = threadIdx.x;\n");
         source.push_str(&format!("    unsigned int lane = tid & {lane_bits}u;\n"));
     } else {
-        source.push_str(&format!("    long output_index = gid / {wave};\n"));
+        source.push_str(&format!("    long long output_index = gid / {wave};\n"));
         source.push_str("    if (output_index >= u.output_total) { return; }\n");
         source.push_str(&format!(
             "    unsigned int lane = (unsigned int)(gid % {wave});\n"
         ));
     }
 
-    source.push_str(&format!("    long full_coord[{rank_len}];\n"));
+    source.push_str(&format!("    long long full_coord[{rank_len}];\n"));
     for dim in 0..rank {
         source.push_str(&format!("    full_coord[{dim}] = 0;\n"));
     }
 
     if output_rank > 0 {
-        source.push_str(&format!("    long output_coord[{output_rank_len}];\n"));
-        source.push_str("    long remaining = output_index;\n");
+        source.push_str(&format!("    long long output_coord[{output_rank_len}];\n"));
+        source.push_str("    long long remaining = output_index;\n");
         for index in (0..output_rank).rev() {
             let slot = if is_broadcast_epilogue {
                 usize::from(output_axes[index])
@@ -3515,7 +3641,7 @@ fn push_cooperative_reduce_body(
             );
         } else if packed_chunked {
             source.push_str(&format!(
-                "    for (long chunk = (long)lane * 8; chunk < u.reduction_total; chunk += {wave} * 8) {{\n"
+                "    for (long long chunk = (long long)lane * 8; chunk < u.reduction_total; chunk += {wave} * 8) {{\n"
             ));
             if reduce_rank > 0 {
                 push_reduction_coord_decompose(
@@ -3527,7 +3653,7 @@ fn push_cooperative_reduce_body(
                 );
             }
             if !chunk_slots.is_empty() {
-                source.push_str("        long r = chunk;\n");
+                source.push_str("        long long r = chunk;\n");
             }
             for &(index, spec) in &chunk_slots {
                 let (_, layout, _) = &resolved.operands()[index];
@@ -3535,11 +3661,11 @@ fn push_cooperative_reduce_body(
                 push_gather_base_add(source, resolved, index, "        ");
                 push_chunk_decode(source, index, spec);
             }
-            source.push_str("        for (long inner = 0; inner < 8 && chunk + inner < u.reduction_total; inner++) {\n");
-            source.push_str("            long r = chunk + inner;\n");
+            source.push_str("        for (long long inner = 0; inner < 8 && chunk + inner < u.reduction_total; inner++) {\n");
+            source.push_str("            long long r = chunk + inner;\n");
         } else {
             source.push_str(&format!(
-                "    #pragma unroll 8\n    for (long r = {lane_start}; r < u.reduction_total; r += {lane_stride}) {{\n"
+                "    #pragma unroll 8\n    for (long long r = {lane_start}; r < u.reduction_total; r += {lane_stride}) {{\n"
             ));
         }
         if reduce_rank > 0 && !packed_chunked && !unit_fold {
@@ -3569,11 +3695,11 @@ fn push_cooperative_reduce_body(
             } else if unit_fold {
                 let reduce_dim = reduce_dims[0];
                 source.push_str(&format!(
-                    "        long off{index} = off_base{index} + (long)r * u.operand_strides[{index}][{reduce_dim}];\n"
+                    "        long long off{index} = off_base{index} + (long long)r * u.operand_strides[{index}][{reduce_dim}];\n"
                 ));
             } else {
                 source.push_str(&format!(
-                    "        long off{index} = u.operand_base[{index}];\n"
+                    "        long long off{index} = u.operand_base[{index}];\n"
                 ));
                 for dim in 0..rank {
                     source.push_str(&format!(
@@ -3690,23 +3816,23 @@ fn push_cooperative_reduce_body(
             return Ok(());
         }
         source.push_str(&format!(
-            "    #pragma unroll 8\n    for (long r = {lane_start}; r < u.reduction_total; r += {lane_stride}) {{\n"
+            "    #pragma unroll 8\n    for (long long r = {lane_start}; r < u.reduction_total; r += {lane_stride}) {{\n"
         ));
         if reduce_rank > 0 {
             source.push_str(&format!(
-                "        long broadcast_reduce_coord[{reduce_rank_len}];\n"
+                "        long long broadcast_reduce_coord[{reduce_rank_len}];\n"
             ));
             if reduce_rank == 1 {
                 source.push_str("        broadcast_reduce_coord[0] = r;\n");
             } else {
-                source.push_str("        long broadcast_remaining = r;\n");
+                source.push_str("        long long broadcast_remaining = r;\n");
                 for index in (0..reduce_rank).rev() {
                     source.push_str(&format!(
                         "        broadcast_reduce_coord[{index}] = broadcast_remaining % u.reduction_extents[{index}]; broadcast_remaining /= u.reduction_extents[{index}];\n"
                     ));
                 }
             }
-            source.push_str(&format!("        long broadcast_full_coord[{rank_len}];\n"));
+            source.push_str(&format!("        long long broadcast_full_coord[{rank_len}];\n"));
             for dim in 0..rank {
                 source.push_str(&format!(
                     "        broadcast_full_coord[{dim}] = full_coord[{dim}];\n"
@@ -3717,7 +3843,7 @@ fn push_cooperative_reduce_body(
                     "        broadcast_full_coord[{dim}] = broadcast_reduce_coord[{index}];\n"
                 ));
             }
-            source.push_str("        long broadcast_out_offset = u.out_base;\n");
+            source.push_str("        long long broadcast_out_offset = u.out_base;\n");
             for dim in 0..rank {
                 source.push_str(&format!(
                     "        broadcast_out_offset += broadcast_full_coord[{dim}] * u.broadcast_out_strides[{dim}];\n"
@@ -3748,7 +3874,7 @@ fn push_cooperative_reduce_body(
         return Ok(());
     }
     source.push_str("    if (lane != 0u) { return; }\n");
-    source.push_str("    long out_offset = u.out_base;\n");
+    source.push_str("    long long out_offset = u.out_base;\n");
     for dim in 0..rank {
         source.push_str(&format!(
             "    out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"
@@ -3843,26 +3969,26 @@ fn render_reduce(
     }
 
     source.push_str("struct Uniforms {\n");
-    source.push_str("    long output_total;\n");
-    source.push_str("    long reduction_total;\n");
-    source.push_str(&format!("    long output_extents[{output_rank_len}];\n"));
-    source.push_str(&format!("    long reduction_extents[{reduce_rank_len}];\n"));
-    source.push_str(&format!("    long operand_base[{operand_count}];\n"));
+    source.push_str(&format!("    {WORD_C} output_total;\n"));
+    source.push_str(&format!("    {WORD_C} reduction_total;\n"));
+    source.push_str(&format!("    {WORD_C} output_extents[{output_rank_len}];\n"));
+    source.push_str(&format!("    {WORD_C} reduction_extents[{reduce_rank_len}];\n"));
+    source.push_str(&format!("    {WORD_C} operand_base[{operand_count}];\n"));
     source.push_str(&format!(
-        "    long operand_strides[{operand_count}][{rank_len}];\n"
+        "    {WORD_C} operand_strides[{operand_count}][{rank_len}];\n"
     ));
-    source.push_str("    long out_base;\n");
-    source.push_str(&format!("    long out_strides[{rank_len}];\n"));
+    source.push_str(&format!("    {WORD_C} out_base;\n"));
+    source.push_str(&format!("    {WORD_C} out_strides[{rank_len}];\n"));
     if epilogue_operand_count > 0 {
         source.push_str(&format!(
-            "    long epilogue_operand_base[{epilogue_operand_count}];\n"
+            "    {WORD_C} epilogue_operand_base[{epilogue_operand_count}];\n"
         ));
         source.push_str(&format!(
-            "    long epilogue_operand_strides[{epilogue_operand_count}][{output_rank_len}];\n"
+            "    {WORD_C} epilogue_operand_strides[{epilogue_operand_count}][{output_rank_len}];\n"
         ));
     }
     if is_broadcast_epilogue {
-        source.push_str(&format!("    long broadcast_out_strides[{rank_len}];\n"));
+        source.push_str(&format!("    {WORD_C} broadcast_out_strides[{rank_len}];\n"));
     }
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
@@ -3983,15 +4109,15 @@ fn render_scan(
     preamble(target, &mut source, element_type);
 
     source.push_str("struct Uniforms {\n");
-    source.push_str("    long outer_total;\n");
-    source.push_str("    long inner_len;\n");
-    source.push_str(&format!("    long outer_extents[{outer_rank_len}];\n"));
-    source.push_str(&format!("    long operand_base[{operand_count}];\n"));
+    source.push_str(&format!("    {WORD_C} outer_total;\n"));
+    source.push_str(&format!("    {WORD_C} inner_len;\n"));
+    source.push_str(&format!("    {WORD_C} outer_extents[{outer_rank_len}];\n"));
+    source.push_str(&format!("    {WORD_C} operand_base[{operand_count}];\n"));
     source.push_str(&format!(
-        "    long operand_strides[{operand_count}][{rank_len}];\n"
+        "    {WORD_C} operand_strides[{operand_count}][{rank_len}];\n"
     ));
-    source.push_str("    long out_base;\n");
-    source.push_str(&format!("    long out_strides[{rank_len}];\n"));
+    source.push_str(&format!("    {WORD_C} out_base;\n"));
+    source.push_str(&format!("    {WORD_C} out_strides[{rank_len}];\n"));
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
@@ -3999,16 +4125,16 @@ fn render_scan(
     source.push_str("    if (gid != 0) { return; }\n");
 
     if outer_rank > 0 {
-        source.push_str(&format!("    long outer_coord[{outer_rank_len}];\n"));
+        source.push_str(&format!("    long long outer_coord[{outer_rank_len}];\n"));
     }
 
     let (init_expr, seeded_init) = fold_init_tokens(*init);
     source.push_str(&format!("    {element_type} accumulator = {init_expr};\n"));
     source.push_str(&format!("    bool seeded = {seeded_init};\n"));
 
-    source.push_str("    for (long outer = 0; outer < u.outer_total; outer++) {\n");
+    source.push_str("    for (long long outer = 0; outer < u.outer_total; outer++) {\n");
     if outer_rank > 0 {
-        source.push_str("        long remaining = outer;\n");
+        source.push_str("        long long remaining = outer;\n");
         for dim in (0..outer_rank).rev() {
             source.push_str(&format!(
                 "        outer_coord[{dim}] = remaining % u.outer_extents[{dim}]; \
@@ -4018,7 +4144,7 @@ fn render_scan(
     }
     for (index, gather_slot) in gather_slots.iter().enumerate() {
         source.push_str(&format!(
-            "        long running{index} = u.operand_base[{index}];\n"
+            "        long long running{index} = u.operand_base[{index}];\n"
         ));
         for dim in 0..outer_rank {
             source.push_str(&format!(
@@ -4027,7 +4153,7 @@ fn render_scan(
         }
         if let Some(slot) = gather_slot {
             source.push_str(&format!(
-                "        long gather_running{index} = u.gather_index_base[{slot}];\n"
+                "        long long gather_running{index} = u.gather_index_base[{slot}];\n"
             ));
             for dim in 0..outer_rank {
                 source.push_str(&format!(
@@ -4036,14 +4162,14 @@ fn render_scan(
             }
         }
     }
-    source.push_str("        long out_running = u.out_base;\n");
+    source.push_str("        long long out_running = u.out_base;\n");
     for dim in 0..outer_rank {
         source.push_str(&format!(
             "        out_running += outer_coord[{dim}] * u.out_strides[{dim}];\n"
         ));
     }
 
-    source.push_str("        for (long step = 0; step < u.inner_len; step++) {\n");
+    source.push_str("        for (long long step = 0; step < u.inner_len; step++) {\n");
     source.push_str(&format!(
         "            {element_type} scratch[{}];\n",
         operand_count.max(1)
@@ -4051,14 +4177,14 @@ fn render_scan(
     for (index, gather_slot) in gather_slots.iter().enumerate() {
         if let Some(slot) = gather_slot {
             source.push_str(&format!(
-                "            long fetched{index} = (long)gather_idx{slot}[gather_running{index}];\n"
+                "            long long fetched{index} = (long long)gather_idx{slot}[gather_running{index}];\n"
             ));
             push_gather_fault_check(&mut source, index, *slot, "            ");
             source.push_str(&format!(
-                "            fetched{index} = max((long)0, min(fetched{index}, u.gather_extent[{slot}] - 1));\n"
+                "            fetched{index} = max((long long)0, min(fetched{index}, u.gather_extent[{slot}] - 1));\n"
             ));
             source.push_str(&format!(
-                "            long read_off{index} = running{index} + fetched{index} * u.gather_element_stride[{slot}];\n"
+                "            long long read_off{index} = running{index} + fetched{index} * u.gather_element_stride[{slot}];\n"
             ));
             source.push_str(&format!(
                 "            scratch[{index}] = {};\n",
@@ -4706,7 +4832,7 @@ mod tests {
         assert!(kernel.source.contains("pass_query = in9"));
         assert!(kernel.source.contains("pass_cached_key = in10"));
         assert!(kernel.source.contains("pass_new_key = in11"));
-        assert!(kernel.source.contains("constexpr long pass_dim = head_dim - rotary_dim"));
+        assert!(kernel.source.contains("constexpr long long pass_dim = head_dim - rotary_dim"));
     }
 
     #[test]
@@ -4787,6 +4913,72 @@ mod tests {
         assert_eq!(bytes.len(), 32, "a multi-row form also carries its row bounds");
     }
 
+    /// The card-C spelling is derived from the numeric layout, not hand-written
+    /// beside it: a 64-bit signed integer is `long long` on every card-C target,
+    /// while a bare `long` would be 32 bits under LLP64.
+    #[test]
+    fn the_uniform_word_is_a_fixed_width_sixty_four_bit_integer() {
+        assert_eq!(WORD, FloatLayout::INT64);
+        assert_eq!(WORD.width(), 64);
+        assert!(WORD.is_integer());
+        assert!(WORD.is_signed_integer());
+        assert_eq!(WORD.width() as usize / 8, core::mem::size_of::<i64>());
+        assert_eq!(card_c_integer(&WORD), Some(WORD_C));
+        assert_eq!(WORD_C, "long long");
+    }
+
+    /// The host packer and the device struct are two views of one numeric word:
+    /// every field is [`WORD`] on the host and [`WORD_C`] on the device, so the
+    /// packed byte length is the struct's word count times the word width.
+    /// `long` would satisfy neither side: under LLP64 it is four bytes while the
+    /// packer writes eight, which is the shifted-field failure this pins.
+    #[test]
+    fn every_uniform_struct_is_the_numeric_word_and_matches_the_pack() {
+        let ops = vec![
+            ("leaf", leaf_iota_op(8)),
+            ("elementwise", elementwise_tanh_op(8)),
+            ("reduce", matmul_reduce_op(4, 16, ScalarOp::Add)),
+            ("scan", scan_op(8)),
+            ("gather", embedding_lookup_op(50_000, 8, 4)),
+            ("moe", moe_top_k_op(32, 8, false)),
+            (
+                "attention",
+                attention_op_with(attention_kind(9, 5, 256, 256)),
+            ),
+        ];
+
+        type DialectEmitter =
+            fn(&BoundOp, &PackedOperands) -> Result<CudaKernel, EmitError>;
+        let dialects: [(&str, DialectEmitter); 2] =
+            [("cuda", emit_cuda), ("hip", emit_hip)];
+        #[cfg(feature = "reduce-epilogue-fusion")]
+        let ops = {
+            let mut ops = ops;
+            ops.push(("broadcast", row_sum_plus_bias_op(4, 16)));
+            ops
+        };
+        let quantize = emit_q8_1_quantize(NodeId(0), NodeId(1), 32)
+            .expect("the q8_1 prologue emits");
+        assert_no_host_width_long(&quantize.source)
+            .expect("the q8_1 prologue carries the 64-bit word");
+        assert!(quantize.source.contains("const long long *u"));
+
+        for (dialect, emit) in dialects {
+            for (name, op) in &ops {
+                // HIP's renderer refuses cached attention by name; the form
+                // belongs to the CUDA lane until a HIP attention body exists.
+                if dialect == "hip" && matches!(op.kind, BoundOpKind::CachedAttention { .. }) {
+                    continue;
+                }
+                let kernel = emit(op, &no_packed()).expect("the op emits");
+                let packed = pack_cuda_uniforms(op).expect("the op packs");
+                let words = check_uniform_abi(&kernel, &packed)
+                    .unwrap_or_else(|error| panic!("{dialect}/{name}: {error}"));
+                assert!(words > 0, "{dialect}/{name}: no uniform word");
+            }
+        }
+    }
+
     fn multi_row_attention_op(rows: u64) -> BoundOp {
         let mut kind = attention_kind(9, 5, 256, 256);
         let BoundOpKind::CachedAttention {
@@ -4826,7 +5018,7 @@ mod tests {
         let kernel = emit_cuda(&attention_op_with(attention_kind(9, 5, 256, 256)), &no_packed())
             .expect("decode form emits");
 
-        assert!(kernel.source.contains("constexpr long new_key_rows = 1L;"));
+        assert!(kernel.source.contains("constexpr long long new_key_rows = 1LL;"));
     }
 
     #[test]
@@ -4835,7 +5027,7 @@ mod tests {
 
         let kernel = emit_cuda(&op, &no_packed()).expect("two-range form emits");
 
-        assert!(kernel.source.contains("(long)in8[0]"));
+        assert!(kernel.source.contains("(long long)in8[0]"));
         assert!(kernel.source.contains("expf(maximum - next_max)"));
         assert!(kernel.source.contains("weighted[local_dimension] * rescale"));
         assert!(kernel.source.contains("__shfl_xor_sync(PROXIMA_ALL_LANES, partial, offset)"));
@@ -4874,6 +5066,23 @@ mod tests {
             cuda_cached_attention_class(&kind),
             Some(CudaAttentionClass::CachedBound)
         );
+    }
+
+    fn leaf_iota_op(extent: u32) -> BoundOp {
+        let program = vec![Op::Iota {
+            dtype: DType::FLOAT32,
+            extent: Extent::Static(extent),
+        }];
+        let shapes = infer(&program, &[]).expect("leaf shape inference succeeds");
+        bind(
+            &program,
+            &shapes,
+            &[NodeId(0)],
+            proxima_numeric::NumericPolicy::default(),
+        )
+        .expect("leaf binding succeeds")
+        .pop()
+        .expect("one leaf bound op")
     }
 
     fn elementwise_tanh_op(extent: u32) -> BoundOp {
@@ -5865,9 +6074,9 @@ mod tests {
         )
         .expect("emit succeeds");
         let source = &kernel.source;
-        let fetch = source.find("long fetched0 =").expect("per-row expert fetch");
+        let fetch = source.find("long long fetched0 =").expect("per-row expert fetch");
         let row = source
-            .find("const long row_element = u.operand_base[0] + packed_row * 1024 + gather_base0;")
+            .find("const long long row_element = u.operand_base[0] + packed_row * 1024 + gather_base0;")
             .expect("row address carries the gather base");
         assert!(fetch < row, "the expert fetch precedes the row address");
         assert!(source.contains("__dp4a"), "the dot is the staged dp4a body");
@@ -5907,7 +6116,7 @@ mod tests {
         assert!(kernel.entry.contains("_sg1"), "{}", kernel.entry);
         assert!(kernel.entry.contains("_ss1"), "{}", kernel.entry);
         assert!(source.contains("act_row_element += coord0 * u.operand_strides[1][0];"));
-        assert!(source.contains("act_row_byte[row] = (act_row_element / 128) * 144L;"));
+        assert!(source.contains("act_row_byte[row] = (act_row_element / 128) * 144LL;"));
         assert!(source.contains("staged_blocks + act_row_byte[row] + ((chunk) / 4) * 144"));
         let row_loop = source.find("if (row_start[row] == 0) { continue; }").expect("row loop");
         let load = source.find("staged_blocks + act_row_byte[row]").expect("per-row activation load");
@@ -5955,11 +6164,11 @@ mod tests {
         assert!(kernel.source.contains("__shfl_down_sync"));
         let fetch = kernel
             .source
-            .find("long fetched0 =")
+            .find("long long fetched0 =")
             .expect("hoisted fetch is emitted");
         let lane_loop = kernel
             .source
-            .find("for (long r = (long)lane;")
+            .find("for (long long r = (long long)lane;")
             .expect("cooperative lane loop is emitted");
         assert!(fetch < lane_loop, "index fetch must precede the lane loop");
         assert!(kernel.source.contains("gather_base0"));
@@ -5993,9 +6202,9 @@ mod tests {
             .expect("emit succeeds");
         let source = &kernel.source;
         assert_eq!(kernel.grid.block_width, Some(WARP_SIZE));
-        let fetch = source.find("long gather_base0 =").expect("hoisted gather base");
+        let fetch = source.find("long long gather_base0 =").expect("hoisted gather base");
         let row = source
-            .find("const long row0 = u.operand_base[0] + packed_row0 * u.reduction_total + gather_base0;")
+            .find("const long long row0 = u.operand_base[0] + packed_row0 * u.reduction_total + gather_base0;")
             .expect("row base carries the gather base");
         let unrolled = source
             .find("q8_0_chunk8(in0 + (off0_3 /")
@@ -6027,7 +6236,7 @@ mod tests {
         let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
             .expect("emit succeeds");
         assert!(kernel.source.contains("off0 += gather_base0;"));
-        assert!(!kernel.source.contains("const long row0 ="));
+        assert!(!kernel.source.contains("const long long row0 ="));
         assert!(kernel.entry.ends_with("_gid64c8"), "{}", kernel.entry);
     }
 
@@ -6039,7 +6248,7 @@ mod tests {
         let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
             .expect("emit succeeds");
         assert!(kernel.source.contains(
-            "    const long row0 = u.operand_base[0] + packed_row0 * u.reduction_total;\n"
+            "    const long long row0 = u.operand_base[0] + packed_row0 * u.reduction_total;\n"
         ));
         assert!(!kernel.source.contains("gather_base"));
         assert!(kernel.entry.ends_with("_gid64c8"), "{}", kernel.entry);
@@ -6268,7 +6477,7 @@ mod tests {
         assert_eq!(kernel.grid.block_width, Some(1024 / BLOCK_REDUCE_ELEMENTS_PER_THREAD));
         assert_eq!(kernel.grid.threads, 1024 / BLOCK_REDUCE_ELEMENTS_PER_THREAD);
         assert!(kernel.source.contains("__shared__ float warp_partials[32];"));
-        assert!(kernel.source.contains("long output_index = (long)blockIdx.x;"));
+        assert!(kernel.source.contains("long long output_index = (long long)blockIdx.x;"));
     }
 
     #[test]
@@ -6306,7 +6515,7 @@ mod tests {
             let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
                 .expect("emit succeeds");
 
-            assert!(kernel.source.contains("const long row0 ="), "{name} row base");
+            assert!(kernel.source.contains("const long long row0 ="), "{name} row base");
             assert!(
                 kernel.source.contains(&format!("{name}_chunk8(in0 + (off0_3 /")),
                 "{name} unrolled chunk decode"
@@ -6515,7 +6724,7 @@ mod tests {
         assert!(
             kernel
                 .source
-                .contains("long gid = (long)blockIdx.x * (long)blockDim.x + (long)threadIdx.x;"),
+                .contains("long long gid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;"),
             "{}",
             kernel.source
         );
@@ -6561,7 +6770,7 @@ mod tests {
         assert!(
             kernel
                 .source
-                .contains("(long)blockIdx.x * (long)blockDim.x")
+                .contains("(long long)blockIdx.x * (long long)blockDim.x")
         );
     }
 }

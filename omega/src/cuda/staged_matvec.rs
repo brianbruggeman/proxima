@@ -272,16 +272,16 @@ pub(super) fn push_staged_matvec_body(
 /// Groups of 32 one warp loads before it reduces any, so their loads overlap.
 const STAGE_BATCH: usize = 8;
 
-/// `long act_offset = ...` for flat reduction index `flat`, walking every reduced axis.
+/// `long long act_offset = ...` for flat reduction index `flat`, walking every reduced axis.
 fn activation_offset(plan: &StagedMatvec, flat: &str) -> String {
     let activation_slot = plan.activation_slot;
     let mut text = format!(
-        "            long act_offset = u.operand_base[{activation_slot}];\n            unsigned int act_rest = (unsigned int)({flat});\n"
+        "            long long act_offset = u.operand_base[{activation_slot}];\n            unsigned int act_rest = (unsigned int)({flat});\n"
     );
     // the extents are literals so the walk is multiply-shift, not a 64-bit divide per element
     for (dim, extent) in plan.reduce_dims.iter().zip(&plan.reduce_extents).rev() {
         text.push_str(&format!(
-            "            act_offset += (long)(act_rest % {extent}u) * u.operand_strides[{activation_slot}][{dim}];\n\
+            "            act_offset += (long long)(act_rest % {extent}u) * u.operand_strides[{activation_slot}][{dim}];\n\
              \x20           act_rest /= {extent}u;\n"
         ));
     }
@@ -347,7 +347,7 @@ fn push_stage(source: &mut String, plan: &StagedMatvec) {
     let activation_slot = plan.activation_slot;
     let groups = plan.reduction / DOT_ELEMENTS as u64;
     let stride = STAGED_WARPS * STAGE_BATCH;
-    let offset = activation_offset(plan, "(long)group * 32 + lane");
+    let offset = activation_offset(plan, "(long long)group * 32 + lane");
     source.push_str(&format!(
         "    __shared__ __align__(16) int staged_q[{}];\n    __shared__ float staged_d[{groups}];\n",
         plan.reduction / 4
@@ -385,28 +385,28 @@ fn push_row_setup(source: &mut String, resolved: &BoundOp, plan: &StagedMatvec, 
     let weight_slot = plan.weight_slot;
     let (_, weight_layout, _) = &resolved.operands()[weight_slot];
     for index in 0..output_axes.len() {
-        source.push_str(&format!("    long coord{index}_rows[{rows}];\n"));
+        source.push_str(&format!("    long long coord{index}_rows[{rows}];\n"));
     }
     if plan.rows_in_shared() {
-        source.push_str(&format!("    __shared__ long block_row_byte[{}];\n", STAGED_WARPS * rows));
+        source.push_str(&format!("    __shared__ long long block_row_byte[{}];\n", STAGED_WARPS * rows));
     }
     if plan.activation_per_slot {
-        source.push_str(&format!("    long act_row_byte[{rows}];\n"));
+        source.push_str(&format!("    long long act_row_byte[{rows}];\n"));
     }
     source.push_str(&format!(
-        "    const long first_row = ((long)blockIdx.x * {STAGED_WARPS} + (long)warp) * {rows};\n\
-         \x20   long row_block[{rows}];\n\
-         \x20   long out_offset[{rows}];\n\
+        "    const long long first_row = ((long long)blockIdx.x * {STAGED_WARPS} + (long long)warp) * {rows};\n\
+         \x20   long long row_block[{rows}];\n\
+         \x20   long long out_offset[{rows}];\n\
          \x20   #pragma unroll\n\
          \x20   for (int row = 0; row < {rows}; row++) {{\n\
          \x20       unsigned int remaining = (unsigned int)(first_row + row);\n\
-         \x20       long packed_row = 0;\n\
+         \x20       long long packed_row = 0;\n\
          \x20       out_offset[row] = u.out_base;\n"
     ));
     for (index, axis) in output_axes.iter().enumerate().rev() {
         let extent = resolved.extents[usize::from(*axis)];
         source.push_str(&format!(
-            "        long coord{index} = (long)(remaining % {extent}u); remaining /= {extent}u;\n\
+            "        long long coord{index} = (long long)(remaining % {extent}u); remaining /= {extent}u;\n\
              \x20       out_offset[row] += coord{index} * u.out_strides[{axis}];\n\
              \x20       coord{index}_rows[row] = coord{index};\n"
         ));
@@ -424,7 +424,7 @@ fn push_row_setup(source: &mut String, resolved: &BoundOp, plan: &StagedMatvec, 
     let elements = plan.dot.elements;
     let block_bytes = plan.dot.block_bytes;
     source.push_str(&format!(
-        "        const long row_element = u.operand_base[{weight_slot}] + packed_row * {}{gather_term};\n\
+        "        const long long row_element = u.operand_base[{weight_slot}] + packed_row * {}{gather_term};\n\
          \x20       if (row_element % {elements} != 0) {{ __trap(); }}\n\
          \x20       row_block[row] = row_element / {elements};\n\
          {publish}\
@@ -449,7 +449,7 @@ fn push_activation_row_base(source: &mut String, resolved: &BoundOp, plan: &Stag
     };
     let activation_slot = plan.activation_slot;
     let (_, activation_layout, _) = &resolved.operands()[activation_slot];
-    source.push_str("        long act_row_element = 0;\n");
+    source.push_str("        long long act_row_element = 0;\n");
     for (index, axis) in varying_activation_axes(resolved, output_axes, activation_layout)
         .iter()
         .filter_map(|axis| output_axes.iter().position(|output| output == axis).map(|index| (index, *axis)))
@@ -459,7 +459,7 @@ fn push_activation_row_base(source: &mut String, resolved: &BoundOp, plan: &Stag
         ));
     }
     source.push_str(&format!(
-        "        act_row_byte[row] = (act_row_element / {}) * {}L;\n",
+        "        act_row_byte[row] = (act_row_element / {}) * {}LL;\n",
         held.elements, held.block_bytes
     ));
 }
@@ -473,7 +473,7 @@ fn push_gather_row_base(source: &mut String, plan: &StagedMatvec, output_axes: &
     };
     let operand_index = plan.weight_slot;
     source.push_str(&format!(
-        "        long gather_off{operand_index} = u.gather_index_base[{gather_slot}];\n"
+        "        long long gather_off{operand_index} = u.gather_index_base[{gather_slot}];\n"
     ));
     for (index, axis) in output_axes.iter().enumerate() {
         source.push_str(&format!(
@@ -481,14 +481,14 @@ fn push_gather_row_base(source: &mut String, plan: &StagedMatvec, output_axes: &
         ));
     }
     source.push_str(&format!(
-        "        long fetched{operand_index} = (long)gather_idx{gather_slot}[gather_off{operand_index}];\n\
+        "        long long fetched{operand_index} = (long long)gather_idx{gather_slot}[gather_off{operand_index}];\n\
          \x20       if (lane == 0u && first_row + row < u.output_total) {{\n"
     ));
     push_gather_fault_check(source, operand_index, gather_slot, "            ");
     source.push_str(&format!(
         "        }}\n\
-         \x20       fetched{operand_index} = max((long)0, min(fetched{operand_index}, u.gather_extent[{gather_slot}] - 1));\n\
-         \x20       const long gather_base{operand_index} = fetched{operand_index} * u.gather_element_stride[{gather_slot}];\n"
+         \x20       fetched{operand_index} = max((long long)0, min(fetched{operand_index}, u.gather_extent[{gather_slot}] - 1));\n\
+         \x20       const long long gather_base{operand_index} = fetched{operand_index} * u.gather_element_stride[{gather_slot}];\n"
     ));
     format!(" + gather_base{operand_index}")
 }
@@ -556,7 +556,7 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
          \x20   float accumulator[{rows}];\n\
          \x20   #pragma unroll\n\
          \x20   for (int row = 0; row < {rows}; row++) {{\n\
-         \x20       const long base = {row_base};\n\
+         \x20       const long long base = {row_base};\n\
          \x20       row_start[row] = base < 0 ? (const unsigned char *)0 : in{weight_slot} + base;\n\
          \x20       accumulator[row] = 0.0f;\n\
          \x20   }}\n\
@@ -651,7 +651,7 @@ fn contiguous_prepass_body(plan: &StagedMatvec) -> String {
 fn strided_prepass_body(plan: &StagedMatvec) -> String {
     let activation_slot = plan.activation_slot;
     let groups = plan.reduction / DOT_ELEMENTS as u64;
-    let offset = activation_offset(plan, "(long)group * 32 + lane");
+    let offset = activation_offset(plan, "(long long)group * 32 + lane");
     format!(
         "    const unsigned int lane = threadIdx.x & 31u;\n\
          \x20   const unsigned int group = blockIdx.x * {STAGED_WARPS}u + (threadIdx.x >> 5u);\n\

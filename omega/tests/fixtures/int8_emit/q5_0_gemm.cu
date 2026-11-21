@@ -1,6 +1,6 @@
 #include <cuda_fp16.h>
 #define PROXIMA_ALL_LANES 0xffffffffu
-__device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float *out, long group, unsigned int lane) {
+__device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float *out, long long group, unsigned int lane) {
     float x = in[group * 32 + lane];
     float amax = fabsf(x);
     for (int offset = 16; offset > 0; offset >>= 1) { amax = fmaxf(amax, __shfl_xor_sync(PROXIMA_ALL_LANES, amax, offset)); }
@@ -9,7 +9,7 @@ __device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float
     int qsum = q;
     for (int offset = 16; offset > 0; offset >>= 1) { qsum += __shfl_xor_sync(PROXIMA_ALL_LANES, qsum, offset); }
     unsigned char *bytes = (unsigned char *)out + (group / 4) * 144;
-    const long run = group % 4;
+    const long long run = group % 4;
     unsigned char *header = bytes + 0 + run * 4;
     if (lane == 0) {
         unsigned short d_bits = __half_as_ushort(__float2half(d));
@@ -22,7 +22,7 @@ __device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float
     bytes[16 + run * 32 + lane] = (unsigned char)(signed char)q;
 }
 
-struct Uniforms { long groups; };
+struct Uniforms { long long groups; };
 
 extern "C" __global__ void __launch_bounds__(256) omega_cuda_block_quantize_e128_b144_wide_gid64c8(
     const float* __restrict__ in0,
@@ -30,8 +30,8 @@ extern "C" __global__ void __launch_bounds__(256) omega_cuda_block_quantize_e128
     const Uniforms* __restrict__ u_ptr
 ) {
     const Uniforms u = *u_ptr;
-    const long gid = (long)blockIdx.x * blockDim.x + threadIdx.x;
-    const long group = gid / 32;
+    const long long gid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    const long long group = gid / 32;
     if (group >= u.groups) { return; }
     omega_q8_1_quantize_block(in0, out, group, (unsigned int)(gid & 31));
 }
@@ -506,14 +506,14 @@ __device__ __forceinline__ void blockdot_e32_b22_c4ur0_at48_m1_z16_s5x10at0_nsh1
     }
 }
 struct Uniforms {
-    long output_total;
-    long reduction_total;
-    long output_extents[2];
-    long reduction_extents[1];
-    long operand_base[2];
-    long operand_strides[2][3];
-    long out_base;
-    long out_strides[3];
+    long long output_total;
+    long long reduction_total;
+    long long output_extents[2];
+    long long reduction_extents[1];
+    long long operand_base[2];
+    long long operand_strides[2][3];
+    long long out_base;
+    long long out_strides[3];
 };
 
 extern "C" __global__ void __launch_bounds__(256, 2) omega_cuda_reduce_r3_ax0_1_n2_multiply_add_zero_wide_cdz_mma8x8x16s8c4_gid64c9(
@@ -523,7 +523,7 @@ extern "C" __global__ void __launch_bounds__(256, 2) omega_cuda_reduce_r3_ax0_1_
     const Uniforms* __restrict__ u_ptr
 ) {
     const Uniforms u = *u_ptr;
-    long gid = (long)blockIdx.x * (long)blockDim.x + (long)threadIdx.x;
+    long long gid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
     const int tid = (int)threadIdx.x;
     const int warp = tid >> 5;
     const int lane = tid & 31;
@@ -531,13 +531,13 @@ extern "C" __global__ void __launch_bounds__(256, 2) omega_cuda_reduce_r3_ax0_1_
     const int quad = lane & 3;
     const int warp_feature = warp & 3;
     const int warp_token = warp >> 2;
-    long feature_total = 1;
+    long long feature_total = 1;
     feature_total *= u.output_extents[1];
-    long token_total = 1;
+    long long token_total = 1;
     token_total *= u.output_extents[0];
-    const long feature_tiles = (feature_total + 128 - 1) / 128;
-    const long feature_first = ((long)blockIdx.x % feature_tiles) * 128;
-    const long token_first = ((long)blockIdx.x / feature_tiles) * 64;
+    const long long feature_tiles = (feature_total + 128 - 1) / 128;
+    const long long feature_first = ((long long)blockIdx.x % feature_tiles) * 128;
+    const long long token_first = ((long long)blockIdx.x / feature_tiles) * 64;
     __shared__ __align__(16) signed char weight_tile[128][144];
     __shared__ __align__(16) signed char act_tile[64][144];
     __shared__ float weight_scales[4][128];
@@ -545,15 +545,15 @@ extern "C" __global__ void __launch_bounds__(256, 2) omega_cuda_reduce_r3_ax0_1_
     float flat[32];
     #pragma unroll
     for (int index = 0; index < 32; index++) { flat[index] = 0.0f; }
-    for (long slab_first = 0; slab_first < u.reduction_total; slab_first += 128) {
+    for (long long slab_first = 0; slab_first < u.reduction_total; slab_first += 128) {
         for (int item = tid; item < 512; item += 256) {
             const int feature_local = item / 4;
             const int chunk = item % 4;
-            const long feature = feature_first + feature_local;
+            const long long feature = feature_first + feature_local;
             int words[8] = {0, 0, 0, 0, 0, 0, 0, 0};
             float block_scale = 0.0f;
             if (feature < feature_total) {
-                const long element = u.operand_base[1] + feature * u.reduction_total + slab_first + chunk * 32;
+                const long long element = u.operand_base[1] + feature * u.reduction_total + slab_first + chunk * 32;
                 const unsigned char *block = in1 + (element / 32) * 22;
                 blockdot_e32_b22_c4ur0_at48_m1_z16_s5x10at0_nsh16_i8x32(block, (unsigned int)(element % 32) / 32u, words);
                 block_scale = blockdot_e32_b22_c4ur0_at48_m1_z16_s5x10at0_nsh16_scale(block);
@@ -566,12 +566,12 @@ extern "C" __global__ void __launch_bounds__(256, 2) omega_cuda_reduce_r3_ax0_1_
         for (int item = tid; item < 256; item += 256) {
             const int token_local = item / 4;
             const int chunk = item % 4;
-            const long token = token_first + token_local;
+            const long long token = token_first + token_local;
             uint4 low = make_uint4(0u, 0u, 0u, 0u);
             uint4 high = make_uint4(0u, 0u, 0u, 0u);
             float step = 0.0f;
             if (token < token_total) {
-                const long group = token * (u.reduction_total / 32) + slab_first / 32 + chunk;
+                const long long group = token * (u.reduction_total / 32) + slab_first / 32 + chunk;
                 const unsigned char *bytes = in0 + ((group) / 4) * 144;
                 const uint4 activation_low = ((const uint4 *)(bytes + 16 + ((group) % 4) * 32))[0];
                 const uint4 activation_high = ((const uint4 *)(bytes + 16 + ((group) % 4) * 32))[1];
@@ -624,15 +624,15 @@ extern "C" __global__ void __launch_bounds__(256, 2) omega_cuda_reduce_r3_ax0_1_
         const int row = index >> 3;
         const int col = (index >> 1) & 3;
         const int pair = index & 1;
-        const long feature = feature_first + warp_feature * 32 + row * 8 + group;
-        const long token = token_first + warp_token * 32 + col * 8 + quad * 2 + pair;
+        const long long feature = feature_first + warp_feature * 32 + row * 8 + group;
+        const long long token = token_first + warp_token * 32 + col * 8 + quad * 2 + pair;
         if (feature >= feature_total || token >= token_total) { continue; }
-        long output_coord[2];
-        long feature_rest = feature;
-        long token_rest = token;
+        long long output_coord[2];
+        long long feature_rest = feature;
+        long long token_rest = token;
         output_coord[1] = feature_rest % u.output_extents[1]; feature_rest /= u.output_extents[1];
         output_coord[0] = token_rest % u.output_extents[0]; token_rest /= u.output_extents[0];
-        long out_offset = u.out_base;
+        long long out_offset = u.out_base;
         out_offset += output_coord[0] * u.out_strides[0];
         out_offset += output_coord[1] * u.out_strides[1];
         out[out_offset] = flat[index];

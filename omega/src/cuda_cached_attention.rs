@@ -7,7 +7,7 @@ use proxima_numeric::{DType, NumericPolicy};
 
 use crate::cuda::mma_gemm::MMA_INSTRUCTION;
 use crate::cuda::{
-    CudaAttentionClass, cuda_cached_attention_class, cuda_float_literal, preamble,
+    CudaAttentionClass, WORD_C, cuda_cached_attention_class, cuda_float_literal, preamble,
 };
 use crate::cuda_cached_attention_mma::{MMA_ATTENTION_BODY, MMA_ATTENTION_HELPERS};
 use crate::cuda_cached_attention_tiled::{
@@ -127,12 +127,12 @@ pub(crate) fn render_attention(
         .collect::<Vec<String>>()
         .join(",\n    ");
     let cached_rows_decl = match class {
-        CudaAttentionClass::CachedBound => String::from("const long cached_key_rows = (long)in8[0];"),
-        CudaAttentionClass::Static => format!("constexpr long cached_key_rows = {cached_key_rows}L;"),
+        CudaAttentionClass::CachedBound => String::from("const long long cached_key_rows = (long long)in8[0];"),
+        CudaAttentionClass::Static => format!("constexpr long long cached_key_rows = {cached_key_rows}LL;"),
     };
     let cached_lower = match *cached_lower_inclusive {
-        i64::MIN => String::from("-9223372036854775807L"),
-        bound => format!("{bound}L"),
+        i64::MIN => String::from("-9223372036854775807LL"),
+        bound => format!("{bound}LL"),
     };
     let pass_planes = if rotary_dim < head_dim {
         let first = match class {
@@ -159,34 +159,38 @@ pub(crate) fn render_attention(
     let runtime_bounds = cached_attention_runtime_bounds(&resolved.kind);
     let (uniform_fields, bounds_decl) = if runtime_bounds {
         (
-            " long new_key_rows; long new_upper; long cached_lower;",
+            format!(
+                " {WORD_C} new_key_rows; {WORD_C} new_upper; {WORD_C} cached_lower;"
+            ),
             String::from(
-                "const long new_key_rows = u_ptr->new_key_rows;\n\
-                 \x20   const long new_upper = u_ptr->new_upper;\n\
-                 \x20   const long cached_lower = u_ptr->cached_lower;",
+                "const long long new_key_rows = u_ptr->new_key_rows;\n\
+                 \x20   const long long new_upper = u_ptr->new_upper;\n\
+                 \x20   const long long cached_lower = u_ptr->cached_lower;",
             ),
         )
     } else {
         (
-            "",
+            String::new(),
             format!(
-                "constexpr long new_key_rows = {new_key_rows}L;\n\
-                 \x20   constexpr long new_upper = {new_upper_inclusive}L;\n\
-                 \x20   constexpr long cached_lower = {cached_lower};"
+                "constexpr long long new_key_rows = {new_key_rows}LL;\n\
+                 \x20   constexpr long long new_upper = {new_upper_inclusive}LL;\n\
+                 \x20   constexpr long long cached_lower = {cached_lower};"
             ),
         )
     };
-    source.push_str(&format!("struct Uniforms {{ long total_elements;{uniform_fields} }};\n\n"));
+    source.push_str(&format!(
+        "struct Uniforms {{ {WORD_C} total_elements;{uniform_fields} }};\n\n"
+    ));
     source.push_str(&format!(
         "extern \"C\" __global__ void {entry}(\n    {params},\n    float* __restrict__ out,\n    const Uniforms* __restrict__ u_ptr{extra_param}) {{\n"
     ));
     source.push_str(&format!(
-        "    constexpr long kv_heads = {kv_heads};\n\
-         \x20   constexpr long query_groups = {query_groups};\n\
-         \x20   constexpr long head_dim = {head_dim};\n\
-         \x20   constexpr long rotary_dim = {rotary_dim};\n\
-         \x20   constexpr long pair_dim = rotary_dim / 2;\n\
-         \x20   constexpr long pass_dim = head_dim - rotary_dim;\n\
+        "    constexpr long long kv_heads = {kv_heads};\n\
+         \x20   constexpr long long query_groups = {query_groups};\n\
+         \x20   constexpr long long head_dim = {head_dim};\n\
+         \x20   constexpr long long rotary_dim = {rotary_dim};\n\
+         \x20   constexpr long long pair_dim = rotary_dim / 2;\n\
+         \x20   constexpr long long pass_dim = head_dim - rotary_dim;\n\
          \x20   {bounds_decl}\n\
          \x20   constexpr float scale = {scale};\n\
          \x20   {cached_rows_decl}\n\
@@ -202,34 +206,34 @@ const CACHED_ATTENTION_BODY: &str = "\
     constexpr int warps = 4;
     const unsigned int lane = threadIdx.x & 31u;
     const unsigned int warp = threadIdx.x >> 5u;
-    const long vector_index = (long)blockIdx.x;
+    const long long vector_index = (long long)blockIdx.x;
     if (vector_index >= u_ptr->total_elements) { return; }
-    const long query_row = vector_index / (kv_heads * query_groups);
-    const long query_head = vector_index % (kv_heads * query_groups);
-    const long kv_head = query_head / query_groups;
-    const long qbase = query_row * (kv_heads * query_groups * pair_dim) + query_head * pair_dim;
-    const long qpass = query_row * (kv_heads * query_groups * pass_dim) + query_head * pass_dim;
-    const long last_key = cached_key_rows + new_key_rows - 1L;
+    const long long query_row = vector_index / (kv_heads * query_groups);
+    const long long query_head = vector_index % (kv_heads * query_groups);
+    const long long kv_head = query_head / query_groups;
+    const long long qbase = query_row * (kv_heads * query_groups * pair_dim) + query_head * pair_dim;
+    const long long qpass = query_row * (kv_heads * query_groups * pass_dim) + query_head * pass_dim;
+    const long long last_key = cached_key_rows + new_key_rows - 1LL;
     float maximum = negative_infinity;
     float sum = 0.0f;
     float weighted[(head_dim + 31) / 32];
-    for (long slot = 0; slot < (head_dim + 31) / 32; slot++) { weighted[slot] = 0.0f; }
-    for (long key = (long)warp; key <= last_key; key += warps) {
+    for (long long slot = 0; slot < (head_dim + 31) / 32; slot++) { weighted[slot] = 0.0f; }
+    for (long long key = (long long)warp; key <= last_key; key += warps) {
         const bool cached = key < cached_key_rows;
-        const long new_index = key - cached_key_rows;
-        const long relative = (cached ? key - cached_key_rows : new_index) - query_row;
+        const long long new_index = key - cached_key_rows;
+        const long long relative = (cached ? key - cached_key_rows : new_index) - query_row;
         if (cached && relative < cached_lower) { continue; }
         if (!cached && relative > new_upper) { continue; }
-        const long key_row = cached ? key : new_index;
-        const long kbase = key_row * (kv_heads * pair_dim) + kv_head * pair_dim;
-        const long kpass = key_row * (kv_heads * pass_dim) + kv_head * pass_dim;
-        const long vbase = key_row * (kv_heads * head_dim) + kv_head * head_dim;
+        const long long key_row = cached ? key : new_index;
+        const long long kbase = key_row * (kv_heads * pair_dim) + kv_head * pair_dim;
+        const long long kpass = key_row * (kv_heads * pass_dim) + kv_head * pass_dim;
+        const long long vbase = key_row * (kv_heads * head_dim) + kv_head * head_dim;
         float partial = 0.0f;
-        for (long pair = (long)lane; pair < pair_dim; pair += 32L) {
+        for (long long pair = (long long)lane; pair < pair_dim; pair += 32LL) {
             partial += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);
             partial += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);
         }
-        for (long column = (long)lane; column < pass_dim; column += 32L) {
+        for (long long column = (long long)lane; column < pass_dim; column += 32LL) {
             partial += pass_query[qpass + column] * (cached ? pass_cached_key[kpass + column] : pass_new_key[kpass + column]);
         }
         for (int offset = 16; offset > 0; offset >>= 1) { partial += __shfl_xor_sync(PROXIMA_ALL_LANES, partial, offset); }
@@ -238,8 +242,8 @@ const CACHED_ATTENTION_BODY: &str = "\
         const float weight = expf(score - next_max);
         const float rescale = (maximum == negative_infinity) ? 0.0f : expf(maximum - next_max);
         sum = sum * rescale + weight;
-        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {
-            const long local_dimension = dimension / 32L;
+        for (long long dimension = (long long)lane; dimension < head_dim; dimension += 32LL) {
+            const long long local_dimension = dimension / 32LL;
             weighted[local_dimension] = weighted[local_dimension] * rescale
                 + weight * (cached ? in6[vbase + dimension] : in7[vbase + dimension]);
         }
@@ -248,8 +252,8 @@ const CACHED_ATTENTION_BODY: &str = "\
     __shared__ float shared_maximum[warps];
     __shared__ float shared_sum[warps];
     __shared__ float shared_weighted[warps * head_dim];
-    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {
-        shared_weighted[warp * head_dim + dimension] = weighted[dimension / 32L];
+    for (long long dimension = (long long)lane; dimension < head_dim; dimension += 32LL) {
+        shared_weighted[warp * head_dim + dimension] = weighted[dimension / 32LL];
     }
     if (lane == 0u) {
         shared_maximum[warp] = maximum;
@@ -262,7 +266,7 @@ const CACHED_ATTENTION_BODY: &str = "\
     for (int source = 0; source < warps; source++) {
         total += (shared_maximum[source] == negative_infinity) ? 0.0f : shared_sum[source] * expf(shared_maximum[source] - global_maximum);
     }
-    for (long dimension = (long)threadIdx.x; dimension < head_dim; dimension += (long)blockDim.x) {
+    for (long long dimension = (long long)threadIdx.x; dimension < head_dim; dimension += (long long)blockDim.x) {
         float merged = 0.0f;
         for (int source = 0; source < warps; source++) {
             merged += (shared_maximum[source] == negative_infinity) ? 0.0f : shared_weighted[source * head_dim + dimension] * expf(shared_maximum[source] - global_maximum);

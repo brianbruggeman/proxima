@@ -92,24 +92,24 @@ pub(super) fn push_row_tiled_cooperative_body(
     let (init_expr, seeded_init) = fold_init_tokens(*init);
     let identity = cooperative_identity_token(resolved.node, *reduce_op)?;
 
-    source.push_str(&format!("    long output_index = gid / {WARP_SIZE};\n"));
+    source.push_str(&format!("    long long output_index = gid / {WARP_SIZE};\n"));
     source.push_str(&format!(
-        "    long row_extent = u.output_extents[{tile_index}];\n"
+        "    long long row_extent = u.output_extents[{tile_index}];\n"
     ));
     source.push_str(&format!(
-        "    long row_tiles = (row_extent + {ROW_TILE} - 1) / {ROW_TILE};\n"
+        "    long long row_tiles = (row_extent + {ROW_TILE} - 1) / {ROW_TILE};\n"
     ));
-    source.push_str("    long warp_total = u.output_total / row_extent * row_tiles;\n");
+    source.push_str("    long long warp_total = u.output_total / row_extent * row_tiles;\n");
     source.push_str("    if (output_index >= warp_total) { return; }\n");
     source.push_str(&format!(
         "    unsigned int lane = (unsigned int)(gid % {WARP_SIZE});\n"
     ));
-    source.push_str(&format!("    long full_coord[{rank_len}];\n"));
+    source.push_str(&format!("    long long full_coord[{rank_len}];\n"));
     for dim in 0..rank {
         source.push_str(&format!("    full_coord[{dim}] = 0;\n"));
     }
-    source.push_str(&format!("    long output_coord[{output_rank}];\n"));
-    source.push_str("    long remaining = output_index;\n");
+    source.push_str(&format!("    long long output_coord[{output_rank}];\n"));
+    source.push_str("    long long remaining = output_index;\n");
     for index in (0..output_rank).rev() {
         let extent = if index == tile_index {
             "row_tiles".to_string()
@@ -124,23 +124,23 @@ pub(super) fn push_row_tiled_cooperative_body(
         source.push_str(&format!("    full_coord[{dim}] = output_coord[{index}];\n"));
     }
     source.push_str(&format!(
-        "    long row_first = output_coord[{tile_index}] * {ROW_TILE};\n"
+        "    long long row_first = output_coord[{tile_index}] * {ROW_TILE};\n"
     ));
     source.push_str(&format!(
-        "    long rows_here = min((long){ROW_TILE}, row_extent - row_first);\n"
+        "    long long rows_here = min((long long){ROW_TILE}, row_extent - row_first);\n"
     ));
 
     for (index, &codec) in quantized.iter().enumerate() {
         if codec.is_some() {
             continue;
         }
-        source.push_str(&format!("    long row_off{index}[{ROW_TILE}];\n"));
+        source.push_str(&format!("    long long row_off{index}[{ROW_TILE}];\n"));
         source.push_str("    #pragma unroll\n");
         source.push_str(&format!(
             "    for (int slot = 0; slot < {ROW_TILE}; slot++) {{\n"
         ));
         source.push_str(&format!(
-            "        long row_coord = row_first + slot;\n        row_off{index}[slot] = u.operand_base[{index}];\n"
+            "        long long row_coord = row_first + slot;\n        row_off{index}[slot] = u.operand_base[{index}];\n"
         ));
         for &dim in output_axes {
             let coord = if dim as usize == tile_axis {
@@ -169,7 +169,7 @@ pub(super) fn push_row_tiled_cooperative_body(
     source.push_str("    }\n");
 
     source.push_str(&format!(
-        "    for (long chunk = (long)lane * 8; chunk < u.reduction_total; chunk += {WARP_SIZE} * 8) {{\n"
+        "    for (long long chunk = (long long)lane * 8; chunk < u.reduction_total; chunk += {WARP_SIZE} * 8) {{\n"
     ));
     push_reduction_coord_decompose(
         source,
@@ -178,7 +178,7 @@ pub(super) fn push_row_tiled_cooperative_body(
         reduce_rank.max(1),
         "        ",
     );
-    source.push_str("        long r = chunk;\n");
+    source.push_str("        long long r = chunk;\n");
     for (index, &codec) in quantized.iter().enumerate() {
         let Some(codec) = codec else { continue };
         let (_, layout, _) = &resolved.operands()[index];
@@ -186,7 +186,7 @@ pub(super) fn push_row_tiled_cooperative_body(
         push_weight_chunk(source, resolved, index, codec)?;
     }
     source.push_str(
-        "        for (long inner = 0; inner < 8 && chunk + inner < u.reduction_total; inner++) {\n",
+        "        for (long long inner = 0; inner < 8 && chunk + inner < u.reduction_total; inner++) {\n",
     );
     for (index, dim) in reduce_dims.iter().enumerate() {
         source.push_str(&format!(
@@ -197,7 +197,7 @@ pub(super) fn push_row_tiled_cooperative_body(
         if codec.is_some() {
             continue;
         }
-        source.push_str(&format!("            long reduce_off{index} = 0;\n"));
+        source.push_str(&format!("            long long reduce_off{index} = 0;\n"));
         for dim in &reduce_dims {
             source.push_str(&format!(
                 "            reduce_off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
@@ -276,7 +276,7 @@ pub(super) fn push_row_tiled_cooperative_body(
     source.push_str(&format!(
         "        full_coord[{tile_axis}] = row_first + slot;\n"
     ));
-    source.push_str("        long out_offset = u.out_base;\n");
+    source.push_str("        long long out_offset = u.out_base;\n");
     for dim in 0..rank {
         source.push_str(&format!(
             "        out_offset += full_coord[{dim}] * u.out_strides[{dim}];\n"

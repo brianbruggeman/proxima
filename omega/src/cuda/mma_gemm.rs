@@ -394,17 +394,17 @@ pub(super) fn push_mma_gemm_body(
 ");
     source.push_str("    const int load_segment = (tid & 3) * 8;
 ");
-    source.push_str("    const long load_feature = feature_first + load_row;
+    source.push_str("    const long long load_feature = feature_first + load_row;
 ");
     source.push_str("    const bool feature_ok = load_feature < feature_total;
 ");
     for rep in 0..ACT_REPS {
         source.push_str(&format!(
-            "    const long load_token{rep} = token_first + load_row + {};
+            "    const long long load_token{rep} = token_first + load_row + {};
     const bool token_ok{rep} = load_token{rep} < token_total;
-    long token_offset{rep} = u.operand_base[{activation}];
+    long long token_offset{rep} = u.operand_base[{activation}];
     if (token_ok{rep}) {{
-        long token_rest = load_token{rep};
+        long long token_rest = load_token{rep};
 ",
             rep * FEATURE_TILE
         ));
@@ -419,7 +419,7 @@ pub(super) fn push_mma_gemm_body(
 ");
     }
     source.push_str(&format!(
-        "    const long weight_row = u.operand_base[{weight}] + load_feature * u.reduction_total;\n"
+        "    const long long weight_row = u.operand_base[{weight}] + load_feature * u.reduction_total;\n"
     ));
 
     source.push_str(&format!(
@@ -451,13 +451,13 @@ pub(super) fn push_mma_gemm_body(
     }
 
     source.push_str(&format!(
-        "    for (long stage_first = 0; stage_first < u.reduction_total; stage_first += {STAGE_K}) {{\n"
+        "    for (long long stage_first = 0; stage_first < u.reduction_total; stage_first += {STAGE_K}) {{\n"
     ));
     source.push_str("        float scale = 0.0f;\n        float minimum = 0.0f;\n");
     source.push_str("        __align__(16) __half2 weight_pairs[4];\n");
     source.push_str("        #pragma unroll\n        for (int pair = 0; pair < 4; pair++) { weight_pairs[pair] = __float2half2_rn(0.0f); }\n");
     source.push_str("        if (feature_ok) {\n");
-    source.push_str("            long element = weight_row + stage_first + load_segment;\n");
+    source.push_str("            long long element = weight_row + stage_first + load_segment;\n");
     source.push_str(&format!(
         "            const unsigned char *block = (const unsigned char *)in{weight} + (element / {block_elements}) * {block_bytes};\n"
     ));
@@ -484,22 +484,22 @@ pub(super) fn push_mma_gemm_body(
 ");
         source.push_str(&format!("        if (token_ok{rep}) {{
 "));
-        source.push_str("            unsigned int reduce_rest = (unsigned int)(stage_first + load_segment);
+        source.push_str("            long long reduce_rest = stage_first + load_segment;
 ");
-        source.push_str(&format!("            long reduce_coord[{reduce_rank}];
+        source.push_str(&format!("            long long reduce_coord[{reduce_rank}];
 "));
-        source.push_str("            long reduce_offset = 0;
+        source.push_str("            long long reduce_offset = 0;
 ");
         for (index, dim) in reduce_dims.iter().enumerate().rev() {
             source.push_str(&format!(
-                "            reduce_coord[{index}] = (long)(reduce_rest % (unsigned int)u.reduction_extents[{index}]); reduce_rest /= (unsigned int)u.reduction_extents[{index}];
+                "            reduce_coord[{index}] = reduce_rest % u.reduction_extents[{index}]; reduce_rest /= u.reduction_extents[{index}];
             reduce_offset += reduce_coord[{index}] * u.operand_strides[{activation}][{dim}];
 "
             ));
         }
         let last = reduce_rank - 1;
         source.push_str(&format!(
-            "            const long segment_index = token_offset{rep} + reduce_offset;
+            "            const long long segment_index = token_offset{rep} + reduce_offset;
             if (u.operand_strides[{activation}][{inner}] == 1 && (u.reduction_extents[{last}] & 7) == 0 && (segment_index & 3) == 0) {{
                 const float4 first = *(const float4 *)(in{activation} + segment_index);
                 const float4 second = *(const float4 *)(in{activation} + segment_index + 4);
@@ -706,18 +706,18 @@ pub(super) fn push_tile_origin(
     source.push_str("    const int tid = (int)threadIdx.x;\n    const int warp = tid >> 5;\n");
     source.push_str("    const int lane = tid & 31;\n    const int group = lane >> 2;\n");
     source.push_str("    const int quad = lane & 3;\n    const int warp_feature = warp & 3;\n");
-    source.push_str("    const int warp_token = warp >> 2;\n    long feature_total = 1;\n");
+    source.push_str("    const int warp_token = warp >> 2;\n    long long feature_total = 1;\n");
     for &position in &plan.feature_positions {
         source.push_str(&format!("    feature_total *= u.output_extents[{position}];\n"));
     }
-    source.push_str("    long token_total = 1;\n");
+    source.push_str("    long long token_total = 1;\n");
     for &position in &plan.token_positions {
         source.push_str(&format!("    token_total *= u.output_extents[{position}];\n"));
     }
     source.push_str(&format!(
-        "    const long feature_tiles = (feature_total + {feature_tile} - 1) / {feature_tile};\n\
-         \x20   const long feature_first = ((long)blockIdx.x % feature_tiles) * {feature_tile};\n\
-         \x20   const long token_first = ((long)blockIdx.x / feature_tiles) * {token_tile};\n"
+        "    const long long feature_tiles = (feature_total + {feature_tile} - 1) / {feature_tile};\n\
+         \x20   const long long feature_first = ((long long)blockIdx.x % feature_tiles) * {feature_tile};\n\
+         \x20   const long long token_first = ((long long)blockIdx.x / feature_tiles) * {token_tile};\n"
     ));
 }
 
@@ -746,12 +746,12 @@ pub(super) fn push_output_write(
     let output_rank = output_axes.len();
     source.push_str(&format!(
         "    #pragma unroll 1\n    for (int index = 0; index < 32; index++) {{\n{index_setup}\
-         \x20       const long feature = {feature_expr};\n\
-         \x20       const long token = {token_expr};\n\
+         \x20       const long long feature = {feature_expr};\n\
+         \x20       const long long token = {token_expr};\n\
          \x20       if (feature >= feature_total || token >= token_total) {{ continue; }}\n\
-         \x20       long output_coord[{output_rank}];\n\
-         \x20       long feature_rest = feature;\n\
-         \x20       long token_rest = token;\n"
+         \x20       long long output_coord[{output_rank}];\n\
+         \x20       long long feature_rest = feature;\n\
+         \x20       long long token_rest = token;\n"
     ));
     for &position in plan.feature_positions.iter().rev() {
         source.push_str(&format!(
@@ -763,7 +763,7 @@ pub(super) fn push_output_write(
             "        output_coord[{position}] = token_rest % u.output_extents[{position}]; token_rest /= u.output_extents[{position}];\n"
         ));
     }
-    source.push_str("        long out_offset = u.out_base;\n");
+    source.push_str("        long long out_offset = u.out_base;\n");
     for (position, axis) in output_axes.iter().enumerate() {
         source.push_str(&format!(
             "        out_offset += output_coord[{position}] * u.out_strides[{axis}];\n"

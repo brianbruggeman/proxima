@@ -211,11 +211,11 @@ fn push_stage_weight(source: &mut String, plan: &MmaGemm, int8: &Int8Gemm) {
         "        for (int item = tid; item < {items}; item += {INT8_THREADS}) {{\n\
          \x20           const int feature_local = item / {chunks};\n\
          \x20           const int chunk = item % {chunks};\n\
-         \x20           const long feature = feature_first + feature_local;\n\
+         \x20           const long long feature = feature_first + feature_local;\n\
          \x20           int words[8] = {{0, 0, 0, 0, 0, 0, 0, 0}};\n\
 {weight_declare}\
          \x20           if (feature < feature_total) {{\n\
-         \x20               const long element = u.operand_base[{weight}] + feature * u.reduction_total + slab_first + chunk * 32;\n\
+         \x20               const long long element = u.operand_base[{weight}] + feature * u.reduction_total + slab_first + chunk * 32;\n\
          \x20               const unsigned char *block = in{weight} + (element / {elements}) * {block_bytes};\n\
          \x20               {name}_i8x32(block, (unsigned int)(element % {elements}) / 32u, words);\n\
 {weight_compute}\
@@ -239,12 +239,12 @@ fn push_stage_activation(source: &mut String, activation: usize, int8: &Int8Gemm
         "        for (int item = tid; item < {items}; item += {INT8_THREADS}) {{\n\
          \x20           const int token_local = item / {chunks};\n\
          \x20           const int chunk = item % {chunks};\n\
-         \x20           const long token = token_first + token_local;\n\
+         \x20           const long long token = token_first + token_local;\n\
          \x20           uint4 low = make_uint4(0u, 0u, 0u, 0u);\n\
          \x20           uint4 high = make_uint4(0u, 0u, 0u, 0u);\n\
 {act_declare}\
          \x20           if (token < token_total) {{\n\
-         \x20               const long group = token * (u.reduction_total / 32) + slab_first / 32 + chunk;\n\
+         \x20               const long long group = token * (u.reduction_total / 32) + slab_first / 32 + chunk;\n\
          \x20               const unsigned char *bytes = in{activation} + {block};\n\
          {codes}\
          \x20               low = activation_low;\n\
@@ -380,7 +380,7 @@ pub(super) fn push_int8_gemm_body(
     push_declarations(source, int8);
     let slab = int8.chunks * DOT_ELEMENTS;
     source.push_str(&format!(
-        "    for (long slab_first = 0; slab_first < u.reduction_total; slab_first += {slab}) {{\n"
+        "    for (long long slab_first = 0; slab_first < u.reduction_total; slab_first += {slab}) {{\n"
     ));
     push_stage_weight(source, plan, int8);
     push_stage_activation(source, plan.activation, int8);

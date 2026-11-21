@@ -52,14 +52,14 @@ pub(crate) const TILED_ATTENTION_BODY: &str = "\
     const int tid = (int)threadIdx.x;
     const int warp = tid >> 5;
     const int lane = tid & 31;
-    const long query_rows = u_ptr->total_elements / (kv_heads * query_groups);
-    const long kv_head = (long)blockIdx.x % kv_heads;
-    const long first_row = ((long)blockIdx.x / kv_heads) * tile_rows;
-    const long row_count = (query_rows - first_row < (long)tile_rows) ? query_rows - first_row : (long)tile_rows;
-    const long last_row = first_row + row_count - 1L;
-    const long last_key = cached_key_rows + new_key_rows - 1L;
-    auto allowed = [&](long key, long row) -> bool {
-        const long relative = key - cached_key_rows - row;
+    const long long query_rows = u_ptr->total_elements / (kv_heads * query_groups);
+    const long long kv_head = (long long)blockIdx.x % kv_heads;
+    const long long first_row = ((long long)blockIdx.x / kv_heads) * tile_rows;
+    const long long row_count = (query_rows - first_row < (long long)tile_rows) ? query_rows - first_row : (long long)tile_rows;
+    const long long last_row = first_row + row_count - 1LL;
+    const long long last_key = cached_key_rows + new_key_rows - 1LL;
+    auto allowed = [&](long long key, long long row) -> bool {
+        const long long relative = key - cached_key_rows - row;
         return key < cached_key_rows ? relative >= cached_lower : relative <= new_upper;
     };
     __shared__ __align__(16) float tile_query[warps * per_warp * 128];
@@ -68,10 +68,10 @@ pub(crate) const TILED_ATTENTION_BODY: &str = "\
     for (int index = tid; index < items * dim_chunks; index += (int)blockDim.x) {
         const int item = index / dim_chunks;
         const int dimension = (index % dim_chunks) * 4;
-        const long row = first_row + item / (int)query_groups;
-        const long head = kv_head * query_groups + item % (int)query_groups;
-        const long base = row * (kv_heads * query_groups * pair_dim) + head * pair_dim;
-        const long pass_base = row * (kv_heads * query_groups * pass_dim) + head * pass_dim;
+        const long long row = first_row + item / (int)query_groups;
+        const long long head = kv_head * query_groups + item % (int)query_groups;
+        const long long base = row * (kv_heads * query_groups * pair_dim) + head * pair_dim;
+        const long long pass_base = row * (kv_heads * query_groups * pass_dim) + head * pass_dim;
         float4 value = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         if (row <= last_row) {
             value = dimension < pair_dim ? *(const float4*)&in0[base + dimension]
@@ -80,35 +80,35 @@ pub(crate) const TILED_ATTENTION_BODY: &str = "\
         }
         *(float4*)&tile_query[item * 128 + dimension] = value;
     }
-    long item_row[per_warp];
+    long long item_row[per_warp];
     float running_max[per_warp];
     float running_sum[per_warp];
     float4 accumulator[per_warp];
     for (int slot = 0; slot < per_warp; slot++) {
         const int item = warp * per_warp + slot;
-        const long row = first_row + item / (int)query_groups;
-        item_row[slot] = (item < items && row <= last_row) ? row : -1L;
+        const long long row = first_row + item / (int)query_groups;
+        item_row[slot] = (item < items && row <= last_row) ? row : -1LL;
         running_max[slot] = negative_infinity;
         running_sum[slot] = 0.0f;
         accumulator[slot] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
-    for (long tile_start = 0; tile_start <= last_key; tile_start += key_tile) {
+    for (long long tile_start = 0; tile_start <= last_key; tile_start += key_tile) {
         bool any_allowed = false;
         for (int offset = 0; offset < key_tile && tile_start + offset <= last_key; offset++) {
-            const long key = tile_start + offset;
+            const long long key = tile_start + offset;
             any_allowed = any_allowed || allowed(key, key < cached_key_rows ? first_row : last_row);
         }
         if (!any_allowed) { continue; }
         for (int index = tid; index < key_tile * dim_chunks; index += (int)blockDim.x) {
             const int offset = index / dim_chunks;
             const int dimension = (index % dim_chunks) * 4;
-            const long key = tile_start + offset;
+            const long long key = tile_start + offset;
             float4 key_value = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             if (key <= last_key) {
                 const bool cached = key < cached_key_rows;
-                const long key_row = cached ? key : key - cached_key_rows;
-                const long kbase = key_row * (kv_heads * pair_dim) + kv_head * pair_dim;
-                const long kpass = key_row * (kv_heads * pass_dim) + kv_head * pass_dim;
+                const long long key_row = cached ? key : key - cached_key_rows;
+                const long long kbase = key_row * (kv_heads * pair_dim) + kv_head * pair_dim;
+                const long long kpass = key_row * (kv_heads * pass_dim) + kv_head * pass_dim;
                 key_value = dimension < pair_dim ? *(const float4*)&(cached ? in2 : in4)[kbase + dimension]
                     : dimension < 2 * pair_dim ? *(const float4*)&(cached ? in3 : in5)[kbase + dimension - pair_dim]
                     : *(const float4*)&(cached ? pass_cached_key : pass_new_key)[kpass + dimension - rotary_dim];
@@ -128,7 +128,7 @@ pub(crate) const TILED_ATTENTION_BODY: &str = "\
                     + query_chunk.z * key_chunk.z + query_chunk.w * key_chunk.w;
             }
         }
-        const long key = tile_start + lane;
+        const long long key = tile_start + lane;
         #pragma unroll
         for (int slot = 0; slot < per_warp; slot++) {
             const bool live = item_row[slot] >= 0 && key <= last_key && allowed(key, item_row[slot]);
@@ -152,12 +152,12 @@ pub(crate) const TILED_ATTENTION_BODY: &str = "\
         for (int index = tid; index < key_tile * dim_chunks; index += (int)blockDim.x) {
             const int offset = index / dim_chunks;
             const int dimension = (index % dim_chunks) * 4;
-            const long key_index = tile_start + offset;
+            const long long key_index = tile_start + offset;
             float4 value_chunk = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             if (key_index <= last_key) {
                 const bool cached = key_index < cached_key_rows;
-                const long key_row = cached ? key_index : key_index - cached_key_rows;
-                const long vbase = key_row * (kv_heads * head_dim) + kv_head * head_dim;
+                const long long key_row = cached ? key_index : key_index - cached_key_rows;
+                const long long vbase = key_row * (kv_heads * head_dim) + kv_head * head_dim;
                 value_chunk = *(const float4*)&(cached ? in6 : in7)[vbase + dimension];
             }
             *(float4*)&tile_stage[offset * key_stride + dimension] = value_chunk;
@@ -190,8 +190,8 @@ pub(crate) const TILED_ATTENTION_BODY: &str = "\
         for (int offset = 16; offset > 0; offset >>= 1) { total += __shfl_xor_sync(PROXIMA_ALL_LANES, total, offset); }
         if (item_row[slot] < 0) { continue; }
         const int item = warp * per_warp + slot;
-        const long head = kv_head * query_groups + item % (int)query_groups;
-        const long vector_index = item_row[slot] * (kv_heads * query_groups) + head;
+        const long long head = kv_head * query_groups + item % (int)query_groups;
+        const long long vector_index = item_row[slot] * (kv_heads * query_groups) + head;
         const float inverse = (total == 0.0f) ? 0.0f : 1.0f / total;
         *(float4*)&out[vector_index * head_dim + lane * 4] = make_float4(
             accumulator[slot].x * inverse, accumulator[slot].y * inverse,

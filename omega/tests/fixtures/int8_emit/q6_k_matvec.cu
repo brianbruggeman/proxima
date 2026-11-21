@@ -1,6 +1,6 @@
 #include <cuda_fp16.h>
 #define PROXIMA_ALL_LANES 0xffffffffu
-__device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float *out, long group, unsigned int lane) {
+__device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float *out, long long group, unsigned int lane) {
     float x = in[group * 32 + lane];
     float amax = fabsf(x);
     for (int offset = 16; offset > 0; offset >>= 1) { amax = fmaxf(amax, __shfl_xor_sync(PROXIMA_ALL_LANES, amax, offset)); }
@@ -9,7 +9,7 @@ __device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float
     int qsum = q;
     for (int offset = 16; offset > 0; offset >>= 1) { qsum += __shfl_xor_sync(PROXIMA_ALL_LANES, qsum, offset); }
     unsigned char *bytes = (unsigned char *)out + (group / 4) * 144;
-    const long run = group % 4;
+    const long long run = group % 4;
     unsigned char *header = bytes + 0 + run * 4;
     if (lane == 0) {
         unsigned short d_bits = __half_as_ushort(__float2half(d));
@@ -22,7 +22,7 @@ __device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float
     bytes[16 + run * 32 + lane] = (unsigned char)(signed char)q;
 }
 
-struct Uniforms { long groups; };
+struct Uniforms { long long groups; };
 
 extern "C" __global__ void __launch_bounds__(256) omega_cuda_block_quantize_e128_b144_wide_gid64c8(
     const float* __restrict__ in0,
@@ -30,8 +30,8 @@ extern "C" __global__ void __launch_bounds__(256) omega_cuda_block_quantize_e128
     const Uniforms* __restrict__ u_ptr
 ) {
     const Uniforms u = *u_ptr;
-    const long gid = (long)blockIdx.x * blockDim.x + threadIdx.x;
-    const long group = gid / 32;
+    const long long gid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    const long long group = gid / 32;
     if (group >= u.groups) { return; }
     omega_q8_1_quantize_block(in0, out, group, (unsigned int)(gid & 31));
 }
@@ -375,14 +375,14 @@ __device__ __forceinline__ float blockdot_e256_b210_c4ur0_at0_m1_z32_s5x10at208_
     return blockdot_e256_b210_c4ur0_at0_m1_z32_s5x10at208_sb2nh2_scale(block) * (float)blockdot_e256_b210_c4ur0_at0_m1_z32_s5x10at208_sb2nh2_sub_scale(block, chunk * 2u + part);
 }
 struct Uniforms {
-    long output_total;
-    long reduction_total;
-    long output_extents[2];
-    long reduction_extents[1];
-    long operand_base[2];
-    long operand_strides[2][3];
-    long out_base;
-    long out_strides[3];
+    long long output_total;
+    long long reduction_total;
+    long long output_extents[2];
+    long long reduction_extents[1];
+    long long operand_base[2];
+    long long operand_strides[2][3];
+    long long out_base;
+    long long out_strides[3];
 };
 
 extern "C" __global__ void __launch_bounds__(256) omega_cuda_reduce_r3_ax0_1_n2_multiply_add_zero_wide_cd6_smv8x4q_gid64c9(
@@ -392,27 +392,27 @@ extern "C" __global__ void __launch_bounds__(256) omega_cuda_reduce_r3_ax0_1_n2_
     const Uniforms* __restrict__ u_ptr
 ) {
     const Uniforms u = *u_ptr;
-    long gid = (long)blockIdx.x * (long)blockDim.x + (long)threadIdx.x;
+    long long gid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;
     const unsigned int lane = threadIdx.x & 31u;
     const unsigned int warp = threadIdx.x >> 5u;
-    long coord0_rows[4];
-    long coord1_rows[4];
-    const long first_row = ((long)blockIdx.x * 8 + (long)warp) * 4;
-    long row_block[4];
-    long out_offset[4];
+    long long coord0_rows[4];
+    long long coord1_rows[4];
+    const long long first_row = ((long long)blockIdx.x * 8 + (long long)warp) * 4;
+    long long row_block[4];
+    long long out_offset[4];
     #pragma unroll
     for (int row = 0; row < 4; row++) {
         unsigned int remaining = (unsigned int)(first_row + row);
-        long packed_row = 0;
+        long long packed_row = 0;
         out_offset[row] = u.out_base;
-        long coord1 = (long)(remaining % 8u); remaining /= 8u;
+        long long coord1 = (long long)(remaining % 8u); remaining /= 8u;
         out_offset[row] += coord1 * u.out_strides[1];
         coord1_rows[row] = coord1;
-        long coord0 = (long)(remaining % 1u); remaining /= 1u;
+        long long coord0 = (long long)(remaining % 1u); remaining /= 1u;
         out_offset[row] += coord0 * u.out_strides[0];
         coord0_rows[row] = coord0;
         packed_row = packed_row * 8 + coord1;
-        const long row_element = u.operand_base[1] + packed_row * 512;
+        const long long row_element = u.operand_base[1] + packed_row * 512;
         if (row_element % 256 != 0) { __trap(); }
         row_block[row] = row_element / 256;
     }
@@ -421,7 +421,7 @@ extern "C" __global__ void __launch_bounds__(256) omega_cuda_reduce_r3_ax0_1_n2_
     float accumulator[4];
     #pragma unroll
     for (int row = 0; row < 4; row++) {
-        const long base = first_row + row < u.output_total ? row_block[row] * 210 : -1;
+        const long long base = first_row + row < u.output_total ? row_block[row] * 210 : -1;
         row_start[row] = base < 0 ? (const unsigned char *)0 : in1 + base;
         accumulator[row] = 0.0f;
     }

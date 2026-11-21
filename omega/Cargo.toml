@@ -775,6 +775,11 @@ name = "hip_shuffle_mask"
 harness = false
 required-features = ["cuda"]
 
+[[bench]]
+name = "hip_uniform_abi"
+harness = false
+required-features = ["cuda-driver"]
+
 [[example]]
 name = "q8_0_flat_gate"
 required-features = ["metal", "instrument"]

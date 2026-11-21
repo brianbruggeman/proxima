@@ -64,7 +64,7 @@ pub(super) fn render_combine(
     entry: &str,
     chunks: u64,
 ) -> Result<String, EmitError> {
-    let tail = format!("    constexpr long chunks = {chunks}L;\n{COMBINE_BODY}");
+    let tail = format!("    constexpr long long chunks = {chunks}LL;\n{COMBINE_BODY}");
     render_attention(
         resolved,
         entry,
@@ -80,7 +80,7 @@ pub(super) fn split_pass(
     chunks: u64,
 ) -> Result<CudaKernel, EmitError> {
     let split_entry = format!("{entry}_split");
-    let tail = format!("    constexpr long chunks = {chunks}L;\n{SPLIT_BODY}");
+    let tail = format!("    constexpr long long chunks = {chunks}LL;\n{SPLIT_BODY}");
     let source = render_attention(resolved, &split_entry, "", &tail, "")?;
     let scratch = split_scratch_node(resolved.node);
     let bindings: Vec<Binding> = dispatch_bindings(resolved)
@@ -117,44 +117,44 @@ fn split_vector_count(kind: &BoundOpKind) -> u64 {
 }
 
 const SPLIT_BODY: &str = "\
-    constexpr long min_chunk_keys = 16L;
+    constexpr long long min_chunk_keys = 16LL;
     const float negative_infinity = -__int_as_float(0x7f800000);
     constexpr int warps = 4;
-    constexpr long record = head_dim + 2;
+    constexpr long long record = head_dim + 2;
     const unsigned int lane = threadIdx.x & 31u;
     const unsigned int warp = threadIdx.x >> 5u;
-    const long vector_index = (long)blockIdx.x / chunks;
-    const long chunk = (long)blockIdx.x % chunks;
+    const long long vector_index = (long long)blockIdx.x / chunks;
+    const long long chunk = (long long)blockIdx.x % chunks;
     if (vector_index >= u_ptr->total_elements) { return; }
-    const long query_row = vector_index / (kv_heads * query_groups);
-    const long query_head = vector_index % (kv_heads * query_groups);
-    const long kv_head = query_head / query_groups;
-    const long qbase = query_row * (kv_heads * query_groups * pair_dim) + query_head * pair_dim;
-    const long qpass = query_row * (kv_heads * query_groups * pass_dim) + query_head * pass_dim;
-    const long total_keys = cached_key_rows + new_key_rows;
-    const long per_chunk = max(min_chunk_keys, (total_keys + chunks - 1L) / chunks);
-    const long first_key = chunk * per_chunk;
-    const long end_key = min(total_keys, first_key + per_chunk);
+    const long long query_row = vector_index / (kv_heads * query_groups);
+    const long long query_head = vector_index % (kv_heads * query_groups);
+    const long long kv_head = query_head / query_groups;
+    const long long qbase = query_row * (kv_heads * query_groups * pair_dim) + query_head * pair_dim;
+    const long long qpass = query_row * (kv_heads * query_groups * pass_dim) + query_head * pass_dim;
+    const long long total_keys = cached_key_rows + new_key_rows;
+    const long long per_chunk = max(min_chunk_keys, (total_keys + chunks - 1LL) / chunks);
+    const long long first_key = chunk * per_chunk;
+    const long long end_key = min(total_keys, first_key + per_chunk);
     float maximum = negative_infinity;
     float sum = 0.0f;
     float weighted[(head_dim + 31) / 32];
-    for (long slot = 0; slot < (head_dim + 31) / 32; slot++) { weighted[slot] = 0.0f; }
-    for (long key = first_key + (long)warp; key < end_key; key += warps) {
+    for (long long slot = 0; slot < (head_dim + 31) / 32; slot++) { weighted[slot] = 0.0f; }
+    for (long long key = first_key + (long long)warp; key < end_key; key += warps) {
         const bool cached = key < cached_key_rows;
-        const long new_index = key - cached_key_rows;
-        const long relative = (cached ? key - cached_key_rows : new_index) - query_row;
+        const long long new_index = key - cached_key_rows;
+        const long long relative = (cached ? key - cached_key_rows : new_index) - query_row;
         if (cached && relative < cached_lower) { continue; }
         if (!cached && relative > new_upper) { continue; }
-        const long key_row = cached ? key : new_index;
-        const long kbase = key_row * (kv_heads * pair_dim) + kv_head * pair_dim;
-        const long kpass = key_row * (kv_heads * pass_dim) + kv_head * pass_dim;
-        const long vbase = key_row * (kv_heads * head_dim) + kv_head * head_dim;
+        const long long key_row = cached ? key : new_index;
+        const long long kbase = key_row * (kv_heads * pair_dim) + kv_head * pair_dim;
+        const long long kpass = key_row * (kv_heads * pass_dim) + kv_head * pass_dim;
+        const long long vbase = key_row * (kv_heads * head_dim) + kv_head * head_dim;
         float partial = 0.0f;
-        for (long pair = (long)lane; pair < pair_dim; pair += 32L) {
+        for (long long pair = (long long)lane; pair < pair_dim; pair += 32LL) {
             partial += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);
             partial += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);
         }
-        for (long column = (long)lane; column < pass_dim; column += 32L) {
+        for (long long column = (long long)lane; column < pass_dim; column += 32LL) {
             partial += pass_query[qpass + column] * (cached ? pass_cached_key[kpass + column] : pass_new_key[kpass + column]);
         }
         for (int offset = 16; offset > 0; offset >>= 1) { partial += __shfl_xor_sync(PROXIMA_ALL_LANES, partial, offset); }
@@ -163,8 +163,8 @@ const SPLIT_BODY: &str = "\
         const float weight = expf(score - next_max);
         const float rescale = (maximum == negative_infinity) ? 0.0f : expf(maximum - next_max);
         sum = sum * rescale + weight;
-        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {
-            const long local_dimension = dimension / 32L;
+        for (long long dimension = (long long)lane; dimension < head_dim; dimension += 32LL) {
+            const long long local_dimension = dimension / 32LL;
             weighted[local_dimension] = weighted[local_dimension] * rescale
                 + weight * (cached ? in6[vbase + dimension] : in7[vbase + dimension]);
         }
@@ -173,8 +173,8 @@ const SPLIT_BODY: &str = "\
     __shared__ float shared_maximum[warps];
     __shared__ float shared_sum[warps];
     __shared__ float shared_weighted[warps * head_dim];
-    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {
-        shared_weighted[warp * head_dim + dimension] = weighted[dimension / 32L];
+    for (long long dimension = (long long)lane; dimension < head_dim; dimension += 32LL) {
+        shared_weighted[warp * head_dim + dimension] = weighted[dimension / 32LL];
     }
     if (lane == 0u) {
         shared_maximum[warp] = maximum;
@@ -192,7 +192,7 @@ const SPLIT_BODY: &str = "\
         record_out[0] = global_maximum;
         record_out[1] = total;
     }
-    for (long dimension = (long)threadIdx.x; dimension < head_dim; dimension += (long)blockDim.x) {
+    for (long long dimension = (long long)threadIdx.x; dimension < head_dim; dimension += (long long)blockDim.x) {
         float merged = 0.0f;
         for (int source = 0; source < warps; source++) {
             merged += (shared_maximum[source] == negative_infinity) ? 0.0f : shared_weighted[source * head_dim + dimension] * expf(shared_maximum[source] - global_maximum);
@@ -204,20 +204,20 @@ const SPLIT_BODY: &str = "\
 
 const COMBINE_BODY: &str = "\
     const float negative_infinity = -__int_as_float(0x7f800000);
-    constexpr long record = head_dim + 2;
-    const long vector_index = (long)blockIdx.x;
+    constexpr long long record = head_dim + 2;
+    const long long vector_index = (long long)blockIdx.x;
     if (vector_index >= u_ptr->total_elements) { return; }
     const float* vector_partials = partials + vector_index * chunks * record;
     float global_maximum = negative_infinity;
-    for (long chunk = 0; chunk < chunks; chunk++) { global_maximum = fmaxf(global_maximum, vector_partials[chunk * record]); }
+    for (long long chunk = 0; chunk < chunks; chunk++) { global_maximum = fmaxf(global_maximum, vector_partials[chunk * record]); }
     float total = 0.0f;
-    for (long chunk = 0; chunk < chunks; chunk++) {
+    for (long long chunk = 0; chunk < chunks; chunk++) {
         const float chunk_maximum = vector_partials[chunk * record];
         total += (chunk_maximum == negative_infinity) ? 0.0f : vector_partials[chunk * record + 1] * expf(chunk_maximum - global_maximum);
     }
-    for (long dimension = (long)threadIdx.x; dimension < head_dim; dimension += (long)blockDim.x) {
+    for (long long dimension = (long long)threadIdx.x; dimension < head_dim; dimension += (long long)blockDim.x) {
         float merged = 0.0f;
-        for (long chunk = 0; chunk < chunks; chunk++) {
+        for (long long chunk = 0; chunk < chunks; chunk++) {
             const float chunk_maximum = vector_partials[chunk * record];
             merged += (chunk_maximum == negative_infinity) ? 0.0f : vector_partials[chunk * record + 2 + dimension] * expf(chunk_maximum - global_maximum);
         }

@@ -1,8 +1,9 @@
 //! The int8 activation path lowers every codec through `block_dot_i8` or `sub_block_dot`; the codecs that lowered
 //! before the sub-block lowering existed (Q8_0, Q5_0, Pq2_0) must keep emitting the same bytes.
-//! The fixtures under `tests/fixtures/int8_emit` were captured from the commit that preceded
-//! `sub_block_dot`, through the same derive-then-emit sequence a plan runs; the k-quant fixtures were
-//! captured from the emitter at the commit that introduced them and pin their kernel text.
+//! The fixtures under `tests/fixtures/int8_emit` pin the emitter text: the k-quant fixtures were captured
+//! at the commit that introduced them, and every fixture was regenerated on 2026-11-21 when the card-C
+//! uniform word and 64-bit index types became `long long`. Re-generating them is the expected change for
+//! a deliberate text change; the tests still catch any other drift.
 
 use proxima_tensor::{BoundOp, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, bind_with_fusion, correct_packed_matmul_layouts, infer, projection};
 use proxima_numeric::{DType, NumericPolicy};

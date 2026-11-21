@@ -11,7 +11,7 @@ use proxima_numeric::block_layout::BlockLayout;
 pub use proxima_tensor::Missing;
 use proxima_tensor::{ACTIVATION_GROUP_ELEMENTS, BoundOp, BoundOpKind, is_int8_run_layout, quantize_rule_is_served};
 
-use super::{CudaGridSpec, EmitError, MAX_GRID_BLOCKS};
+use super::{CudaGridSpec, EmitError, MAX_GRID_BLOCKS, WORD_C};
 use super::target::Target;
 use crate::grid::checked_product;
 
@@ -104,7 +104,7 @@ pub(super) fn quantize_device(layout: &BlockLayout) -> String {
     let (scale_base, scale_stride) = (layout.run_scale_byte(0), layout.run_scale_byte(runs.min(2) - 1) - layout.run_scale_byte(0));
     let (code_base, code_stride) = (layout.run_code_byte(0), layout.run_code_byte(runs.min(2) - 1) - layout.run_code_byte(0));
     format!(
-        "__device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float *out, long group, unsigned int lane) {{\n\
+        "__device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float *out, long long group, unsigned int lane) {{\n\
          \x20   float x = in[group * 32 + lane];\n\
          \x20   float amax = fabsf(x);\n\
          \x20   for (int offset = 16; offset > 0; offset >>= 1) {{ amax = fmaxf(amax, __shfl_xor_sync(PROXIMA_ALL_LANES, amax, offset)); }}\n\
@@ -113,7 +113,7 @@ pub(super) fn quantize_device(layout: &BlockLayout) -> String {
          \x20   int qsum = q;\n\
          \x20   for (int offset = 16; offset > 0; offset >>= 1) {{ qsum += __shfl_xor_sync(PROXIMA_ALL_LANES, qsum, offset); }}\n\
          \x20   unsigned char *bytes = (unsigned char *)out + (group / {runs}) * {block_bytes};\n\
-         \x20   const long run = group % {runs};\n\
+         \x20   const long long run = group % {runs};\n\
          \x20   unsigned char *header = bytes + {scale_base} + run * {scale_stride};\n\
          \x20   if (lane == 0) {{\n\
          \x20       unsigned short d_bits = __half_as_ushort(__float2half(d));\n\
@@ -139,15 +139,15 @@ pub(super) fn render_block_quantize(
     let lane_mask_define = target.lane_mask_define();
     Ok(format!(
         "#include <{header}>\n{lane_mask_define}{device}\n\
-         struct Uniforms {{ long groups; }};\n\n\
+         struct Uniforms {{ {WORD_C} groups; }};\n\n\
          extern \"C\" __global__ void __launch_bounds__({QUANTIZE_THREADS}) {entry}(\n\
          \x20   const float* __restrict__ in0,\n\
          \x20   float* __restrict__ out,\n\
          \x20   const Uniforms* __restrict__ u_ptr\n\
          ) {{\n\
          \x20   const Uniforms u = *u_ptr;\n\
-         \x20   const long gid = (long)blockIdx.x * blockDim.x + threadIdx.x;\n\
-         \x20   const long group = gid / {GROUP_ELEMENTS};\n\
+         \x20   const long long gid = (long long)blockIdx.x * blockDim.x + threadIdx.x;\n\
+         \x20   const long long group = gid / {GROUP_ELEMENTS};\n\
          \x20   if (group >= u.groups) {{ return; }}\n\
          \x20   omega_q8_1_quantize_block(in0, out, group, (unsigned int)(gid & {lane_mask}));\n\
          }}\n",
