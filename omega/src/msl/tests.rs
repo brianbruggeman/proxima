@@ -1846,7 +1846,7 @@ fn flattened_selected_axis_gathered_q4k_matmul_is_not_row_blocked_without_featur
 
 #[cfg(feature = "metal-gathered-packed-row")]
 #[test]
-fn flattened_selected_axis_gathered_q4k_matmul_gathers_expert_base_once_per_token() {
+fn flattened_selected_axis_below_the_tiled_minimum_adds_each_rows_expert_base_in_the_single_row_body() {
     let bound = gathered_matmul_op(2, 3, 4, 256);
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
@@ -1884,18 +1884,19 @@ fn flattened_selected_axis_gathered_q4k_matmul_gathers_expert_base_once_per_toke
     );
 }
 
-/// Bytes proof for ROW 536/537's routed-expert regression: derives the
-/// total weight-ROW count the dispatch reads (`feature_total *
-/// token_total`, the exact product [`push_packed_row_multi_row_body`]
-/// walks -- `weight_base[q]` once per feature row, `weight_expert_base[s]`
-/// once per token slot, never re-derived per `(s, q)` pair) straight from
-/// [`classify_packed_row_block`]'s own output, the same source the
-/// codegen itself reads. 8 selected experts times 512 rows is the exact
-/// slab-once shape the invariant names; the DENSE decode matvec of the
-/// same `[rows=512, k=2048]` weight reads exactly 512 rows, one token.
+/// Bytes proof for ROW 536/537's routed-expert regression, below the tiled
+/// minimum: 8 selected experts collapse (`routed_axes_leave_one_token_row`)
+/// to single-row matvecs, so the classifier's own output folds `selected`
+/// into the feature rows (`feature_total` 8 * 512, `token_total` 1) and the
+/// dispatch reads `feature_total * token_total` = 8 * 512 weight rows, each
+/// selected expert's slab exactly once. The DENSE decode matvec of the same
+/// `[rows=512, k=2048]` weight reads exactly 512 rows, one token, so the
+/// gather scales row reads by exactly 8x. The multi-token split of the same
+/// invariant, at or above the minimum, is
+/// [`routed_rows_at_the_tiled_minimum_gather_expert_base_once_per_token_when_tiled_is_off`].
 #[cfg(feature = "metal-gathered-packed-row")]
 #[test]
-fn gathered_packed_row_reads_each_selected_experts_slab_exactly_once() {
+fn routed_rows_below_the_tiled_minimum_read_each_selected_experts_slab_once_as_single_row_matvecs() {
     let selected = 8u32;
     let experts = 16u32;
     let rows = 512u32;
