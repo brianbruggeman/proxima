@@ -421,8 +421,11 @@ fn main() {
         let warmed_buffers = model
             .warm_resident_buffers(&serving_config)
             .expect("declare the model buffers to the driver");
+        let warmed_rows = model
+            .warm_prefill(&serving_config, serving_config.ubatch_size as usize)
+            .expect("compile the chunk pipelines and build their plans");
         eprintln!(
-            "decode_gbps_baseline warm_model_buffers={warm_model_buffers_at_load} warmed_buffers={warmed_buffers} warm_ms={:.3}",
+            "decode_gbps_baseline warm_model_buffers={warm_model_buffers_at_load} warmed_buffers={warmed_buffers} warmed_rows={warmed_rows} warm_ms={:.3}",
             warm_started.elapsed().as_secs_f64() * 1000.0
         );
     }
