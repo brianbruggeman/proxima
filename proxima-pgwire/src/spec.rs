@@ -93,4 +93,24 @@ mod tests {
 
         assert!(acceptor.is_none(), "plaintext mount refuses SSL");
     }
+
+    #[test]
+    fn ctl_format_member_pgwire_server_config() {
+        let spec: Value = conflaguration::from_toml_str(include_str!(
+            "../tests/fixtures/config_formats/pgwire_server_config.toml"
+        ))
+        .expect("pgwire_server_config.toml parses as toml");
+        let expected: PgServerConfig = serde_json::from_str(include_str!(
+            "../tests/fixtures/config_formats/pgwire_server_config.expected.json"
+        ))
+        .expect("pgwire_server_config.expected.json reads as the type");
+
+        let resolved = resolve_config(&PgServerConfig::default(), &spec)
+            .expect("the pgwire override in the toml spec resolves");
+
+        assert_eq!(
+            resolved, expected,
+            "pgwire_server_config: resolved config differs from expected.json"
+        );
+    }
 }

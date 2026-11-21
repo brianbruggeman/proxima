@@ -1,0 +1,7 @@
+[amqp]
+read_buffer_bytes = 4096
+write_high_water_bytes = 32768
+frame_max_bytes = 65536
+message_max_bytes = 1048576
+channel_max = 512
+heartbeat_seconds = 30

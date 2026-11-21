@@ -1,0 +1,2 @@
+[dns]
+max_message_bytes = 4096

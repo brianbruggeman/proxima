@@ -147,4 +147,24 @@ mod tests {
         let spec = serde_json::json!({ "dns": { "max_message_bytes": "not a number" } });
         assert!(resolve_config(&base, &spec).is_err());
     }
+
+    #[test]
+    fn ctl_format_member_dns_server_config() {
+        let spec: Value = conflaguration::from_toml_str(include_str!(
+            "../tests/fixtures/config_formats/dns_server_config.toml"
+        ))
+        .expect("dns_server_config.toml parses as toml");
+        let expected: DnsServerConfig = serde_json::from_str(include_str!(
+            "../tests/fixtures/config_formats/dns_server_config.expected.json"
+        ))
+        .expect("dns_server_config.expected.json reads as the type");
+
+        let resolved = resolve_config(&DnsServerConfig::default(), &spec)
+            .expect("the dns override in the toml spec resolves");
+
+        assert_eq!(
+            resolved, expected,
+            "dns_server_config: resolved config differs from expected.json"
+        );
+    }
 }

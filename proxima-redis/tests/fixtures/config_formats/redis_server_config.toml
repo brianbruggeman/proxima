@@ -1,0 +1,4 @@
+[redis]
+read_buffer_bytes = 4096
+write_high_water_bytes = 32768
+max_message_bytes = 1048576

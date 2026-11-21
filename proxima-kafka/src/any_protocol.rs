@@ -272,4 +272,24 @@ mod tests {
         let resolved = resolve_config(&base, &Value::Null).expect("no override resolves");
         assert_eq!(resolved, base);
     }
+
+    #[test]
+    fn ctl_format_member_kafka_server_config() {
+        let spec: Value = conflaguration::from_toml_str(include_str!(
+            "../tests/fixtures/config_formats/kafka_server_config.toml"
+        ))
+        .expect("kafka_server_config.toml parses as toml");
+        let expected: KafkaServerConfig = serde_json::from_str(include_str!(
+            "../tests/fixtures/config_formats/kafka_server_config.expected.json"
+        ))
+        .expect("kafka_server_config.expected.json reads as the type");
+
+        let resolved = resolve_config(&KafkaServerConfig::default(), &spec)
+            .expect("the kafka override in the toml spec resolves");
+
+        assert_eq!(
+            resolved, expected,
+            "kafka_server_config: resolved config differs from expected.json"
+        );
+    }
 }

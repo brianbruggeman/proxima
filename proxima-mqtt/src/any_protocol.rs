@@ -247,4 +247,24 @@ mod tests {
         let wire = [0x10, 0x08, 0x00, 0x06, b'M', b'Q', b'I', b's', b'd', b'p'];
         assert_eq!(protocol.probe(&wire), ProbeVerdict::Match { consumed: 0 });
     }
+
+    #[test]
+    fn ctl_format_member_mqtt_server_config() {
+        let spec: Value = conflaguration::from_toml_str(include_str!(
+            "../tests/fixtures/config_formats/mqtt_server_config.toml"
+        ))
+        .expect("mqtt_server_config.toml parses as toml");
+        let expected: MqttServerConfig = serde_json::from_str(include_str!(
+            "../tests/fixtures/config_formats/mqtt_server_config.expected.json"
+        ))
+        .expect("mqtt_server_config.expected.json reads as the type");
+
+        let resolved = resolve_config(&MqttServerConfig::default(), &spec)
+            .expect("the mqtt override in the toml spec resolves");
+
+        assert_eq!(
+            resolved, expected,
+            "mqtt_server_config: resolved config differs from expected.json"
+        );
+    }
 }

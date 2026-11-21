@@ -324,4 +324,24 @@ mod tests {
             "a cap that rejects every command must not reach the codec"
         );
     }
+
+    #[test]
+    fn ctl_format_member_memcached_server_config() {
+        let spec: Value = conflaguration::from_toml_str(include_str!(
+            "../tests/fixtures/config_formats/memcached_server_config.toml"
+        ))
+        .expect("memcached_server_config.toml parses as toml");
+        let expected: MemcachedServerConfig = serde_json::from_str(include_str!(
+            "../tests/fixtures/config_formats/memcached_server_config.expected.json"
+        ))
+        .expect("memcached_server_config.expected.json reads as the type");
+
+        let resolved = resolve_config(&MemcachedServerConfig::default(), &spec)
+            .expect("the memcached override in the toml spec resolves");
+
+        assert_eq!(
+            resolved, expected,
+            "memcached_server_config: resolved config differs from expected.json"
+        );
+    }
 }

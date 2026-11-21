@@ -160,4 +160,24 @@ mod tests {
         assert_eq!(protocol.probe(b""), ProbeVerdict::NeedMore { at_least: 1 });
         assert_eq!(protocol.probe(b"GET foo"), ProbeVerdict::No);
     }
+
+    #[test]
+    fn ctl_format_member_redis_server_config() {
+        let spec: Value = conflaguration::from_toml_str(include_str!(
+            "../tests/fixtures/config_formats/redis_server_config.toml"
+        ))
+        .expect("redis_server_config.toml parses as toml");
+        let expected: RedisServerConfig = serde_json::from_str(include_str!(
+            "../tests/fixtures/config_formats/redis_server_config.expected.json"
+        ))
+        .expect("redis_server_config.expected.json reads as the type");
+
+        let resolved = resolve_config(&RedisServerConfig::default(), &spec)
+            .expect("the redis override in the toml spec resolves");
+
+        assert_eq!(
+            resolved, expected,
+            "redis_server_config: resolved config differs from expected.json"
+        );
+    }
 }

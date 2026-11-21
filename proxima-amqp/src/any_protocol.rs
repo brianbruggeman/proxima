@@ -172,4 +172,24 @@ mod tests {
         assert_eq!(protocol.probe(b"GET / HTTP/1.1\r\n"), ProbeVerdict::No);
         assert_eq!(protocol.probe(b"AMQP\0\0\x09\x02"), ProbeVerdict::No);
     }
+
+    #[test]
+    fn ctl_format_member_amqp_server_config() {
+        let spec: Value = conflaguration::from_toml_str(include_str!(
+            "../tests/fixtures/config_formats/amqp_server_config.toml"
+        ))
+        .expect("amqp_server_config.toml parses as toml");
+        let expected: AmqpServerConfig = serde_json::from_str(include_str!(
+            "../tests/fixtures/config_formats/amqp_server_config.expected.json"
+        ))
+        .expect("amqp_server_config.expected.json reads as the type");
+
+        let resolved = resolve_config(&AmqpServerConfig::default(), &spec)
+            .expect("the amqp override in the toml spec resolves");
+
+        assert_eq!(
+            resolved, expected,
+            "amqp_server_config: resolved config differs from expected.json"
+        );
+    }
 }

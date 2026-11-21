@@ -1,0 +1,1 @@
+{"read_buffer_bytes": 4096, "write_high_water_bytes": 32768, "max_message_bytes": 1048576, "max_statements": 128, "max_portals": 32, "parameters": [["application_name", "proxima"], ["client_encoding", "UTF8"]], "auth": {"mode": "cleartext", "username": "app", "password": "s3cret"}}

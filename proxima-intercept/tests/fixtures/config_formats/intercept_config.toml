@@ -1,0 +1,8 @@
+ca_cert = "/etc/proxima/ca.pem"
+ca_key = "/etc/proxima/ca.key"
+
+[capture]
+data_path = "/var/lib/proxima/capture"
+tee_cap_items = 512
+chunk_granularity = "discard"
+zstd_level = 5

@@ -683,4 +683,25 @@ mod tests {
         );
         assert!(!path.exists(), "no spigot -> no file opened");
     }
+
+    #[test]
+    fn ctl_format_member_intercept_config() {
+        let spec: serde_json::Value = toml::from_str(include_str!(
+            "../tests/fixtures/config_formats/intercept_config.toml"
+        ))
+        .expect("intercept_config.toml parses as toml");
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/config_formats/intercept_config.expected.json"
+        ))
+        .expect("intercept_config.expected.json is json");
+
+        let config: InterceptConfig =
+            serde_json::from_value(spec).expect("toml value reads as InterceptConfig");
+        let actual = serde_json::to_value(&config).expect("config serializes to a value");
+
+        assert_eq!(
+            actual, expected,
+            "intercept_config: to_value differs from expected.json"
+        );
+    }
 }
