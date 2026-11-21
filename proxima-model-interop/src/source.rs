@@ -55,7 +55,7 @@ impl CheckpointMapping {
         Ok(Self::Pmem(mapping))
     }
 
-    /// Drops the weight mapping's pages from the resident set; the next read refaults them from the file. A DAX mapping has no page cache to drop.
+    /// Asks the OS to drop the weight mapping's pages; unix refaults them on the next read, and a target without a per-range discard leaves the mapping unchanged. A DAX mapping has no page cache to drop.
     pub fn release_pages(&self) -> Result<(), InteropError> {
         match self {
             Self::File { mapping, .. } => release_mapping(mapping),

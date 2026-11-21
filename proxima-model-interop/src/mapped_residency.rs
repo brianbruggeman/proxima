@@ -22,6 +22,10 @@ struct RegionState {
 }
 
 /// Ties the weights and expert sidecar mappings to idle and pressure reclaim; pin, unpin and touch are atomics so an evaluation never takes a lock, and only the cold `reclaim` scan builds a `RegionLedger`.
+///
+/// The resident flags are policy state: a target with no per-range discard reports a region
+/// released without the OS dropping its pages, so [`MappedResidency::resident_bytes`] is not an
+/// OS measurement.
 pub struct MappedResidency<'map> {
     weights: OnceLock<&'map Mmap>,
     sidecar: OnceLock<Arc<Mmap>>,

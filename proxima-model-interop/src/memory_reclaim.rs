@@ -1,9 +1,10 @@
 //! Idle and pressure policy for mapped regions (weights, expert slabs, cold
 //! KV): a region idle for `idle_secs` or the least recently used one while
 //! system memory is at `pressure_milli` thousandths is released. The ledger
-//! owns only timestamps and pin counts; the caller's `release` closure does
-//! the `madvise`/drop, and time and pressure arrive as closures so tests
-//! drive both.
+//! owns only timestamps and pin counts; the caller's `release` closure does the
+//! drop where the target can (page advice or cache eviction) and the ledger
+//! records the policy step either way, and time and pressure arrive as closures
+//! so tests drive both.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -26,9 +27,27 @@ pub fn monotonic_now() -> Duration {
     EPOCH.get_or_init(Instant::now).elapsed()
 }
 
+/// Asks the OS to drop a mapping's resident pages.
+///
+/// On Linux and macOS `MADV_DONTNEED` drops them (macOS refaults the next read
+/// from the unified buffer cache rather than the file, but the mapping's pages
+/// still had to be faulted back in); other unix targets forward the same advice
+/// with their own semantics. Windows has no per-range file-mapping discard, so
+/// there the call succeeds without touching the mapping (what llama's Windows
+/// mapping does). [`Released::bytes`] and [`RegionLedger::resident_bytes`] are
+/// therefore policy quantities, not bytes the OS freed.
 pub fn release_mapping(mapping: &memmap2::Mmap) -> Result<(), InteropError> {
-    // SAFETY: the map is read-only and file-backed, so discarding its pages loses no data and the next read refaults.
-    unsafe { mapping.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) }.map_err(InteropError::SidecarIo)
+    #[cfg(unix)]
+    {
+        // SAFETY: the map is read-only and file-backed, so discarding its pages loses no data and the next read refaults.
+        unsafe { mapping.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) }.map_err(InteropError::SidecarIo)
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows has no per-range file-mapping discard; llama's mmap glue only prefetches there.
+        let _ = mapping;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Builder, Deserialize, Serialize, Settings, Validate)]
@@ -61,6 +80,8 @@ pub enum ReclaimReason {
     Pressure,
 }
 
+/// One region the policy took out of the resident set; on a target with no
+/// per-range discard the bytes stay resident in the OS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Released {
     pub region: u64,
@@ -221,6 +242,12 @@ pub fn used_fraction_of_meminfo(text: &str) -> Option<f64> {
     (total > 0.0).then(|| 1.0 - available / total)
 }
 
+/// Reads the used-memory fraction from `/proc/meminfo`.
+///
+/// The source exists only where the kernel exposes that file (Linux, WSL,
+/// linprocfs); elsewhere this returns a typed error. Both current callers treat
+/// that error as `0.0`; a `pressure_milli` above 0 therefore leaves pressure
+/// reclaim off, and idle reclaim still runs independently.
 pub fn read_used_fraction() -> Result<f64, InteropError> {
     let text = std::fs::read_to_string(MEMINFO_PATH).map_err(|source| InteropError::BlockFileIo {
         path: Path::new(MEMINFO_PATH).to_path_buf(),
@@ -381,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn released_mapping_refaults_identical_bytes_from_the_file() {
+    fn released_mapping_refaults_identical_bytes() {
         let mut file = tempfile::tempfile().expect("temp file");
         let payload: Vec<u8> = (0..8192_u32).map(|value| (value % 251) as u8).collect();
         std::io::Write::write_all(&mut file, &payload).expect("write payload");
@@ -389,6 +416,29 @@ mod tests {
         assert_eq!(&mapping[..], &payload[..]);
         release_mapping(&mapping).expect("release pages");
         assert_eq!(&mapping[..], &payload[..]);
+    }
+
+    #[test]
+    fn release_mapping_is_idempotent_and_keeps_the_mapping_readable() {
+        let mut file = tempfile::tempfile().expect("temp file");
+        let payload: Vec<u8> = (0..8192_u32).map(|value| (value % 251) as u8).collect();
+        std::io::Write::write_all(&mut file, &payload).expect("write payload");
+        let mapping = unsafe { memmap2::Mmap::map(&file) }.expect("map payload");
+        release_mapping(&mapping).expect("first release");
+        release_mapping(&mapping).expect("second release");
+        assert_eq!(&mapping[..], &payload[..]);
+    }
+
+    /// A target with no per-range file-mapping discard reports the policy step
+    /// as satisfied and leaves the mapping readable.
+    #[test]
+    #[cfg(not(unix))]
+    fn release_mapping_is_a_successful_no_op_off_unix() {
+        let mut file = tempfile::tempfile().expect("temp file");
+        std::io::Write::write_all(&mut file, b"windows reclaim").expect("write payload");
+        let mapping = unsafe { memmap2::Mmap::map(&file) }.expect("map payload");
+        release_mapping(&mapping).expect("release is a successful no-op");
+        assert_eq!(&mapping[..], b"windows reclaim");
     }
 
     #[test]

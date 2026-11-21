@@ -708,6 +708,13 @@ name = "codec_decode_fallback"
 harness = false
 required-features = ["std"]
 
+# Release/refault over a read-only file mapping, the mapping llama_mmap
+# creates; memmap2 and ReclaimSettings are both `std`-gated.
+[[bench]]
+name = "memory_reclaim_release"
+harness = false
+required-features = ["std"]
+
 [target.'cfg(not(target_os = "windows"))'.dev-dependencies]
 sha2 = { version = "0.10.9", default-features = false, features = ["asm"] }
 

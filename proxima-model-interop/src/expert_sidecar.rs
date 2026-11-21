@@ -566,7 +566,7 @@ impl MappedExpertSidecar {
         &self.mapping
     }
 
-    /// Drops the sidecar mapping's pages from the resident set; the next expert read refaults them from the file.
+    /// Asks the OS to drop the sidecar mapping's pages; unix refaults them on the next read, and a target without a per-range discard leaves the mapping unchanged.
     pub fn release_pages(&self) -> Result<(), InteropError> {
         release_mapping(&self.mapping)
     }
@@ -1173,9 +1173,8 @@ impl MappedExpertSidecar {
     }
 
     /// Releases resident file pages after a step has finished consuming them.
-    /// The mapping remains valid and faults pages back from the sidecar file
-    /// on the next routed access; callers opt in because refault cost is
-    /// workload-dependent.
+    /// The mapping remains valid and faults pages back in on the next routed
+    /// access; callers opt in because refault cost is workload-dependent.
     #[cfg(unix)]
     pub fn discard_resident_pages(&self) -> Result<(), InteropError> {
         unsafe {
