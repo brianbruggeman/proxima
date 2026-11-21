@@ -1,0 +1,26 @@
+type = "struct"
+
+[value]
+name = "Ticket"
+
+[[value.fields]]
+name = "id"
+[value.fields.schema]
+type = "u_int"
+[value.fields.schema.value]
+min = 1
+max = 99999
+[value.fields.flags]
+optional = false
+deprecated = true
+
+[[value.fields]]
+name = "title"
+[value.fields.schema]
+type = "string"
+[value.fields.schema.value]
+min_len = 3
+max_len = 120
+[value.fields.flags]
+optional = true
+description = "short title"

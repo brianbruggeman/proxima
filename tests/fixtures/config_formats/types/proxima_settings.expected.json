@@ -1,0 +1,14 @@
+{
+  "listeners": {"public": {"type": "http", "port": 8080}},
+  "upstreams": {"backend": {"type": "synth", "status": 201}},
+  "middlewares": {},
+  "pipes": {},
+  "producers": {},
+  "http": {
+    "response_buffer_bytes": 4096, "read_buffer_bytes": 8192, "headers_capacity": 16,
+    "h1_max_headers": 50, "h2_max_frame_size": 32768, "h2_max_concurrent_streams": 64,
+    "h2_header_table_size": 2048, "max_body_bytes": 1048576
+  },
+  "zstd": {"compression_level": 7},
+  "buffer_pool": {"depth_per_worker": 4, "buffer_bytes": 16384}
+}

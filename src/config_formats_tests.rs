@@ -2,6 +2,10 @@
 
 use std::fmt::Debug;
 
+#[cfg(feature = "tokio")]
+use crate::pipelines::spec::StageSpec;
+use crate::schema::Schema;
+use crate::settings::ProximaSettings;
 use crate::upstreams::callback::CallbackConfig;
 use crate::upstreams::fs::FsConfig;
 #[cfg(all(
@@ -434,5 +438,33 @@ fn ctl_format_member_kafka_client_config() {
         "kafka_client_config",
         fixture!("kafka_client_config", "toml"),
         fixture!("kafka_client_config", "expected.json"),
+    );
+}
+
+#[test]
+#[cfg(feature = "tokio")]
+fn ctl_format_member_stage_spec() {
+    assert_typed_twin::<StageSpec>(
+        "stage_spec",
+        fixture!("stage_spec", "toml"),
+        fixture!("stage_spec", "expected.json"),
+    );
+}
+
+#[test]
+fn ctl_format_member_schema() {
+    assert_typed_twin::<Schema>(
+        "schema",
+        fixture!("schema", "toml"),
+        fixture!("schema", "expected.json"),
+    );
+}
+
+#[test]
+fn ctl_format_member_proxima_settings() {
+    assert_serialized_twin::<ProximaSettings>(
+        "proxima_settings",
+        fixture!("proxima_settings", "toml"),
+        fixture!("proxima_settings", "expected.json"),
     );
 }

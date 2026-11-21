@@ -1,0 +1,9 @@
+{
+  "name": "build",
+  "command": "cargo",
+  "args": ["build", "--release"],
+  "env": {"RUST_LOG": "info"},
+  "cwd": "/srv/work",
+  "depends_on": ["fetch", "lint"],
+  "when": "input.run_build == true"
+}

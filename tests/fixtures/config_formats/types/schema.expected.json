@@ -1,0 +1,10 @@
+{
+  "type": "struct",
+  "value": {
+    "name": "Ticket",
+    "fields": [
+      {"name": "id", "schema": {"type": "u_int", "value": {"min": 1, "max": 99999}}, "flags": {"optional": false, "deprecated": true}},
+      {"name": "title", "schema": {"type": "string", "value": {"min_len": 3, "max_len": 120}}, "flags": {"optional": true, "deprecated": false, "description": "short title"}}
+    ]
+  }
+}

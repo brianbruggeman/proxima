@@ -1,0 +1,11 @@
+name = "review_ticket"
+description = "review a ticket"
+method = "PUT"
+path = "/review"
+
+[inputSchema]
+type = "object"
+required = ["ticket"]
+
+[inputSchema.properties.ticket]
+type = "string"

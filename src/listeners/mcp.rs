@@ -1038,6 +1038,7 @@ mod tests {
     use crate::control_plane::{ControlPlanePipe, PipeState, PipeStatus, StaticControlPlane};
     use crate::pipe::into_handle;
     use crate::request::Response;
+    use proxima_config::ConfigFormatFactory;
     use serde_json::json;
     use std::sync::{Arc, mpsc};
 
@@ -1710,5 +1711,28 @@ mod tests {
         let reply = answer(&tools, &fixture_handle(), &line).await;
 
         assert_eq!(reply["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn ctl_format_member_configured_tool() {
+        let parsed = proxima_config::TomlConfigFormat
+            .parse(include_str!(
+                "../../tests/fixtures/config_formats/types/configured_tool.toml"
+            ))
+            .expect("configured_tool.toml parses");
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/config_formats/types/configured_tool.expected.json"
+        ))
+        .expect("configured_tool.expected.json is json");
+
+        let actual: ConfiguredTool =
+            serde_json::from_value(parsed).expect("toml value reads as ConfiguredTool");
+        let wanted: ConfiguredTool =
+            serde_json::from_value(expected).expect("expected.json reads as ConfiguredTool");
+
+        assert_eq!(
+            actual, wanted,
+            "configured_tool: typed value differs from expected.json"
+        );
     }
 }

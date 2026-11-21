@@ -1,0 +1,7 @@
+{
+  "name": "review_ticket",
+  "description": "review a ticket",
+  "inputSchema": {"type": "object", "required": ["ticket"], "properties": {"ticket": {"type": "string"}}},
+  "method": "PUT",
+  "path": "/review"
+}
