@@ -69,4 +69,7 @@ pub enum TokenizerError {
 
     #[error("hf tokenizer.json cannot be written from this vocab: {reason}")]
     HfTokenizerJsonWrite { reason: String },
+
+    #[error("hf tokenizer.json pre_tokenizer is not one this crate expresses exactly: {kind}")]
+    UnsupportedHfPreTokenizer { kind: String },
 }

@@ -100,7 +100,7 @@ pub fn vocab_from_tokenizer_json(
 /// this dense (verified against the real SmolLM2 fixture in this module's
 /// own doc), so a gap or duplicate here means the file is malformed rather
 /// than something this reader should silently paper over.
-fn tokens_by_id(
+pub(crate) fn tokens_by_id(
     vocab_object: &serde_json::Map<String, Value>,
 ) -> Result<Vec<String>, TokenizerError> {
     let mut tokens: Vec<Option<String>> = alloc::vec![None; vocab_object.len()];
@@ -185,7 +185,7 @@ fn bool_field(root: &Value, field: &'static str) -> Result<Option<bool>, Tokeniz
 /// string, or the `["left", "right"]` pair current `tokenizers` releases
 /// write (the vendored mlx-community files use the pair form). Both reach
 /// [`Vocab::new`] as the `"left right"` string it takes.
-fn merge_rules(values: &[Value]) -> Result<Vec<String>, TokenizerError> {
+pub(crate) fn merge_rules(values: &[Value]) -> Result<Vec<String>, TokenizerError> {
     values.iter().map(merge_rule).collect()
 }
 

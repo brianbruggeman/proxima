@@ -67,6 +67,8 @@ pub mod hf_write;
 #[cfg(feature = "hf")]
 mod hf_write_pipeline;
 pub mod pipe;
+#[cfg(feature = "hf")]
+pub mod tokenizer_json;
 pub mod pretokenize;
 mod pretokenize_passes;
 pub mod sample;
