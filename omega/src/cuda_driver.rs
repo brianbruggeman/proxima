@@ -49,7 +49,7 @@ use proxima_tensor::bind::{
     refresh_cached_attention, row_template, rows_enumerable, symbols_shapes_template,
     touched_positions, touches_changed,
 };
-use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Executes, Keep, NodeId, Op, QuantizedBlock, Shapes, bind_unfused, bind_with_fusion_for, block_node_ids, correct_packed_matmul_layouts, infer, prune_dead, resolve_named_blocks, underive_block_quantize};
+use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Executes, NodeId, Op, QuantizedBlock, Shapes, bind_unfused, bind_with_fusion_for, block_node_ids, correct_packed_matmul_layouts, infer, prune_dead, resolve_named_blocks, underive_block_quantize};
 use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
 
 /// Errors from CUDA initialization, NVRTC compilation, or execution.
@@ -374,7 +374,7 @@ impl PoolSchedule {
         let plan = ReleasePlan::build(resolved, kernels, outputs);
         let produced: Vec<(NodeId, usize)> = resolved
             .iter()
-            .map(|bound| (bound.node, bound_output_len(bound)))
+            .map(|bound| (bound.node, bound.output_len()))
             .collect();
         let peak = plan.pool_shape(&produced);
         Self { plan, peak }
@@ -383,27 +383,9 @@ impl PoolSchedule {
     fn relength(&mut self, resolved: &[BoundOp]) {
         let produced: Vec<(NodeId, usize)> = resolved
             .iter()
-            .map(|bound| (bound.node, bound_output_len(bound)))
+            .map(|bound| (bound.node, bound.output_len()))
             .collect();
         self.peak = self.plan.pool_shape(&produced);
-    }
-}
-
-fn bound_output_len(bound: &BoundOp) -> usize {
-    match &bound.kind {
-        BoundOpKind::Reduce {
-            keep: Keep::Reduce,
-            output_axes,
-            epilogue_broadcast_axes,
-            ..
-        } if epilogue_broadcast_axes.is_empty() => output_axes
-            .iter()
-            .map(|axis| bound.extents[*axis as usize] as usize)
-            .product(),
-        BoundOpKind::BlockQuantize { .. } => {
-            bound.extents.iter().map(|extent| *extent as usize).product::<usize>() / std::mem::size_of::<f32>()
-        }
-        _ => bound.extents.iter().map(|extent| *extent as usize).product(),
     }
 }
 
@@ -2786,7 +2768,7 @@ impl CudaPlan {
         let mut lengths_moved = false;
         for (position, bound) in patches {
             let previous = std::mem::replace(&mut self.resolved[position], bound);
-            lengths_moved |= bound_output_len(&previous) != bound_output_len(&self.resolved[position]);
+            lengths_moved |= previous.output_len() != self.resolved[position].output_len();
             let text_kept = crate::cuda::refit_kernel(
                 &previous,
                 &self.resolved[position],
@@ -2864,7 +2846,7 @@ impl CudaPlan {
         }
         for (bound, uniform) in self.resolved.iter().zip(&self.uniforms) {
             let bytes = match &bound.kind {
-                BoundOpKind::BlockQuantize { .. } => bound_output_len(bound) as u64 * 4,
+                BoundOpKind::BlockQuantize { .. } => bound.output_len() as u64 * 4,
                 _ => cuda_float_bytes(self.shapes.of(bound.node))?,
             };
             let pooled = release_plan.pooled.contains(&bound.node);
@@ -3665,7 +3647,7 @@ impl CudaPlan {
                     kernel.bindings
                 );
             }
-            let output_len = bound_output_len(bound);
+            let output_len = bound.output_len();
             if trace {
                 eprintln!(
                     "cuda_trace: node={:?} kind={} extents={:?} bindings={:?} grid={} output_len={} uniforms={} detail={}",
@@ -3686,7 +3668,7 @@ impl CudaPlan {
             // A zero-extent intermediate is a valid tensor, not a valid CUDA
             // launch.  Skip the dispatch; downstream reductions still see
             // their identity value over the empty axis.
-            if output_len == 0 {
+            if !bound.launches() {
                 let needs_zero_buffer = !matches!(
                     self.arena.buffers.get(&bound.node),
                     Some(CudaGraphBuffer::F32(buffer)) if buffer.is_empty()
@@ -5588,6 +5570,27 @@ pub mod rocm {
         unsafe { core::slice::from_raw_parts(values.as_ptr().cast::<u8>(), core::mem::size_of_val(values)) }
     }
 
+    /// The node a kernel writes: its `Binding::Output`.
+    fn output_target(kernel: &HipKernel) -> Result<NodeId, HipDriverError> {
+        kernel
+            .bindings
+            .iter()
+            .find_map(|binding| match binding {
+                Binding::Output(node) => Some(*node),
+                _ => None,
+            })
+            .ok_or(HipDriverError::BindingContract)
+    }
+
+    /// What a kernel the shared plan decision (`BoundOp::launches`) says launches
+    /// nothing yields instead of a launch: its output node and a zero-length buffer.
+    fn empty_launch(kernel: &HipKernel, launches: bool) -> Result<Option<(NodeId, Vec<f32>)>, HipDriverError> {
+        if launches {
+            return Ok(None);
+        }
+        Ok(Some((output_target(kernel)?, Vec::new())))
+    }
+
     /// (blocks, block width) for one launch, refusing a grid past the launch index.
     /// HIP's `gridDim.x` ceiling is `2^31 - 1`, the same value the CUDA lane's
     /// emit-time check uses.
@@ -5721,6 +5724,7 @@ pub mod rocm {
         shapes: Shapes,
         block_nodes: Vec<NodeId>,
         kernels: Vec<HipKernel>,
+        launches: Vec<bool>,
         uniforms: Vec<Vec<u8>>,
         outputs: Vec<NodeId>,
         compiled: BTreeMap<String, Option<CompiledKernel>>,
@@ -5768,6 +5772,7 @@ pub mod rocm {
                         .map_err(|error| HipDriverError::Emit { node: bound.node, error: error.to_string() })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            let launches = resolved.iter().map(proxima_tensor::BoundOp::launches).collect::<Vec<_>>();
             let uniforms = resolved
                 .iter()
                 .map(|bound| {
@@ -5782,6 +5787,7 @@ pub mod rocm {
                 shapes,
                 block_nodes: block_node_ids(program),
                 kernels,
+                launches,
                 uniforms,
                 outputs,
                 compiled: BTreeMap::new(),
@@ -5828,7 +5834,11 @@ pub mod rocm {
                 };
                 buffers.insert(*node, values.to_vec());
             }
-            for (kernel, uniforms) in self.kernels.iter().zip(&self.uniforms) {
+            for ((kernel, uniforms), launches) in self.kernels.iter().zip(&self.uniforms).zip(&self.launches) {
+                if let Some((node, empty)) = empty_launch(kernel, *launches)? {
+                    buffers.insert(node, empty);
+                    continue;
+                }
                 if !kernel.prologue.is_empty() || !kernel.extra_outputs.is_empty() {
                     return Err(HipDriverError::UnsupportedGraph { reason: "kernel prologues and extra outputs are not launched on hip yet" });
                 }
@@ -5843,15 +5853,7 @@ pub mod rocm {
                 let slot = self.compiled.entry(kernel.entry.clone()).or_default();
                 let compiled = cached(slot, &mut self.compilations, || self.device.compile_kernel(kernel))?;
                 let output = self.device.launch_compiled(kernel, compiled, &inputs, uniforms)?;
-                let target = kernel
-                    .bindings
-                    .iter()
-                    .find_map(|binding| match binding {
-                        Binding::Output(node) => Some(*node),
-                        _ => None,
-                    })
-                    .ok_or(HipDriverError::BindingContract)?;
-                buffers.insert(target, output);
+                buffers.insert(output_target(kernel)?, output);
             }
             let results = self
                 .outputs
@@ -5913,6 +5915,15 @@ pub mod rocm {
                 assert_eq!(value, Ok(&7));
             }
             assert_eq!(compiles, 1, "three launches share one compile");
+        }
+
+        #[test]
+        fn a_kernel_the_plan_decided_not_to_launch_yields_an_empty_output_without_a_zero_block_launch() {
+            let kernel = add_one_kernel(0);
+            assert_eq!(launch_geometry(&kernel).expect("geometry").0, 0, "this grid is the one hipModuleLaunchKernel rejects");
+            let skipped = empty_launch(&kernel, false).expect("binding contract");
+            assert_eq!(skipped, Some((proxima_tensor::NodeId(1), Vec::new())));
+            assert_eq!(empty_launch(&add_one_kernel(64), true).expect("binding contract"), None);
         }
 
         #[test]

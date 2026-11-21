@@ -741,6 +741,41 @@ impl BoundOpKind {
 pub(super) static EMPTY_BODY: ComposedBody = ComposedBody { steps: Vec::new() };
 
 impl BoundOp {
+    /// The element count of this op's output buffer: the surviving axes of a
+    /// `Keep::Reduce` reduce, the packed `f32` words of a block quantize, else
+    /// the product of [`Self::extents`]. The one definition every backend
+    /// executor reads; none recomputes it.
+    #[must_use]
+    pub fn output_len(&self) -> usize {
+        match &self.kind {
+            BoundOpKind::Reduce {
+                keep: Keep::Reduce,
+                output_axes,
+                epilogue_broadcast_axes,
+                ..
+            } if epilogue_broadcast_axes.is_empty() => output_axes
+                .iter()
+                .map(|axis| self.extents[*axis as usize] as usize)
+                .product(),
+            BoundOpKind::BlockQuantize { .. } => {
+                self.extents.iter().map(|extent| *extent as usize).product::<usize>() / core::mem::size_of::<f32>()
+            }
+            _ => self.extents.iter().map(|extent| *extent as usize).product(),
+        }
+    }
+
+    /// Whether an executor launches anything for this op. A zero-extent op is
+    /// a valid empty tensor but not a valid launch (CUDA and HIP reject a
+    /// zero-block grid): it yields a zero-length output buffer and dispatches
+    /// nothing, and a downstream reduction over the empty axis keeps its
+    /// identity value. Every backend consults this one decision.
+    #[must_use]
+    pub fn launches(&self) -> bool {
+        self.output_len() != 0
+    }
+}
+
+impl BoundOp {
     #[must_use]
     pub fn operands(&self) -> &[(NodeId, Layout, Option<Lookup>)] {
         match &self.kind {

@@ -1702,10 +1702,12 @@ pub fn execute_plan(
         });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        #[cfg(feature = "instrument")]
-        ENCODE_DISPATCHES.add(1, &[]);
-        pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
-        counter!(DISPATCH_CALLS, 1);
+        if bound.launches() {
+            #[cfg(feature = "instrument")]
+            ENCODE_DISPATCHES.add(1, &[]);
+            pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+            counter!(DISPATCH_CALLS, 1);
+        }
         drop(pass);
         uniform_buffers.push(uniform_buffer);
         if let Some(buffer) = fault_buffer {

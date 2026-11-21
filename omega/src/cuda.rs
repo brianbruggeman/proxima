@@ -4889,6 +4889,18 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_extent_elementwise_op_launches_nothing_and_has_an_empty_output() {
+        let empty = elementwise_tanh_op(0);
+        assert_eq!(empty.output_len(), 0);
+        assert!(!empty.launches(), "zero extent is a valid empty tensor, not a launch");
+        let kernel = emit_cuda(&empty, &no_packed()).expect("emit succeeds");
+        assert_eq!(kernel.grid.threads, 0, "the grid the shared decision keeps every backend from launching");
+        let live = elementwise_tanh_op(8);
+        assert_eq!(live.output_len(), 8);
+        assert!(live.launches());
+    }
+
+    #[test]
     fn elementwise_chain_emits_cuda_with_the_expected_shape() {
         let bound = elementwise_tanh_op(8);
         let kernel = emit_cuda(&bound, &no_packed()).expect("emit succeeds");
