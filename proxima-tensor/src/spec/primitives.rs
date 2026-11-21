@@ -456,22 +456,32 @@ pub fn fused_rope_pair(
     Ok((rotated_same, rotated_partner))
 }
 
+/// `Interleaved` carries no pair count, so it is the cos table's last extent; a pair axis that
+/// depends on any symbol is refused rather than read under an arbitrary binding.
 fn rope_pair_count(
     program: &[Op],
     cos_new: NodeId,
     pairing: RopePairing,
 ) -> Result<u32, TensorError> {
-    match pairing {
-        RopePairing::SplitHalf { pairs } => Ok(pairs),
-        RopePairing::Interleaved => crate::shape::infer(program, &[])?
-            .of(cos_new)
-            .last()
-            .and_then(|&extent| u32::try_from(extent).ok())
-            .ok_or(TensorError::NotLowerable {
-                node: cos_new,
-                reason: "rope rows need the cos table's pair axis to be a static extent",
-            }),
+    if let RopePairing::SplitHalf { pairs } = pairing {
+        return Ok(pairs);
     }
+    let refused = TensorError::NotLowerable {
+        node: cos_new,
+        reason: "rope rows need the cos table's pair axis to be a static extent",
+    };
+    let symbolic_pair_axis = crate::shape::symbol_dependency_output_masks(program)
+        .get(cos_new.0 as usize)
+        .and_then(|axes| axes.last().copied())
+        .is_none_or(|mask| mask != 0);
+    if symbolic_pair_axis {
+        return Err(refused);
+    }
+    crate::shape::infer(program, &[1; u64::BITS as usize])?
+        .of(cos_new)
+        .last()
+        .and_then(|&extent| u32::try_from(extent).ok())
+        .ok_or(refused)
 }
 
 /// [`fused_rope_pair`]'s two halves as ONE `[s, head, 2, P]` node (`p = 0` is its

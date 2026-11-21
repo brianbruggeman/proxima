@@ -127,3 +127,57 @@ async fn rope_rows_halves_equal_the_pair_outputs_bit_for_bit(#[case] pairing: Ro
     );
     std::println!("{pairing:?} row[0,0] = {:?}", &rows[..2 * PAIRS as usize]);
 }
+
+fn symbolic_leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
+    input_leaf(program, DType::FLOAT32, shape, name)
+}
+
+#[proxima::test]
+async fn interleaved_rows_resolve_the_pair_count_from_a_symbolic_sequence_cos_table() {
+    let mut program = Vec::new();
+    let sequence = Extent::Symbolic(0);
+    let source = symbolic_leaf(
+        &mut program,
+        "x",
+        vec![sequence, Extent::Static(HEADS), Extent::Static(HEAD_DIM)],
+    );
+    let cos = symbolic_leaf(&mut program, "cos", vec![sequence, Extent::Static(PAIRS)]);
+    let sin = symbolic_leaf(&mut program, "sin", vec![sequence, Extent::Static(PAIRS)]);
+    let half = leaf(&mut program, "half", &[2]);
+
+    let rows = fused_rope_rows(
+        &mut program,
+        source,
+        'h',
+        cos,
+        sin,
+        RopePairing::Interleaved,
+        half,
+    )
+    .expect("a symbolic sequence axis does not hide the static pair axis");
+
+    let shapes = crate::shape::infer(&program, &[SEQUENCE.into()]).expect("shapes infer");
+    assert_eq!(shapes.of(rows), &[3, 2, 2, 4]);
+}
+
+#[proxima::test]
+async fn interleaved_rows_refuse_a_cos_table_whose_pair_axis_is_symbolic() {
+    let mut program = Vec::new();
+    let source = leaf(&mut program, "x", &[SEQUENCE, HEADS, HEAD_DIM]);
+    let trig = vec![Extent::Static(SEQUENCE), Extent::Symbolic(1)];
+    let cos = symbolic_leaf(&mut program, "cos", trig.clone());
+    let sin = symbolic_leaf(&mut program, "sin", trig);
+    let half = leaf(&mut program, "half", &[2]);
+
+    let refused = fused_rope_rows(
+        &mut program,
+        source,
+        'h',
+        cos,
+        sin,
+        RopePairing::Interleaved,
+        half,
+    );
+
+    assert!(matches!(refused, Err(TensorError::NotLowerable { .. })));
+}
