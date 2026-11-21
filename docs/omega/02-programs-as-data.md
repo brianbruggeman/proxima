@@ -40,20 +40,20 @@ Both exit `1`. Those messages come from `TensorError::UnboundInputName` through 
 
 ## 2. The node envelope
 
-Every node carries an `id` and a `dtype`, and a node may only reference ids defined above it (`program_spec.rs:26-33`). The `id` is a string you choose; the lowering assigns each node its position as its `NodeId` (`run.rs:95-100`), so `n0`, `n1`, `n2` in page 00's file were positions, not a special numbering.
+Every node carries an `id` and a `dtype`, and a node may only reference ids defined above it (`program_spec.rs:26-33`). The `id` is a string you choose; the lowering assigns each node its position as its `NodeId` (`run.rs:95-100`), so `n0`, `n1`, `n2` in page 00's file were simply positions in the file.
 
 Shapes are written one of two ways (`ExtentSpec`, `program_spec.rs:87`): a bare integer for a static extent, or a string beginning `?` for a symbolic one, where `?0` and `?1` are the zeroth and first symbolic extents (`:92-96`). `[2, 4]` is a static 2x4; `["?0", 4]` is `seq x 4`, and is how a serving plan expresses a sequence length it learns at bind time.
 
-Every node also accepts an optional `name`, which is identity rather than decoration: the backend binds data by name, so a name survives a partition pass that renumbers positions (`proxima-tensor/src/op.rs:195-201`).
+Every node also accepts an optional `name`. That name is identity: the backend binds data by name, so a name survives a partition pass that renumbers positions (`proxima-tensor/src/op.rs:195-201`).
 
 ## 3. The five node kinds
 
 `NodeSpec` (`program_spec.rs:129`) is told apart by its `op` string.
 
-- **`input`** (`:130`) declares a leaf the caller supplies: `dtype` and `shape`. Its `name` is the key the backend binds it under, and it is the only node kind that may be a bind target (`program_spec.rs:262`).
-- **`elementwise`** (`:137`) computes an n-ary scalar map: `body` is a `ScalarOp` such as `add` or `multiply`, `inputs` lists the operands by id, and `maps` gives one addressing rule per operand.
-- **`reduce`** (`:146`) is a matmul and every other contraction: multiply, then sum over an axis. `body` is the scalar fold (`add`, `maximum`), `init` is the fold's identity (`ReduceInit`, `op.rs:141`), and `input` is the operand. `in_map` and `out_map` relate the operand's axes to the output's; `keep` says whether the reduced axis survives as a size-1 axis (`Keep`, `op.rs:159`).
-- **`iota`** (`:162`) is a leaf of `0, 1, 2, ...` up to `extent`; **`constant`** (`:171`) is a leaf of one repeated `value`, with `shape = []` meaning a rank-0 scalar that broadcasts into any consumer. These two are why a plan can run with no data at all, as page 00's did.
+- `input` (`:130`) declares a leaf the caller supplies: `dtype` and `shape`. Its `name` is the key the backend binds it under, and it is the only node kind that may be a bind target (`program_spec.rs:262`).
+- `elementwise` (`:137`) computes an n-ary scalar map: `body` is a `ScalarOp` such as `add` or `multiply`, `inputs` lists the operands by id, and `maps` gives one addressing rule per operand.
+- `reduce` (`:146`) is a matmul and every other contraction: multiply, then sum over an axis. `body` is the scalar fold (`add`, `maximum`), `init` is the fold's identity (`ReduceInit`, `op.rs:141`), and `input` is the operand. `in_map` and `out_map` relate the operand's axes to the output's; `keep` says whether the reduced axis survives as a size-1 axis (`Keep`, `op.rs:159`).
+- `iota` (`:162`) is a leaf of `0, 1, 2, ...` up to `extent`; **`constant`** (`:171`) is a leaf of one repeated `value`, with `shape = []` meaning a rank-0 scalar that broadcasts into any consumer. These two are why a plan can run with no data at all, as page 00's did.
 
 ## 4. The map grammar
 
@@ -71,7 +71,7 @@ The eleven files in `proxima-tensor/specs/` are production shapes written as pla
 
 The distinction matters in practice: a bound plan is what a caller runs (`proxima tensor run`, a serving request), and a shape-addressed spec is what a shape or a lowering is proved against. Both appear in the pages that follow, and each page says which it means.
 
-The smallest real spec is `proxima-tensor/specs/rope.toml`: a pairwise rotation of `x: 2x4` by per-position `cos`/`sin` tables of shape `2x2`. Its interesting lines are the strided reads `s,2*i->si` and `s,2*i+1->si` (`rope.toml:42` and `:50`), the map form from section 4 doing real work with no gather node and no intermediate even/odd split.
+The smallest real spec is `proxima-tensor/specs/rope.toml`: a pairwise rotation of `x: 2x4` by per-position `cos`/`sin` tables of shape `2x2`. Its two strided reads, `s,2*i->si` and `s,2*i+1->si` (`rope.toml:42` and `:50`), show the map form from section 4 doing real work: no gather node, and no intermediate even/odd split.
 
 Its test computes the expected pair norm straight off the raw buffer at indices `2*i` and `2*i+1`, so a map that read `i` instead of `2*i` would fail on a different pair:
 
@@ -86,9 +86,9 @@ SUMMARY  passed=2 failed=0 ignored=0 not_run=0  wall=47.638s discovered=1141 run
 
 ## 7. What omega does not do yet
 
-- **No plan imports another plan.** A `transformer_block` is one file, not `attention_block` plus `moe_block`; nothing in `ProgramSpec` composes sub-plans (`program_spec.rs:26-45` has no include field).
-- **No dtype choice per output.** `dtype` is per node and the storage path is float32 today; page 00's gap list has the `numerics` half of that story.
-- **No way to run a shape-addressed spec from the CLI.** `proxima tensor run` needs `[[bind]]` entries, because it must name the tensors it sends (`tools/proxima-cli/src/tensor.rs:41-45`); the eleven production specs are reachable from Rust tests, not from a shell command.
-- **Symbolic extents stop at the Rust API.** `?0` lets a plan describe a sequence length, but nothing in the CLI lets a caller declare which length it is sending, so a symbolic plan is a Rust-side plan today.
+- No plan imports another plan. A `transformer_block` is one file, not `attention_block` plus `moe_block`; nothing in `ProgramSpec` composes sub-plans (`program_spec.rs:26-45` has no include field).
+- No dtype choice per output. `dtype` is per node and the storage path is float32 today; page 00's gap list has the `numerics` half of that story.
+- No way to run a shape-addressed spec from the CLI. `proxima tensor run` needs `[[bind]]` entries, because it must name the tensors it sends (`tools/proxima-cli/src/tensor.rs:41-45`); the eleven production specs are reachable from Rust tests, and the CLI has no command for them.
+- Symbolic extents stop at the Rust API. `?0` lets a plan describe a sequence length, but nothing in the CLI lets a caller declare which length it is sending, so a symbolic plan is a Rust-side plan today.
 
 Next: [03: training](./03-train.md) maps the PyTorch loop onto `proxima-autograd`, loads the optimizer from TOML, and runs four epochs on real MNIST with the loss curve and the test accuracy.

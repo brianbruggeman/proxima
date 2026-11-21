@@ -34,7 +34,7 @@ file + env                         engine=cpu  gpu_driver=auto
 file + env + with_engine("cpu")    engine=cpu  gpu_driver=auto
 ```
 
-The file is `omega/examples/omega_hello_tensor.toml`, whose two lines agree with the defaults, so the first three rows look alike. The environment is where the interesting row appears; every field's env spelling is `OMEGA_` plus the field name (`config.rs:20`), so:
+The file is `omega/examples/omega_hello_tensor.toml`, whose two lines agree with the defaults, so the first three rows look alike. The environment changes the picture; every field's env spelling is `OMEGA_` plus the field name (`config.rs:20`), so:
 
 ```sh
 OMEGA_ENGINE=gpu OMEGA_GPU_DRIVER=metal cargo run -p proxima-omega --example config_layers
@@ -160,9 +160,9 @@ The real output repeats that block once more under `Caused by:`, because two lay
 
 ## 7. What omega does not do yet
 
-- **`numerics` is recorded, not read.** The storage/activation/accumulator formats appear in the config (`config.rs:102`) and lower nothing: the field's own doc says "Recorded here; lowering does not read it yet". A dtype change today is a `ProgramSpec` `dtype` on a node, not a runtime setting.
-- **`emit` is Metal-only.** `EmitKnobs` (`config.rs:105`) switches Metal emit decisions and keeps the historical `PROXIMA_*` spellings (`override_prefix`, `config.rs:104`); there is no emit surface for wgpu or CUDA, whose kernels are not emitted from this crate at run time.
-- **There is one loader per type, and no global one.** Each config type owns its own `from_file`/`from_env`; nothing reads `proxima.toml` and hands every subsystem its section. Wiring several configs together is the caller's job today.
-- **The daemon path still has no runtime file.** `proximad serve` takes flags and reads `OMEGA_*` per request (`tools/proxima-cli/src/tensor_run.rs:59`); there is no `--runtime <toml>`.
+- `numerics` is recorded in the config and ignored by lowering. The storage/activation/accumulator formats appear there (`config.rs:102`) and the field's own doc says "Recorded here; lowering does not read it yet". A dtype change today is a `ProgramSpec` `dtype` on a node.
+- `emit` is Metal-only. `EmitKnobs` (`config.rs:105`) switches Metal emit decisions and keeps the historical `PROXIMA_*` spellings (`override_prefix`, `config.rs:104`); there is no emit surface for wgpu or CUDA, whose kernels are not emitted from this crate at run time.
+- There is one loader per type, and no global one. Each config type owns its own `from_file`/`from_env`; nothing reads `proxima.toml` and hands every subsystem its section. Wiring several configs together is the caller's job today.
+- The daemon path still has no runtime file. `proximad serve` takes flags and reads `OMEGA_*` per request (`tools/proxima-cli/src/tensor_run.rs:59`); there is no `--runtime <toml>`.
 
 Next: [02: programs as data](./02-programs-as-data.md) takes the `ProgramSpec` from page 00 apart: every node kind, binds, outputs, and a real spec from `proxima-tensor/specs/` running through omega.

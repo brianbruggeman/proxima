@@ -54,7 +54,7 @@ llama.cpp, the `llama-bench` binary at `~/repos/others/llama.cpp/bin/llama-bench
 | llama 1B F16                   |   2.30 GiB |     1.24 B | Metal,BLAS |       8 |            tg24 |        104.30 ± 0.98 |
 ```
 
-`104.30 ± 0.98` tokens per second over 5 repetitions is **9.59 ms per token** (CoV 0.94%). Against omega's warm 21.08 ms, the measured ratio is **2.20x slower** on this prompt, this checkpoint and this machine. The cold omega number, 116 ms, is 12x slower and is not the steady-state ratio — report it as first-request cost, never as decode throughput.
+`104.30 ± 0.98` tokens per second over 5 repetitions is **9.59 ms per token** (CoV 0.94%). Against omega's warm 21.08 ms, the measured ratio is **2.20x slower** on this prompt, this checkpoint and this machine. The cold omega number, 116 ms, is 12x slower; report it as first-request cost.
 
 Both sides of this row were measured back to back, with no other build running. That condition is not decoration: a later window on the same machine under load average 78 put omega between 24 and 64 ms per token for the same command. A decode number without the load it was taken under is not reusable.
 
@@ -91,13 +91,13 @@ grep -m1 "Iteration 50$" /tmp/burn-example-mnist/experiment.log
 2026-11-21T14:41:36.236671Z  INFO burn_train::learner::strategies::single::epoch: Iteration 50
 ```
 
-49 iterations in 110.3 s is **2.25 s per 256-image iteration**. Other work ran on this machine while it trained, so that number is an upper bound on the time per step, not a lower bound. At 1250 iterations its own schedule is about 47 minutes.
+49 iterations in 110.3 s is **2.25 s per 256-image iteration**. Other work ran on this machine while it trained, so that number is an upper bound on the time per step. At 1250 iterations its own schedule is about 47 minutes.
 
-**Gap.** A comparable training row needs burn configured to page 03's network and schedule — 784-128-10, 8,000 examples, batch 32, 4 epochs — which is an edit to `examples/mnist/src/model.rs` and `examples/mnist/src/training.rs:39-45`, not a flag. Until that exists, burn has a measured rate and no accuracy number that could sit beside `0.9180`.
+**Gap.** A comparable training row needs burn configured to page 03's network and schedule — 784-128-10, 8,000 examples, batch 32, 4 epochs — which means editing `examples/mnist/src/model.rs` and `examples/mnist/src/training.rs:39-45`. Until that exists, burn has a measured rate and no accuracy number that could sit beside `0.9180`.
 
 ## 4. PyTorch
 
-**Gap.** PyTorch is not installed on this machine and this workspace does not install Python tooling, so there is no PyTorch row. The artifact that would complete it is a PyTorch build on the same M1 Max running an equivalent 784-128-10 MLP for four epochs on the same idx files (`~/.cache/burn-dataset/mnist`), reporting the same three numbers page 03 reports: first-epoch mean loss, last-epoch mean loss, and test accuracy. Page 03's numbers are therefore comparable to burn only, not to PyTorch.
+**Gap.** PyTorch is not installed on this machine and this workspace installs no Python tooling, so there is no PyTorch row. The artifact that would complete it is a PyTorch build on the same M1 Max running an equivalent 784-128-10 MLP for four epochs on the same idx files (`~/.cache/burn-dataset/mnist`), reporting the same three numbers page 03 reports: first-epoch mean loss, last-epoch mean loss, and test accuracy. Page 03's numbers are therefore comparable to burn only.
 
 ## 5. whisper.cpp
 
@@ -109,6 +109,6 @@ grep -m1 "Iteration 50$" /tmp/burn-example-mnist/experiment.log
 
 ## 7. What omega does not do yet, and how to read the table
 
-- **Decode** is the one row where both sides run the same weights and the same token count, so the milliseconds are comparable. One prompt on one machine says nothing about long context, batching, or another model family.
-- **Training** is comparable only if both sides use the same data files and the same network; page 03 fixes omega's side, section 3 of this page shows that burn's shipped example does not, and names what would have to change.
-- **A gap is not a loss.** Three of five targets have nothing to compare because an artifact is missing, not because omega lost. A benchmark nobody ran tells you about the evidence, not about the code.
+- Decode is the one row where both sides run the same weights and the same token count, so the milliseconds are comparable. One prompt on one machine says nothing about long context, batching, or another model family.
+- Training is comparable only if both sides use the same data files and the same network; page 03 fixes omega's side, section 3 of this page shows that burn's shipped example does not, and names what would have to change.
+- A gap is missing evidence. Three of five targets have nothing to compare because an artifact is missing. A benchmark nobody ran says which artifact is missing; it does not say how fast the code is.

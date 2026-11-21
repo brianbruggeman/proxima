@@ -53,10 +53,10 @@ SUMMARY  passed=3 failed=0 ignored=0 not_run=0  wall=2.406s discovered=203 run=3
 
 ## 3. What omega does not do yet
 
-- **No whisper model path.** `proxima-model-interop/specs/whisper/SPEC.md:3` is a draft: written from whisper.cpp's source, with no code, no build and no model run. Nothing in `proxima-model-interop/src` mentions whisper.
-- **A per-model profile is ruled out.** The spec's second requirement (`proxima-model-interop/specs/whisper/SPEC.md:26`) forbids a per-model profile — no `whisper.toml`, no "whisper" branch in omega or interop. The intended path is one encoder-decoder template that fills its slots from `model.safetensors` names plus `config.json`. A template is more work than a profile, which is why it is not done.
-- **The checkpoint is on disk and unread.** `~/models/asr/whisper-tiny` is a complete HF checkpoint (`config.json`, `tokenizer.json`, `preprocessor_config.json`, `model.safetensors`); no code path opens it.
-- **There is no decoder loop.** Even with every lowering present, nothing assembles the encoder pass, the cross-KV cache and the token loop into a transcription. The spec's slice list still owes that driver.
-- **Nothing to compare against yet.** `~/repos/others/whisper.cpp` is source only (`build` does not exist) and there is no `ggml-*.bin` here. Converting the tiny checkpoint to ggml needs whisper.cpp's Python converter, which this workspace does not run, so the spec's wall-time requirement (`proxima-model-interop/specs/whisper/SPEC.md:37`) has no measurable row.
+- No whisper model path. `proxima-model-interop/specs/whisper/SPEC.md:3` is a draft: written from whisper.cpp's source, with no code, no build and no model run. Nothing in `proxima-model-interop/src` mentions whisper.
+- A per-model profile is ruled out. The spec's second requirement (`proxima-model-interop/specs/whisper/SPEC.md:26`) forbids a per-model profile — no `whisper.toml`, no "whisper" branch in omega or interop. The intended path is one encoder-decoder template that fills its slots from `model.safetensors` names plus `config.json`. A template is more work than a profile, which is why it is not done.
+- The checkpoint is on disk and unread. `~/models/asr/whisper-tiny` is a complete HF checkpoint (`config.json`, `tokenizer.json`, `preprocessor_config.json`, `model.safetensors`); no code path opens it.
+- There is no decoder loop. Even with every lowering present, nothing assembles the encoder pass, the cross-KV cache and the token loop into a transcription. The spec's slice list still owes that driver.
+- Nothing to compare against yet. `~/repos/others/whisper.cpp` is source only (`build` does not exist) and there is no `ggml-*.bin` here. Converting the tiny checkpoint to ggml needs whisper.cpp's Python converter, which this workspace does not run, so the spec's wall-time requirement (`proxima-model-interop/specs/whisper/SPEC.md:37`) has no measurable row.
 
 Next: [06: diffusion](./06-diffusion.md) does the same for image generation: the adaLN and attention pieces exist and are differentiable; the scheduler and the VAE decode do not.

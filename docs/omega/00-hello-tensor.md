@@ -73,12 +73,12 @@ Omega is the crate `proxima-omega` (library name `omega`, `omega/Cargo.toml:2` a
 
 The backend choice has two levels, both plain enums in `omega/src/backend.rs`:
 
-- **`Engine`** (`backend.rs:113`) is where the work happens: `Cpu` or `Gpu`. There are only two, because there are only two places an op runs.
-- **`GpuDriver`** (`backend.rs:187`) is which API renders the GPU: `Metal`, `Wgpu`, and with the `cuda-driver` feature, `Cuda` and `Hip`.
+- `Engine` (`backend.rs:113`) is where the work happens: `Cpu` or `Gpu`. There are only two, because there are only two places an op runs.
+- `GpuDriver` (`backend.rs:187`) is which API renders the GPU: `Metal`, `Wgpu`, and with the `cuda-driver` feature, `Cuda` and `Hip`.
 
-If you configured `cpu`, the driver is ignored (`backend.rs:643`). If you ask for `gpu` in a build with no driver compiled in, you get `BackendError::NoGpuDriver` (`backend.rs:323`), never a silent fall back to the CPU. The default features are `["std", "metal", "cpu"]` (`omega/Cargo.toml:21`), so a default build on a Mac has the Metal driver and a default build on Linux has none.
+If you configured `cpu`, the driver is ignored (`backend.rs:643`). A `gpu` build with no driver compiled in fails with `BackendError::NoGpuDriver` (`backend.rs:323`): the engine you asked for is the engine that runs. The default features are `["std", "metal", "cpu"]` (`omega/Cargo.toml:21`), so a default build on a Mac has the Metal driver and a default build on Linux has none.
 
-The PyTorch comparison, and where it breaks: omega sits where `torch.compile` plus the device dispatcher sit, not where `torch.Tensor` sits. You describe the computation once and choose the device separately — which is the point of the whole series.
+The PyTorch comparison: omega is the layer under `torch.compile` plus the device dispatcher. A `torch.Tensor` is one level above that, carrying its operators with it. In omega you describe the computation once and choose the device separately, which is the point of the whole series.
 
 ## 3. Put it on the GPU
 
@@ -246,12 +246,12 @@ The doctest on `plan_named_with_config` (`backend.rs:468-487`) is the smallest e
 
 ## 6. What omega does not do yet
 
-- **The daemon path has no runtime-TOML surface.** `proxima tensor run` evaluates with `RuntimeConfig::from_env()` per request (`tools/proxima-cli/src/tensor_run.rs:59`). There is no `--runtime <toml>` on `proximad serve`, and the CLI does not report the device that served a plan.
-- **No tensor object and no operators.** There is no `a + b` on a value: you write a `ProgramSpec` or build a `Vec<Op>` and index nodes by `NodeId` (`proxima-tensor/src/op.rs:192`, `:29`). [Page 02](./02-programs-as-data.md) is about the first form.
-- **Two engines, five drivers, and no more.** `Engine` is `Cpu` or `Gpu` (`backend.rs:113`) and the driver is one of `auto|metal|wgpu|cuda|hip|rocm` (`config.rs:310`). There is no `mlx`, `coreml`, `ane` or `npu` value; the `Plan` enum has Cpu, Metal, Wgpu, Cuda and Rocm variants only (`backend.rs:409-421`), and an `Npu`/`Ane` name existed without a lowering and was deleted (`backend.rs:105-111`).
-- **MLX and Core ML are not selectable engines.** `omega/src/mlx.rs:1-5` says execution "remains behind a native adapter" and the module exists only when `PROXIMA_MLX_PREFIX` points at an installed MLX (`omega/build.rs:25-37`). Core ML is a package writer behind `coreml-lane` (`omega/Cargo.toml:499`), not an `engine` value.
-- **Which drivers you have is a compile-time fact.** wgpu and CUDA need features that are off by default (`omega/Cargo.toml:382`, `:241`), and asking for `gpu` without one is `NoGpuDriver` (`backend.rs:323`).
-- **Float32 in, float32 out on this path.** Input blocks are `QuantizedBlock` variants (`epilogue.rs:1459`) and `Evaluated` holds `Vec<f32>` (`arena.rs:22`). The `numerics` setting that would choose storage and accumulator formats is recorded in the config and not read by lowering yet (`config.rs:102`).
-- **No autograd here.** Nothing in `backend.rs` or `config.rs` differentiates a program. `proxima-autograd` is a separate crate, used here only as a dev-dependency (`omega/Cargo.toml:710`); [page 03](./03-train.md) is where training happens.
+- The daemon path has no runtime-TOML surface. `proxima tensor run` evaluates with `RuntimeConfig::from_env()` per request (`tools/proxima-cli/src/tensor_run.rs:59`). There is no `--runtime <toml>` on `proximad serve`, and the CLI does not report the device that served a plan.
+- No tensor object and no operators. There is no `a + b` on a value: you write a `ProgramSpec` or build a `Vec<Op>` and index nodes by `NodeId` (`proxima-tensor/src/op.rs:192`, `:29`). [Page 02](./02-programs-as-data.md) is about the first form.
+- Two engines, five drivers, and no more. `Engine` is `Cpu` or `Gpu` (`backend.rs:113`) and the driver is one of `auto|metal|wgpu|cuda|hip|rocm` (`config.rs:310`). There is no `mlx`, `coreml`, `ane` or `npu` value; the `Plan` enum has Cpu, Metal, Wgpu, Cuda and Rocm variants only (`backend.rs:409-421`), and an `Npu`/`Ane` name existed without a lowering and was deleted (`backend.rs:105-111`).
+- MLX and Core ML live outside the engine enum. `omega/src/mlx.rs:1-5` says execution "remains behind a native adapter", and the module exists only when `PROXIMA_MLX_PREFIX` points at an installed MLX (`omega/build.rs:25-37`). Core ML is a package writer behind `coreml-lane` (`omega/Cargo.toml:499`).
+- Which drivers you have is a compile-time fact. wgpu and CUDA need features that are off by default (`omega/Cargo.toml:382`, `:241`), and asking for `gpu` without one is `NoGpuDriver` (`backend.rs:323`).
+- Float32 in, float32 out on this path. Input blocks are `QuantizedBlock` variants (`epilogue.rs:1459`) and `Evaluated` holds `Vec<f32>` (`arena.rs:22`). The `numerics` setting that would choose storage and accumulator formats is recorded in the config and not read by lowering yet (`config.rs:102`).
+- No autograd here. Nothing in `backend.rs` or `config.rs` differentiates a program. `proxima-autograd` is a separate crate, used here only as a dev-dependency (`omega/Cargo.toml:710`); [page 03](./03-train.md) is where training happens.
 
 Next: [01: configuration in depth](./01-config.md) — the rest of the config surface, how the four sources layer, and the errors that name your field.

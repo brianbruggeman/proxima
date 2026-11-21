@@ -19,9 +19,9 @@ opt.step()                     step        proxima_autograd::optimizer::adam_ste
 
 There is no `Module`, no `Parameter`, and no `.backward()` on a tensor. A model is a `Vec<Op>` whose leaves are `Op::Input`s, and a parameter is an input you keep re-binding by name.
 
-The three losses are `mse` (`proxima-autograd/src/loss.rs:32`), `cross_entropy` (`:103`) and `softmax_cross_entropy` (`:153`). Each takes the program under construction and the ids it needs, appends its own nodes, and returns the `NodeId` of the scalar it built — so a loss is a node in the same graph, not a separate layer.
+The three losses are `mse` (`proxima-autograd/src/loss.rs:32`), `cross_entropy` (`:103`) and `softmax_cross_entropy` (`:153`). Each takes the program under construction and the ids it needs, appends its own nodes, and returns the `NodeId` of the scalar it built, so a loss is a node in the same graph.
 
-`differentiate` (`adjoint.rs:214`) takes the program and the loss node and returns a `Differentiated` (`:137`), which is the backward program plus the map from a forward node to its gradient node (`gradient_of`, `:163`). It is a graph transform: the backward pass is built once, not recorded per step.
+`differentiate` (`adjoint.rs:214`) takes the program and the loss node and returns a `Differentiated` (`:137`), which is the backward program plus the map from a forward node to its gradient node (`gradient_of`, `:163`). It is a graph transform: the backward pass is built once, and nothing is recorded per step.
 
 The step is a small elementwise graph over `(param, grad, m, v)` (`optimizer.rs:1-6`). `adam_step` (`:368`) appends them; `step_input` (`:336`) gives you the rank-0 `step` input that bias correction needs; `AdamOperands` (`:354`) is the four ids.
 
@@ -55,7 +55,7 @@ SUMMARY  passed=3 failed=0 ignored=0 not_run=0  wall=3.493s discovered=203 run=3
 
 
 
-The layouts matter for the same reason they matter in PyTorch's `foreach` fused optimizers: `first_moment_layout` and `second_moment_layout` decide the storage of `m` and `v` between steps, and `hyper_layout` decides the width the hyper-parameters are rounded to before they become graph constants. All three are config values over `proxima-numeric` layouts, so a bf16 moment is a file edit, not a type change.
+The layouts matter for the same reason they matter in PyTorch's `foreach` fused optimizers: `first_moment_layout` and `second_moment_layout` decide the storage of `m` and `v` between steps, and `hyper_layout` decides the width the hyper-parameters are rounded to before they become graph constants. All three are config values over `proxima-numeric` layouts, so a bf16 moment is a file edit.
 
 ## 3. One step on the GPU, checked against the CPU
 
@@ -99,10 +99,10 @@ The dataset is a host-local path constant (`real_mnist_training.rs:65`); the tes
 
 ## 5. What omega does not do yet
 
-- **There is no optimizer trait.** `adam_step` and its three sibling configs are functions, not an `impl Optimizer`; adding a new optimizer is a new graph-building function (`optimizer.rs:1-14` explains why: the step is a graph, not an object).
-- **Only Adam has a file loader.** `AdamConfig::from_file` exists (`optimizer.rs:293`); `SgdConfig` (`:632`), `RmspropConfig` (`:755`) and `AdamwConfig` (`:985`) have builders and env layering but no `from_file`. Adding one is the same six lines.
-- **`fit` takes every batch in memory.** Its signature is `batches: &[Vec<(&str, &[f32])>]` (`train.rs:177`), so a dataset larger than RAM needs a caller-driven loop around `train_step` instead. There is no streaming data loader.
-- **No mixed-precision training path.** The moments and the hyper-parameters have layouts, but the activations and gradients in the graph are float32; `numerics` is still recorded and not read (page 01, section 7).
-- **Training is a library call, not a daemon route.** `proximad`'s tensor route only evaluates a plan (`tools/proxima-cli/src/tensor_run.rs:94`); nothing in the CLI submits a training step.
+- There is no optimizer trait. `adam_step` and its three sibling configs are plain functions; adding a new optimizer is a new graph-building function (`optimizer.rs:1-14` explains why the step is written as a graph).
+- Only Adam has a file loader. `AdamConfig::from_file` exists (`optimizer.rs:293`); `SgdConfig` (`:632`), `RmspropConfig` (`:755`) and `AdamwConfig` (`:985`) have builders and env layering but no `from_file`. Adding one is the same six lines.
+- `fit` takes every batch in memory. Its signature is `batches: &[Vec<(&str, &[f32])>]` (`train.rs:177`), so a dataset larger than RAM needs a caller-driven loop around `train_step` instead. There is no streaming data loader.
+- No mixed-precision training path. The moments and the hyper-parameters have layouts, but the activations and gradients in the graph are float32; `numerics` is still recorded and not read (page 01, section 7).
+- Training lives in the library. `proximad`'s tensor route only evaluates a plan (`tools/proxima-cli/src/tensor_run.rs:94`), and nothing in the CLI submits a training step.
 
 Next: [04: inference with an LLM](./04-infer-an-llm.md) loads a real GGUF checkpoint, reads its architecture as data, generates tokens, and measures milliseconds per token.

@@ -46,10 +46,10 @@ The same file checks `non_causal_attention` for `q`, `k` and `v` (`proxima-autog
 
 ## 3. What omega does not do yet
 
-- **No image path.** `proxima-model-interop/specs/flux2-klein/SPEC.md:3` is a draft with no code and no runs. Its requirements name what a real path owes: latents reproducible from `(seed, shape)`, text conditioning that matches the reference, a flow-matching noise schedule matched step for step, the diffusion transformer's predicted velocity (how much to move the latent this step) and the latent after each step, a VAE decode, and a final image compared by PSNR (peak signal-to-noise ratio). None of that exists as code.
-- **No scheduler driver.** A flow-matching or Euler schedule is a data structure plus a loop over it. What exists in `proxima-tensor/src/spec/generic_lowering.rs` is lowerings; nothing there advances a schedule.
-- **No VAE decode.** There is no decoder stack and no image writer. `proxima-autograd/src/conv.rs:223` is a 1-D convolution; an image VAE needs 2-D.
-- **The checkpoints are on disk and unread.** `~/models/image_gen/flux2-klein-4b` (diffusers layout plus one safetensors) and `~/models/diffusion_pixel/ddpm-cifar10-32` both exist; nothing opens either.
-- **The comparison has nothing to compare.** `~/repos/others/stable-diffusion.cpp/build/bin/sd-cli` exists (`master-1052-f5df5f8`), but with no proxima image path there is no wall-time row to measure. It needs a proxima-side path plus a checkpoint both sides load.
+- No image path. `proxima-model-interop/specs/flux2-klein/SPEC.md:3` is a draft with no code and no runs. Its requirements name what a real path owes: latents reproducible from `(seed, shape)`, text conditioning that matches the reference, a flow-matching noise schedule matched step for step, the diffusion transformer's predicted velocity (how much to move the latent this step) and the latent after each step, a VAE decode, and a final image compared by PSNR (peak signal-to-noise ratio). None of that exists as code.
+- No scheduler driver. A flow-matching or Euler schedule is a data structure plus a loop over it. What exists in `proxima-tensor/src/spec/generic_lowering.rs` is lowerings; nothing there advances a schedule.
+- No VAE decode. There is no decoder stack and no image writer. `proxima-autograd/src/conv.rs:223` is a 1-D convolution; an image VAE needs 2-D.
+- The checkpoints are on disk and unread. `~/models/image_gen/flux2-klein-4b` (diffusers layout plus one safetensors) and `~/models/diffusion_pixel/ddpm-cifar10-32` both exist; nothing opens either.
+- The comparison has nothing to compare. `~/repos/others/stable-diffusion.cpp/build/bin/sd-cli` exists (`master-1052-f5df5f8`), but with no proxima image path there is no wall-time row to measure. It needs a proxima-side path plus a checkpoint both sides load.
 
 Next: [07: comparisons](./07-comparisons.md) is where the measured numbers in this series live, with the command, the hardware, the run count and the variation.
