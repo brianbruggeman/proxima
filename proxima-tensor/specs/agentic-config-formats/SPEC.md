@@ -256,14 +256,14 @@ AC8's 16 commands (`<tickets>/PROXIMA-50/evidence/baseline-{a..h,i1..i8}.log` ho
 
 | run | command | expected |
 |---|---|---|
-| (a) | `cargo val -p proxima-lib --features tokio --lib -E 'test(pipelines::) or test(upstreams::process_rpc::) or test(upstreams::synth::)'` | `<B_a> + 0` |
-| (b) | `cargo val -p proxima-lib --features tokio --test pipeline_pipe` | `<B_b> + 9` (AC6 pipe 8, AC7 pipe 1) |
+| (a) | `cargo val -p proxima-lib --features tokio --lib -E 'test(pipelines::) or test(upstreams::process_rpc::) or test(upstreams::synth::)'` | `126 + 0` |
+| (b) | `cargo val -p proxima-lib --features tokio --test pipeline_pipe` | `31 + 9` (AC6 pipe 8, AC7 pipe 1) |
 | (c) | `cargo val -p proxima-cli --test integration -E 'test(mcp_config_tool_) or test(ctl_serve_) or test(mcp_config_payload_)'` | `<B_c> + 0` (this spec's `mcp_config_format_` and `mcp_config_xml_text_` match none of the three) |
-| (d) | `cargo val -p proxima-lib --features tokio --lib -E 'test(load::)'` | `<B_d> + 0` |
-| (e) | `cargo val -p proxima-http --features http1 --lib -E 'test(templates::)'` | `<B_e> + 0` |
-| (f) | `cargo val -p proxima-config --features std --lib` | `<B_f> + 21` (AC1 7, AC1c 5, AC1d 2, ctl 7; the 12 AC4-schema tests need `schema-std`, not `std`) |
-| (g) | `cargo val -p proxima-primitives --features std --lib` | `<B_g> + 0` |
-| (h) | `cargo val -p proxima-patterns --features std --lib` | `<B_h> + 0` |
+| (d) | `cargo val -p proxima-lib --features tokio --lib -E 'test(load::)'` | `10 + 0` |
+| (e) | `cargo val -p proxima-http --features http1 --lib -E 'test(templates::)'` | `13 + 0` |
+| (f) | `cargo val -p proxima-config --features std --lib` | `17 + 21` (AC1 7, AC1c 5, AC1d 2, ctl 7; the 12 AC4-schema tests need `schema-std`, not `std`) |
+| (g) | `cargo val -p proxima-primitives --features std --lib` | `434 + 0` |
+| (h) | `cargo val -p proxima-patterns --features std --lib` | `63 + 0` |
 | (i1) | `cargo val -p proxima-mqtt --features listen --lib` | `<B_i1> + 2` (twin 1, ctl 1) |
 | (i2) | `cargo val -p proxima-amqp --features listen --lib` | `<B_i2> + 2` |
 | (i3) | `cargo val -p proxima-kafka --features listen --lib` | `<B_i3> + 2` |
