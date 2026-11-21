@@ -100,6 +100,8 @@ mod codec_policy_settings;
 #[cfg(feature = "std")]
 pub mod convert;
 #[cfg(feature = "std")]
+pub mod inferred_profile;
+#[cfg(feature = "std")]
 mod hf_descriptor;
 #[cfg(any(test, all(feature = "std", feature = "metal", target_os = "macos")))]
 mod memory_fit;

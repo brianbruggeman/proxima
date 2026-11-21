@@ -1,0 +1,156 @@
+# the facts no checkpoint carries, one section per `general.architecture` (GGUF)
+# or `model_type` (HF). Only what inference leaves unresolved appears here:
+# activation, rope_layout, value_norm, score_scale_inverse_sqrt_head_dim, and
+# embedding_scale / routed_gating where the header omits the key. Values are
+# copied from the per-family rows this table replaces. A value that contradicts
+# what the file shows is refused at load, never applied.
+#
+# ssm_v_head_reordered is the value for a recurrent header that omits the key.
+# embedding_scale spells "None", "Sqrt" or { Factor = f32 }.
+
+# source: llama.cpp rev f1ea20621. NORM pairs src/llama-model.cpp:3018, silu
+# src/models/granite.cpp:269, no V norm. The header carries embedding_scale.
+[granite]
+activation = "Silu"
+rope_layout = "adjacent"
+value_norm = false
+score_scale_inverse_sqrt_head_dim = true
+routed_gating = "Softmax"
+
+[granitemoe]
+activation = "Silu"
+rope_layout = "adjacent"
+value_norm = false
+score_scale_inverse_sqrt_head_dim = true
+routed_gating = "Softmax"
+
+# source: llama.cpp rev f1ea20621. NORM pairs src/llama-model.cpp:3018-3022, silu
+# src/models/llama.cpp:194, no ggml_rms_norm(Vcur) in src/models/llama.cpp.
+[llama]
+activation = "Silu"
+rope_layout = "adjacent"
+value_norm = false
+score_scale_inverse_sqrt_head_dim = true
+embedding_scale = "None"
+routed_gating = "Softmax"
+
+[mistral]
+activation = "Silu"
+rope_layout = "adjacent"
+value_norm = false
+score_scale_inverse_sqrt_head_dim = true
+embedding_scale = "None"
+routed_gating = "Softmax"
+
+[mixtral]
+activation = "Silu"
+rope_layout = "adjacent"
+value_norm = false
+score_scale_inverse_sqrt_head_dim = true
+embedding_scale = "None"
+routed_gating = "Softmax"
+
+[qwen2]
+activation = "Silu"
+rope_layout = "split_half"
+value_norm = false
+score_scale_inverse_sqrt_head_dim = true
+embedding_scale = "None"
+routed_gating = "Softmax"
+
+[qwen3]
+activation = "Silu"
+rope_layout = "split_half"
+value_norm = false
+score_scale_inverse_sqrt_head_dim = true
+embedding_scale = "None"
+routed_gating = "Softmax"
+
+[qwen3moe]
+activation = "Silu"
+rope_layout = "split_half"
+value_norm = false
+score_scale_inverse_sqrt_head_dim = true
+embedding_scale = "None"
+routed_gating = "Softmax"
+
+[qwen3_moe]
+activation = "Silu"
+rope_layout = "split_half"
+value_norm = false
+score_scale_inverse_sqrt_head_dim = true
+embedding_scale = "None"
+routed_gating = "Softmax"
+
+[qwen35]
+activation = "Silu"
+rope_layout = "split_half"
+value_norm = false
+score_scale_inverse_sqrt_head_dim = true
+embedding_scale = "None"
+# for a header that omits `ssm.v_head_reordered`; an explicit key must agree
+ssm_v_head_reordered = true
+routed_gating = "Softmax"
+
+[qwen35moe]
+activation = "Silu"
+rope_layout = "split_half"
+value_norm = false
+score_scale_inverse_sqrt_head_dim = true
+embedding_scale = "None"
+routed_gating = "Softmax"
+# the routed header reader takes an omitted key as false
+ssm_v_head_reordered = false
+
+[lfm2]
+activation = "Silu"
+rope_layout = "split_half"
+value_norm = false
+score_scale_inverse_sqrt_head_dim = true
+embedding_scale = "None"
+routed_gating = "Sigmoid"
+
+[lfm2moe]
+activation = "Silu"
+rope_layout = "split_half"
+value_norm = false
+score_scale_inverse_sqrt_head_dim = true
+embedding_scale = "None"
+routed_gating = "Sigmoid"
+
+[flint]
+activation = "Silu"
+rope_layout = "split_half"
+value_norm = false
+score_scale_inverse_sqrt_head_dim = true
+embedding_scale = "None"
+routed_gating = "Sigmoid"
+
+[gemma4]
+activation = "GeluTanh"
+rope_layout = "split_half"
+value_norm = true
+score_scale_inverse_sqrt_head_dim = false
+embedding_scale = "Sqrt"
+routed_gating = "Softmax"
+
+# no row existed before. source: llama.cpp rev f1ea20621. NEOX rope
+# src/llama-model.cpp:3078 (the GEMMA3 case) to :3121, embedding scaled by
+# sqrt(n_embd) src/models/gemma3.cpp:91, LLM_FFN_GELU gemma3.cpp:182, no V norm
+# in gemma3.cpp, scores scaled by 1/sqrt(head_dim) gemma3.cpp:29-31 (the 27B
+# size scales by 1/sqrt(n_embd / n_head) instead, which this does not model).
+[gemma3]
+activation = "GeluTanh"
+rope_layout = "split_half"
+value_norm = false
+score_scale_inverse_sqrt_head_dim = true
+embedding_scale = "Sqrt"
+
+[ouro]
+activation = "Silu"
+rope_layout = "adjacent"
+value_norm = false
+score_scale_inverse_sqrt_head_dim = true
+embedding_scale = "None"
+recurrence = { normalize_each_iteration = true }
+routed_gating = "Softmax"

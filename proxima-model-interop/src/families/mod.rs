@@ -8,6 +8,7 @@
 
 mod accept;
 mod decoder;
+mod facts;
 mod infer;
 mod pattern;
 mod template;
@@ -18,6 +19,7 @@ pub use accept::{LedgerFileError, read_ledger};
 pub use decoder::{
     DecoderFamily, Dialect, ProfileFacts, ProfileInferError, Slot, gguf_config, infer_profile,
 };
+pub use facts::{ArchFacts, EmbeddingFact, FactsError, FactsTable};
 pub use infer::{
     CheckpointSha, Fact, InferError, Inferred, ShaError, Source, TensorShape, Unmet, infer,
 };

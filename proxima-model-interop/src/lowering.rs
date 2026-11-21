@@ -25,10 +25,13 @@ use proxima_tensor::spec::{
     RecurrentReadoutRoots, ScheduleSource, build_forward, build_forward_with_row_cut,
 };
 
+use conflaguration::Settings;
+use proxima_telemetry::warn;
 use crate::bind::{BoundWeights, ModelHparams, bind_native_f32, metadata_str};
 use crate::bind_leaves::{bind_census, bind_missing_leaves, bind_program_leaves};
 use crate::error::InteropError;
 use crate::hf_bind::{HfShard, bind_safetensors_shards};
+use crate::inferred_profile::{ProfileSourceSettings, inferred_profile};
 use crate::key_inference::with_inferred_keys;
 use crate::profiles::{BindingProfile, binding_profile, family_profile};
 use crate::recurrent_config::RecurrentConfig;
@@ -274,6 +277,10 @@ fn family(parsed: &ParsedGguf) -> Result<&str, InteropError> {
     metadata_str(parsed, "general.architecture")
 }
 
+/// With [`ProfileSourceSettings::inferred`] the profile is built from the header
+/// and the architecture facts; the row path below is the fallback and the
+/// differential's incumbent.
+///
 /// The header reader `parsed`'s own key shape selects
 /// ([`crate::key_inference::infer_schedule_source`]), decided before any reader
 /// runs. The family's profile is still resolved first, so a family with neither
@@ -281,6 +288,23 @@ fn family(parsed: &ParsedGguf) -> Result<&str, InteropError> {
 /// header.
 fn schedule_source(parsed: &ParsedGguf) -> Result<ScheduleSource, InteropError> {
     let family = family(parsed)?;
+    let settings = ProfileSourceSettings::from_env().map_err(|error| InteropError::InvalidFamilyProfile {
+        family: family.into(),
+        message: error.to_string(),
+    })?;
+    if settings.inferred {
+        match inferred_profile(parsed, family, &settings) {
+            Ok(Some(profile)) => {
+                return Ok(with_inferred_keys(profile, parsed, family)?.schedule_source);
+            }
+            Ok(None) => {}
+            // the row path stays the serving answer until it is deleted; the refusal is not hidden
+            Err(InteropError::FamilyFacts(refusal)) => {
+                warn!(family = ?family, refusal = ?refusal, "architecture facts refused; serving from the family row");
+            }
+            Err(other) => return Err(other),
+        }
+    }
     let profile = with_inferred_keys(family_profile(family)?, parsed, family)?;
     Ok(profile.schedule_source)
 }

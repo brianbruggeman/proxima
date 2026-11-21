@@ -18,6 +18,7 @@ use proxima_model_interop::families::{
     CheckpointSha, DecoderFamily, InferError, ProfileFacts, Slot, TensorShape, gguf_config, infer,
     infer_profile,
 };
+use proxima_model_interop::inferred_profile::{ProfileSourceSettings, inferred_profile};
 use proxima_model_interop::probes::incumbent_profile;
 use proxima_tensor::spec::FamilyProfile;
 
@@ -111,6 +112,13 @@ struct Locations {
     blobs: String,
     model_layer: String,
     unresolved: BTreeMap<String, Vec<String>>,
+    named: Named,
+}
+
+#[derive(serde::Deserialize)]
+struct Named {
+    without_a_row: String,
+    states_embedding_scale: String,
 }
 
 fn locations() -> Locations {
@@ -345,4 +353,168 @@ fn inferred_profile_equals_todays_profile_on_every_local_decoder_checkpoint() {
         Vec::<String>::new(),
         "unresolved set moved from the recorded one"
     );
+}
+
+fn serving(parsed: &ParsedGguf, arch: &str) -> Result<FamilyProfile, String> {
+    let settings = ProfileSourceSettings::builder().inferred(true).build();
+    inferred_profile(parsed, arch, &settings)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("{arch}: no template or no facts section"))
+}
+
+fn field<T: PartialEq + Debug>(name: &str, served: T, old: T, rows: &mut Vec<String>) {
+    let word = if served == old {
+        "equal".to_string()
+    } else {
+        format!("DIFFERS served={served:?} old={old:?}")
+    };
+    rows.push(format!("{name}: {word}"));
+}
+
+// a slot the file marks not applicable has no value to compare: the serving
+// profile holds a neutral there and no lowering of this checkpoint reads it
+fn served_vs_old(
+    facts: &ProfileFacts,
+    served: &FamilyProfile,
+    old: &FamilyProfile,
+    experts: u32,
+    qk_norm: bool,
+) -> Vec<String> {
+    let (new_ffn, old_ffn) = (served.layer_ffn(experts), old.layer_ffn(experts));
+    let mut rows = Vec::new();
+    field("embedding_scale", served.embedding_scale, old.embedding_scale, &mut rows);
+    field("ffn.post_attention_norm", new_ffn.post_attention_norm, old_ffn.post_attention_norm, &mut rows);
+    field("ffn.combination", new_ffn.combination, old_ffn.combination, &mut rows);
+    field("ffn.output_scale", new_ffn.output_scale, old_ffn.output_scale, &mut rows);
+    field("ffn.activation", new_ffn.activation, old_ffn.activation, &mut rows);
+    field(
+        "ffn.exclusive_dense_post_norm",
+        new_ffn.exclusive_dense_post_norm,
+        old_ffn.exclusive_dense_post_norm,
+        &mut rows,
+    );
+    if facts.routed_gating != Slot::NotApplicable {
+        field("ffn.routed_gating", new_ffn.routed_gating, old_ffn.routed_gating, &mut rows);
+    }
+    if facts.routed_expert_bias != Slot::NotApplicable {
+        field("ffn.routed_expert_bias", new_ffn.routed_expert_bias, old_ffn.routed_expert_bias, &mut rows);
+    }
+    if facts.shared_expert_gate != Slot::NotApplicable {
+        field("ffn.shared_expert_gate", new_ffn.shared_expert_gate, old_ffn.shared_expert_gate, &mut rows);
+    }
+    field(
+        "score_scale_inverse_sqrt_head_dim",
+        served.score_scale_inverse_sqrt_head_dim,
+        old.score_scale_inverse_sqrt_head_dim,
+        &mut rows,
+    );
+    field("value_norm", served.value_norm, old.value_norm, &mut rows);
+    field("qk_norm", served.qk_norm, qk_norm, &mut rows);
+    field("rope_layout", served.rope_layout, old.rope_layout, &mut rows);
+    field("recurrence", served.recurrence, old.recurrence, &mut rows);
+    field("schedule_source", served.schedule_source, old.schedule_source, &mut rows);
+    if facts.ssm_v_head_reordered != Slot::NotApplicable {
+        field("ssm_v_head_reordered", served.ssm_v_head_reordered, old.ssm_v_head_reordered, &mut rows);
+    }
+    rows
+}
+
+#[test]
+fn serving_profile_equals_the_old_row_profile_on_every_local_decoder_checkpoint() {
+    let locations = locations();
+    let (mut differs, mut checked, mut equal, mut seen) = (Vec::new(), 0usize, 0usize, 0usize);
+    for (label, path) in checkpoints(&locations) {
+        let parsed = read_header(&path);
+        let arch = match parsed.metadata_value("general.architecture") {
+            Some(proxima_gguf::value::MetadataValue::String(arch)) => arch.clone(),
+            other => panic!("{label}: no architecture, got {other:?}"),
+        };
+        let served = serving(&parsed, &arch).unwrap_or_else(|error| panic!("{label}: {error}"));
+        seen += 1;
+        let Ok((old, experts, qk_norm)) = incumbent(&parsed, &arch) else {
+            println!("{label} (arch {arch}): no old row; served profile complete");
+            continue;
+        };
+        let facts = infer_facts(&parsed).expect("inferred");
+        let rows = served_vs_old(&facts, &served, &old, experts, qk_norm);
+        checked += 1;
+        equal += rows.iter().filter(|row| row.ends_with("equal")).count();
+        differs.extend(
+            rows.iter()
+                .filter(|row| row.contains("DIFFERS"))
+                .map(|row| format!("{label}: {row}")),
+        );
+    }
+    println!("SERVING served={seen} compared={checked} equal_fields={equal} differs={}", differs.len());
+    assert_eq!(seen, 16, "every local checkpoint served");
+    assert_eq!(checked, 14, "the checkpoints with an old row, compared field by field; the rest have none");
+    assert_eq!(differs, Vec::<String>::new(), "serving profile differs from the old row");
+    assert!(equal > 0, "no field compared");
+}
+
+#[test]
+fn a_header_with_no_row_yields_a_complete_profile_from_inference_and_facts() {
+    let locations = locations();
+    let target = locations.named.without_a_row.clone();
+    let mut found = 0usize;
+    for (label, path) in checkpoints(&locations) {
+        let parsed = read_header(&path);
+        if !matches!(
+            parsed.metadata_value("general.architecture"),
+            Some(proxima_gguf::value::MetadataValue::String(arch)) if *arch == target
+        ) {
+            continue;
+        }
+        found += 1;
+        let served = serving(&parsed, &target).unwrap_or_else(|error| panic!("{label}: {error}"));
+        assert_eq!(served.rope_layout, proxima_tensor::spec::RopeLayout::SplitHalf, "{label}");
+        assert_eq!(served.ffn.activation, proxima_tensor::spec::Activation::GeluTanh, "{label}");
+        assert!(served.qk_norm && served.ffn.post_attention_norm, "{label}: this family carries q/k norms and a post-attention norm");
+    }
+    assert!(found > 0, "no {target} checkpoint among the local ones");
+}
+
+#[test]
+fn a_fact_that_contradicts_the_header_is_refused_and_an_open_field_is_named() {
+    let locations = locations();
+    let target = locations.named.states_embedding_scale.clone();
+    let (_, path) = checkpoints(&locations)
+        .into_iter()
+        .find(|(_, path)| header_arch(path) == target)
+        .expect("a local checkpoint of the named architecture");
+    let parsed = read_header(&path);
+    let residue = "activation = \"Silu\"\nrope_layout = \"adjacent\"\nvalue_norm = false\nscore_scale_inverse_sqrt_head_dim = true\n";
+    let contradicting = ProfileSourceSettings::builder()
+        .facts_file(write_facts(
+            "contradiction",
+            &format!("[{target}]\n{residue}embedding_scale = \"None\"\n"),
+        ))
+        .build();
+    let error = inferred_profile(&parsed, &target, &contradicting).expect_err("a contradiction is refused");
+    assert!(error.to_string().contains("embedding_scale"), "{error}");
+    let incomplete = ProfileSourceSettings::builder()
+        .facts_file(write_facts("incomplete", &format!("[{target}]\nactivation = \"Silu\"\n")))
+        .build();
+    let error = inferred_profile(&parsed, &target, &incomplete).expect_err("an open field is refused");
+    let message = error.to_string();
+    assert!(message.contains(&target) && message.contains("rope_layout"), "{message}");
+    fs::remove_dir_all(scratch()).expect("remove scratch");
+}
+
+fn header_arch(path: &Path) -> String {
+    match read_header(path).metadata_value("general.architecture") {
+        Some(proxima_gguf::value::MetadataValue::String(arch)) => arch.clone(),
+        other => panic!("{}: no architecture, got {other:?}", path.display()),
+    }
+}
+
+fn scratch() -> PathBuf {
+    std::env::temp_dir().join(format!("facts-{}", std::process::id()))
+}
+
+fn write_facts(name: &str, text: &str) -> String {
+    fs::create_dir_all(scratch()).expect("scratch dir");
+    let path = scratch().join(format!("{name}.toml"));
+    fs::write(&path, text).expect("write facts");
+    path.display().to_string()
 }

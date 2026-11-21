@@ -85,3 +85,65 @@ fn another_familys_tensors_in_the_file_are_counted_not_hidden() {
 
     assert_eq!(inferred.facts["companion_tensors"].value, Value::Int(2));
 }
+
+#[test]
+fn the_embedded_facts_table_parses_and_every_section_states_residue_only() {
+    let table = FactsTable::builtin().expect("embedded facts parse");
+    let sections = table.iter().count();
+
+    assert!(sections >= 16, "one section per architecture, got {sections}");
+    assert!(table.iter().all(|(_, facts)| facts.field_count() >= 4));
+}
+
+#[test]
+fn a_fact_that_disagrees_with_a_known_slot_is_refused_naming_field_and_architecture() {
+    let family = DecoderFamily::builtin().expect("embedded family parses");
+    let templates = family.templates().expect("templates expand");
+    let tensors = [
+        "token_embd.weight",
+        "output_norm.weight",
+        "blk.0.attn_q.weight",
+    ]
+    .map(|name| TensorShape {
+        name: name.into(),
+        shape: vec![8, 8],
+    });
+    let sha = CheckpointSha::parse(&"0".repeat(64)).expect("64 hex digits");
+    let config = json!({"embedding_scale": 12.0});
+    let inferred = infer(&tensors, &config, &templates, sha).expect("gguf dialect matches");
+    let facts = infer_profile(&family, &inferred, &config).expect("profile reads");
+    let stated = ArchFacts {
+        embedding_scale: Some(EmbeddingFact::None),
+        ..ArchFacts::default()
+    };
+
+    let refused = facts.settle(&stated, "invented").expect_err("a contradiction is refused");
+
+    assert!(
+        matches!(&refused, FactsError::Contradicts { field: "embedding_scale", architecture, .. } if architecture == "invented"),
+        "{refused}"
+    );
+}
+
+#[test]
+fn an_open_field_after_the_facts_is_a_typed_error_naming_it() {
+    let family = DecoderFamily::builtin().expect("embedded family parses");
+    let templates = family.templates().expect("templates expand");
+    let layer = "blk.0.";
+    let projection = format!("{layer}attn_q.weight");
+    let tensors = ["token_embd.weight", projection.as_str()].map(|name| TensorShape {
+        name: name.into(),
+        shape: vec![8, 8],
+    });
+    let sha = CheckpointSha::parse(&"0".repeat(64)).expect("64 hex digits");
+    let config = json!({});
+    let inferred = infer(&tensors, &config, &templates, sha).expect("gguf dialect matches");
+    let facts = infer_profile(&family, &inferred, &config).expect("profile reads");
+
+    let open = facts.into_profile("invented").expect_err("rope_layout is stated nowhere");
+
+    assert!(
+        matches!(&open, FactsError::Unresolved { architecture, fields } if architecture == "invented" && fields.contains("rope_layout")),
+        "{open}"
+    );
+}

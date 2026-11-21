@@ -102,6 +102,10 @@ pub enum InteropError {
     #[error(transparent)]
     Gguf(#[from] proxima_gguf::GgufError),
 
+    /// `crate::families` architecture facts left a field open or contradicted the file.
+    #[error(transparent)]
+    FamilyFacts(#[from] crate::families::FactsError),
+
     #[error(transparent)]
     Safetensors(#[from] proxima_safetensors::SafetensorsError),
 

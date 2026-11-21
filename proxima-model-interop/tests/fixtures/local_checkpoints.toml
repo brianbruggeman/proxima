@@ -26,3 +26,10 @@ gemma4 = ["embedding_scale", "activation", "score_scale_inverse_sqrt_head_dim", 
 qwen2 = ["embedding_scale", "activation", "score_scale_inverse_sqrt_head_dim", "value_norm", "rope_layout"]
 qwen3 = ["embedding_scale", "activation", "score_scale_inverse_sqrt_head_dim", "value_norm", "rope_layout"]
 qwen35 = ["embedding_scale", "activation", "score_scale_inverse_sqrt_head_dim", "value_norm", "rope_layout"]
+
+# architectures the serving tests single out by `general.architecture`
+[named]
+# no per-family row exists for it, so only the inferred profile describes it
+without_a_row = "gemma3"
+# its header states embedding_scale, so a contradicting fact is refused
+states_embedding_scale = "granite"
