@@ -9,14 +9,15 @@
 //! `ggml/src/ggml-opt.cpp:229-231`, `common/common.cpp:2108-2109`) so the bench
 //! cannot drift into a benchmark-only optimizer.
 #![cfg(all(feature = "train", feature = "cpu"))]
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+// assertions name the failure; the workspace denies clippy::expect_used
+#![allow(clippy::expect_used)]
 
 use std::io::Write;
 
 use omega::config::RuntimeConfig;
 use omega::train::{
-    AdamConfig, AdamwConfig, TrainConfig, adam_first_moment_name, adam_second_moment_name,
-    build_optimizer_step,
+    AdamConfig, AdamwConfig, LLAMA_FINETUNE_CONFIG, TrainConfig, TrainError, TrainSchedule,
+    adam_first_moment_name, adam_second_moment_name, build_optimizer_step,
 };
 use proxima_autograd::loss::softmax_cross_entropy;
 use proxima_numeric::DType;
@@ -24,6 +25,7 @@ use proxima_numeric::float_layout::FloatLayout;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::op::{Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append};
+use proxima_autograd::optimizer::store_moment;
 
 const IN_DIM: usize = 2;
 const OUT_DIM: usize = 3;
@@ -206,7 +208,7 @@ fn metal_config() -> TrainConfig {
 
 #[test]
 fn llama_finetune_config_is_the_benchmark_config() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/benches/llama-finetune.toml");
+    let path = LLAMA_FINETUNE_CONFIG;
     let config =
         TrainConfig::from_file(path).expect("the checked-in llama config loads and validates");
 
@@ -250,9 +252,9 @@ fn builder_overrides_every_group_and_validates() {
         engine: String::from("cpu"),
         ..RuntimeConfig::default()
     };
-    let schedule = omega::train::TrainSchedule {
+    let schedule = TrainSchedule {
         ubatch: 128,
-        ..omega::train::TrainSchedule::default()
+        ..TrainSchedule::default()
     };
     let config = TrainConfig::builder()
         .runtime(runtime)
@@ -456,7 +458,7 @@ fn a_state_buffer_cannot_be_overridden_by_the_batch() {
         .expect_err("a batch may not replace owned state");
     assert!(matches!(
         error,
-        omega::train::TrainError::BatchOverridesState { ref name } if name == "b"
+        TrainError::BatchOverridesState { ref name } if name == "b"
     ));
 }
 
@@ -471,7 +473,7 @@ fn a_missing_state_binding_is_refused_by_name() {
         .expect("a plan with no state must be refused");
     assert!(matches!(
         error,
-        omega::train::TrainError::MissingStateBinding { ref name } if name == "w"
+        TrainError::MissingStateBinding { ref name } if name == "w"
     ));
 }
 
@@ -493,21 +495,15 @@ fn a_state_buffer_bound_with_another_dtype_is_refused() {
         .expect("a non-float state buffer is refused");
     assert!(matches!(
         error,
-        omega::train::TrainError::StateBinding { ref name } if name == "w"
+        TrainError::StateBinding { ref name } if name == "w"
     ));
 }
 
-#[test]
-fn the_configured_moment_layouts_narrow_the_owned_state() {
+fn assert_moment_layouts(wide: &TrainConfig, narrow: &TrainConfig) {
     let (program, loss) = build_forward();
-    let wide = cpu_config();
-    let mut narrow = cpu_config();
-    narrow.adam.first_moment_layout = FloatLayout::BF16;
-    narrow.adam.second_moment_layout = FloatLayout::F16;
-
     let wide_built =
-        build_optimizer_step(&program, loss, &PARAMETERS, &wide).expect("the MLP differentiates");
-    let narrow_built = build_optimizer_step(&program, loss, &PARAMETERS, &narrow)
+        build_optimizer_step(&program, loss, &PARAMETERS, wide).expect("the MLP differentiates");
+    let narrow_built = build_optimizer_step(&program, loss, &PARAMETERS, narrow)
         .expect("the same graph with narrow moment storage differentiates");
     let state = initial_state();
     let mut wide_step = wide_built.plan(&as_named(&state)).expect("wide plans");
@@ -525,7 +521,7 @@ fn the_configured_moment_layouts_narrow_the_owned_state() {
         .state_value(&first)
         .expect("the wide step owns m_w")
         .to_vec();
-    proxima_autograd::optimizer::store_moment(&mut expected_first, FloatLayout::BF16, "m_w")
+    store_moment(&mut expected_first, FloatLayout::BF16, "m_w")
         .expect("bf16 narrows the wide first moment");
     assert_eq!(
         narrow_step
@@ -548,7 +544,7 @@ fn the_configured_moment_layouts_narrow_the_owned_state() {
         .state_value(&second)
         .expect("the wide step owns v_w")
         .to_vec();
-    proxima_autograd::optimizer::store_moment(&mut expected_second, FloatLayout::F16, "v_w")
+    store_moment(&mut expected_second, FloatLayout::F16, "v_w")
         .expect("f16 narrows the wide second moment");
     assert_eq!(
         narrow_step
@@ -562,6 +558,89 @@ fn the_configured_moment_layouts_narrow_the_owned_state() {
         wide_step.state_value("w").expect("w is owned"),
         "the parameter itself is not narrowed"
     );
+}
+
+#[test]
+fn adam_moment_layouts_narrow_the_owned_state() {
+    let wide = cpu_config();
+    let mut narrow = cpu_config();
+    narrow.adam.first_moment_layout = FloatLayout::BF16;
+    narrow.adam.second_moment_layout = FloatLayout::F16;
+    assert_moment_layouts(&wide, &narrow);
+}
+
+#[test]
+fn adamw_moment_layouts_narrow_the_owned_state() {
+    let mut wide = cpu_config();
+    wide.optimizer = String::from("adamw");
+    wide.adamw = AdamwConfig {
+        learning_rate: 0.05,
+        weight_decay: 0.0,
+        ..AdamwConfig::default()
+    };
+    let mut narrow = wide.clone();
+    narrow.adamw.first_moment_layout = FloatLayout::BF16;
+    narrow.adamw.second_moment_layout = FloatLayout::F16;
+    assert_moment_layouts(&wide, &narrow);
+}
+
+#[test]
+fn a_parameter_with_a_gathered_read_is_refused() {
+    use proxima_tensor::map::{AxisIndex, AxisTerm};
+
+    let mut program = Vec::new();
+    let table = leaf(
+        &mut program,
+        "table",
+        vec![Extent::Static(2), Extent::Static(2)],
+    );
+    let ids = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::INT32,
+            shape: vec![Extent::Static(1)],
+            name: Some(String::from("ids")),
+        },
+    );
+    let dense = elementwise(&mut program, ScalarOp::Identity, vec![(table, identity(2))]);
+    let dense_sum = reduce_add(
+        &mut program,
+        dense,
+        identity(2),
+        IndexMap::Affine(map::projection(2, &[])),
+    );
+    let gather_map = IndexMap::Computed {
+        indices: ids,
+        index_map: map::projection(2, &[0]),
+        base: map::IndexPattern {
+            iter_rank: 2,
+            axes: vec![
+                AxisIndex::default(),
+                AxisIndex {
+                    terms: std::iter::once(AxisTerm::projection(1)).collect(),
+                    offset: 0,
+                    len: None,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    let gathered = elementwise(&mut program, ScalarOp::Identity, vec![(table, gather_map)]);
+    let gathered_sum = reduce_add(
+        &mut program,
+        gathered,
+        identity(2),
+        IndexMap::Affine(map::projection(2, &[])),
+    );
+    let loss = elementwise(
+        &mut program,
+        ScalarOp::Add,
+        vec![(dense_sum, identity(0)), (gathered_sum, identity(0))],
+    );
+
+    let error = build_optimizer_step(&program, loss, &["table"], &cpu_config())
+        .expect_err("a parameter read both densely and through a gather must be refused");
+    assert!(matches!(error, TrainError::GatheredGradient { ref name } if name == "table"));
 }
 
 #[test]

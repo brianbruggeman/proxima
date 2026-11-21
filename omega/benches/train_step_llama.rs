@@ -18,13 +18,15 @@
 //!
 //! Run with:
 //! `cargo bench -p proxima-omega --features train,cpu --bench train_step_llama`
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+// assertions name the failure; the workspace denies clippy::expect_used
+#![allow(clippy::expect_used)]
 
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use omega::train::{
-    TrainConfig, adam_first_moment_name, adam_second_moment_name, build_optimizer_step,
+    LLAMA_FINETUNE_CONFIG, TrainConfig, adam_first_moment_name, adam_second_moment_name,
+    build_optimizer_step,
 };
 use proxima_autograd::activation::relu;
 use proxima_autograd::loss::softmax_cross_entropy;
@@ -38,10 +40,6 @@ const HIDDEN_DIM: usize = 128;
 const OUT_DIM: usize = 10;
 const PARAMETERS: [&str; 4] = ["w1", "b1", "w2", "b2"];
 const WARMUP_STEPS: usize = 3;
-
-fn config_path() -> String {
-    format!("{}/benches/llama-finetune.toml", env!("CARGO_MANIFEST_DIR"))
-}
 
 fn leaf(program: &mut Vec<Op>, name: &str, shape: Vec<Extent>) -> NodeId {
     op::append(
@@ -243,7 +241,8 @@ fn run_step(lane: &mut Lane, step_number: u32) -> f32 {
 }
 
 fn bench_training_step(criterion: &mut Criterion) {
-    let config = TrainConfig::from_file(config_path()).expect("the llama finetune config loads");
+    let config =
+        TrainConfig::from_file(LLAMA_FINETUNE_CONFIG).expect("the llama finetune config loads");
     assert_eq!(
         config.optimizer, "adamw",
         "the benchmark measures llama.cpp's optimizer, not a benchmark-only one"

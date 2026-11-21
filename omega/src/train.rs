@@ -48,10 +48,11 @@
 //! host-side [`proxima_autograd::adjoint::GatheredContribution`]; applying it
 //! stays the caller's job (`proxima_autograd::sparse::dedupe_and_sum_rows`
 //! plus an optimizer step sized to the touched rows). This module therefore
-//! covers the dense-gradient case: every parameter passed to
-//! [`build_optimizer_step`] must feed the loss through a non-gathered read, or
-//! it is rejected with [`TrainError::MissingGradient`] rather than silently
-//! skipped. Every extent must be static: the plan binds an empty symbol table.
+//! covers the dense-gradient case: a parameter with any gathered contribution
+//! is rejected with [`TrainError::GatheredGradient`], one with no dense
+//! gradient with [`TrainError::MissingGradient`], so neither is silently
+//! applied with a partial update. Every extent must be static: the plan binds
+//! an empty symbol table.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -76,6 +77,11 @@ pub use proxima_autograd::optimizer::{AdamConfig, AdamwConfig};
 /// (`1.0`, `2.0`, ...) on every [`TrainingStep::step`] call.
 pub const STEP_INPUT: &str = "step";
 
+/// The checked-in llama.cpp `b11671` finetune configuration the benchmark and
+/// its pinning test both load.
+pub const LLAMA_FINETUNE_CONFIG: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/benches/llama-finetune.toml");
+
 /// The first-moment state name for `parameter`.
 #[must_use]
 pub fn adam_first_moment_name(parameter: &str) -> String {
@@ -88,9 +94,9 @@ pub fn adam_second_moment_name(parameter: &str) -> String {
     format!("v_{parameter}")
 }
 
-/// The loop schedule an optimizer step is embedded in. The step itself reads
-/// only [`Self::ubatch`]; the rest is carried so a training driver and its
-/// benchmark read one config rather than inventing their own.
+/// The loop schedule a training driver and its benchmark read. The step reads
+/// no schedule field: the batch it trains is the graph's static input shape, so
+/// a driver that builds the graph reads [`Self::ubatch`] and binds it there.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Settings)]
 #[serde(default, deny_unknown_fields)]
 #[settings(prefix = "OMEGA_TRAIN_SCHEDULE")]
@@ -317,6 +323,8 @@ pub enum TrainError {
         "parameter `{name}` does not feed the loss through a dense read, so it has no gradient"
     )]
     MissingGradient { name: String },
+    #[error("parameter `{name}` also has a gathered gradient, which this step cannot apply")]
+    GatheredGradient { name: String },
     #[error("parameter `{name}` has rank above u16::MAX")]
     RankOverflow { name: String },
     #[error("state input `{name}` already exists in the forward program")]
@@ -563,6 +571,13 @@ pub fn build_optimizer_step(
     let gradients = resolved
         .iter()
         .map(|(name, _, _, _)| {
+            if differentiated
+                .gathered_gradients_of_named(name)
+                .next()
+                .is_some()
+            {
+                return Err(TrainError::GatheredGradient { name: name.clone() });
+            }
             differentiated
                 .gradient_of_named(name)
                 .ok_or_else(|| TrainError::MissingGradient { name: name.clone() })

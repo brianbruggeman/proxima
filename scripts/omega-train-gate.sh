@@ -57,7 +57,7 @@ run_and_print "std tier" "${cargo_cmd[@]}" check -p "${crate}" --no-default-feat
 printf '\n[2/6] train graph builder unit tests\n'
 unit_output="$("${cargo_cmd[@]}" nextest run -p "${crate}" --features "${features}" --lib -E 'test(train::tests)' 2>&1)" || {
     printf '%s\n' "${unit_output}"
-    printf 'ERROR: the train unit tests failed to run\n' >&2
+    printf 'ERROR: the train unit tests failed\n' >&2
     exit 1
 }
 printf '%s\n' "${unit_output}"
@@ -70,15 +70,15 @@ fi
 printf '\n[3/6] training API and llama config tests\n'
 api_output="$("${cargo_cmd[@]}" nextest run -p "${crate}" --features "${features}" --test training_api 2>&1)" || {
     printf '%s\n' "${api_output}"
-    printf 'ERROR: the training API tests failed to run\n' >&2
+    printf 'ERROR: the training API tests failed\n' >&2
     exit 1
 }
 printf '%s\n' "${api_output}"
 api_passed="$(passed_count "${api_output}")"
 # the Metal parity test compiles only on macOS with the default `metal` feature
-expected_api=13
+expected_api=15
 if [ "$(uname -s)" = "Darwin" ]; then
-    expected_api=14
+    expected_api=16
 fi
 if [ "${api_passed:-0}" -ne "${expected_api}" ]; then
     printf 'ERROR: expected %s training_api tests, got %s\n' "${expected_api}" "${api_passed:-0}" >&2
@@ -86,6 +86,10 @@ if [ "${api_passed:-0}" -ne "${expected_api}" ]; then
 fi
 
 printf '\n[4/6] numerics stay proxima-numeric: no format-name token in the surface\n'
+if [ ! -f "${crate_dir}/src/train.rs" ]; then
+    printf 'ERROR: %s/src/train.rs is missing, so the format-token check proves nothing\n' "${crate_dir}" >&2
+    exit 1
+fi
 format_tokens="$(grep -Eio '\b(f16|bf16|q2_k|q3_k|q4_0|q4_1|q4_k|q5_0|q5_1|q5_k|q6_k|q8_0|bf32)\b' "${crate_dir}/src/train.rs" | sort -u || true)"
 if [ -n "${format_tokens}" ]; then
     printf 'ERROR: train.rs names a format instead of a proxima-numeric type: %s\n' "${format_tokens}" >&2
@@ -112,6 +116,11 @@ bench_output="$("${cargo_cmd[@]}" bench -p "${crate}" --features "${features}" -
     exit 1
 }
 printf '%s\n' "${bench_output}"
+config_rows="$(printf '%s\n' "${bench_output}" | grep -c '^train_step_llama: optimizer=adamw ' || true)"
+if [ "${config_rows:-0}" -ne 1 ]; then
+    printf 'ERROR: expected 1 bench config row, got %s\n' "${config_rows:-0}" >&2
+    exit 1
+fi
 if ! printf '%s\n' "${bench_output}" | grep -q 'train_step_llama: optimizer=adamw .*batch=2048 ubatch=512'; then
     printf 'ERROR: the bench did not print llama.cpp b11671 finetune defaults (adamw, batch 2048, ubatch 512)\n' >&2
     exit 1
