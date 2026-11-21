@@ -3,8 +3,8 @@
 //! offset-0 case every other test in this crate exercises) come back as a
 //! full-size, zero-elsewhere gradient tensor? Checked BEFORE
 //! `sparse_ffn_pruning.rs` was built on top of it (guiding principle 6:
-//! never work from inference) -- and the answer this file found is why
-//! that file uses separate per-band leaf tensors instead.
+//! never work from inference) -- and the answer found here is why that file
+//! uses separate per-band leaf tensors instead.
 //!
 //! Three findings, one test each:
 //!
@@ -18,14 +18,11 @@
 //!    crate's own adjoint already uses for the structurally identical
 //!    problem -- fixes shape inference, and the FORWARD read then
 //!    evaluates to exactly the right slice.
-//! 3. But the BACKWARD routed `Reduce` -- writing that slice's gradient
-//!    into the full `[2, 6]` destination through the same offset -- panics
-//!    in `proxima-tensor/src/cpu.rs:4461` with an index-out-of-bounds. This
-//!    is a genuine `proxima-tensor` evaluator gap, not a `proxima-autograd`
-//!    one, and out of this session's scope (`proxima-autograd/**`) to fix.
-//!    The test below captures it precisely (`catch_unwind` on the exact
-//!    panic site) so it stays a documented, reproducible finding rather
-//!    than a red test in the gate or a silently-skipped one.
+//! 3. The BACKWARD routed `Reduce` that writes that slice's gradient into
+//!    the full `[2, 6]` destination through the same offset used to panic
+//!    in `proxima-tensor`'s CPU interpreter. It evaluates now, so this file
+//!    asserts the gradient it produces -- full shape, one inside the slice,
+//!    zero outside -- instead of recording the panic.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 extern crate alloc;
@@ -164,19 +161,12 @@ async fn an_anchored_offset_read_differentiates_without_a_shape_error() {
     );
 }
 
-/// Finding 3, captured precisely: evaluating that SAME adjoint program's
-/// gradient panics in `proxima-tensor`'s CPU interpreter with an
-/// index-out-of-bounds, not a typed `TensorError`. `catch_unwind` turns
-/// this into a documented, reproducible regression check (does the panic
-/// still happen at this exact site, with this exact message) rather than
-/// leaving a permanently-red test in the gate for a bug this session's
-/// scope (`proxima-autograd/**`) cannot fix. If a future
-/// `proxima-tensor` fix makes this evaluate correctly, THIS test starts
-/// failing (the `catch_unwind` no longer observes a panic) and should be
-/// replaced with the positive assertion `offset_gradient_probe.rs`'s own
-/// history shows was the original intent.
+/// Finding 3, resolved: the backward write through the nonzero-offset map
+/// evaluates. `d sum(w[:, 2:4] + anchor) / d w` is one inside the slice and
+/// zero outside it, so the whole `[2, 6]` gradient is checked element by
+/// element rather than only "it did not panic".
 #[proxima::test]
-async fn anchored_offset_backward_write_panics_in_the_cpu_evaluator_today() {
+async fn an_anchored_offset_read_backs_a_full_size_gradient() {
     let (program, loss) = build_anchored_slice_program();
     let differentiated = differentiate(&program, loss).expect("anchored slice differentiates");
     let grad_w = differentiated
@@ -184,24 +174,15 @@ async fn anchored_offset_backward_write_panics_in_the_cpu_evaluator_today() {
         .expect("w feeds the loss");
     let w_values: alloc::vec::Vec<f32> = (0..12).map(|index| index as f32).collect();
 
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        evaluate_named(&differentiated.program, &[], &[("w", &w_values)], &[grad_w])
-    }));
+    let evaluated = evaluate_named(&differentiated.program, &[], &[("w", &w_values)], &[grad_w])
+        .expect("the adjoint program evaluates");
 
-    match outcome {
-        Err(_) => {
-            std::eprintln!(
-                "confirmed: evaluating a gradient routed through a nonzero-offset out_map \
-                 still panics in proxima-tensor's CPU evaluator (cpu.rs:4461, index out of bounds) -- \
-                 this is why sparse_ffn_pruning.rs uses separate per-band leaves instead"
-            );
-        }
-        Ok(Ok(_)) => panic!(
-            "evaluation succeeded -- proxima-tensor's evaluator gap appears to be FIXED; replace this test \
-             with the positive full-size/zero-off-the-slice assertion this file's own doc describes"
-        ),
-        Ok(Err(error)) => panic!(
-            "expected a panic (the known cpu.rs:4461 bug), got a typed error instead: {error}"
-        ),
-    }
+    let (gradient, shape) = evaluated.get(grad_w).expect("the gradient node evaluated");
+    assert_eq!(shape, &[2_u64, 6], "the gradient is the input's full shape");
+    let inside = [0.0_f32, 0.0, 1.0, 1.0, 0.0, 0.0];
+    let expected: alloc::vec::Vec<f32> = (0..2).flat_map(|_row| inside).collect();
+    assert_eq!(
+        gradient, expected.as_slice(),
+        "one inside the offset slice, zero outside it"
+    );
 }

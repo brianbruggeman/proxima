@@ -58,23 +58,30 @@ pub(crate) fn is_pure_projection(pattern: &IndexPattern) -> bool {
 /// a gradient of exactly the operand's shape. A narrower pair axis (`i@P`
 /// reading the first half of a `2P`-wide axis) fails this and takes
 /// `crate::affine_scatter` instead.
+///
+/// A rank-0 pattern (a scalar read, such as a rank-1 `[1]` epsilon read at
+/// every iteration) is a projection too: the reduce below sums the iteration
+/// space into no axes, which is the whole gradient. Without the empty-pattern
+/// arm the rank check rejects it and the scatter path, which cannot
+/// accumulate a broadcast, refuses the program.
 pub(crate) fn is_full_extent_projection(
     pattern: &IndexPattern,
     iteration_extents: &[u64],
     operand_extents: &[u64],
 ) -> bool {
     is_pure_projection(pattern)
-        && pattern.axes.len() == operand_extents.len()
-        && pattern
-            .axes
-            .iter()
-            .zip(operand_extents)
-            .all(|(axis, extent)| {
-                axis.terms
-                    .first()
-                    .and_then(|term| iteration_extents.get(usize::from(term.axis)))
-                    == Some(extent)
-            })
+        && (pattern.axes.is_empty()
+            || (pattern.axes.len() == operand_extents.len()
+                && pattern
+                    .axes
+                    .iter()
+                    .zip(operand_extents)
+                    .all(|(axis, extent)| {
+                        axis.terms
+                            .first()
+                            .and_then(|term| iteration_extents.get(usize::from(term.axis)))
+                            == Some(extent)
+                    })))
 }
 
 fn push(program: &mut Vec<Op>, dtype: DType, body: ScalarOp, operands: Vec<Operand>) -> NodeId {
