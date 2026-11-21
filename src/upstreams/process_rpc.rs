@@ -232,6 +232,9 @@ async fn run_init(state: &RpcState, rpc_child: &mut RpcChild) -> Result<(), Prox
 fn spawn_child(spec: &ProcessRpcSpec, label: &str) -> Result<RpcChild, ProximaError> {
     let mut command = Command::new(&spec.command);
     command.args(&spec.args);
+    // std inherits the parent env implicitly; proxima_process::Command starts empty, so
+    // `env` below would otherwise be the child's whole environment, PATH included.
+    command.inherit_current_env();
     if let Some(dir) = &spec.working_dir {
         command.current_dir(dir);
     }
