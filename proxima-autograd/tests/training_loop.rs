@@ -554,7 +554,7 @@ async fn adam_training_decreases_the_loss_over_the_dataset() {
             v: v_w1,
         },
         step_node,
-    );
+    ).expect("step layouts are supported");
     let (new_b1, new_m_b1, new_v_b1) = adam_step(
         &mut program,
         &config,
@@ -566,7 +566,7 @@ async fn adam_training_decreases_the_loss_over_the_dataset() {
             v: v_b1,
         },
         step_node,
-    );
+    ).expect("step layouts are supported");
     let (new_w2, new_m_w2, new_v_w2) = adam_step(
         &mut program,
         &config,
@@ -578,7 +578,7 @@ async fn adam_training_decreases_the_loss_over_the_dataset() {
             v: v_w2,
         },
         step_node,
-    );
+    ).expect("step layouts are supported");
     let (new_b2, new_m_b2, new_v_b2) = adam_step(
         &mut program,
         &config,
@@ -590,7 +590,7 @@ async fn adam_training_decreases_the_loss_over_the_dataset() {
             v: v_b2,
         },
         step_node,
-    );
+    ).expect("step layouts are supported");
 
     let mut w1 = counter_pattern(1, IN_DIM * HIDDEN_DIM);
     let mut b1 = counter_pattern(2, HIDDEN_DIM);

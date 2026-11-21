@@ -77,6 +77,7 @@ proxima = { workspace = true, features = ["test-support"] }
 proxima-telemetry = { path = "../proxima-telemetry", version = "0.1.0", default-features = false, features = ["alloc"] }
 proxima-tensor = { path = "../proxima-tensor", version = "0.1.0", features = ["std", "config", "test-support", "instrument"] }
 proxima-tokenizer = { path = "../proxima-tokenizer", version = "0.1.0", features = ["hf"] }
+temp-env.workspace = true
 tempfile.workspace = true
 toml.workspace = true
 

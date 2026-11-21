@@ -698,7 +698,7 @@ fn real_mnist_conv_norm_trains_and_classifies() {
 
     let mut program = differentiated.program;
     let adam_config = AdamConfig {
-        learning_rate: config.learning_rate,
+        learning_rate: f64::from(config.learning_rate),
         ..AdamConfig::default()
     };
     let step_node = step_input(&mut program, "step");
@@ -813,7 +813,7 @@ fn real_mnist_conv_norm_trains_and_classifies() {
             v: v_conv1_weight,
         },
         step_node,
-    );
+    ).expect("step layouts are supported");
     let (new_conv1_bias, new_m_conv1_bias, new_v_conv1_bias) = adam_step(
         &mut program,
         &adam_config,
@@ -825,7 +825,7 @@ fn real_mnist_conv_norm_trains_and_classifies() {
             v: v_conv1_bias,
         },
         step_node,
-    );
+    ).expect("step layouts are supported");
     let (new_bn1_gamma, new_m_bn1_gamma, new_v_bn1_gamma) = adam_step(
         &mut program,
         &adam_config,
@@ -837,7 +837,7 @@ fn real_mnist_conv_norm_trains_and_classifies() {
             v: v_bn1_gamma,
         },
         step_node,
-    );
+    ).expect("step layouts are supported");
     let (new_bn1_beta, new_m_bn1_beta, new_v_bn1_beta) = adam_step(
         &mut program,
         &adam_config,
@@ -849,7 +849,7 @@ fn real_mnist_conv_norm_trains_and_classifies() {
             v: v_bn1_beta,
         },
         step_node,
-    );
+    ).expect("step layouts are supported");
     let (new_conv2_weight, new_m_conv2_weight, new_v_conv2_weight) = adam_step(
         &mut program,
         &adam_config,
@@ -861,7 +861,7 @@ fn real_mnist_conv_norm_trains_and_classifies() {
             v: v_conv2_weight,
         },
         step_node,
-    );
+    ).expect("step layouts are supported");
     let (new_conv2_bias, new_m_conv2_bias, new_v_conv2_bias) = adam_step(
         &mut program,
         &adam_config,
@@ -873,7 +873,7 @@ fn real_mnist_conv_norm_trains_and_classifies() {
             v: v_conv2_bias,
         },
         step_node,
-    );
+    ).expect("step layouts are supported");
     let (new_fc_weight, new_m_fc_weight, new_v_fc_weight) = adam_step(
         &mut program,
         &adam_config,
@@ -885,7 +885,7 @@ fn real_mnist_conv_norm_trains_and_classifies() {
             v: v_fc_weight,
         },
         step_node,
-    );
+    ).expect("step layouts are supported");
     let (new_fc_bias, new_m_fc_bias, new_v_fc_bias) = adam_step(
         &mut program,
         &adam_config,
@@ -897,7 +897,7 @@ fn real_mnist_conv_norm_trains_and_classifies() {
             v: v_fc_bias,
         },
         step_node,
-    );
+    ).expect("step layouts are supported");
 
     let rebind: Vec<(NodeId, &str)> = alloc::vec![
         (new_conv1_weight, "conv1_weight"),

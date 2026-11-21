@@ -289,8 +289,11 @@ mod tests {
             .gradient_of_named("x")
             .expect("x feeds the loss");
         let mut trained_program = differentiated.program;
-        let config = crate::optimizer::SgdConfig { learning_rate: 0.1 };
-        let new_x = crate::optimizer::sgd_step(&mut trained_program, &config, 1, x, grad_x);
+        let config = crate::optimizer::SgdConfig {
+            learning_rate: 0.1,
+            ..crate::optimizer::SgdConfig::default()
+        };
+        let new_x = crate::optimizer::sgd_step(&mut trained_program, &config, 1, x, grad_x).expect("step layouts are supported");
 
         let x_values = [2.0f32];
         let target_values = [0.0f32];
@@ -363,8 +366,11 @@ mod tests {
             .gradient_of_named("x")
             .expect("x feeds the loss");
         let mut trained_program = differentiated.program;
-        let config = crate::optimizer::SgdConfig { learning_rate: 0.1 };
-        let new_x = crate::optimizer::sgd_step(&mut trained_program, &config, 1, x, grad_x);
+        let config = crate::optimizer::SgdConfig {
+            learning_rate: 0.1,
+            ..crate::optimizer::SgdConfig::default()
+        };
+        let new_x = crate::optimizer::sgd_step(&mut trained_program, &config, 1, x, grad_x).expect("step layouts are supported");
 
         let target_values = [0.0f32];
         let batches = vec![vec![("target", target_values.as_slice())]];

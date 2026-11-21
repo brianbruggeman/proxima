@@ -256,7 +256,7 @@ fn run_adam_row(
             v: moment_two,
         },
         step,
-    );
+    ).expect("step layouts are supported");
     let evaluated = evaluate_named(
         &program,
         &[],

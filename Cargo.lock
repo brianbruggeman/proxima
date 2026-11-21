@@ -4153,6 +4153,7 @@ dependencies = [
  "proxima-tokenizer",
  "serde",
  "serde_json",
+ "temp-env",
  "tempfile",
  "thiserror 2.0.19",
  "toml 0.8.23",

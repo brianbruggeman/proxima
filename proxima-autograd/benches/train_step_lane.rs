@@ -60,11 +60,14 @@ use proxima_numeric::DType;
 use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 
+#[cfg(not(feature = "train-step-profile"))]
+type FreeBuffers = (Vec<Vec<f32>>, Vec<Vec<f64>>);
+
 /// [`train_step_scratch`]'s two threaded-across-the-run pieces, named once so
 /// the criterion closure below doesn't repeat the tuple type at both the
 /// `RefCell` declaration and the destructure.
 #[cfg(not(feature = "train-step-profile"))]
-type ScratchPool = (Vec<Vec<f32>>, Option<BTreeSet<NodeId>>);
+type ScratchPool = (FreeBuffers, Option<BTreeSet<NodeId>>);
 
 /// Bench-local twin of [`train_step`], composing
 /// [`evaluate_quantized_named_with_scratch`] directly instead of
@@ -77,7 +80,7 @@ fn train_step_scratch(
     loss: NodeId,
     rebind: &[(NodeId, &str)],
     named: &[(&str, &[f32])],
-    free_buffers: &mut Vec<Vec<f32>>,
+    free_buffers: &mut FreeBuffers,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
 ) -> (f32, State) {
     let mut outputs = Vec::with_capacity(rebind.len() + 1);
@@ -452,7 +455,7 @@ fn build_training_lane() -> TrainingLane {
             v: v_w1,
         },
         step_node,
-    );
+    ).expect("step layouts are supported");
     let (new_b1, new_m_b1, new_v_b1) = adam_step(
         &mut program,
         &config,
@@ -464,7 +467,7 @@ fn build_training_lane() -> TrainingLane {
             v: v_b1,
         },
         step_node,
-    );
+    ).expect("step layouts are supported");
     let (new_w2, new_m_w2, new_v_w2) = adam_step(
         &mut program,
         &config,
@@ -476,7 +479,7 @@ fn build_training_lane() -> TrainingLane {
             v: v_w2,
         },
         step_node,
-    );
+    ).expect("step layouts are supported");
     let (new_b2, new_m_b2, new_v_b2) = adam_step(
         &mut program,
         &config,
@@ -488,7 +491,7 @@ fn build_training_lane() -> TrainingLane {
             v: v_b2,
         },
         step_node,
-    );
+    ).expect("step layouts are supported");
 
     let rebind: Vec<(NodeId, &'static str)> = vec![
         (new_w1, "w1"),
@@ -633,7 +636,7 @@ fn sweep_baseline(lane: &TrainingLane) -> SweepResult {
 #[cfg(not(feature = "train-step-profile"))]
 fn sweep_scratch(lane: &TrainingLane) -> SweepResult {
     let mut state = lane.initial_state.clone();
-    let mut free_buffers: Vec<Vec<f32>> = Vec::new();
+    let mut free_buffers: FreeBuffers = (Vec::new(), Vec::new());
     let mut validated_weight_nodes: Option<BTreeSet<NodeId>> = None;
     for batch in &lane.batches[..WARMUP_STEPS] {
         let named = named_for_step(batch, &state);
@@ -981,7 +984,7 @@ fn run_sealed_sweeps(lane: &TrainingLane) {
     );
 
     let scratch_state = scratch.final_state.clone();
-    let scratch_pool: RefCell<ScratchPool> = RefCell::new((Vec::new(), None));
+    let scratch_pool: RefCell<ScratchPool> = RefCell::new(((Vec::new(), Vec::new()), None));
     group.bench_function(
         "train_step_mlp_784_128_10_batch32_adam_scratch",
         |bencher| {

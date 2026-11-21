@@ -731,6 +731,8 @@ pub fn evaluate_packed_token(
     Ok((logits, loss, gradient))
 }
 
+// the default config is float32 everywhere, which the scalar codec always runs
+#[allow(clippy::expect_used)]
 pub fn optimizer_program() -> (Vec<Op>, NodeId, NodeId, NodeId) {
     let mut program = Vec::new();
     let parameters = op::append(
@@ -777,7 +779,7 @@ pub fn optimizer_program() -> (Vec<Op>, NodeId, NodeId, NodeId) {
             v: second_moment,
         },
         step,
-    );
+    ).expect("step layouts are supported");
     (program, updated_parameters, updated_first, updated_second)
 }
 

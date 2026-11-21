@@ -415,7 +415,7 @@ fn wire_adam(
                 v: v_node,
             },
             step,
-        );
+        ).expect("step layouts are supported");
         m_names[index] = m_name;
         v_names[index] = v_name;
         new_param[index] = updated_param;

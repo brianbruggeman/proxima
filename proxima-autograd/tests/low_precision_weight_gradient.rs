@@ -144,7 +144,7 @@ fn low_precision_weight_gradient_matches_f32_reference() {
             v: moment_two,
         },
         step,
-    );
+    ).expect("step layouts are supported");
     for operation in &differentiated.program {
         assert_eq!(
             operation.dtype(),

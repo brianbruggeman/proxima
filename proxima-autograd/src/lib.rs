@@ -94,6 +94,8 @@ pub mod loss;
 pub mod low_precision;
 pub mod norm;
 pub mod optimizer;
+#[cfg(all(test, feature = "config"))]
+mod optimizer_config;
 // `save_state`/`load_state`: `train::State` through `proxima-safetensors`'s
 // writer/parser -- see this module's own doc for why `State` stays
 // shapeless and `program: &[Op]` is the shape source instead.

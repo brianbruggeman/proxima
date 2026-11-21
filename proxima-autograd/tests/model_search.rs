@@ -939,7 +939,7 @@ fn append_adam(
             v: v_in,
         },
         step,
-    );
+    ).expect("step layouts are supported");
     AdamNodes {
         new_param,
         new_m,

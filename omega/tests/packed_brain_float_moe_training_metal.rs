@@ -8,6 +8,7 @@ use std::fmt::Write;
 use std::fs;
 
 use moe_test_json as serde_json;
+use proxima_numeric::FloatLayout;
 use omega::backend::{Engine, GpuDriver, Plan, execute_plan_named, plan_named};
 use omega::{Codec, PackedOperands, emit};
 use proxima_autograd::adjoint::{Differentiated, GatheredContribution, differentiate};
@@ -114,6 +115,9 @@ const LOOP_ADAM: AdamConfig = AdamConfig {
     beta1: 0.9,
     beta2: 0.999,
     epsilon: 1e-8,
+    hyper_layout: FloatLayout::BF32,
+    first_moment_layout: FloatLayout::BF32,
+    second_moment_layout: FloatLayout::BF32,
 };
 
 fn build_fixture() -> Fixture {
@@ -469,7 +473,7 @@ fn run_adam_state_row(
             v: moment_two,
         },
         step,
-    );
+    ).expect("step layouts are supported");
     let evaluated = proxima_tensor::cpu::evaluate_named(
         &program,
         &[],
@@ -675,20 +679,26 @@ fn scalar_loop_step(
     let mut updated_masters = masters.to_vec();
     let mut updated_first = first_moments.to_vec();
     let mut updated_second = second_moments.to_vec();
-    let correction_one = 1.0 - LOOP_ADAM.beta1.powi(step as i32);
-    let correction_two = 1.0 - LOOP_ADAM.beta2.powi(step as i32);
+    let [beta1, beta2, learning_rate, epsilon] = [
+        LOOP_ADAM.beta1 as f32,
+        LOOP_ADAM.beta2 as f32,
+        LOOP_ADAM.learning_rate as f32,
+        LOOP_ADAM.epsilon as f32,
+    ];
+    let correction_one = 1.0 - beta1.powi(step as i32);
+    let correction_two = 1.0 - beta2.powi(step as i32);
     for expert_index in [0usize, 1] {
         for element_index in 0..4 {
             let index = expert_index * 4 + element_index;
             let gradient = coalesced_gradients[index];
             updated_first[index] =
-                LOOP_ADAM.beta1 * first_moments[index] + (1.0 - LOOP_ADAM.beta1) * gradient;
-            updated_second[index] = LOOP_ADAM.beta2 * second_moments[index]
-                + (1.0 - LOOP_ADAM.beta2) * gradient * gradient;
+                beta1 * first_moments[index] + (1.0 - beta1) * gradient;
+            updated_second[index] = beta2 * second_moments[index]
+                + (1.0 - beta2) * gradient * gradient;
             let corrected_first = updated_first[index] / correction_one;
             let corrected_second = updated_second[index] / correction_two;
-            updated_masters[index] -= LOOP_ADAM.learning_rate * corrected_first
-                / (corrected_second.sqrt() + LOOP_ADAM.epsilon);
+            updated_masters[index] -= learning_rate * corrected_first
+                / (corrected_second.sqrt() + epsilon);
         }
     }
     ReferenceValues {
