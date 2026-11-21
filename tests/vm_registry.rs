@@ -99,6 +99,7 @@ const WHOAMI_BLOBS: [&str; 6] = [
 const RESIDENT_REQUESTS: usize = 3;
 const RESTART_FLAG: &str = "--vm-registry-restart-child";
 const SERVE_ONCE_GUEST: &str = "serve-once-init";
+#[cfg(all(feature = "vm", target_os = "linux", target_arch = "x86_64"))]
 const RESTART_GET_LIMIT: Duration = Duration::from_secs(10);
 
 const MAX_SEGMENTS: usize = 8;
@@ -114,8 +115,11 @@ fn main() {
     let outcome = match arguments.first().map(String::as_str) {
         Some(PROBE_FLAG) => Some(run_probe_child(&arguments[1], &arguments[2])),
         Some(SERVE_FLAG) => Some(run_serve_child(&arguments[1], &arguments[2])),
+        #[cfg(all(feature = "vm", target_os = "linux", target_arch = "x86_64"))]
         Some(RESIDENT_FLAG) => Some(run_resident_child(&arguments[1], &arguments[2], true)),
+        #[cfg(all(feature = "vm", target_os = "linux", target_arch = "x86_64"))]
         Some(RESIDENT_BARE_FLAG) => Some(run_resident_child(&arguments[1], &arguments[2], false)),
+        #[cfg(all(feature = "vm", target_os = "linux", target_arch = "x86_64"))]
         Some(RESTART_FLAG) => Some(run_restart_child(&arguments[1..])),
         Some(BENCH_FLAG) => Some(run_bench_child(&arguments[1..])),
         Some(INSTRUMENT_FLAG) => Some(run_instrument_child(&arguments[1..])),
@@ -338,6 +342,7 @@ fn run_serve_child(config_path: &str, mount_path: &str) -> Result<(), Box<dyn Er
     })
 }
 
+#[cfg(all(feature = "vm", target_os = "linux", target_arch = "x86_64"))]
 fn get_request() -> Result<proxima::Request<Bytes>, Box<dyn Error>> {
     Ok(proxima::Request::builder()
         .method("GET")
@@ -349,6 +354,7 @@ fn get_request() -> Result<proxima::Request<Bytes>, Box<dyn Error>> {
 /// `RESIDENT_REQUESTS` sequential GETs through its `PipeHandle`, and prints one
 /// `status=<code>` line per response, the first response's body, and
 /// `boots=<n>`: the count of guests this process started.
+#[cfg(all(feature = "vm", target_os = "linux", target_arch = "x86_64"))]
 fn run_resident_child(
     config_path: &str,
     pipe_name: &str,
@@ -1393,6 +1399,7 @@ fn restart_report(restart: &str) -> String {
     String::from_utf8(output).expect("child prints text")
 }
 
+#[cfg(all(feature = "vm", target_os = "linux", target_arch = "x86_64"))]
 async fn get_outcome(upstream: &proxima::upstreams::vm_resident::ResidentVmUpstream) -> String {
     let attempt = async {
         let response = proxima_primitives::pipe::SendPipe::call(upstream, get_request()?).await?;
@@ -1413,6 +1420,7 @@ async fn get_outcome(upstream: &proxima::upstreams::vm_resident::ResidentVmUpstr
 /// over the self-ending `serve-once-init`, GETs once, follows the published
 /// status until the supervisor finishes (the sender drops), GETs once while a
 /// restarted guest runs, and prints the process-wide boot and restart counts.
+#[cfg(all(feature = "vm", target_os = "linux", target_arch = "x86_64"))]
 fn run_restart_child(arguments: &[String]) -> Result<(), Box<dyn Error>> {
     let [kernel, init, restart] = arguments else {
         return Err("restart child takes <kernel> <serve-once-init> <always|never>".into());
