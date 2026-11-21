@@ -100,6 +100,9 @@ pub mod optimizer;
 #[cfg(feature = "safetensors")]
 pub mod persist;
 pub mod sparse;
+#[cfg(all(test, feature = "std"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod generic_lowering_grad;
 // `evaluate_named` (proxima-tensor's own std-gated `cpu` module) is what
 // `train_step` actually runs a compiled step through -- see this crate's own
 // `std` feature doc for the same gate on `optimizer::AdamConfig`'s config
