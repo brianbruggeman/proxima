@@ -14,8 +14,9 @@ use alloc::vec::Vec;
 use proxima_numeric::DType;
 use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 use proxima_tensor::spec::{
-    RopePairing, elementwise_like, fused_rope_pair, layer_norm, layer_norm_no_affine, modulate,
-    multi_axis_rope_tables, non_causal_attention, reduce_like, scalar_constant_like, tap_layers,
+    RopePairing, cross_kv, elementwise_like, fused_rope_pair, layer_norm, layer_norm_no_affine,
+    modulate, multi_axis_rope_tables, non_causal_attention, reduce_like, scalar_constant_like,
+    tap_layers,
 };
 
 // central difference of an f32 loss of magnitude L at step h errs by about
@@ -333,4 +334,268 @@ async fn grad_layer_norm_matches_finite_differences_for_x_weight_and_bias() {
         &["x", "weight", "bias"],
     );
     assert_eq!(reports.len(), 3);
+}
+
+// cross-attention, non-Whisper shape: s = 3 queries over t = 5 memory positions.
+const CROSS_S: u32 = 3;
+const CROSS_T: u32 = 5;
+const CROSS_U: u32 = 2;
+const CROSS_I: u32 = 4;
+const CROSS_D: u32 = 3;
+const CROSS_M: u32 = 6;
+const CROSS_SCALE: f32 = 0.5;
+
+fn cross_values() -> Vec<(&'static str, Vec<f32>)> {
+    let (u, i, d, m) = (CROSS_U, CROSS_I, CROSS_D, CROSS_M);
+    vec![
+        ("q", Lcg::values(21, (CROSS_S * u * i) as usize)),
+        ("memory", Lcg::values(22, (CROSS_T * m) as usize)),
+        ("k_weight", Lcg::values(23, (m * u * i) as usize)),
+        ("k_bias", Lcg::values(24, (u * i) as usize)),
+        ("v_weight", Lcg::values(25, (m * u * d) as usize)),
+    ]
+}
+
+/// graph that projects K and V from the memory (`cross_kv`; v has no bias) and
+/// attends; returns the program, the k and v nodes and the attention output.
+fn cross_recomputed() -> (Vec<Op>, NodeId, NodeId, NodeId) {
+    let (s, t, u, i, d, m) = (CROSS_S, CROSS_T, CROSS_U, CROSS_I, CROSS_D, CROSS_M);
+    let mut program = Vec::new();
+    let q = input(&mut program, "q", &[s, u, i]);
+    let memory = input(&mut program, "memory", &[t, m]);
+    let k_weight = input(&mut program, "k_weight", &[m, u, i]);
+    let k_bias = input(&mut program, "k_bias", &[u, i]);
+    let v_weight = input(&mut program, "v_weight", &[m, u, d]);
+    let (k, v) = cross_kv(&mut program, memory, k_weight, Some(k_bias), v_weight, None)
+        .expect("cross kv builds");
+    let scale = scalar_constant_like(&mut program, CROSS_SCALE, q).expect("scale builds");
+    let out = non_causal_attention(&mut program, q, k, v, scale).expect("attention builds");
+    (program, k, v, out)
+}
+
+/// graph that binds cached `cross_k`/`cross_v` as inputs and runs the same attention.
+fn cross_cached() -> (Vec<Op>, NodeId) {
+    let (s, t, u, i, d) = (CROSS_S, CROSS_T, CROSS_U, CROSS_I, CROSS_D);
+    let mut program = Vec::new();
+    let q = input(&mut program, "q", &[s, u, i]);
+    let k = input(&mut program, "cross_k", &[t, u, i]);
+    let v = input(&mut program, "cross_v", &[t, u, d]);
+    let scale = scalar_constant_like(&mut program, CROSS_SCALE, q).expect("scale builds");
+    let out = non_causal_attention(&mut program, q, k, v, scale).expect("attention builds");
+    (program, out)
+}
+
+/// `sum(out * out)` as a scalar loss node.
+fn sum_of_squares(program: &mut Vec<Op>, out: NodeId) -> NodeId {
+    let axes = "sugd";
+    let squared = elementwise_like(
+        program,
+        out,
+        ScalarOp::Multiply,
+        &[(out, "sugd->sugd"), (out, "sugd->sugd")],
+    )
+    .expect("square builds");
+    reduce_like(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        squared,
+        "sugd->sugd",
+        alloc::format!("->{axes}").as_str(),
+    )
+    .expect("loss reduce builds")
+}
+
+fn evaluate_nodes(program: &[Op], bound: &[(&str, Vec<f32>)], nodes: &[NodeId]) -> Vec<Vec<f32>> {
+    let owned: Vec<(String, Vec<f32>)> = bound
+        .iter()
+        .map(|(n, v)| ((*n).into(), v.clone()))
+        .collect();
+    let evaluated = proxima_tensor::cpu::evaluate_named(program, &[], &borrowed(&owned), nodes)
+        .expect("program evaluates");
+    nodes
+        .iter()
+        .map(|&node| evaluated.get(node).expect("node requested").0.to_vec())
+        .collect()
+}
+
+fn named<'a>(bound: &'a [(&'static str, Vec<f32>)], name: &str) -> &'a [f32] {
+    &bound.iter().find(|(n, _)| *n == name).expect("bound").1
+}
+
+/// plain-loop reference: `softmax_t(scale * q.k) . v`, k and v projected from the memory.
+fn cross_reference(bound: &[(&'static str, Vec<f32>)]) -> Vec<f32> {
+    let (s, t, u, i, d, m) = (
+        CROSS_S as usize,
+        CROSS_T as usize,
+        CROSS_U as usize,
+        CROSS_I as usize,
+        CROSS_D as usize,
+        CROSS_M as usize,
+    );
+    let (q, memory) = (named(bound, "q"), named(bound, "memory"));
+    let (wk, bk, wv) = (
+        named(bound, "k_weight"),
+        named(bound, "k_bias"),
+        named(bound, "v_weight"),
+    );
+    let mut k = vec![0f32; t * u * i];
+    let mut v = vec![0f32; t * u * d];
+    for pos in 0..t {
+        for head in 0..u {
+            for col in 0..i {
+                let dot: f32 = (0..m)
+                    .map(|c| memory[pos * m + c] * wk[(c * u + head) * i + col])
+                    .sum();
+                k[(pos * u + head) * i + col] = dot + bk[head * i + col];
+            }
+            for col in 0..d {
+                let dot: f32 = (0..m)
+                    .map(|c| memory[pos * m + c] * wv[(c * u + head) * d + col])
+                    .sum();
+                v[(pos * u + head) * d + col] = dot;
+            }
+        }
+    }
+    let mut out = vec![0f32; s * u * d];
+    for row in 0..s {
+        for head in 0..u {
+            let scores: Vec<f32> = (0..t)
+                .map(|pos| {
+                    CROSS_SCALE
+                        * (0..i)
+                            .map(|c| q[(row * u + head) * i + c] * k[(pos * u + head) * i + c])
+                            .sum::<f32>()
+                })
+                .collect();
+            let peak = scores.iter().cloned().fold(f32::MIN, f32::max);
+            let weights: Vec<f32> = scores.iter().map(|x| (x - peak).exp()).collect();
+            let total: f32 = weights.iter().sum();
+            for col in 0..d {
+                out[(row * u + head) * d + col] = (0..t)
+                    .map(|pos| weights[pos] / total * v[(pos * u + head) * d + col])
+                    .sum();
+            }
+        }
+    }
+    out
+}
+
+/// spec metric (R10): `max|g_ad - g_fd| / max|g_fd|` at `h = 5e-3`, returns (elements, error).
+fn spec_gradient_error(
+    program: &[Op],
+    loss: NodeId,
+    bound: &[(&'static str, Vec<f32>)],
+    target: &str,
+) -> (usize, f32) {
+    const SPEC_STEP: f32 = 5e-3;
+    let differentiated = crate::adjoint::differentiate(program, loss).expect("differentiates");
+    let grad = differentiated
+        .gradient_of_named(target)
+        .unwrap_or_else(|| panic!("{target} feeds the loss and has a gradient"));
+    let analytic = evaluate_nodes(&differentiated.program, bound, &[grad]).remove(0);
+    let slot = bound.iter().position(|(n, _)| *n == target).expect("bound");
+    assert_eq!(
+        analytic.len(),
+        bound[slot].1.len(),
+        "{target} gradient size"
+    );
+    let mut probe = bound.to_vec();
+    let (mut worst, mut largest) = (0f32, 0f32);
+    for index in 0..analytic.len() {
+        let original = bound[slot].1[index];
+        probe[slot].1[index] = original + SPEC_STEP;
+        let plus = evaluate_nodes(program, &probe, &[loss])[0][0];
+        probe[slot].1[index] = original - SPEC_STEP;
+        let minus = evaluate_nodes(program, &probe, &[loss])[0][0];
+        probe[slot].1[index] = original;
+        let numeric = (plus - minus) / (2.0 * SPEC_STEP);
+        worst = worst.max((analytic[index] - numeric).abs());
+        largest = largest.max(numeric.abs());
+    }
+    assert!(
+        largest > 0.0,
+        "{target}: central-difference gradient is identically zero"
+    );
+    (analytic.len(), worst / largest)
+}
+
+#[proxima::test]
+async fn grad_cross_attention_forward_matches_a_naive_reference() {
+    let bound = cross_values();
+    let (program, _, _, out) = cross_recomputed();
+    let got = evaluate_nodes(&program, &bound, &[out]).remove(0);
+    let want = cross_reference(&bound);
+    assert_eq!(got.len(), want.len());
+    assert!(!want.is_empty(), "compared zero elements");
+    let worst = got
+        .iter()
+        .zip(&want)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    std::println!("cross_attention forward n={} max_abs={worst:e}", got.len());
+    assert!(
+        worst < 1e-5,
+        "forward differs from the reference by {worst}"
+    );
+}
+
+#[proxima::test]
+async fn grad_cross_attention_gradient_to_query_and_memory_matches_central_differences() {
+    let bound = cross_values();
+    let (mut program, _, _, out) = cross_recomputed();
+    let loss = sum_of_squares(&mut program, out);
+    for target in ["q", "memory"] {
+        let (count, error) = spec_gradient_error(&program, loss, &bound, target);
+        std::println!("cross_attention wrt={target} n={count} max|g_ad-g_fd|/max|g_fd|={error:e}");
+        assert!(count > 0, "{target}: compared zero elements");
+        assert!(error <= 5e-4, "{target}: error {error} exceeds 5e-4");
+    }
+}
+
+#[proxima::test]
+async fn grad_cross_attention_cached_and_recomputed_kv_give_equal_outputs_and_query_gradients() {
+    let bound = cross_values();
+    let (mut recomputed, k, v, out) = cross_recomputed();
+    let kv = evaluate_nodes(&recomputed, &bound, &[k, v]);
+    let loss = sum_of_squares(&mut recomputed, out);
+    let (mut cached, cached_out) = cross_cached();
+    let cached_loss = sum_of_squares(&mut cached, cached_out);
+    let cached_bound = vec![
+        ("q", named(&bound, "q").to_vec()),
+        ("cross_k", kv[0].clone()),
+        ("cross_v", kv[1].clone()),
+    ];
+    let from_graph = evaluate_nodes(&recomputed, &bound, &[out]).remove(0);
+    let from_cache = evaluate_nodes(&cached, &cached_bound, &[cached_out]).remove(0);
+    let output_gap = from_graph
+        .iter()
+        .zip(&from_cache)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    let query_grad = |program: &[Op], loss: NodeId, values: &[(&str, Vec<f32>)]| {
+        let differentiated = crate::adjoint::differentiate(program, loss).expect("differentiates");
+        let grad = differentiated
+            .gradient_of_named("q")
+            .expect("q has a gradient");
+        evaluate_nodes(&differentiated.program, values, &[grad]).remove(0)
+    };
+    let grad_graph = query_grad(&recomputed, loss, &bound);
+    let grad_cache = query_grad(&cached, cached_loss, &cached_bound);
+    let grad_gap = grad_graph
+        .iter()
+        .zip(&grad_cache)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    std::println!(
+        "cross_attention cached-vs-recomputed outputs n={} max_abs={output_gap:e}; q grad n={} max_abs={grad_gap:e}",
+        from_graph.len(),
+        grad_graph.len()
+    );
+    assert!(
+        !from_graph.is_empty() && !grad_graph.is_empty(),
+        "compared zero elements"
+    );
+    assert!(output_gap <= 1e-6, "outputs differ by {output_gap}");
+    assert!(grad_gap <= 1e-6, "query gradients differ by {grad_gap}");
 }

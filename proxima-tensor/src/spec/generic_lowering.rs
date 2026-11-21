@@ -200,6 +200,69 @@ pub fn non_causal_attention(
     append_masked_softmax_mix(program, scores, inv_sqrt_head_dim, None, None, 1, v)
 }
 
+/// One head-split projection of the encoder memory: `memory` is `[t, m]`,
+/// `weight` is `[m, u, o]`, the result is `[t, u, o]`; an optional `bias`
+/// (`[u, o]`) is added per position. A multiply and a `Reduce` over `m`, so
+/// autograd differentiates it with the rules it already has.
+fn project_memory(
+    program: &mut Vec<Op>,
+    memory: NodeId,
+    weight: NodeId,
+    bias: Option<NodeId>,
+) -> Result<NodeId, TensorError> {
+    let product = elementwise_like(
+        program,
+        memory,
+        ScalarOp::Multiply,
+        &[(memory, "tm->tmuo"), (weight, "muo->tmuo")],
+    )?;
+    let projected = reduce_like(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        product,
+        "tmuo->tmuo",
+        "tuo->tmuo",
+    )?;
+    match bias {
+        Some(bias) => elementwise_like(
+            program,
+            memory,
+            ScalarOp::Add,
+            &[(projected, "tuo->tuo"), (bias, "uo->tuo")],
+        ),
+        None => Ok(projected),
+    }
+}
+
+/// The once-per-utterance cross-attention K and V: both projected from the
+/// encoder `memory` (`[t, m]`) with `k_weight` (`[m, u, i]`) and `v_weight`
+/// (`[m, u, d]`), giving `k` as `[t, u, i]` and `v` as `[t, u, d]`. A bias is an
+/// operand or it is absent (`None`); a model whose K projection has no bias
+/// passes `None`, nothing branches on a name.
+///
+/// Feed the pair to [`non_causal_attention`] (`s != t`). Inference binds the
+/// cached `k`/`v` tensors as `Input`s in place of this builder's output;
+/// training calls this builder in the same graph, so the adjoint flows through
+/// the projection to the memory and the weights. The attention ops are the same
+/// either way: there is no inference-only op.
+///
+/// # Errors
+///
+/// [`TensorError`] when a node is not part of `program`.
+pub fn cross_kv(
+    program: &mut Vec<Op>,
+    memory: NodeId,
+    k_weight: NodeId,
+    k_bias: Option<NodeId>,
+    v_weight: NodeId,
+    v_bias: Option<NodeId>,
+) -> Result<(NodeId, NodeId), TensorError> {
+    let k = project_memory(program, memory, k_weight, k_bias)?;
+    let v = project_memory(program, memory, v_weight, v_bias)?;
+    Ok((k, v))
+}
+
 fn encode_table(values: &[f32], dtype: DType) -> Result<Vec<u8>, TensorError> {
     let unsupported = TensorError::NotLowerable {
         node: NodeId(0),
