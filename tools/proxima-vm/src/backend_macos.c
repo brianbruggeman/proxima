@@ -55,6 +55,9 @@ static uint32_t mov_x0_imm(uint16_t value) {
  * constructs a second context in the SAME process, over the same
  * process-wide `hv_vm`, so this call must be safe to make twice. */
 static int g_vm_created = 0;
+/* The device-model loop's own flag (see `device_create_vm`); declared here so
+ * `destroy_vm` can clear it. */
+static int g_device_vm_created = 0;
 
 static int create_vm(char *error_buffer, size_t error_capacity) {
     if (g_vm_created) {
@@ -129,9 +132,18 @@ static void destroy_vcpu(hv_vcpu_t vcpu, int vcpu_created) {
     }
 }
 
+/* `hv_vm_destroy` ends the process's one hv_vm, so the create guards must
+ * drop with it: a later run in the same process has to create a fresh vm, not
+ * skip creation and hit `hv_vm_map` on a destroyed one (`HV_NO_DEVICE`). */
+static void forget_destroyed_vm(void) {
+    g_vm_created = 0;
+    g_device_vm_created = 0;
+}
+
 static void destroy_vm(int vm_created) {
     if (vm_created) {
         hv_vm_destroy();
+        forget_destroyed_vm();
     }
 }
 
@@ -144,7 +156,6 @@ static void destroy_vm(int vm_created) {
  * must never be entangled with `create_vm`'s callers (`proxima_vm_scratch_run`,
  * `proxima_vm_run_dispatch_loop`), which run in their own dedicated
  * processes and know nothing about EL2. */
-static int g_device_vm_created = 0;
 
 /* `enable_el2` is `edk2`-boot-only (`boot::boot_edk2_firmware`'s own doc):
  * every kernel-boot caller passes 0. `hv_vm_config_set_el2_enabled`'s own
@@ -1388,6 +1399,7 @@ int proxima_vm_scratch_warm_restore(
 void proxima_vm_scratch_warm_vm_destroy(proxima_vm_warm_restore_context_t *context) {
     hv_vcpu_destroy((hv_vcpu_t)context->vcpu);
     hv_vm_destroy();
+    forget_destroyed_vm();
     proxima_vm_destroy_named_region(&context->region);
 }
 
