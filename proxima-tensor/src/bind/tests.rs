@@ -7887,6 +7887,17 @@ fn the_program_level_kv_padding_probe_agrees_with_the_bound_graph_probe() {
         let by_program = kv_read_only_by_fused_attention_in_program(&program, &shapes, &requested, policy, is_kv);
         assert!(by_graph, "control: the fixture's kv inputs are read only by the fused attention");
         assert_eq!(by_program, by_graph, "the program-level probe must give the bound graph's answer");
+        assert!(
+            !kv_read_only_by_fused_attention_for_target(
+                &program,
+                &shapes,
+                &requested,
+                policy,
+                &Executes::BASE,
+                is_kv,
+            ),
+            "a target without Form::CachedAttention has no fused reader to absorb the padding"
+        );
         let kv_input = program
             .iter()
             .position(|op| matches!(op, Op::Input { name: Some(name), .. } if is_kv(name)))

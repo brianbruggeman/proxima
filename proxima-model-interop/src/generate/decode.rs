@@ -5220,7 +5220,6 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         active_program_hash,
                         &[new_count as u64, probe_extent, probe_extent],
                         || kv_padding_probe_roots(active_logits_root, active_layer_roots),
-                        &named_blocks,
                     );
                     let kv_bound_extent = cached_kv_extent(
                         runtime.pads_cached_kv(active_program_hash, new_count),

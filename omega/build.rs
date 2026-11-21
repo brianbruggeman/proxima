@@ -166,6 +166,16 @@ fn require_multiple_of_thirty_two(name: &str, value: usize) -> usize {
     value
 }
 
+/// `[kv_padding].default` is the one name `KvPaddingPolicy` parses; a typo here
+/// would otherwise become a silent `Auto` at every runtime default.
+fn require_kv_padding(name: &str, value: String) -> String {
+    assert!(
+        matches!(value.as_str(), "auto" | "padded" | "exact"),
+        "{name} must be auto, padded or exact; got {value}"
+    );
+    value
+}
+
 /// `[attention_rows].mma_min_query_rows` below 2 would route K = 1 off the
 /// decode split form.
 fn require_at_least(name: &str, minimum: usize, value: i64) -> usize {
@@ -353,6 +363,14 @@ fn emit_sizing_consts() {
     );
     out.push_str(&format!(
         "pub const COMMAND_BUFFER_GROWTH_PERMILLE: u64 = {growth_permille};\n"
+    ));
+
+    let kv_padding_default = require_kv_padding(
+        "kv_padding.default",
+        resolve_str(&root, "kv_padding", "default"),
+    );
+    out.push_str(&format!(
+        "pub const KV_PADDING_DEFAULT: &str = {kv_padding_default:?};\n"
     ));
 
     let wavefront_schedule = require_nonneg(

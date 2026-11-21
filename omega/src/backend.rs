@@ -66,7 +66,7 @@
 //! so a wrapper would relocate the impl without enabling any composition. The
 //! free-function pair stays.
 
-use crate::config::{RuntimeConfig, SelectionMode};
+use crate::config::{KvPaddingPolicy, RuntimeConfig, SelectionMode};
 use conflaguration::Validate;
 use core::ops::Range;
 use std::collections::{BTreeMap, BTreeSet};
@@ -234,14 +234,59 @@ impl GpuDriver {
         }
     }
 
-    /// Capability only: whether this driver renders every `BoundOpKind::CachedAttention`
-    /// it is handed, usable before a plan exists. The padding decision itself is the graph
-    /// property [`plan_pads_kv`]; wgpu runs the unfused chain and CUDA renders the fused
-    /// op only where its matcher accepts the form (the tiny recurrent fixture's attention
-    /// is rejected, and a padded range read by an unfused chain is wrong), so neither
-    /// claims it up front.
+    /// The forms this driver's renderer admits, as the value its binder was given.
+    /// This is the one source of "can this driver see a fused cached attention":
+    /// HIP's target has `card_asm = false`, so `CachedAttention` is absent there and
+    /// a padded range can never be read through the unfused chain.
     #[must_use]
-    pub const fn renders_fused_cached_attention(self) -> bool {
+    pub fn executes(self) -> Executes {
+        match self {
+            GpuDriver::Metal => {
+                #[cfg(all(feature = "metal", target_os = "macos"))]
+                {
+                    crate::metal::executes()
+                }
+                #[cfg(not(all(feature = "metal", target_os = "macos")))]
+                {
+                    Executes::BASE
+                }
+            }
+            GpuDriver::Wgpu => {
+                #[cfg(feature = "wgpu-backend")]
+                {
+                    crate::wgpu_driver::executes()
+                }
+                #[cfg(not(feature = "wgpu-backend"))]
+                {
+                    Executes::BASE
+                }
+            }
+            #[cfg(feature = "cuda-driver")]
+            GpuDriver::Cuda => crate::cuda::executes(&crate::cuda::target::Target::CUDA),
+            #[cfg(feature = "cuda-driver")]
+            GpuDriver::Hip { wave, .. } => crate::cuda::executes(&crate::cuda::target::Target::hip_wave(
+                wave.map_or(crate::cuda::HIP_WAVE64, crate::cuda::HipWave::lanes),
+            )),
+        }
+    }
+
+    /// The driver `config` names for its engine, `None` on `cpu`.
+    ///
+    /// # Errors
+    /// [`BackendError`] when the engine or driver name is unknown, or a named driver
+    /// is not compiled into this build.
+    pub fn from_config(config: &RuntimeConfig) -> Result<Option<Self>, BackendError> {
+        let engine: Engine = config.engine.parse()?;
+        configured_driver(config, engine)
+    }
+
+    /// Capability only: whether this driver renders EVERY `BoundOpKind::CachedAttention`
+    /// it is handed, usable before a plan exists. CUDA grants the form but its matcher can
+    /// still decline a specific graph (a sink, a packed operand, an unclassed shape), so it
+    /// does not claim "every" here; the padding decision itself is the graph property
+    /// [`plan_pads_kv`] plus [`GpuDriver::executes`].
+    #[must_use]
+    pub fn renders_fused_cached_attention(self) -> bool {
         matches!(self, GpuDriver::Metal)
     }
 }
@@ -1649,8 +1694,9 @@ pub fn cuda_kernel_identities(plan: &Plan) -> Option<Vec<String>> {
 /// reader of an input `is_kv_input` accepts is a fused `CachedAttention`, whose runtime
 /// bound excludes the pad rows. A plan with any other reader of those inputs (an unfused
 /// attention chain would score zero pad rows into its softmax) is `false`, as is every arm
-/// that never renders the fused op. CUDA and Metal both answer with
-/// [`proxima_tensor::bind::kv_read_only_by_fused_attention`].
+/// that never renders the fused op. CUDA, Metal and HIP all answer with
+/// [`proxima_tensor::bind::kv_read_only_by_fused_attention`] over their own bound graph;
+/// HIP's graph has no fused reader because its target does not grant the form.
 #[must_use]
 pub fn plan_pads_kv(plan: &Plan, is_kv_input: impl Fn(&str) -> bool) -> bool {
     match plan {
@@ -1659,7 +1705,7 @@ pub fn plan_pads_kv(plan: &Plan, is_kv_input: impl Fn(&str) -> bool) -> bool {
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(cuda_plan) => cuda_plan.pads_kv_safely(is_kv_input),
         #[cfg(feature = "cuda-driver")]
-        Plan::Rocm(_) => false,
+        Plan::Rocm(rocm_plan) => rocm_plan.pads_kv_safely(is_kv_input),
         // only reachable while a variant this arm is not naming exists
         #[cfg(any(feature = "cpu", feature = "wgpu-backend"))]
         _ => {
@@ -1680,30 +1726,35 @@ pub fn plan_pads_kv(plan: &Plan, is_kv_input: impl Fn(&str) -> bool) -> bool {
     }
 }
 
-/// [`plan_pads_kv`]'s answer for the plan [`plan_named`] would build for `program` at
-/// `symbols`, decided before any plan exists: the program is bound, nothing is emitted.
-/// Lets the first call at a new width bind its KV range padded instead of building an
-/// unpadded plan to find out.
+/// [`plan_pads_kv`]'s answer for `driver` at `program`/`symbols`, decided before any plan
+/// exists. Shapes are inferred and the program's readers are matched against the driver's
+/// own [`GpuDriver::executes`]: no backend plan is built, no kernel is compiled and no
+/// device is touched, so the probe cannot build a CUDA plan for a HIP call.
 ///
 /// # Errors
-/// [`BackendError::Cuda`] when shape inference or binding fails at `symbols`.
-#[cfg(feature = "cuda-driver")]
-pub fn probe_cuda_pads_kv(
+/// [`BackendError`] when shape inference or the effective-output rewrite fails at `symbols`.
+#[cfg(feature = "std")]
+pub fn probe_pads_kv(
+    driver: GpuDriver,
+    policy: KvPaddingPolicy,
     program: &[Op],
     symbols: &[u64],
     outputs: &[NodeId],
-    named: &[(&str, QuantizedBlock<'_>)],
     numeric_policy: NumericPolicy,
     is_kv_input: impl Fn(&str) -> bool,
 ) -> Result<bool, BackendError> {
-    Ok(crate::cuda_driver::probe_pads_kv(
-        program,
-        symbols,
-        outputs,
-        named,
-        numeric_policy,
-        is_kv_input,
-    )?)
+    match policy {
+        KvPaddingPolicy::Exact => Ok(false),
+        KvPaddingPolicy::Padded => Ok(true),
+        KvPaddingPolicy::Auto => Ok(proxima_tensor::cpu::probe_kv_padding_for(
+            program,
+            symbols,
+            outputs,
+            numeric_policy,
+            &driver.executes(),
+            is_kv_input,
+        )?),
+    }
 }
 
 /// Sets [`metal::DispatchType`] on [`Plan::Metal`] -- see that type's own
@@ -2363,8 +2414,87 @@ mod tests {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use super::MetalError;
     use super::{BackendError, Engine, GpuDriver};
+    use crate::config::KvPaddingPolicy;
+    #[cfg(all(feature = "cuda-driver", feature = "cached-attention-streaming"))]
+    use crate::config::RuntimeConfig;
 
     static ENVIRONMENT_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn kv_padding_policy_resolves_auto_from_the_graph_and_forces_the_overrides() {
+        assert!(!KvPaddingPolicy::Auto.resolves(false));
+        assert!(KvPaddingPolicy::Auto.resolves(true));
+        assert!(KvPaddingPolicy::Padded.resolves(false));
+        assert!(!KvPaddingPolicy::Exact.resolves(true));
+        assert_eq!(KvPaddingPolicy::default(), KvPaddingPolicy::Auto);
+    }
+
+    #[cfg(all(feature = "cuda-driver", feature = "cached-attention-streaming"))]
+    #[test]
+    fn kv_padding_probe_never_builds_a_cuda_plan_for_a_hip_call() {
+        let (program, root, roots) = proxima_tensor::spec::gqa_cached_forward_program(
+            32, 16, 24, 4, 2, 4, 2,
+        )
+        .expect("interleaved fixture builds");
+        let mut outputs = vec![root];
+        for cache_roots in &roots {
+            outputs.extend_from_slice(&[cache_roots.0, cache_roots.1, cache_roots.2]);
+        }
+        let symbols = [1, 6];
+        let policy = proxima_numeric::NumericPolicy::bit_exact();
+        let is_kv_input = |name: &str| name.starts_with("kv_cache.");
+
+        let cpu = proxima_tensor::cpu::probe_kv_padding_for(
+            &program,
+            &symbols,
+            &outputs,
+            policy,
+            &proxima_tensor::Executes::CPU,
+            is_kv_input,
+        )
+        .expect("the CPU probe infers");
+        assert!(cpu, "control: the fixture's kv inputs are read only fused");
+
+        let hip_driver = GpuDriver::from_config(&RuntimeConfig {
+            engine: String::from("gpu"),
+            gpu_driver: String::from("hip"),
+            ..RuntimeConfig::default()
+        })
+        .expect("hip is an accepted driver")
+        .expect("gpu names a driver");
+        assert!(matches!(hip_driver, GpuDriver::Hip { .. }));
+        let hip = super::probe_pads_kv(
+            hip_driver,
+            KvPaddingPolicy::Auto,
+            &program,
+            &symbols,
+            &outputs,
+            policy,
+            is_kv_input,
+        )
+        .expect("the HIP probe infers");
+        assert!(!hip, "HIP's target does not grant CachedAttention, so it cannot pad");
+
+        let cuda_driver = GpuDriver::from_config(&RuntimeConfig {
+            engine: String::from("gpu"),
+            gpu_driver: String::from("cuda"),
+            ..RuntimeConfig::default()
+        })
+        .expect("cuda is an accepted driver")
+        .expect("gpu names a driver");
+        assert_eq!(cuda_driver, GpuDriver::Cuda);
+        let cuda = super::probe_pads_kv(
+            cuda_driver,
+            KvPaddingPolicy::Auto,
+            &program,
+            &symbols,
+            &outputs,
+            policy,
+            is_kv_input,
+        )
+        .expect("the CUDA probe infers");
+        assert!(cuda, "CUDA grants CachedAttention and the graph fuses");
+    }
 
     #[test]
     fn only_the_metal_driver_always_renders_the_fused_cached_attention_bound() {

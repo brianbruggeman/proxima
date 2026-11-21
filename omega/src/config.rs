@@ -32,6 +32,10 @@ pub struct RuntimeConfig {
     /// HIP device ordinal the ROCm plan opens, so a multi-device host can select the device its kernels target.
     #[setting(default = 0)]
     pub hip_device: u32,
+    /// Cached K/V padding policy: `auto` decides from the selected driver and its bound graph,
+    /// `padded` binds the capacity bucket, `exact` binds the live width.
+    #[setting(default_str = "sized", resolve_with = "parse_kv_padding")]
+    pub kv_padding: KvPaddingPolicy,
     /// Permit bind-time and execution-time algebraic fusion, such as joining a product and reduce.
     #[setting(default = false)]
     pub allow_fusion: bool,
@@ -124,6 +128,7 @@ impl Default for RuntimeConfig {
             gpu_driver: String::from("auto"),
             hip_wave: 0,
             hip_device: 0,
+            kv_padding: KvPaddingPolicy::from_sized(),
             allow_fusion: false,
             wavefront_schedule: crate::sized::COMMAND_BUFFER_WAVEFRONT_SCHEDULE,
             exact_activations: true,
@@ -460,6 +465,14 @@ fn parse_max_in_flight(value: &str) -> Result<u16, ParseIntError> {
     parse_sized_u16(value, crate::sized::RUNTIME_MAX_IN_FLIGHT)
 }
 
+fn parse_kv_padding(value: &str) -> Result<KvPaddingPolicy, KvPaddingPolicyParseError> {
+    if value == "sized" {
+        KvPaddingPolicy::from_env_str(crate::sized::KV_PADDING_DEFAULT)
+    } else {
+        KvPaddingPolicy::from_env_str(value)
+    }
+}
+
 macro_rules! string_policy {
     ($name:ident, $error:ident, {$first_string:literal => $first_variant:ident $(, $string:literal => $variant:ident)* $(,)?}, $expected:literal) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -531,6 +544,31 @@ string_policy!(SpeculationStrategy, SpeculationStrategyParseError, {
 string_policy!(WeightConversionStrategy, WeightConversionStrategyParseError, {
     "disabled" => Disabled,
 }, "disabled");
+
+string_policy!(KvPaddingPolicy, KvPaddingPolicyParseError, {
+    "auto" => Auto,
+    "padded" => Padded,
+    "exact" => Exact,
+}, "auto|padded|exact");
+
+impl KvPaddingPolicy {
+    /// The build-time `[kv_padding].default` this platform compiled with.
+    #[must_use]
+    pub fn from_sized() -> Self {
+        Self::from_env_str(crate::sized::KV_PADDING_DEFAULT).unwrap_or(Self::Auto)
+    }
+
+    /// Whether a range binds padded for a graph that binds it `graph_pads` fused, or for a
+    /// driver that renders every fused cached attention before a plan exists.
+    #[must_use]
+    pub const fn resolves(self, graph_pads: bool) -> bool {
+        match self {
+            Self::Auto => graph_pads,
+            Self::Padded => true,
+            Self::Exact => false,
+        }
+    }
+}
 
 /// Byte ceilings enforced at each concrete allocation owner, such as the host input tensor payload.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, Settings)]
@@ -881,6 +919,13 @@ impl RuntimeConfigBuilder {
     #[must_use]
     pub fn with_hip_device(mut self, value: u32) -> Self {
         self.inner.hip_device = value;
+        self
+    }
+
+    /// Set the cached K/V padding policy.
+    #[must_use]
+    pub fn with_kv_padding(mut self, value: KvPaddingPolicy) -> Self {
+        self.inner.kv_padding = value;
         self
     }
 

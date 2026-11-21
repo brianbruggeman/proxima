@@ -1803,25 +1803,6 @@ struct LowerMicros {
     pack: u64,
 }
 
-/// Whether a plan built for `program` at `symbols` would bind its cached K/V range
-/// padded safely (see [`CudaPlan::pads_kv_safely`]), decided by binding alone: no
-/// kernel is emitted and no device is touched. `named` need only carry the weights;
-/// a missing input is not an error here, it just binds unpacked.
-///
-/// # Errors
-/// Shape inference or binding fails at `symbols`.
-pub fn probe_pads_kv(
-    program: &[Op],
-    symbols: &[u64],
-    outputs: &[NodeId],
-    named: &[(&str, QuantizedBlock<'_>)],
-    numeric_policy: NumericPolicy,
-    is_kv_input: impl Fn(&str) -> bool,
-) -> Result<bool, CudaDriverError> {
-    let (resolved, _) = probe_bound_graph(program, symbols, outputs, named, numeric_policy, None)?;
-    Ok(kv_read_only_by_fused_attention(program, &resolved, outputs, is_kv_input))
-}
-
 /// The bound ops and packed-operand map a CUDA plan for `program` at `symbols` would
 /// bind, by binding alone: no kernel is emitted and no device is touched. The packed map
 /// is built from the weight blocks in `named` (a missing input binds unpacked), then
@@ -4733,7 +4714,8 @@ pub mod rocm {
     use crate::cuda::{EmitDevice, HipKernel, HipWave, emit_hip_at_wave};
     use crate::lowering::PackedOperands;
     use proxima_numeric::NumericPolicy;
-    use proxima_tensor::{Evaluated, NodeId, Op, QuantizedBlock, Shapes, bind_unfused, block_node_ids, infer, prune_dead, resolve_named_blocks};
+    use proxima_tensor::bind::kv_read_only_by_fused_attention;
+    use proxima_tensor::{BoundOp, Evaluated, NodeId, Op, QuantizedBlock, Shapes, bind_unfused, block_node_ids, infer, prune_dead, resolve_named_blocks};
     use crate::lowering::Binding;
 
     /// Shared objects the runtime half probes, in order. The versioned names come
@@ -5837,6 +5819,7 @@ pub mod rocm {
         wave: HipWave,
         program: Vec<Op>,
         shapes: Shapes,
+        resolved: Vec<BoundOp>,
         block_nodes: Vec<NodeId>,
         kernels: Vec<HipKernel>,
         launches: Vec<bool>,
@@ -5900,6 +5883,7 @@ pub mod rocm {
                 wave,
                 program: program.to_vec(),
                 shapes,
+                resolved,
                 block_nodes: block_node_ids(program),
                 kernels,
                 launches,
@@ -5932,6 +5916,19 @@ pub mod rocm {
         #[must_use]
         pub fn kernels(&self) -> &[HipKernel] {
             &self.kernels
+        }
+
+        /// Whether every reader of the named K/V cache inputs is a fused `CachedAttention`.
+        /// The HIP target does not grant that form, so its unfused bound graph answers
+        /// `false`; the answer is read off this plan's own graph, never a variant literal.
+        #[must_use]
+        pub fn pads_kv_safely(&self, is_kv_input: impl Fn(&str) -> bool) -> bool {
+            kv_read_only_by_fused_attention(
+                &self.program,
+                &self.resolved,
+                &self.outputs,
+                is_kv_input,
+            )
         }
 
         /// Runs every kernel in order over `named` float32 inputs.

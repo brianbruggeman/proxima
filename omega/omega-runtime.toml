@@ -752,6 +752,16 @@ max_threadgroups_x = 65535
 # `OMEGA_ONNX_DOOR_MAX_PIN_SETS`.
 max_pin_sets = 4
 
+[kv_padding]
+# Default for `RuntimeConfig::kv_padding` (`OMEGA_KV_PADDING` at run time):
+# "auto" decides from the selected driver's own `Executes` and the bound graph,
+# "padded" always binds the capacity bucket (a plan that reads the range unfused
+# refuses at plan build), "exact" always binds the live width. "auto" is the
+# platform default on every target: Metal resolves it from its CachedAttention
+# grant, HIP resolves it false from the same grant being absent, and CUDA resolves
+# it from the graph. Overridable per-build via `OMEGA_KV_PADDING_DEFAULT`.
+default = "auto"
+
 [runtime]
 # Build-time defaults for the optional cold-planning measurement mode. Runtime
 # overrides remain in `RuntimeConfig`; the alloc floor reads these constants.

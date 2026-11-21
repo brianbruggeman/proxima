@@ -2815,6 +2815,32 @@ pub fn kv_read_only_by_fused_attention_in_program(
     numeric_policy: NumericPolicy,
     is_kv_input: impl Fn(&str) -> bool,
 ) -> bool {
+    kv_read_only_by_fused_attention_for_target(
+        program,
+        shapes,
+        outputs,
+        numeric_policy,
+        &Executes::CPU,
+        is_kv_input,
+    )
+}
+
+/// [`kv_read_only_by_fused_attention_in_program`] against the forms one driver actually
+/// executes. A target that does not grant [`Form::CachedAttention`] has no fused reader to
+/// absorb a KV input, so its answer is `false` before discovery runs: padding a range a HIP
+/// or wgpu plan will read through the unfused chain is never safe.
+#[cfg(feature = "cached-attention-streaming")]
+pub fn kv_read_only_by_fused_attention_for_target(
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
+    executes: &Executes,
+    is_kv_input: impl Fn(&str) -> bool,
+) -> bool {
+    if !executes.forms.contains(Form::CachedAttention) {
+        return false;
+    }
     let kv_nodes: BTreeSet<NodeId> = program
         .iter()
         .enumerate()
@@ -2831,7 +2857,7 @@ pub fn kv_read_only_by_fused_attention_in_program(
         &[],
         outputs,
         false,
-        (numeric_policy, &Executes::CPU),
+        (numeric_policy, executes),
         true,
     );
     candidates.extend(cached_attention_single_range_candidates(

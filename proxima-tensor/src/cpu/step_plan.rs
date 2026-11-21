@@ -302,13 +302,39 @@ pub fn probe_kv_padding(
     outputs: &[NodeId],
     is_kv_input: impl Fn(&str) -> bool,
 ) -> Result<bool, TensorError> {
+    probe_kv_padding_for(
+        program,
+        symbols,
+        outputs,
+        NumericPolicy::bit_exact(),
+        &bind::Executes::CPU,
+        is_kv_input,
+    )
+}
+
+/// [`probe_kv_padding`] against the forms one driver actually executes. The program is
+/// inferred and its fused readers are matched against `executes`; nothing is bound or
+/// emitted, so a caller can ask before building a backend plan.
+///
+/// # Errors
+/// Shape inference or the effective-output rewrite fails at `symbols`.
+#[cfg(feature = "cached-attention-streaming")]
+pub fn probe_kv_padding_for(
+    program: &[Op],
+    symbols: &[u64],
+    outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
+    executes: &bind::Executes,
+    is_kv_input: impl Fn(&str) -> bool,
+) -> Result<bool, TensorError> {
     let shapes = shape::infer(program, symbols)?;
     let (_, effective_outputs) = effective_step_outputs(program, outputs)?;
-    Ok(bind::kv_read_only_by_fused_attention_in_program(
+    Ok(bind::kv_read_only_by_fused_attention_for_target(
         program,
         &shapes,
         &effective_outputs,
-        NumericPolicy::bit_exact(),
+        numeric_policy,
+        executes,
         is_kv_input,
     ))
 }
@@ -320,6 +346,20 @@ pub fn probe_kv_padding(
     _program: &[Op],
     _symbols: &[u64],
     _outputs: &[NodeId],
+    _is_kv_input: impl Fn(&str) -> bool,
+) -> Result<bool, TensorError> {
+    Ok(false)
+}
+
+/// Without cached-attention streaming nothing is fused, for any target.
+#[cfg(not(feature = "cached-attention-streaming"))]
+#[expect(clippy::missing_errors_doc, reason = "the streaming-enabled build documents the errors")]
+pub fn probe_kv_padding_for(
+    _program: &[Op],
+    _symbols: &[u64],
+    _outputs: &[NodeId],
+    _numeric_policy: NumericPolicy,
+    _executes: &bind::Executes,
     _is_kv_input: impl Fn(&str) -> bool,
 ) -> Result<bool, TensorError> {
     Ok(false)

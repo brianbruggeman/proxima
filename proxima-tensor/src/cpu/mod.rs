@@ -267,7 +267,7 @@ pub use gemm_tile::*;
 pub use quantized_eval::*;
 pub use run_node::*;
 pub use run_reduce_scan::*;
-pub use step_plan::{CpuStepPlan, probe_kv_padding};
+pub use step_plan::{CpuStepPlan, probe_kv_padding, probe_kv_padding_for};
 pub use typed_eval::*;
 use width_kernels::*;
 

@@ -3,7 +3,7 @@ use conflaguration::Validate;
 use core::future::Future;
 use core::ops::ControlFlow;
 #[cfg(feature = "gpu")]
-use omega::config::{RuntimeConfig, SelectionMode};
+use omega::config::{KvPaddingPolicy, RuntimeConfig, SelectionMode};
 
 use super::*;
 #[cfg(feature = "cuda")]
@@ -35,6 +35,24 @@ fn same_program_width(
     right: &(usize, usize, Vec<NodeId>, bool, u64),
 ) -> bool {
     left.0 == right.0 && left.2 == right.2 && left.3 == right.3 && left.4 == right.4
+}
+
+/// Resolves the configured policy against the built plan's graph and any pre-plan probe.
+/// A `probed` width was already used to bind this program, so it wins over a later policy
+/// read; only a width bound padded that the plan reads unfused is refused, before a pad
+/// scratch can be sized from a wider program and then compared to a narrower ring plane.
+#[cfg(feature = "gpu")]
+fn kv_padding_decision(
+    policy: KvPaddingPolicy,
+    probed: Option<bool>,
+    graph_pads: bool,
+) -> Result<bool, ()> {
+    let decided = probed.unwrap_or_else(|| policy.resolves(graph_pads));
+    if decided && !graph_pads {
+        Err(())
+    } else {
+        Ok(decided)
+    }
 }
 
 /// One CUDA graph to evaluate: the program, its shape symbols, its named
@@ -89,6 +107,20 @@ mod configured_runtime_tests {
     use omega::config::DenseMmaInputLayout;
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     use proxima_numeric::float_layout::FloatLayout;
+
+    #[test]
+    fn kv_padding_decision_refuses_a_padded_width_on_an_unfused_plan() {
+        assert_eq!(kv_padding_decision(KvPaddingPolicy::Auto, None, true), Ok(true));
+        assert_eq!(kv_padding_decision(KvPaddingPolicy::Auto, Some(true), false), Err(()));
+        assert_eq!(kv_padding_decision(KvPaddingPolicy::Padded, None, true), Ok(true));
+        assert_eq!(kv_padding_decision(KvPaddingPolicy::Padded, None, false), Err(()));
+        assert_eq!(
+            kv_padding_decision(KvPaddingPolicy::Exact, Some(true), true),
+            Ok(true),
+            "the width was already bound padded, so the decision must keep that width"
+        );
+        assert_eq!(kv_padding_decision(KvPaddingPolicy::Exact, Some(false), false), Ok(false));
+    }
 
     #[test]
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -3258,6 +3290,12 @@ pub struct BackendRuntime {
     /// bound padded to its bucket. Decided once per width, at that plan's first build.
     #[cfg(feature = "gpu")]
     kv_pad: alloc::collections::BTreeMap<(u64, usize), bool>,
+    /// The driver `omega_runtime` named for this build, or the compiled target's default.
+    #[cfg(feature = "gpu")]
+    gpu_driver: Option<omega::backend::GpuDriver>,
+    /// `omega_runtime.kv_padding`, resolved from the build-time `[kv_padding]` default.
+    #[cfg(feature = "gpu")]
+    kv_padding: KvPaddingPolicy,
     /// Misses served by refitting the previous plan in place
     /// ([`Self::take_near_plan`]) instead of building one -- a subset of
     /// `plan_misses`, so `plan_misses - plan_refits` is the number of plans
@@ -3378,6 +3416,17 @@ impl BackendRuntime {
             #[cfg(feature = "cuda")]
             active_cuda_shape: None,
             engine: select_backend(config),
+            #[cfg(feature = "gpu")]
+            gpu_driver: match config.omega_runtime {
+                Some(runtime) => omega::backend::GpuDriver::from_config(runtime)
+                    .ok()
+                    .flatten(),
+                None => omega::backend::GpuDriver::for_target(),
+            },
+            #[cfg(feature = "gpu")]
+            kv_padding: config
+                .omega_runtime
+                .map_or_else(KvPaddingPolicy::from_sized, |runtime| runtime.kv_padding),
             retain_monolithic_prefill_sources: false,
             prefix_retention: PrefixRetention::Keep,
             plans: alloc::collections::BTreeMap::new(),
@@ -3513,20 +3562,24 @@ impl BackendRuntime {
 
     /// Whether the cached K/V range is bound padded to its bucket. Once a plan of this
     /// `new_count` width was built, `omega::backend::plan_pads_kv` decides from its graph
-    /// (every reader of the `kv_cache.*` inputs a fused `CachedAttention`); before that, a
-    /// driver that renders the fused op for every plan (Metal) pads, any other binds exact.
+    /// (every reader of the `kv_cache.*` inputs a fused `CachedAttention`); before that,
+    /// `KvPaddingPolicy::resolves` asks whether the selected driver can ever render
+    /// the fused op. `exact` and `padded` are the configured overrides.
     #[cfg(feature = "gpu")]
     pub(super) fn pads_cached_kv(&self, program_hash: u64, new_count: usize) -> bool {
         self.kv_pad
             .get(&(program_hash, new_count))
             .copied()
-            .unwrap_or_else(|| self.driver_renders_fused_cached_attention())
+            .unwrap_or_else(|| {
+                self.kv_padding
+                    .resolves(self.driver_renders_fused_cached_attention())
+            })
     }
 
-    /// Decides the padding of `program` at `new_count` rows before any plan for it
-    /// exists, by binding at `symbols` without emitting a kernel, so the first call binds
-    /// its cached range padded and no unpadded plan is built to find out. A probe that
-    /// cannot bind leaves the width undecided: it binds exact until a plan answers.
+    /// Decides the padding of `program` at `new_count` rows before any plan for it exists,
+    /// from shapes and the selected driver's own `Executes`. No backend plan is built and
+    /// no device is touched, so a HIP call never compiles a CUDA plan to answer this. A
+    /// probe that cannot infer leaves the width to the configured pre-plan default.
     #[cfg(feature = "gpu")]
     pub(super) fn settle_kv_padding(
         &mut self,
@@ -3534,52 +3587,54 @@ impl BackendRuntime {
         program_hash: u64,
         symbols: &[u64],
         outputs: impl FnOnce() -> Vec<NodeId>,
-        named: &[(&str, QuantizedBlock<'_>)],
     ) {
-        if !self.uses_gpu() && !self.kv_pad.contains_key(&(program_hash, symbols[0] as usize)) {
-            match proxima_tensor::cpu::probe_kv_padding(program, symbols, &outputs(), |name| {
-                name.starts_with(KV_CACHE_INPUT_PREFIX)
-            }) {
-                Ok(pads) => {
-                    self.kv_pad.insert((program_hash, symbols[0] as usize), pads);
-                }
-                Err(error) => debug!(
-                    error = %error,
-                    new_count = symbols[0],
-                    "kv padding probe could not bind, the width binds exact"
-                ),
-            }
+        let key = (program_hash, symbols[0] as usize);
+        if self.kv_pad.contains_key(&key) {
             return;
         }
-        #[cfg(feature = "cuda")]
-        if self.uses_gpu() && !self.kv_pad.contains_key(&(program_hash, symbols[0] as usize)) {
-            let probed = omega::backend::probe_cuda_pads_kv(
-                program,
-                symbols,
-                &outputs(),
-                named,
-                self.numeric_policy,
-                |name| name.starts_with(KV_CACHE_INPUT_PREFIX),
-            );
-            match probed {
-                Ok(pads) => {
-                    self.kv_pad.insert((program_hash, symbols[0] as usize), pads);
+        let is_kv_input = |name: &str| name.starts_with(KV_CACHE_INPUT_PREFIX);
+        let probed = if self.uses_gpu() {
+            match self.gpu_driver {
+                // Metal renders every fused cached attention, so its plan is the probe:
+                // bind the bucket up front and let the post-plan check correct a graph
+                // that turns out unfused. Probing the unbound program here would bind
+                // exact on a conservative false and lose the padded plan for the call.
+                Some(driver) if driver.renders_fused_cached_attention() => {
+                    Ok(self.kv_padding.resolves(true))
                 }
-                Err(error) => debug!(
-                    error = %error,
-                    new_count = symbols[0],
-                    "kv padding probe could not bind, the width binds exact until a plan answers"
+                Some(driver) => omega::backend::probe_pads_kv(
+                    driver,
+                    self.kv_padding,
+                    program,
+                    symbols,
+                    &outputs(),
+                    self.numeric_policy,
+                    is_kv_input,
                 ),
+                None => Ok(self.kv_padding.resolves(false)),
             }
+        } else {
+            proxima_tensor::cpu::probe_kv_padding(program, symbols, &outputs(), is_kv_input)
+                .map(|pads| self.kv_padding.resolves(pads))
+                .map_err(Into::into)
+        };
+        match probed {
+            Ok(pads) => {
+                self.kv_pad.insert(key, pads);
+            }
+            Err(error) => debug!(
+                error = %error,
+                new_count = symbols[0],
+                "kv padding probe could not infer, the width keeps its pre-plan default"
+            ),
         }
-        #[cfg(not(feature = "cuda"))]
-        let _ = (program, program_hash, symbols, outputs, named);
     }
 
     #[cfg(feature = "gpu")]
     fn driver_renders_fused_cached_attention(&self) -> bool {
         self.uses_gpu()
-            && omega::backend::GpuDriver::for_target()
+            && self
+                .gpu_driver
                 .is_some_and(omega::backend::GpuDriver::renders_fused_cached_attention)
     }
 
@@ -3827,14 +3882,18 @@ impl BackendRuntime {
             #[cfg(not(feature = "cuda"))]
             let freshly_built = false;
             if matches!(self.engine, Engine::Gpu) && (freshly_built || !self.kv_pad.contains_key(&key)) {
-                let pads = omega::backend::plan_pads_kv(plan, |name| {
+                let graph_pads = omega::backend::plan_pads_kv(plan, |name| {
                     name.starts_with(KV_CACHE_INPUT_PREFIX)
                 });
-                let probed = *self.kv_pad.entry(key).or_insert(pads);
-                if probed && !pads {
-                    return Err(InteropError::PaddedKvReadUnfused {
-                        new_count: symbols[0] as usize,
-                    });
+                match kv_padding_decision(self.kv_padding, self.kv_pad.get(&key).copied(), graph_pads) {
+                    Ok(pads) => {
+                        self.kv_pad.insert(key, pads);
+                    }
+                    Err(()) => {
+                        return Err(InteropError::PaddedKvReadUnfused {
+                            new_count: symbols[0] as usize,
+                        });
+                    }
                 }
             }
         }
@@ -5723,7 +5782,6 @@ impl BackendRuntime {
         program_hash: u64,
         symbols: &[u64],
         outputs: impl FnOnce() -> Vec<NodeId>,
-        _named: &[(&str, QuantizedBlock<'_>)],
     ) {
         let key = (program_hash, symbols[0] as usize);
         if self.kv_pad.contains_key(&key) {

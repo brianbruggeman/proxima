@@ -7,13 +7,14 @@ use proxima_numeric::{NumericFormat, NumericPolicy, Numerics};
 use tempfile::NamedTempFile;
 
 use super::{
-    BatchingStrategy, DecodeKernelStrategy, DenseMmaInputLayout, FusionStrategy, ResidencyStrategy,
-    ResourceConstraints, RuntimeConfig, SelectionConfig, SelectionMode, SpeculationStrategy,
-    WeightConversionStrategy,
+    BatchingStrategy, DecodeKernelStrategy, DenseMmaInputLayout, FusionStrategy, KvPaddingPolicy,
+    ResidencyStrategy, ResourceConstraints, RuntimeConfig, SelectionConfig, SelectionMode,
+    SpeculationStrategy, WeightConversionStrategy,
 };
 #[cfg(feature = "cuda")]
 use crate::cuda::{HipWave, target::Target};
-const CLEAN_ENVIRONMENT: [(&str, Option<&str>); 33] = [
+
+const CLEAN_ENVIRONMENT: [(&str, Option<&str>); 34] = [
     ("OMEGA_ENGINE", None),
     ("OMEGA_GPU_DRIVER", None),
     ("OMEGA_ALLOW_FUSION", None),
@@ -47,6 +48,7 @@ const CLEAN_ENVIRONMENT: [(&str, Option<&str>); 33] = [
     ("OMEGA_NUMERIC_BF16_INPUT_ROUNDING", None),
     ("OMEGA_HIP_WAVE", None),
     ("OMEGA_HIP_DEVICE", None),
+    ("OMEGA_KV_PADDING", None),
 ];
 
 fn validation_text(result: conflaguration::Result<RuntimeConfig>) -> String {
@@ -978,6 +980,36 @@ fn rocm_gpu_driver_builder_env_and_toml_agree_and_the_error_lists_it() {
 
     let error = validation_text(RuntimeConfig::builder().with_gpu_driver("vulkan").build());
     assert!(error.contains("expected auto|metal|wgpu|cuda|hip|rocm"), "{error}");
+}
+
+#[test]
+fn kv_padding_defaults_from_the_sized_platform_value() {
+    let config = RuntimeConfig::default();
+
+    assert_eq!(config.kv_padding, KvPaddingPolicy::from_sized());
+    assert_eq!(crate::sized::KV_PADDING_DEFAULT, "auto");
+}
+
+#[test]
+fn kv_padding_env_and_builder_agree_and_refuse_an_unknown_name() {
+    let from_builder = RuntimeConfig::builder()
+        .with_kv_padding(KvPaddingPolicy::Exact)
+        .build()
+        .expect("exact is an accepted kv padding policy");
+    let from_toml: RuntimeConfig =
+        toml::from_str("kv_padding = 'exact'\n").expect("config TOML deserializes");
+    let from_env = temp_env::with_vars([("OMEGA_KV_PADDING", Some("exact"))], || {
+        RuntimeConfig::from_env().expect("env config validates")
+    });
+
+    assert_eq!(runtime_config_difference_count(&from_builder, &from_toml), 0);
+    assert_eq!(runtime_config_difference_count(&from_builder, &from_env), 0);
+    let error = temp_env::with_vars([("OMEGA_KV_PADDING", Some("bucket"))], || {
+        RuntimeConfig::from_env()
+            .expect_err("an unknown policy must be refused")
+            .to_string()
+    });
+    assert!(error.contains("expected auto|padded|exact"), "{error}");
 }
 
 #[test]
