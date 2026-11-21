@@ -1884,6 +1884,46 @@ fn flattened_selected_axis_below_the_tiled_minimum_adds_each_rows_expert_base_in
     );
 }
 
+/// The multi-token split of the gathered packed-row body is reached once the
+/// routed rows fill the tiled minimum AND the tiled GEMM declines the codec
+/// (`EmitKnobs::tiled_gemm_disable`, the same-binary off switch): the token
+/// axis stays `selected`, `d_out` is the feature axis, each token slot's
+/// expert base is its own value and the route is fetched once.
+#[cfg(all(feature = "metal-gathered-packed-row", feature = "metal-tiled-gemm"))]
+#[test]
+fn routed_rows_at_the_tiled_minimum_gather_expert_base_once_per_token_when_tiled_is_off() {
+    let selected = crate::sized::TILED_GEMM_MIN_TOKENS as u32;
+    let rows = 4u32;
+    let bound = gathered_matmul_op(selected, 3, rows, 256);
+    let weight_node = bound.operands()[0].0;
+    let mut q4k = BTreeMap::new();
+    q4k.insert(weight_node, Codec::Q4K);
+    let knobs = EmitKnobs::default().with_tiled_gemm_disable(vec![String::from("q4k")]);
+
+    let block = classify_packed_row_block(&bound, &operand_codecs(&bound, &q4k), &knobs)
+        .expect("routed rows at the tiled minimum classify as a multi-row packed block");
+    let feature_total: u64 = block.feature_axes.iter().map(|&axis| bound.extents[axis as usize]).product();
+    assert_eq!(packed_row_block_token_total(&block, &bound.extents), u64::from(selected));
+    assert_eq!(feature_total, u64::from(rows), "one weight row per d_out per token slot");
+
+    let source = emit_with_knobs(&bound, &q4k, NumericPolicy::default(), &knobs)
+        .expect("emits the multi-row gathered packed-row source")
+        .source;
+    assert!(
+        source.contains("token_first = token_group"),
+        "the token/feature split must reach the emitted multi-row body:\n{source}"
+    );
+    assert!(
+        source.contains("weight_expert_base"),
+        "each token slot's expert base must be its own value, not shared:\n{source}"
+    );
+    assert_eq!(
+        source.matches("long fetched0").count(),
+        1,
+        "the route must be resolved ONCE per token slot, not once per feature row:\n{source}"
+    );
+}
+
 /// Bytes proof for ROW 536/537's routed-expert regression, below the tiled
 /// minimum: 8 selected experts collapse (`routed_axes_leave_one_token_row`)
 /// to single-row matvecs, so the classifier's own output folds `selected`
