@@ -2874,8 +2874,10 @@ fn flash_decomposition_emits_the_flash_kernel_for_the_full_layer_shape() {
     )
     .expect("the flash kernel emits for a sinked full-attention 8-group head-128 op");
 
-    assert!(flash.source.contains("flash_block<half, false>(in2, in3, in6,"));
-    assert!(flash.source.contains("flash_block<float, false>(in4, in5, in7,"));
+    assert!(flash.source.contains("flash_block<half, false, true>(in2, in3, in6,"));
+    assert!(flash.source.contains("flash_block<half, false, false>(in2, in3, in6,"));
+    assert!(flash.source.contains("flash_block<float, false, true>(in4, in5, in7,"));
+    assert!(flash.source.contains("flash_block<float, false, false>(in4, in5, in7,"));
     assert!(flash.source.contains("constant constexpr int nsg = 4, block = 64, nq = 2, no = 4,"));
     assert!(!flash.source.contains('@'), "every flash placeholder is substituted");
 }
@@ -3059,7 +3061,8 @@ fn flash_where_admitted_gives_flash_to_an_admitted_op_and_legacy_to_a_refused_on
         .expect("an admitted op emits the flash kernel");
     let legacy = emit_variant_wide(&refused, &f16_cache_operands(&refused), NumericPolicy::llama_relaxed(), variant)
         .expect("a refused op keeps legacy instead of failing the run");
-    assert!(flash.source.contains("flash_block<half, false>"));
+    assert!(flash.source.contains("flash_block<half, false, true>"));
+    assert!(flash.source.contains("flash_block<half, false, false>"));
     assert!(!legacy.source.contains("flash_block"));
     assert!(emit_variant_wide(
         &refused,

@@ -804,9 +804,10 @@ fn emitted_flash_with_qk_operand(
         .source
 }
 
+/// Pins the binary32-operand flash render against the checked-in fixtures; numerics parity with legacy at f32 is proven by cached_attention_flash_parity, not by this text.
 #[cfg(feature = "metal-attn-variants")]
 #[test]
-fn a_flash_kernel_with_binary32_qk_operands_renders_the_text_it_did_before_the_operand_was_configurable() {
+fn a_flash_kernel_with_binary32_qk_operands_renders_its_pinned_text() {
     let (full, full_packed) = full_layer_op();
     let (sliding, sliding_packed) = sliding_layer_op();
 

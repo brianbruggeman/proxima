@@ -351,7 +351,7 @@ inline void flash_softmax(threadgroup @ACC@* ss, threadgroup @ACC@* so, thread @
     }
 }
 
-template <typename T, bool partial>
+template <typename T, bool partial, bool full>
 inline void flash_block(device const T* ke, device const T* ko, device const T* vv, int key0, int columns, int valid_end, bool cached_phase, int row, long lower,
                         @QSPACE@ const @QOP@* qe_base, @QSPACE@ const @QOP@* qo_base, threadgroup @ACC@* ss, threadgroup @ACC@* so, thread @ACC@ (&M)[nq], thread @ACC@ (&S)[nq],
                         int kv_head, ushort lane, ushort sg) {
@@ -360,7 +360,7 @@ inline void flash_block(device const T* ke, device const T* ko, device const T* 
         int kt = cc * nsg + sg;
         {
             @ACC_FRAG@ acc = make_filled_simdgroup_matrix<@ACC@, 8, 8>(0.0f);
-            if (kt * 8 < columns) {                                   // a tile wholly past the live keys loads nothing, as the row-tiled kernel
+            if (full || kt * 8 < columns) {                                   // a tile wholly past the live keys loads nothing, as the row-tiled kernel
                 int key_rows_left = valid_end - (key0 + kt * 8);
                 device const T* kep = ke + (key0 + kt * 8) * kstride + kv_head * half_dim;
                 device const T* kop = ko + (key0 + kt * 8) * kstride + kv_head * half_dim;
@@ -390,14 +390,14 @@ inline void flash_block(device const T* ke, device const T* ko, device const T* 
     @ACC_FRAG@ lo[no];                                       // PV: this simdgroup owns dimension blocks sg + nsg * i
     FOR_UNROLL for (int i = 0; i < no; ++i) { simdgroup_load(lo[i], so + 8 * (sg + nsg * i), (ulong)head_dim); }
     FOR_UNROLL for (int kt = 0; kt < tiles; ++kt) {
-        if (kt * 8 < columns) {
+        if (full || kt * 8 < columns) {
             @ACC_FRAG@ p; simdgroup_load(p, ss + kt * 8, (ulong)block);
             FOR_UNROLL for (int i = 0; i < no; ++i) {
                 @ACC_FRAG@ vf;
                 device const T* vp = vv + (key0 + kt * 8) * vstride + kv_head * head_dim + 8 * (sg + nsg * i);
                 int value_rows_left = key0 + columns - (key0 + kt * 8);
                 if (!partial || value_rows_left >= 8) { load_v(vf, vp, vstride); } else { load_v_rows(vf, vp, vstride, lane, value_rows_left); }
-                zero_rows(vf, key0 + kt * 8, key0 + columns, lane);
+                if (!full) { zero_rows(vf, key0 + kt * 8, key0 + columns, lane); }
                 simdgroup_multiply_accumulate(lo[i], p, vf, lo[i]);
             }
         }
@@ -472,13 +472,15 @@ kernel void @ENTRY@(device const @ACC@* in0 [[buffer(0)]], device const @ACC@* i
     long first_key = max(0L, (long)live + cached_lower + row0) & ~7L;   // legacy block boundaries start at the window, not at 0
     for (long key0 = first_key; key0 < live; key0 += block) {
         int columns = min(block, live - (int)key0);                    // only the last block can end inside a tile: whole-tile blocks take the instance with no per-tile branch
-        if ((columns & 7) == 0) { flash_block<@ELEM@, false>(in2, in3, in6, (int)key0, columns, live, true, row, cached_lower, qe_base, qo_base, ss, so, M, S, kv_head, lane, sg); }
-        else { flash_block<@ELEM@, true>(in2, in3, in6, (int)key0, columns, live, true, row, cached_lower, qe_base, qo_base, ss, so, M, S, kv_head, lane, sg); }
+        if (columns == block) { flash_block<@ELEM@, false, true>(in2, in3, in6, (int)key0, columns, live, true, row, cached_lower, qe_base, qo_base, ss, so, M, S, kv_head, lane, sg); }
+        else if ((columns & 7) == 0) { flash_block<@ELEM@, false, false>(in2, in3, in6, (int)key0, columns, live, true, row, cached_lower, qe_base, qo_base, ss, so, M, S, kv_head, lane, sg); }
+        else { flash_block<@ELEM@, true, false>(in2, in3, in6, (int)key0, columns, live, true, row, cached_lower, qe_base, qo_base, ss, so, M, S, kv_head, lane, sg); }
     }
     int whole = rows & ~7, mma_end = min(row + 1, whole);
     long new_start = max(0L, row0 + cached_lower) & ~7L;
     for (long key0 = new_start; key0 < mma_end; key0 += block) {
-        flash_block<@ACC@, false>(in4, in5, in7, (int)key0, min(block, mma_end - (int)key0), mma_end, false, row, cached_lower, qe_base, qo_base, ss, so, M, S, kv_head, lane, sg);
+        if (mma_end - (int)key0 >= block) { flash_block<@ACC@, false, true>(in4, in5, in7, (int)key0, block, mma_end, false, row, cached_lower, qe_base, qo_base, ss, so, M, S, kv_head, lane, sg); }
+        else { flash_block<@ACC@, false, false>(in4, in5, in7, (int)key0, mma_end - (int)key0, mma_end, false, row, cached_lower, qe_base, qo_base, ss, so, M, S, kv_head, lane, sg); }
     }
     if (row >= whole) { flash_tail(in4, in5, in7, whole, rows - whole, row, cached_lower, qe_base, qo_base, ss, so, M, S, kv_head, lane, sg); }
     FOR_UNROLL for (int jj = 0; jj < nq; ++jj) {
