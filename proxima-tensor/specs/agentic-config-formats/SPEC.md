@@ -204,8 +204,8 @@ a scalar read takes a typed value or text that parses (`"3"`, `"true"`).
 
 Runner `cargo val`, always `--lib` or `--test`, each run wrapped `timeout -k 30s 25m git wt cargo
 val ...`, `CARGO_BUILD_JOBS=2`, one build at a time. `<L>` is the proxima-lib feature set
-`--features tokio,http1,http-prime,http2,h3-native-upstream,recording,vm,amqp-client,dns-client,kafka-client,memcached-client,mqtt-client,pgwire-client,redis-client`
-(the cfg gates of `src/upstreams/mod.rs:1-76`; slice 0 compiles it and records the result).
+`--features tokio,tcp,http1,http-prime,http2,h3-native-upstream,recording,vm,amqp-client,dns-client,kafka-client,memcached-client,mqtt-client,pgwire-client,redis-client`
+(the cfg gates of `src/upstreams/mod.rs:1-78`; ~~without `tcp`, `mod.rs:1-76`~~ struck 2026-11-20: `stream_passthrough` is gated `any(feature = "tcp", feature = "unix")` at `mod.rs:77-78`, so without `tcp` the StreamPassthroughSettings member is compiled out of every `<L>` run (slice 0b batch 3: 28 passed under the old set, 29 with `tcp`, `"<E>/slice0b-batch3-with-tcp.log"`); slice 0 compiled the old set, and the `tcp` set compiles in `"<E>/slice0b-batch3-with-tcp.log"`).
 Test-name prefixes: `config_format_arm_`, `config_format_same_`, `config_format_diff_` and
 `config_format_buffered_schema_` (proxima-config), `client_config_format_` (lib),
 `config_format_twin_` and `config_format_members` (each crate named below),
