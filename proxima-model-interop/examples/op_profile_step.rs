@@ -8,6 +8,13 @@
 //! (`PROXIMA_OPENCHAT_GGUF`, the whole prompt in one prefill) or
 //! `qwen3-prefill-step0` (`PROXIMA_QWEN3_GGUF`, an ~850-token prompt).
 //!
+//! `op_profile_step prefill-step0 <gguf path> <prompt file>` serves the prompt
+//! file through the normal serving path with `ubatch_size` 512 (512-row prefill
+//! chunks), f16 K and V caches and the serving attention path
+//! (`flash_where_admitted`, via `ServingSettings` as the ragd scoreboard sets it;
+//! `flash_attention: true` is refused by `serving.rs` validation), step 0 armed.
+//! Build with `--features std,metal,instrument,metal-attn-variants`.
+//!
 //! `cargo run -p proxima-model-interop --release --features std,metal,instrument --example op_profile_step -- <probe>`
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -148,13 +155,73 @@ mod profile {
         require_flushed(flushed)
     }
 
-    pub fn run(probe: &str) -> Result<(), String> {
+    #[cfg(feature = "metal-attn-variants")]
+    fn flash_serving(config: ServingConfig<'static>) -> Result<ServingConfig<'static>, String> {
+        let variant = proxima_model_interop::ServingSettings::builder()
+            .attention_decomposition(omega::AttentionDecomposition::FlashWhereAdmitted)
+            .build()
+            .as_serving_config(&[])
+            .attention_variant;
+        Ok(ServingConfig { attention_variant: variant, ..config })
+    }
+
+    #[cfg(not(feature = "metal-attn-variants"))]
+    fn flash_serving(_config: ServingConfig<'static>) -> Result<ServingConfig<'static>, String> {
+        Err("prefill-step0 needs --features metal-attn-variants (flash_where_admitted, the serving attention path)".to_string())
+    }
+
+    fn serving_ubatch_config() -> Result<ServingConfig<'static>, String> {
+        flash_serving(ServingConfig {
+            kv_cache_key_quant: NumericFormat::Float16,
+            kv_cache_value_quant: NumericFormat::Float16,
+            batch_size: 2048,
+            ubatch_size: 512,
+            gpu_layers: GPU_LAYERS_ALL,
+            reasoning_budget: 0,
+            math_mode: math_mode_from_env()?,
+            temperature: 0.0,
+            prompt_cache: PromptCacheConfig::off(),
+            ..ServingConfig::default()
+        })
+    }
+
+    fn prefill_step0(model_path: &str, prompt_path: &str) -> Result<(), String> {
+        let mapped = real_model_probe::map_checkpoint(model_path, "the prefill-step0 gguf path argument")?;
+        let file_bytes: &[u8] = &mapped;
+        let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
+            .map_err(|error| format!("parse the gguf: {error}"))?;
+        let serving_config = serving_ubatch_config()?;
+        let model = LoadedModel::load_with_serving(&parsed, file_bytes, &serving_config)
+            .map_err(|error| format!("load the checkpoint: {error}"))?;
+        let prompt = std::fs::read_to_string(prompt_path)
+            .map_err(|error| format!("read the prompt file {prompt_path}: {error}"))?;
+        let telemetry = real_model_probe::telemetry::install_stdout_telemetry()?;
+
+        arm_profile_step("0");
+        let probe = real_model_probe::stream_decode(&model, &prompt, 1, serving_config)
+            .map_err(|error| format!("prefill with step 0 armed: {error}"))?;
+        disarm_profile_step();
+
+        let flushed = telemetry.drain_and_total();
+        println!(
+            "prefill_step_zero_op_profile prompt_token_count={} telemetry_records_flushed={flushed}",
+            probe.prompt_token_count
+        );
+        require_flushed(flushed)
+    }
+
+    pub fn run(args: &[String]) -> Result<(), String> {
+        let probe = args.first().map_or("", String::as_str);
         match probe {
             "openchat-decode-step3" => openchat("3", 5),
             "openchat-prefill-step0" => openchat("0", 1),
             "qwen3-prefill-step0" => qwen3_prefill(),
+            "prefill-step0" => match (args.get(1), args.get(2)) {
+                (Some(model_path), Some(prompt_path)) => prefill_step0(model_path, prompt_path),
+                _ => Err("prefill-step0 needs <gguf path> <prompt file>".to_string()),
+            },
             other => Err(format!(
-                "unknown probe {other:?}; expected openchat-decode-step3, openchat-prefill-step0 or qwen3-prefill-step0"
+                "unknown probe {other:?}; expected openchat-decode-step3, openchat-prefill-step0, qwen3-prefill-step0 or prefill-step0"
             )),
         }
     }
@@ -162,8 +229,8 @@ mod profile {
 
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 fn main() -> std::process::ExitCode {
-    let probe = std::env::args().nth(1).unwrap_or_default();
-    match profile::run(&probe) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match profile::run(&args) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("op_profile_step: {message}");
