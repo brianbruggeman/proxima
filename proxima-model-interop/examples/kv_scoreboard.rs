@@ -95,6 +95,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use memmap2::MmapOptions;
 use proxima_gguf::parse_complete;
+use proxima_model_interop::ServingSettings;
 use proxima_tokenizer::vocab::Vocab;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -114,6 +115,20 @@ const MAX_TOKENS: usize = 128;
 const LLAMA_KV_PAD: usize = 256;
 const BASE_PORT: u16 = 18_200;
 const BUSY_PATTERN: &str = "cargo|rustc|nextest|kv_scoreboard|llama-server";
+
+/// The benchmark's serving configuration: the checked-in granite/llama-matched
+/// TOML, overlaid by `PROXIMA_SERVING_*` when the caller sets one.
+fn llama_matched_settings() -> ServingSettings {
+    let path = std::env::var("PROXIMA_SERVING_CONFIG")
+        .unwrap_or_else(|_| "proxima-model-interop/examples/granite_llama.toml".to_owned());
+    if Path::new(&path).is_file() {
+        conflaguration::from_file_then_env(Path::new(&path))
+            .unwrap_or_else(|error| panic!("load {path}: {error}"))
+    } else {
+        conflaguration::from_toml_str(include_str!("granite_llama.toml"))
+            .unwrap_or_else(|error| panic!("parse granite_llama.toml: {error}"))
+    }
+}
 const INVARIANT_COUNT: usize = 12;
 const INVARIANT_NAMES: [&str; INVARIANT_COUNT] = [
     "I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8", "I9", "I10", "I11", "I12",
@@ -1742,6 +1757,10 @@ impl TimedServer {
         flash: &str,
     ) -> Result<Self, HarnessError> {
         let (key, value) = kv.llama_types().ok_or_else(|| HarnessError::Server("no llama arm for this KV".to_owned()))?;
+        let settings = llama_matched_settings();
+        let base = settings.as_serving_config(&[]);
+        let batch = base.batch_size.to_string();
+        let ubatch = base.ubatch_size.to_string();
         let stderr_file = File::create(stderr_path).map_err(io_error(stderr_path))?;
         let timer = Command::new(&config.time_bin)
             .arg("-l")
@@ -1749,6 +1768,7 @@ impl TimedServer {
             .arg("-m")
             .arg(&config.model)
             .args(["-ngl", "99", "-fa", flash, "-np", "1", "--no-warmup", "--seed", "1"])
+            .args(["-b", &batch, "-ub", &ubatch])
             .args(["-c", &capacity.to_string(), "-ctk", key, "-ctv", value])
             .args(["--host", "127.0.0.1", "--port", &port.to_string(), "-lv", "4"])
             .stdout(Stdio::null())

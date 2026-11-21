@@ -28,7 +28,7 @@
 //! `PROXIMA_SERVING_ATTENTION_DECOMPOSITION=flash_where_admitted` selects Flash attention on every op
 //! the flash admission accepts (needs `metal` + `metal-attn-variants`); it is `ServingSettings`' own
 //! key, lowered through `as_serving_config`, default `legacy`. `PROXIMA_PROMPT` carries the prompt text.
-//! `PROXIMA_IGNORE_EOS=1` sets `ServingConfig::ignore_eos`: generate exactly the
+//! `PROXIMA_SERVING_IGNORE_EOS=1` sets `ServingConfig::ignore_eos`: generate exactly the
 //! requested max tokens instead of stopping at the end-of-generation id.
 //! A half-width KV cache (`PROXIMA_KV_CACHE_TYPE=f16`) runs with speculation on: a verify step
 //! reads it through the row-tiled kernel (`kv_cache_format::row_tiled_reads`); only a pair that
@@ -51,9 +51,15 @@ use conflaguration::Settings as _;
 use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{
-    GPU_LAYERS_ALL, LoadedModel, Phase, PromptCacheConfig, ServingConfig, SpeculativeSettings,
-    TokenEvent,
+    ContextLength, GPU_LAYERS_ALL, LoadedModel, Phase, PromptCacheConfig, ServingConfig,
+    ServingSettings, SpeculativeSettings, TokenEvent,
 };
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-attn-variants",
+    target_os = "macos"
+))]
+use omega::AttentionDecomposition;
 use proxima_numeric::NumericFormat;
 #[cfg(feature = "instrument")]
 use proxima_telemetry::export::Exporter;
@@ -81,6 +87,64 @@ fn process_memory_bytes() -> (u64, u64) {
 #[cfg(not(target_os = "macos"))]
 fn process_memory_bytes() -> (u64, u64) {
     (0, 0)
+}
+
+/// The benchmark's serving configuration: the checked-in granite/llama-matched
+/// TOML, overlaid by `PROXIMA_SERVING_*` when the caller sets one.
+fn llama_matched_settings() -> ServingSettings {
+    let path = std::env::var("PROXIMA_SERVING_CONFIG")
+        .unwrap_or_else(|_| "proxima-model-interop/examples/granite_llama.toml".to_owned());
+    if std::path::Path::new(&path).is_file() {
+        conflaguration::from_file_then_env(std::path::Path::new(&path))
+            .unwrap_or_else(|error| panic!("load {path}: {error}"))
+    } else {
+        conflaguration::from_toml_str(include_str!("granite_llama.toml"))
+            .unwrap_or_else(|error| panic!("parse granite_llama.toml: {error}"))
+    }
+}
+
+/// The eight requested values that must equal llama's flags and request body.
+fn config_diff_count(config: &ServingConfig<'_>) -> u32 {
+    let mut mismatches = 0;
+    mismatches += u32::from(config.batch_size != 2048);
+    mismatches += u32::from(config.ubatch_size != 512);
+    mismatches += u32::from(config.kv_cache_key_quant != NumericFormat::Float16);
+    mismatches += u32::from(config.kv_cache_value_quant != NumericFormat::Float16);
+    mismatches += u32::from(config.seed != 1);
+    mismatches += u32::from(!config.ignore_eos);
+    mismatches += u32::from(!matches!(config.context_length, ContextLength::Native));
+    #[cfg(all(
+        feature = "metal",
+        feature = "metal-attn-variants",
+        target_os = "macos"
+    ))]
+    {
+        let flash = config.attention_variant.as_ref().is_some_and(|variant| {
+            variant.decomposition == AttentionDecomposition::FlashWhereAdmitted
+        });
+        mismatches += u32::from(!flash);
+    }
+    mismatches
+}
+
+fn attention_label(config: &ServingConfig<'_>) -> String {
+    #[cfg(all(
+        feature = "metal",
+        feature = "metal-attn-variants",
+        target_os = "macos"
+    ))]
+    {
+        format!("{:?}", config.attention_variant)
+    }
+    #[cfg(not(all(
+        feature = "metal",
+        feature = "metal-attn-variants",
+        target_os = "macos"
+    )))]
+    {
+        let _ = config;
+        "unavailable".to_owned()
+    }
 }
 
 /// Generated tokens before the steady-state memory samples start: the first
@@ -305,18 +369,8 @@ fn main() {
             .unwrap_or_else(|_| panic!("PROXIMA_RESIDENT_KV_BYTES={value}: expected a byte count")),
         Err(_) => ServingConfig::default().resident_kv_bytes,
     };
-    let kv_cache_type = match std::env::var("PROXIMA_KV_CACHE_TYPE").as_deref() {
-        Ok(name) => NumericFormat::from_name(name).unwrap_or_else(|| {
-            panic!("PROXIMA_KV_CACHE_TYPE={name}: not a NumericFormat name")
-        }),
-        Err(_) => ServingConfig::default().kv_cache_value_quant,
-    };
-    let kv_cache_key_type = match std::env::var("PROXIMA_KV_CACHE_KEY_TYPE").as_deref() {
-        Ok(name) => NumericFormat::from_name(name).unwrap_or_else(|| {
-            panic!("PROXIMA_KV_CACHE_KEY_TYPE={name}: not a NumericFormat name")
-        }),
-        Err(_) => kv_cache_type,
-    };
+    let settings = llama_matched_settings();
+    let base = settings.as_serving_config(&[]);
     let speculative_settings = SpeculativeSettings::from_env()
         .expect("PROXIMA_SPECULATIVE_* env parses as the serving speculative settings");
     let speculative = speculative_settings.as_speculative_config();
@@ -329,45 +383,20 @@ fn main() {
             ),
             Err(_) => ServingConfig::default().warm_model_buffers_at_load,
         };
-    let ignore_eos = match std::env::var("PROXIMA_IGNORE_EOS").as_deref() {
-        Ok("1") => true,
-        Ok("0") | Err(_) => false,
-        Ok(other) => panic!("PROXIMA_IGNORE_EOS={other}: expected `0` or `1`"),
-    };
-    let batch_size: u32 = match std::env::var("PROXIMA_BATCH_SIZE") {
-        Ok(value) => value
-            .parse()
-            .unwrap_or_else(|_| panic!("PROXIMA_BATCH_SIZE={value}: expected an integer")),
-        Err(_) => 0,
-    };
-    let ubatch_size: u32 = match std::env::var("PROXIMA_UBATCH_SIZE") {
-        Ok(value) => value
-            .parse()
-            .unwrap_or_else(|_| panic!("PROXIMA_UBATCH_SIZE={value}: expected an integer")),
-        Err(_) => 0,
-    };
-    // the one serving setting this example reads through `ServingSettings`: the attention variant
-    // (`PROXIMA_SERVING_ATTENTION_DECOMPOSITION=flash_where_admitted` selects Flash where admitted).
-    #[cfg(all(
-        feature = "metal",
-        feature = "metal-attn-variants",
-        target_os = "macos"
-    ))]
-    let attention_variant = proxima_model_interop::ServingSettings::from_env()
-        .expect("PROXIMA_SERVING_* env parses as the serving settings")
-        .as_serving_config(&[])
-        .attention_variant;
+    let config_diff_count = config_diff_count(&base);
     let serving_config = ServingConfig {
-        ignore_eos,
+        ignore_eos: base.ignore_eos,
         warm_model_buffers_at_load,
         speculative,
         gpu_layers: GPU_LAYERS_ALL,
         numeric_policy,
-        kv_cache_key_quant: kv_cache_key_type,
-        kv_cache_value_quant: kv_cache_type,
-        flash_attention: false,
-        batch_size,
-        ubatch_size,
+        kv_cache_key_quant: base.kv_cache_key_quant,
+        kv_cache_value_quant: base.kv_cache_value_quant,
+        flash_attention: base.flash_attention,
+        batch_size: base.batch_size,
+        ubatch_size: base.ubatch_size,
+        seed: base.seed,
+        context_length: base.context_length,
         reasoning_budget: 0,
         kv_bucket_tokens,
         resident_prefill_plan_bytes,
@@ -380,7 +409,7 @@ fn main() {
             feature = "metal-attn-variants",
             target_os = "macos"
         ))]
-        attention_variant,
+        attention_variant: base.attention_variant,
         ..ServingConfig::default()
     };
     let model = LoadedModel::load_with_serving(&parsed, &bytes, &serving_config)
@@ -429,12 +458,22 @@ fn main() {
         max_tokens = max_tokens as u64,
         batch_size = u64::from(serving_config.batch_size),
         ubatch_size = u64::from(serving_config.ubatch_size),
+        config_diff_count = u64::from(config_diff_count),
         "decode_gbps_baseline"
     );
     #[cfg(not(feature = "instrument"))]
     eprintln!(
-        "decode_gbps_baseline run=start prompt={prompt:?} max_tokens={max_tokens} batch_size={} ubatch_size={}",
-        serving_config.batch_size, serving_config.ubatch_size
+        "decode_gbps_baseline run=start prompt={prompt:?} max_tokens={max_tokens} batch_size={} ubatch_size={} kv_key={:?} kv_value={:?} flash_attention={} attention_variant={:?} context={:?} seed={} ignore_eos={} config_diff_count={}",
+        serving_config.batch_size,
+        serving_config.ubatch_size,
+        serving_config.kv_cache_key_quant,
+        serving_config.kv_cache_value_quant,
+        serving_config.flash_attention,
+        attention_label(&serving_config),
+        serving_config.context_length,
+        serving_config.seed,
+        serving_config.ignore_eos,
+        config_diff_count,
     );
 
     // owner rollout check (2026-09-22, intervention6): K=1 vs K=8 chunked

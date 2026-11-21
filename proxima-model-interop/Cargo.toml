@@ -560,7 +560,7 @@ required-features = ["std"]
 # changing the K=1 vs K=8 comparison.
 [[example]]
 name = "decode_gbps_baseline"
-required-features = ["std", "metal"]
+required-features = ["std", "metal", "metal-attn-variants"]
 
 # Interleaved decode ms/token driver: proxima builds of `decode_gbps_baseline`
 # plus the llama-server and Ollama reference arms over HTTP.

@@ -1,0 +1,7 @@
+batch_size = 2048
+ubatch_size = 512
+kv_cache_key_quant = "f16"
+kv_cache_value_quant = "f16"
+attention_decomposition = "flash_where_admitted"
+seed = 1
+ignore_eos = true
