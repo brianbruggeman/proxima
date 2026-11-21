@@ -189,9 +189,12 @@ pub enum GpuDriver {
     Wgpu,
     #[cfg(feature = "cuda-driver")]
     Cuda,
-    /// AMD HIP through the CUDA renderer's HIP dialect; `wave` is the configured width, `None` reads it from the device.
+    /// AMD HIP through the CUDA renderer's HIP dialect; `wave` is the configured width, `None` reads it from the device, and `device` is the ordinal the plan opens.
     #[cfg(feature = "cuda-driver")]
-    Hip { wave: Option<crate::cuda::HipWave> },
+    Hip {
+        wave: Option<crate::cuda::HipWave>,
+        device: u32,
+    },
 }
 
 impl GpuDriver {
@@ -628,6 +631,7 @@ fn auto_hip_driver(config: &RuntimeConfig) -> Option<GpuDriver> {
 fn hip_driver(config: &RuntimeConfig) -> GpuDriver {
     GpuDriver::Hip {
         wave: crate::cuda_driver::rocm::hip_wave_of(config),
+        device: config.hip_device,
     }
 }
 
@@ -865,8 +869,10 @@ fn plan_configured_gpu(
                 .map_err(map_cuda_configuration_error)?,
         ))),
         #[cfg(feature = "cuda-driver")]
-        GpuDriver::Hip { wave } => Ok(Plan::Rocm(Box::new(
-            crate::cuda_driver::rocm::RocmPlan::plan(config, wave, program, symbols, named, outputs)?,
+        GpuDriver::Hip { wave, .. } => Ok(Plan::Rocm(Box::new(
+            crate::cuda_driver::rocm::RocmPlan::plan(
+                config, wave, program, symbols, named, outputs,
+            )?,
         ))),
     }
 }
@@ -971,7 +977,7 @@ fn binding_policy(plan: &Plan, numeric: NumericPolicy) -> NumericPolicy {
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(_) => numeric.with_accumulator_narrowing().with_flash_narrowing(true),
         #[cfg(feature = "cuda-driver")]
-        Plan::Rocm(_) => numeric.with_accumulator_narrowing().with_flash_narrowing(true),
+        Plan::Rocm(_) => crate::cuda_driver::rocm::numeric_policy(numeric),
         #[cfg(not(any(
             feature = "cpu",
             all(feature = "metal", target_os = "macos"),
@@ -1280,8 +1286,8 @@ pub fn plan_named(
                     plan_named_cuda(_program, _symbols, _named, _outputs, _numeric_policy)
                 }
                 #[cfg(feature = "cuda-driver")]
-                GpuDriver::Hip { wave } => {
-                    plan_named_hip(wave, _program, _symbols, _named, _outputs, _numeric_policy)
+                GpuDriver::Hip { wave, device } => {
+                    plan_named_hip(wave, device, _program, _symbols, _named, _outputs, _numeric_policy)
                 }
             }
         }
@@ -2115,6 +2121,7 @@ fn execute_plan_named_wgpu(
 #[cfg(feature = "cuda-driver")]
 fn plan_named_hip(
     wave: Option<crate::cuda::HipWave>,
+    device: u32,
     program: &[Op],
     symbols: &[u64],
     named: &[(&str, QuantizedBlock<'_>)],
@@ -2123,6 +2130,7 @@ fn plan_named_hip(
 ) -> Result<Plan, BackendError> {
     let config = RuntimeConfig {
         numeric: numeric_policy,
+        hip_device: device,
         ..RuntimeConfig::default()
     };
     Ok(Plan::Rocm(Box::new(crate::cuda_driver::rocm::RocmPlan::plan(
@@ -2622,8 +2630,35 @@ mod hip_routing_tests {
 
             let driver = super::configured_driver(&config, super::Engine::Gpu).expect("hip resolves");
 
-            assert_eq!(driver, Some(GpuDriver::Hip { wave: expected }), "{name} wave {wave}");
+            assert_eq!(
+                driver,
+                Some(GpuDriver::Hip {
+                    wave: expected,
+                    device: 0,
+                }),
+                "{name} wave {wave}"
+            );
         }
+    }
+
+    #[test]
+    fn hip_device_reaches_the_configured_driver_ordinal() {
+        let config = RuntimeConfig::builder()
+            .with_engine("gpu")
+            .with_gpu_driver("hip")
+            .with_hip_device(1)
+            .build()
+            .expect("device 1 is accepted config data");
+
+        let driver = super::configured_driver(&config, super::Engine::Gpu).expect("hip resolves");
+
+        assert_eq!(
+            driver,
+            Some(GpuDriver::Hip {
+                wave: None,
+                device: 1,
+            })
+        );
     }
 
     #[test]

@@ -4732,6 +4732,7 @@ pub mod rocm {
     use crate::config::RuntimeConfig;
     use crate::cuda::{EmitDevice, HipKernel, HipWave, emit_hip_at_wave};
     use crate::lowering::PackedOperands;
+    use proxima_numeric::NumericPolicy;
     use proxima_tensor::{Evaluated, NodeId, Op, QuantizedBlock, Shapes, bind_unfused, block_node_ids, infer, prune_dead, resolve_named_blocks};
     use crate::lowering::Binding;
 
@@ -4792,6 +4793,12 @@ pub mod rocm {
     const HIP_SUCCESS: c_int = 0;
     const RTC_SUCCESS: c_int = 0;
 
+    /// The R0600 `hipDeviceProp_t` is about 1.5 KB; the margin keeps a later
+    /// runtime from writing past this buffer in `hipGetDevicePropertiesR0600`.
+    const HIP_DEVICE_PROPERTIES_BYTES: usize = 4096;
+    const HIP_DEVICE_PROPERTIES_WORDS: usize = HIP_DEVICE_PROPERTIES_BYTES / core::mem::size_of::<u64>();
+    const _: () = assert!(HIP_DEVICE_PROPERTIES_BYTES >= 2048);
+
     /// Errors from loading the ROCm runtime, compiling HIP C++, or executing.
     #[derive(Debug, thiserror::Error)]
     pub enum HipDriverError {
@@ -4824,6 +4831,8 @@ pub mod rocm {
         ArgumentCountMismatch,
         #[error("device ordinal {ordinal} is out of range; this host exposes {count}")]
         DeviceOutOfRange { ordinal: c_int, count: c_int },
+        #[error("hip device ordinal {0} does not fit HIP's integer device index")]
+        DeviceOrdinalTooLarge(u32),
         #[error("a launch of {threads} threads needs more blocks than the launch index holds")]
         GridTooLarge { threads: u64 },
         #[error("smoke input is too large for the launch ABI: {0} elements")]
@@ -4842,6 +4851,7 @@ pub mod rocm {
     type HipGetDeviceCount = unsafe extern "C" fn(*mut c_int) -> c_int;
     type HipSetDevice = unsafe extern "C" fn(c_int) -> c_int;
     type HipDeviceGetName = unsafe extern "C" fn(*mut c_char, c_int, c_int) -> c_int;
+    type HipGetDeviceProperties = unsafe extern "C" fn(*mut c_void, c_int) -> c_int;
     type HipDeviceSynchronize = unsafe extern "C" fn() -> c_int;
     type HipMalloc = unsafe extern "C" fn(*mut *mut c_void, usize) -> c_int;
     type HipFree = unsafe extern "C" fn(*mut c_void) -> c_int;
@@ -4953,6 +4963,7 @@ pub mod rocm {
         hip_get_device_count: HipGetDeviceCount,
         hip_set_device: HipSetDevice,
         hip_device_get_name: HipDeviceGetName,
+        hip_get_device_properties: Option<HipGetDeviceProperties>,
         hip_device_synchronize: HipDeviceSynchronize,
         hip_malloc: HipMalloc,
         hip_free: HipFree,
@@ -4989,11 +5000,19 @@ pub mod rocm {
             let rtc = open_rtc(&runtime)?;
             let runtime_name = "libamdhip64";
             let rtc_name = "libhiprtc";
+            let hip_get_device_properties = resolve::<HipGetDeviceProperties>(
+                &runtime,
+                runtime_name,
+                "hipGetDevicePropertiesR0600",
+            )
+            .or_else(|_| resolve(&runtime, runtime_name, "hipGetDeviceProperties"))
+            .ok();
             Ok(Arc::new(Self {
                 hip_init: resolve(&runtime, runtime_name, "hipInit")?,
                 hip_get_device_count: resolve(&runtime, runtime_name, "hipGetDeviceCount")?,
                 hip_set_device: resolve(&runtime, runtime_name, "hipSetDevice")?,
                 hip_device_get_name: resolve(&runtime, runtime_name, "hipDeviceGetName")?,
+                hip_get_device_properties,
                 hip_device_synchronize: resolve(&runtime, runtime_name, "hipDeviceSynchronize")?,
                 hip_malloc: resolve(&runtime, runtime_name, "hipMalloc")?,
                 hip_free: resolve(&runtime, runtime_name, "hipFree")?,
@@ -5071,6 +5090,46 @@ pub mod rocm {
                 .to_string_lossy()
                 .into_owned())
         }
+
+        fn device_arch(&self, ordinal: c_int) -> Option<String> {
+            let query = self.hip_get_device_properties?;
+            let mut properties = [0_u64; HIP_DEVICE_PROPERTIES_WORDS];
+            // SAFETY: the buffer is HIP_DEVICE_PROPERTIES_BYTES and the runtime
+            // writes at most one R0600 hipDeviceProp_t (~1.5 KB) into it.
+            let status = unsafe { query(properties.as_mut_ptr().cast::<c_void>(), ordinal) };
+            if status != HIP_SUCCESS {
+                return None;
+            }
+            // SAFETY: the call filled the initialized buffer; the scan reads only bytes.
+            let bytes = unsafe {
+                core::slice::from_raw_parts(
+                    properties.as_ptr().cast::<u8>(),
+                    HIP_DEVICE_PROPERTIES_BYTES,
+                )
+            };
+            gcn_arch_name(bytes).map(str::to_owned)
+        }
+    }
+
+    /// The `gcnArchName` token inside a `hipDeviceProp_tR0600` image: the first
+    /// NUL-terminated `gfx...` run of architecture-name bytes. Scanning rather
+    /// than declaring the ~1.5 KB struct keeps this independent of the header's
+    /// versioned layout.
+    fn gcn_arch_name(properties: &[u8]) -> Option<&str> {
+        properties
+            .windows(3)
+            .position(|window| window == b"gfx")
+            .and_then(|start| {
+                let rest = &properties[start..];
+                let end = rest.iter().position(|byte| *byte == 0)?;
+                let token = core::str::from_utf8(&rest[..end]).ok()?;
+                let suffix = token.get(3..)?;
+                let shaped = !suffix.is_empty()
+                    && suffix
+                        .chars()
+                        .all(|value| value.is_ascii_alphanumeric() || matches!(value, ':' | '-' | '+' | '_'));
+                shaped.then_some(token)
+            })
     }
 
     /// A device allocation with the runtime handle that must free it.
@@ -5195,12 +5254,43 @@ pub mod rocm {
         Ok(slot.insert(value))
     }
 
+    /// The options hipRTC receives: one `--offload-arch` naming the opened device
+    /// unless the caller already supplied an arch, so a code object never targets
+    /// a device other than the one the plan selected.
+    fn compile_options(arch: Option<&str>, options: &[&str]) -> Vec<String> {
+        let explicit = options.iter().any(|option| {
+            option.starts_with("--offload-arch") || option.starts_with("--gpu-architecture")
+        });
+        let mut resolved = Vec::with_capacity(options.len() + 1);
+        if !explicit
+            && let Some(arch) = arch.filter(|arch| !arch.is_empty())
+        {
+            resolved.push(format!("--offload-arch={arch}"));
+        }
+        resolved.extend(options.iter().map(|option| (*option).to_owned()));
+        resolved
+    }
+
+    /// Converts the configured ordinal to HIP's integer device index before any
+    /// runtime call.
+    pub fn open_ordinal(device: u32) -> Result<c_int, HipDriverError> {
+        c_int::try_from(device).map_err(|_| HipDriverError::DeviceOrdinalTooLarge(device))
+    }
+
+    /// The HIP lane's numeric policy: the conflaguration/proxima-numeric policy
+    /// with the accumulator and flash narrowing every GPU lane applies.
+    #[must_use]
+    pub fn numeric_policy(numeric: NumericPolicy) -> NumericPolicy {
+        numeric.with_accumulator_narrowing().with_flash_narrowing(true)
+    }
+
     /// One ROCm device, resolved through the runtime API.
     #[derive(Debug)]
     pub struct HipDevice {
         api: Arc<HipApi>,
         ordinal: c_int,
         name: String,
+        arch: Option<String>,
     }
 
     impl HipDevice {
@@ -5237,12 +5327,26 @@ pub mod rocm {
                 return Err(api.runtime_error("hipSetDevice", status));
             }
             let name = api.device_name(ordinal)?;
-            Ok(Self { api, ordinal, name })
+            let arch = api.device_arch(ordinal);
+            Ok(Self {
+                api,
+                ordinal,
+                name,
+                arch,
+            })
         }
 
         #[must_use]
         pub fn name(&self) -> &str {
             &self.name
+        }
+
+        /// The device's `gcnArchName` when the runtime exposes
+        /// `hipGetDevicePropertiesR0600`; `None` lets hipRTC target the current
+        /// device itself.
+        #[must_use]
+        pub fn arch(&self) -> Option<&str> {
+            self.arch.as_deref()
         }
 
         #[must_use]
@@ -5285,9 +5389,10 @@ pub mod rocm {
                 return Err(self.api.rtc_error("hiprtcCreateProgram", status));
             }
 
+            let options = compile_options(self.arch(), options);
             let options_c = options
                 .iter()
-                .filter_map(|option| CString::new(*option).ok())
+                .filter_map(|option| CString::new(option.as_str()).ok())
                 .collect::<Vec<_>>();
             let option_pointers = options_c
                 .iter()
@@ -5742,7 +5847,7 @@ pub mod rocm {
     }
 
     impl RocmPlan {
-        /// Opens device 0, resolves the wave width and emits every op.
+        /// Opens the selected ordinal, resolves the wave width and emits every op.
         ///
         /// # Errors
         /// [`HipDriverError::RuntimeNotInstalled`] (or `RtcNotInstalled`) on a host
@@ -5755,7 +5860,7 @@ pub mod rocm {
             named: &[(&str, QuantizedBlock<'_>)],
             outputs: &[NodeId],
         ) -> Result<Self, HipDriverError> {
-            let device = HipDevice::open(0)?;
+            let device = HipDevice::open(open_ordinal(config.hip_device)?)?;
             let wave = resolve_wave(wave, &device)?;
             let blocks = resolve_named_blocks(program, named)
                 .map_err(|_| HipDriverError::UnsupportedGraph { reason: "named input resolution failed" })?;
@@ -5770,7 +5875,7 @@ pub mod rocm {
                 .map(|last| NodeId(last as u32))
                 .ok_or(HipDriverError::UnsupportedGraph { reason: "empty program" })?;
             let outputs = if outputs.is_empty() { vec![root] } else { outputs.to_vec() };
-            let policy = config.numeric.with_accumulator_narrowing().with_flash_narrowing(true);
+            let policy = numeric_policy(config.numeric);
             let bound = bind_unfused(program, &shapes, &outputs, policy)
                 .map_err(|_| HipDriverError::UnsupportedGraph { reason: "graph binding failed" })?;
             let resolved = prune_dead(bound, &outputs);
@@ -5889,6 +5994,68 @@ pub mod rocm {
         use proxima_tensor::{
             Extent, IndexMap, Keep, Reduce, ReduceInit, ScalarOp, append, bind, infer, map,
         };
+
+        #[test]
+        fn hip_compile_options_name_the_open_devices_gcn_arch() {
+            assert_eq!(
+                compile_options(Some("gfx90a:sramecc-:xnack-"), &[]),
+                vec![String::from("--offload-arch=gfx90a:sramecc-:xnack-")]
+            );
+        }
+
+        #[test]
+        fn hip_compile_options_let_an_explicit_arch_override_the_device() {
+            assert_eq!(
+                compile_options(Some("gfx942"), &["--offload-arch=gfx90a"]),
+                vec![String::from("--offload-arch=gfx90a")]
+            );
+            assert_eq!(
+                compile_options(Some("gfx942"), &["--gpu-architecture=gfx90a"]),
+                vec![String::from("--gpu-architecture=gfx90a")]
+            );
+        }
+
+        #[test]
+        fn hip_compile_options_omit_the_arch_when_the_property_is_unreadable() {
+            assert!(compile_options(None, &[]).is_empty());
+            assert_eq!(compile_options(Some(""), &["-O3"]), vec![String::from("-O3")]);
+        }
+
+        #[test]
+        fn hip_properties_scan_finds_the_gcn_arch_name() {
+            let token = b"gfx90a:sramecc-:xnack-";
+            let mut properties = [0_u8; HIP_DEVICE_PROPERTIES_BYTES];
+            properties[512..512 + token.len()].copy_from_slice(token);
+            properties[512 + token.len()] = 0;
+
+            assert_eq!(gcn_arch_name(&properties), Some("gfx90a:sramecc-:xnack-"));
+            assert_eq!(gcn_arch_name(b"no architecture token here\0"), None);
+            assert_eq!(gcn_arch_name(b"gfx\0"), None, "a bare gfx is not an arch name");
+        }
+
+        #[test]
+        fn hip_numeric_policy_is_the_conflaguration_policy_with_the_shared_narrowing() {
+            let numeric = RuntimeConfig::default().numeric;
+
+            assert_eq!(
+                numeric_policy(numeric),
+                numeric.with_accumulator_narrowing().with_flash_narrowing(true)
+            );
+        }
+
+        #[test]
+        fn hip_open_ordinal_converts_the_configured_device() {
+            assert!(matches!(open_ordinal(1), Ok(1)));
+            assert!(matches!(open_ordinal(i32::MAX as u32), Ok(i32::MAX)));
+            assert!(matches!(
+                open_ordinal(i32::MAX as u32 + 1),
+                Err(HipDriverError::DeviceOrdinalTooLarge(_))
+            ));
+            assert!(matches!(
+                open_ordinal(u32::MAX),
+                Err(HipDriverError::DeviceOrdinalTooLarge(u32::MAX))
+            ));
+        }
 
         #[test]
         fn an_absent_runtime_is_a_typed_error_naming_the_sonames_tried() {

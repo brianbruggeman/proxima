@@ -29,6 +29,9 @@ pub struct RuntimeConfig {
     /// Wavefront width the HIP dialect is emitted for: 0 reads `warpSize` from the device, 32 (RDNA) or 64 (CDNA) overrides it.
     #[setting(default = 0)]
     pub hip_wave: u32,
+    /// HIP device ordinal the ROCm plan opens, so a multi-device host can select the device its kernels target.
+    #[setting(default = 0)]
+    pub hip_device: u32,
     /// Permit bind-time and execution-time algebraic fusion, such as joining a product and reduce.
     #[setting(default = false)]
     pub allow_fusion: bool,
@@ -120,6 +123,7 @@ impl Default for RuntimeConfig {
             engine: String::from("cpu"),
             gpu_driver: String::from("auto"),
             hip_wave: 0,
+            hip_device: 0,
             allow_fusion: false,
             wavefront_schedule: crate::sized::COMMAND_BUFFER_WAVEFRONT_SCHEDULE,
             exact_activations: true,
@@ -305,6 +309,15 @@ impl Validate for RuntimeConfig {
             errors.push(ValidationMessage::new(
                 "hip_wave",
                 format!("unsupported hip wave width {}; expected 0 (device), 32 or 64", self.hip_wave),
+            ));
+        }
+        if self.hip_device > i32::MAX as u32 {
+            errors.push(ValidationMessage::new(
+                "hip_device",
+                format!(
+                    "hip device ordinal {} does not fit HIP's integer device index",
+                    self.hip_device
+                ),
             ));
         }
         if !matches!(self.gpu_driver.as_str(), "auto" | "metal" | "wgpu" | "cuda" | "hip" | "rocm") {
@@ -861,6 +874,13 @@ impl RuntimeConfigBuilder {
     #[must_use]
     pub fn with_hip_wave(mut self, value: u32) -> Self {
         self.inner.hip_wave = value;
+        self
+    }
+
+    /// Set the HIP device ordinal the ROCm plan opens.
+    #[must_use]
+    pub fn with_hip_device(mut self, value: u32) -> Self {
+        self.inner.hip_device = value;
         self
     }
 

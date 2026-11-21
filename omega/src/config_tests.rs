@@ -13,7 +13,7 @@ use super::{
 };
 #[cfg(feature = "cuda")]
 use crate::cuda::{HipWave, target::Target};
-const CLEAN_ENVIRONMENT: [(&str, Option<&str>); 32] = [
+const CLEAN_ENVIRONMENT: [(&str, Option<&str>); 33] = [
     ("OMEGA_ENGINE", None),
     ("OMEGA_GPU_DRIVER", None),
     ("OMEGA_ALLOW_FUSION", None),
@@ -46,6 +46,7 @@ const CLEAN_ENVIRONMENT: [(&str, Option<&str>); 32] = [
     ("OMEGA_DENSE_MMA_INPUT_LAYOUT", None),
     ("OMEGA_NUMERIC_BF16_INPUT_ROUNDING", None),
     ("OMEGA_HIP_WAVE", None),
+    ("OMEGA_HIP_DEVICE", None),
 ];
 
 fn validation_text(result: conflaguration::Result<RuntimeConfig>) -> String {
@@ -68,6 +69,7 @@ fn runtime_config_difference_count(left: &RuntimeConfig, right: &RuntimeConfig) 
         left.engine != right.engine,
         left.gpu_driver != right.gpu_driver,
         left.hip_wave != right.hip_wave,
+        left.hip_device != right.hip_device,
         left.allow_fusion != right.allow_fusion,
         left.wavefront_schedule != right.wavefront_schedule,
         left.exact_activations != right.exact_activations,
@@ -1016,4 +1018,37 @@ fn hip_wave_builder_env_and_toml_agree_and_only_device_32_or_64_validate() {
     }
     let error = validation_text(RuntimeConfig::builder().with_hip_wave(48).build());
     assert!(error.contains("hip_wave"), "{error}");
+}
+
+#[test]
+fn hip_device_builder_env_and_toml_agree_and_the_default_is_zero() {
+    let from_builder = RuntimeConfig::builder()
+        .with_gpu_driver("hip")
+        .with_hip_device(1)
+        .build()
+        .expect("device 1 is accepted config data");
+    let from_toml: RuntimeConfig =
+        toml::from_str("gpu_driver = 'hip'\nhip_device = 1\n").expect("config TOML deserializes");
+    let from_env = temp_env::with_vars(
+        [("OMEGA_GPU_DRIVER", Some("hip")), ("OMEGA_HIP_DEVICE", Some("1"))],
+        || RuntimeConfig::from_env().expect("env config validates"),
+    );
+
+    let zero = RuntimeConfig::builder()
+        .with_gpu_driver("hip")
+        .build()
+        .expect("the default device is accepted config data");
+
+    assert_eq!(from_builder.hip_device, 1);
+    assert_eq!(runtime_config_difference_count(&from_builder, &from_toml), 0);
+    assert_eq!(runtime_config_difference_count(&from_builder, &from_env), 0);
+    assert_eq!(runtime_config_difference_count(&from_builder, &zero), 1);
+    assert_eq!(RuntimeConfig::default().hip_device, 0, "device zero is the default");
+}
+
+#[test]
+fn hip_device_above_the_hip_index_is_refused_by_name() {
+    let error = validation_text(RuntimeConfig::builder().with_hip_device(u32::MAX).build());
+    assert!(error.contains("hip_device"), "{error}");
+    assert!(error.contains("integer device index"), "{error}");
 }
