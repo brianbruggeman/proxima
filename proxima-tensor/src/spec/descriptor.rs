@@ -578,7 +578,6 @@ pub enum KvCacheShape {
     Monolithic,
 }
 
-
 /// Which channels RoPE rotates together: `(i, i + rotary_dim / 2)` or
 /// `(2i, 2i + 1)`. The count of rotating dims is not here; it is the
 /// checkpoint's own `<arch>.rope.dimension_count`.

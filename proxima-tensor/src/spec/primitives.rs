@@ -335,13 +335,19 @@ impl RopePairing {
     /// operand, and only a `coeff == 1`, `offset == 0` single term defines an
     /// extent from the source's own shape, so `2*i` (and `i + pairs`) would be
     /// an unconstrained dimension without the explicit `@`.
-    pub(super) fn offsets_sized(self, pairs: u32) -> (alloc::string::String, alloc::string::String) {
+    pub(super) fn offsets_sized(
+        self,
+        pairs: u32,
+    ) -> (alloc::string::String, alloc::string::String) {
         match self {
             Self::Interleaved => (
                 alloc::format!("2*i@{pairs}"),
                 alloc::format!("2*i+1@{pairs}"),
             ),
-            Self::SplitHalf { .. } => (alloc::format!("i@{pairs}"), alloc::format!("i+{pairs}@{pairs}")),
+            Self::SplitHalf { .. } => (
+                alloc::format!("i@{pairs}"),
+                alloc::format!("i+{pairs}@{pairs}"),
+            ),
         }
     }
 }
@@ -567,12 +573,7 @@ pub fn sum_of_squares(
     full: &str,
     reduce_out: &str,
 ) -> Result<NodeId, TensorError> {
-    let squared = elementwise_like(
-        program,
-        x,
-        ScalarOp::Multiply,
-        &[(x, full), (x, full)],
-    )?;
+    let squared = elementwise_like(program, x, ScalarOp::Multiply, &[(x, full), (x, full)])?;
     let widened = elementwise(
         program,
         DType::FLOAT64,
