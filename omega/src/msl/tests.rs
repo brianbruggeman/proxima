@@ -9487,7 +9487,14 @@ mod expert_grouped_gemm {
             kernel_cache_key(&bound, &packed, NumericPolicy::default()).expect("identity resolves");
 
         assert!(identity.contains("_g10"), "{identity}");
-        assert!(identity.contains("E_w128"), "{identity}");
+        // `metal-gathered-packed-row` admits the gathered op as a packed row block too, so
+        // `packed_row_block_stride_is_one` appends its '1' between the shape token and the width
+        let shape_and_width = if cfg!(feature = "metal-gathered-packed-row") {
+            "E1_w128"
+        } else {
+            "E_w128"
+        };
+        assert!(identity.contains(shape_and_width), "{identity}");
     }
 
     #[proxima::test]
