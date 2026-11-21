@@ -682,6 +682,10 @@ required-features = ["alloc"]
 name = "flat_grid_compile_gate"
 required-features = ["alloc"]
 
+[[test]]
+name = "training_api"
+required-features = ["cpu", "train"]
+
 [[example]]
 name = "real_forward_packed_probe"
 required-features = ["alloc"]
@@ -732,6 +736,11 @@ rustix.workspace = true
 temp-env.workspace = true
 tempfile.workspace = true
 toml.workspace = true
+
+[[bench]]
+name = "train_step_llama"
+harness = false
+required-features = ["train", "cpu"]
 
 [[bench]]
 name = "metal_vs_cpu"

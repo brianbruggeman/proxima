@@ -227,7 +227,7 @@ fn finish(errors: Vec<conflaguration::ValidationMessage>) -> conflaguration::Res
 )]
 #[cfg_attr(feature = "config", settings(prefix = "AUTOGRAD_ADAM"))]
 #[cfg_attr(feature = "config", builder(derive(Clone, Debug)))]
-#[cfg_attr(feature = "config", serde(default))]
+#[cfg_attr(feature = "config", serde(default, deny_unknown_fields))]
 pub struct AdamConfig {
     /// Step size. Scales the bias-corrected first-moment estimate before
     /// it is subtracted from the parameter.
@@ -612,7 +612,7 @@ impl Pipe for AdamStep {
 )]
 #[cfg_attr(feature = "config", settings(prefix = "AUTOGRAD_SGD"))]
 #[cfg_attr(feature = "config", builder(derive(Clone, Debug)))]
-#[cfg_attr(feature = "config", serde(default))]
+#[cfg_attr(feature = "config", serde(default, deny_unknown_fields))]
 pub struct SgdConfig {
     /// Step size. Scales the gradient before it is subtracted from the
     /// parameter.
@@ -735,7 +735,7 @@ impl Pipe for SgdStep {
 )]
 #[cfg_attr(feature = "config", settings(prefix = "AUTOGRAD_RMSPROP"))]
 #[cfg_attr(feature = "config", builder(derive(Clone, Debug)))]
-#[cfg_attr(feature = "config", serde(default))]
+#[cfg_attr(feature = "config", serde(default, deny_unknown_fields))]
 pub struct RmspropConfig {
     /// Step size. Scales the gradient, damped by its own running variance,
     /// before it is subtracted from the parameter.
@@ -965,7 +965,7 @@ impl Pipe for RmspropStep {
 )]
 #[cfg_attr(feature = "config", settings(prefix = "AUTOGRAD_ADAMW"))]
 #[cfg_attr(feature = "config", builder(derive(Clone, Debug)))]
-#[cfg_attr(feature = "config", serde(default))]
+#[cfg_attr(feature = "config", serde(default, deny_unknown_fields))]
 pub struct AdamwConfig {
     /// Step size, as [`AdamConfig::learning_rate`].
     #[cfg_attr(feature = "config", setting(default = 0.001))]

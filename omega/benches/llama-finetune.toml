@@ -1,0 +1,40 @@
+# llama.cpp's finetune configuration at tag b11671, as a conflaguration `TrainConfig`.
+#
+# Every value is the incumbent's default, not a benchmark-only choice:
+#   optimizer      AdamW                     common/common.h:619
+#   learning_rate  --lr0 1e-5                common/common.h:438
+#   beta1/beta2    AdamW 0.9 / 0.999         ggml/src/ggml-opt.cpp:229-230
+#   epsilon        AdamW 1e-8                ggml/src/ggml-opt.cpp:231
+#   weight_decay   --wd 0                    common/common.h:442
+#   epochs         2                         common/common.h:443
+#   val_split      0.05                      common/common.h:620
+#   batch          2048                      common/common.h:458
+#   ubatch         512                       common/common.h:459
+#
+# common.cpp:2108-2109 overrides the optimizer's built-in alpha (0.001) with
+# lr0 and its built-in wd (0.0) with --wd, so the values above are what a
+# default `llama-finetune` run actually uses.
+#
+# The moment/hyper layouts are proxima-numeric `FloatLayout` names; float32 is
+# the format the incumbent trains in (finetune.cpp forces f32 K/V, f32 weights).
+
+optimizer = "adamw"
+
+[runtime]
+engine = "cpu"
+
+[schedule]
+epochs = 2
+val_split = 0.05
+batch = 2048
+ubatch = 512
+
+[adamw]
+learning_rate = 1.0e-5
+beta1 = 0.9
+beta2 = 0.999
+epsilon = 1.0e-8
+weight_decay = 0.0
+hyper_layout = "float32"
+first_moment_layout = "float32"
+second_moment_layout = "float32"
