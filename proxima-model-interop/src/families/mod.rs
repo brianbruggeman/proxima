@@ -6,10 +6,14 @@
 //! last. Every value carries its [`Source`]. Inference is a hypothesis: the
 //! golden gate (`accept`) is what turns it into a model.
 
+mod accept;
 mod infer;
 mod pattern;
 mod template;
 
+pub use accept::{Accepted, GoldenRecord, LedgerError, Refusal, accept, parse_ledger};
+#[cfg(feature = "std")]
+pub use accept::{LedgerFileError, read_ledger};
 pub use infer::{
     CheckpointSha, Fact, InferError, Inferred, ShaError, Source, TensorShape, Unmet, infer,
 };

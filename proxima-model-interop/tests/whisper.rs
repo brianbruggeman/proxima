@@ -11,7 +11,8 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use proxima_model_interop::families::{
-    CheckpointSha, FamilyTemplate, InferError, Inferred, Source, TensorShape, Value, infer,
+    CheckpointSha, FamilyTemplate, GoldenRecord, InferError, Inferred, Refusal, Source,
+    TensorShape, Value, accept, infer, parse_ledger,
 };
 use proxima_safetensors::SafetensorsParser;
 
@@ -208,5 +209,117 @@ mod infer {
             unmet[0].pattern,
             "model.decoder.layers.{L}.encoder_attn.k_proj.weight"
         );
+    }
+}
+
+mod accept {
+    use super::*;
+
+    fn tiny_inferred() -> Result<Inferred> {
+        let tensors = tiny_tensors()?;
+        let config = tiny_config()?;
+        Ok(infer_with(&tensors, &config)??)
+    }
+
+    // synthetic ledger lines: real golden records arrive with S6
+    fn ledger_for(inferred: &Inferred, measured: f64) -> Result<Vec<GoldenRecord>> {
+        let line = |stage: &str| {
+            let sha = inferred.sha.as_str();
+            let digest = inferred.digest();
+            format!(
+                r#"{{"sha":"{sha}","digest":"{digest}","stage":"{stage}","measured":{measured:e},"ceiling":5e-4}}"#
+            )
+        };
+        let lines: Vec<String> = inferred
+            .required_stages
+            .iter()
+            .map(|stage| line(stage))
+            .collect();
+        let text = lines.join("\n");
+        Ok(parse_ledger(&text)?)
+    }
+
+    #[test]
+    fn missing_golden_is_refused_with_golden_missing_for_every_way_it_can_be_absent() {
+        let inferred = tiny_inferred().expect("tiny infers");
+        let good = ledger_for(&inferred, 1e-6).expect("synthetic ledger");
+        let other_sha = GoldenRecord {
+            sha: "0".repeat(64),
+            ..good[0].clone()
+        };
+        let other_digest = GoldenRecord {
+            digest: "stale".into(),
+            ..good[0].clone()
+        };
+
+        let none = accept(&inferred, &[]).expect_err("no records");
+        let sha = accept(&inferred, &[other_sha]).expect_err("other sha");
+        let digest = accept(&inferred, &[other_digest]).expect_err("other digest");
+        let stage = accept(&inferred, &good[..1]).expect_err("one stage missing");
+
+        for refusal in [&none, &sha, &digest] {
+            assert!(
+                matches!(refusal, Refusal::GoldenMissing { stage: None, .. }),
+                "{refusal}"
+            );
+        }
+        let named = Some("encoder".to_string());
+        assert!(
+            matches!(&stage, Refusal::GoldenMissing { stage, .. } if *stage == named),
+            "{stage}"
+        );
+    }
+
+    #[test]
+    fn failed_golden_is_refused_with_golden_failed_naming_the_stage() {
+        let inferred = tiny_inferred().expect("tiny infers");
+        let above = ledger_for(&inferred, 1e-2).expect("synthetic ledger");
+        let mut not_a_number = ledger_for(&inferred, 0.0).expect("synthetic ledger");
+        not_a_number
+            .iter_mut()
+            .for_each(|record| record.measured = f64::NAN);
+
+        let over = accept(&inferred, &above).expect_err("above ceiling");
+        let nan = accept(&inferred, &not_a_number).expect_err("NaN measurement");
+
+        assert!(
+            matches!(&over, Refusal::GoldenFailed { stage, .. } if stage == "mel"),
+            "{over}"
+        );
+        assert!(
+            matches!(&nan, Refusal::GoldenFailed { stage, .. } if stage == "mel"),
+            "{nan}"
+        );
+    }
+
+    #[test]
+    fn golden_within_every_ceiling_is_accepted() {
+        let inferred = tiny_inferred().expect("tiny infers");
+        let records = ledger_for(&inferred, 1e-6).expect("synthetic ledger");
+
+        let accepted = accept(&inferred, &records).expect("all stages pass");
+
+        assert_eq!(accepted.inferred().digest(), inferred.digest());
+    }
+
+    #[test]
+    fn latest_record_per_stage_is_authoritative_in_an_append_only_ledger() {
+        let inferred = tiny_inferred().expect("tiny infers");
+        let passing = ledger_for(&inferred, 1e-6).expect("synthetic ledger");
+        let failing: Vec<_> = passing
+            .iter()
+            .map(|record| GoldenRecord {
+                measured: 1e-2,
+                ..record.clone()
+            })
+            .collect();
+        let pass_then_fail = [passing.clone(), failing.clone()].concat();
+        let fail_then_pass = [failing, passing].concat();
+
+        let revoked = accept(&inferred, &pass_then_fail).expect_err("a later failure revokes");
+        let recovered = accept(&inferred, &fail_then_pass).expect("a later pass supersedes");
+
+        assert!(matches!(revoked, Refusal::GoldenFailed { .. }), "{revoked}");
+        assert_eq!(recovered.inferred().digest(), inferred.digest());
     }
 }
