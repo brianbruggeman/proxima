@@ -1,23 +1,40 @@
 # proxima-omega
 
-MSL kernel emission from the `proxima-tensor` `BoundOp` descriptor: the emit half of the GPU backend. The device driver composes on top.
+Plan and execute tensor programs on a CPU and on a GPU. A program is data — an ordered list of operations over named buffers — and a configuration picks the engine, the driver and the execution policy.
 
-`proxima-tensor`'s `cpu` module interprets a `BoundOp` with nested loops; this crate emits Metal Shading Language source from the same descriptor instead. It stops at source text plus the buffer-index to data mapping a driver needs to dispatch it. Compiling the library, allocating device buffers and dispatching a compute pass are the driver's job.
+```text
+omega::backend::plan_named_with_config   config + program + bound data -> Plan + measurements
+omega::backend::execute_plan_named       Plan + bound data             -> Evaluated
+```
+
+`Engine` (`omega/src/backend.rs:113`) has two variants, `Cpu` and `Gpu`, because there are two places an op runs. Which driver renders the GPU is a second question: `GpuDriver` (`omega/src/backend.rs:187`) is `Metal`, `Wgpu`, or, with the `cuda-driver` feature, `Cuda` and `Hip`. The engine and driver are `RuntimeConfig` fields (`omega/src/config.rs:25` and `:28`), so moving a program from CPU to Metal is a config edit, not a code change.
+
+Programs come from `proxima-tensor`: either a `Vec<Op>` you build, or a `ProgramSpec` TOML that `proxima_tensor::spec::ProgramSpec::plan_parts` lowers to the same vector. The CPU evaluator is `proxima_tensor::cpu`; the GPU side emits Metal Shading Language or CUDA C / HIP C++ from the same bound descriptor and drives it through the platform API.
+
+Teaching material, in order: [`docs/omega/`](../docs/omega/README.md).
 
 ## What it composes
 
-- `proxima-tensor` (the `BoundOp` descriptor and the CPU evaluator it mirrors)
+- `proxima-tensor` — the bound-op descriptor, the shape inference, and the CPU evaluator the GPU path mirrors
+- `proxima-numeric` — dtypes and the numeric-policy permissions the config carries
 - `proxima-primitives` (the `Pipe` algebra), `proxima-telemetry`, `proxima-gguf`
 - optional doors: `proxima-onnx`, `proxima-mil`
 
 ## Tiers and features
 
-- bare (`no_std`, no alloc): error and build-time sizing constants only
-- `alloc` (`no_std` + alloc): adds the MSL emitter
-- `std` (default): adds `std::error::Error` and the backend-agnostic plan/execute pair
-- `train` (default-off): adds the training seam over `proxima-autograd` (graph construction plus a state-owning step) configured by one `TrainConfig`; inference builds never compile it
-- backend and optimisation features (`cpu`, `metal`, `cuda`, `wgpu-backend`, `onnx-door`, `mil-writer`, ...) are listed under `[features]` in `Cargo.toml`; all are additive.
-- `cuda` emits both card-C dialects from the one renderer: CUDA C for NVIDIA and HIP C++ for AMD ROCm, with the dialect and wavefront width selected per emit (`emit_hip_at_wave`: 64-lane CDNA, 32-lane RDNA); `cuda-driver` adds `cuda_driver::rocm`, which resolves `libamdhip64`/`libhiprtc` at run time.
+- bare (`no_std`, no alloc): `error` and the build-time `sized` constants only
+- `alloc` (`no_std` + alloc): adds the MSL emitter (`msl`)
+- `std` (default): adds `std::error::Error`, `config`, and the backend-agnostic `backend` plan/execute pair
+- `train` (default-off): adds [`train`], a forward+backward+optimizer step over `proxima-autograd` configured by one `TrainConfig`; inference builds never compile it
+- engine and driver features are additive and listed under `[features]` in `Cargo.toml`: `cpu` (`:84`), `metal` (`:188`, in the default set, effective on macOS), `wgpu-backend` (`:382`), `cuda` (`:234`, emits both card-C dialects: CUDA C for NVIDIA, HIP C++ for AMD ROCm, with the dialect and wavefront width chosen per emit via `cuda::emit_hip_at_wave` at `omega/src/cuda.rs:6645`), `cuda-driver` (`:241`, resolves `libamdhip64`/`libhiprtc` at run time and adds `cuda_driver::rocm`)
+- `coreml-lane` writes a Core ML package, compiles it with `xcrun coremlcompiler` and caches it by package sha256; it is a package writer, not a selectable engine
+- `mlx-gdn` compiles against an MLX installation named by `PROXIMA_MLX_PREFIX`; `mlx` exposes that capability to a native adapter. Neither is a `RuntimeConfig` value.
+
+## What it does not do
+
+- No tensor object and no operators: a program is data, and there is no `a + b` on a value.
+- `numerics` (storage, activation and accumulator formats) is recorded in the config and not read by lowering yet (`omega/src/config.rs:102`).
+- No autograd here: differentiation lives in `proxima-autograd`; the `train` feature adds a step-wise seam over it, and there is no differentiation of an arbitrary graph on this surface.
 
 ## Training
 

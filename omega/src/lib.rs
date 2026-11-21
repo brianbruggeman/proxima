@@ -1,20 +1,23 @@
-//! MSL kernel emission from the proxima-tensor
-//! [`BoundOp`](proxima_tensor::BoundOp) descriptor — the GPU half of the
-//! bound-addressing seam.
+//! Plan and execute tensor programs on a CPU and on a GPU.
 //!
-//! `proxima-tensor`'s `cpu` module interprets a
-//! `BoundOp` with nested loops on the CPU; this crate emits Metal Shading
-//! Language source from the *same* descriptor instead. Neither backend's
-//! shape leaks into `proxima-tensor` — `bind::bind` says only what to
-//! compute (which buffers, at what layout, combined by which scalar op,
-//! optionally reduced); it never says how. [`msl::emit`] is this crate's
-//! answer to "how," the way `cpu::evaluate` is proxima-tensor's own.
+//! A program is data: an ordered list of [`Op`](proxima_tensor::Op)s over named
+//! buffers. [`backend::plan_named_with_config`] turns that program plus a
+//! [`config::RuntimeConfig`] into a backend-specific plan, and
+//! [`backend::execute_plan_named`] runs it against the bound data.
 //!
-//! This crate stops at source text plus the buffer-index -> data mapping a
-//! driver needs to dispatch it ([`msl::Kernel`], [`msl::Binding`]). Packing
-//! the runtime uniforms buffer, compiling the source into an `MTLLibrary`,
-//! allocating device buffers, and actually dispatching a compute pass are all
-//! the device driver's job, composed on top.
+//! [`backend::Engine`] has two variants, `Cpu` and `Gpu`, because there are two
+//! places an op runs; [`backend::GpuDriver`] is the second question, which
+//! driver renders the GPU (`Metal`, `Wgpu`, and with `cuda-driver`, `Cuda` and
+//! `Hip`). Both are config fields, so moving a program between engines is a
+//! config edit rather than a code change.
+//!
+//! The CPU half is `proxima_tensor::cpu`, the same bound descriptor executed by
+//! nested loops. The GPU half emits Metal Shading Language ([`msl::emit`]) or
+//! CUDA C / HIP C++ from that same descriptor and drives it through the
+//! platform API; [`msl::Kernel`] and [`msl::Binding`] are where an emitter
+//! stops, and compiling, allocating and dispatching are the driver's job.
+//! Neither backend's shape leaks into `proxima-tensor`: `bind::bind` says only
+//! what to compute, never how.
 //!
 //! # Tiers
 //!
@@ -27,9 +30,9 @@
 //! generation over an already-bound `BoundOp`, so it never needs anything
 //! beyond `alloc`'s `String`/`Vec`.
 //!
-//! `std` (default): adds `std::error::Error` on [`EmitError`] and
-//! `backend`, the backend-agnostic `plan_named`/`execute_plan_named` pair,
-//! which needs `proxima_tensor::cpu`'s std-gated `Evaluated`/`QuantizedBlock`
+//! `std` (default): adds `std::error::Error` on [`EmitError`], the [`config`]
+//! surface, and `backend`, the backend-agnostic `plan_named`/`execute_plan_named`
+//! pair, which needs `proxima_tensor::cpu`'s std-gated `Evaluated`/`QuantizedBlock`
 //! even with every concrete backend (`cpu`/`metal`/`wgpu-backend`) off.
 //!
 //! `train` (default-off): adds [`train`], a forward+backward+optimizer step
