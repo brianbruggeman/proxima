@@ -110,6 +110,7 @@ Suggested reading order: Foundations → Gateway (broadest coverage) → then an
 - **`examples/`** — the runnable, compile-tested code each tutorial points at. The tutorial teaches; the example is the source of truth for exact imports and current API.
 - **`examples/README.md`** — the pipe *algebra* laid out as a curriculum (`hello → transform → ... → applied`). These tutorials are the prose companion to that ladder.
 - **`ai_docs/`** — the agent-facing memory surface (`examples-index.jsonl` maps each combinator to its module and "use when"). Agents start there; humans start here.
+- **[`docs/omega/`](../omega/README.md)** — the operations track: tensor programs as data, the runtime configuration surface, training, LLM inference, and the whisper/diffusion status, on the same no-forward-reference discipline as this tree.
 
 ## Contributing a section
 
