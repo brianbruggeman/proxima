@@ -6108,6 +6108,21 @@ mod omega_async_serving_tests {
         assert_eq!(executed, 2);
     }
 
+    #[test]
+    fn hip_and_rocm_driver_selections_pass_the_async_plan_option_check() {
+        for name in ["hip", "rocm"] {
+            let runtime = RuntimeConfig {
+                engine: String::from("gpu"),
+                gpu_driver: String::from(name),
+                ..RuntimeConfig::default()
+            };
+
+            let checked = validate_cuda_plan_options(runtime.numeric, runtime.exact_activations, Some(&runtime));
+
+            assert!(checked.is_ok(), "{name} must be accepted: {checked:?}");
+        }
+    }
+
     #[proxima::test]
     async fn test_omega_async_plan_config_refuses_unsupported_modes_before_owner_work() {
         let service = CudaGpuService::start_fake().expect("fake owner should start");

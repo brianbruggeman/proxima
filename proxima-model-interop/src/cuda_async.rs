@@ -353,7 +353,7 @@ pub(crate) fn validate_cuda_plan_options(
             mode: "non-gpu engine",
         });
     }
-    if runtime.gpu_driver != "cuda" {
+    if runtime.gpu_driver != "cuda" && !selects_hip(runtime) {
         return Err(CudaPlanRegistrationError::UnsupportedMode {
             mode: "non-cuda driver selection",
         });
@@ -386,6 +386,8 @@ pub(crate) struct FakePlanInputs {
 enum RegisteredPlan {
     // boxed: the plan is 352 bytes against the fake variant's few words, which trips clippy's large_enum_variant.
     Cuda(Box<omega::CudaPlan>),
+    // boxed for the same reason as the cuda plan.
+    Rocm(Box<omega::cuda_driver::rocm::RocmPlan>),
     #[cfg(test)]
     Fake {
         program: Vec<Op>,
@@ -546,6 +548,10 @@ fn borrow_owned_block(block: &OwnedBlock) -> QuantizedBlock<'_> {
     }
 }
 
+fn selects_hip(runtime: &RuntimeConfig) -> bool {
+    matches!(runtime.gpu_driver.as_str(), "hip" | "rocm")
+}
+
 fn execute_cuda_plan(
     plan: &mut RegisteredPlan,
     inputs: &OwnedGpuInputs,
@@ -561,6 +567,7 @@ fn execute_cuda_plan(
         .map(AsRef::as_ref)
         .collect::<BTreeSet<&str>>();
     match plan {
+        RegisteredPlan::Rocm(plan) => plan.execute_named(&named).map_err(omega::CudaDriverError::from),
         RegisteredPlan::Cuda(plan) => plan.execute_named(
             &named,
             (!resident_names.is_empty()).then_some(&resident_names),
@@ -937,12 +944,6 @@ impl CudaGpuService<()> {
                                     })
                                     .map_err(CudaPlanRegistrationError::from);
                             }
-                            if driver.is_none() {
-                                driver = Some(omega::CudaDriver::new(0)?);
-                            }
-                            let Some(driver) = driver.as_ref() else {
-                                unreachable!("cuda driver was created above")
-                            };
                             let named = graph
                                 .inputs
                                 .blocks
@@ -951,6 +952,26 @@ impl CudaGpuService<()> {
                                     (input.name.as_ref(), borrow_owned_block(&input.block))
                                 })
                                 .collect::<Vec<_>>();
+                            if let Some(config) = graph.omega_runtime.as_ref().filter(|config| selects_hip(config)) {
+                                let plan = omega::cuda_driver::rocm::RocmPlan::plan(
+                                    config,
+                                    omega::cuda_driver::rocm::hip_wave_of(config),
+                                    &graph.program,
+                                    &graph.symbols,
+                                    &named,
+                                    &graph.outputs,
+                                )
+                                .map_err(omega::CudaDriverError::from)?;
+                                return plans
+                                    .register(RegisteredPlan::Rocm(Box::new(plan)))
+                                    .map_err(CudaPlanRegistrationError::from);
+                            }
+                            if driver.is_none() {
+                                driver = Some(omega::CudaDriver::new(0)?);
+                            }
+                            let Some(driver) = driver.as_ref() else {
+                                unreachable!("cuda driver was created above")
+                            };
                             let plan = match &graph.omega_runtime {
                                 Some(config) => driver.plan_with_config(
                                     &graph.program,
