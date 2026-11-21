@@ -42,7 +42,8 @@
 //! runtime-prime-bgpool,http1-native,macros" -- <gguf-path> [bind-addr]
 //! [max-tokens]`
 //!
-//! Env read per request, same meaning as `decode_gbps_baseline`: `PROXIMA_IGNORE_EOS`,
+//! Env read per request (this example's own surface; `decode_gbps_baseline` now reads
+//! `ServingSettings` instead): `PROXIMA_IGNORE_EOS`,
 //! `PROXIMA_KV_CACHE_TYPE`, `PROXIMA_KV_CACHE_KEY_TYPE`, `PROXIMA_KV_BUCKET_TOKENS`,
 //! `PROXIMA_EPILOGUE_SOURCES`, `PROXIMA_RESIDENT_PREFILL_PLAN_BYTES`,
 //! `PROXIMA_RESIDENT_KV_BYTES`, `PROXIMA_SERVING_WARM_MODEL_BUFFERS_AT_LOAD`,

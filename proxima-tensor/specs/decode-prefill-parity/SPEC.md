@@ -4,6 +4,14 @@ status: draft, 2026-10-06
 
 # decode and prefill speed parity
 
+> Historical record (2026-10-06). The `decode_gbps_baseline` commands below predate the
+> `ServingSettings` config surface. `PROXIMA_KV_CACHE_TYPE` and
+> `PROXIMA_KV_CACHE_KEY_TYPE` are now
+> `PROXIMA_SERVING_KV_CACHE_VALUE_QUANT` and `PROXIMA_SERVING_KV_CACHE_KEY_QUANT` (or
+> `PROXIMA_SERVING_CONFIG=proxima-model-interop/examples/granite_llama.toml`), and
+> `-b`/`-ub` come from that file. Do not run the old commands as current; their numbers
+> are the record of the tree they ran on.
+
 ## problem
 
 Owner, 2026-10-02: gemma4 E2B decode "10ms is our floor, but ceiling is 7ms" (about 10 ms is llama.cpp

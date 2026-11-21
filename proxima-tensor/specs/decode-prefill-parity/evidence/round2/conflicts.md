@@ -1,5 +1,9 @@
 # round two integration conflicts
 
+> Historical (2026-10). The `PROXIMA_KV_CACHE_TYPE` mention below is the old env name;
+> the current key is `PROXIMA_SERVING_KV_CACHE_VALUE_QUANT`, or the TOML loaded by
+> `PROXIMA_SERVING_CONFIG`.
+
 Base: main 9015ad1a. Order applied: combine, gemm, rope, kvplace, e2bdecode, granitehost (git am --3way).
 Result: 22 commits on top of 9015ad1a, 0 aborted slices.
 

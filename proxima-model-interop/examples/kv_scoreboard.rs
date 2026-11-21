@@ -8,14 +8,18 @@
 //! cell alike. Every child runs under `/usr/bin/time -l`; its `peak memory footprint` line is the
 //! RAM read.
 //!
-//! Llama arm: one `llama-server` process per (prompt, KV config, round) with `-fa on`, `-c` set
+//! Llama arm: one `llama-server` process per (prompt, KV config, round) with `-fa on`, `-b`/`-ub`
+//! from the same `ServingSettings` as proxima (`proxima-model-interop/examples/granite_llama.toml`,
+//! overlaid by `PROXIMA_SERVING_*`), `-c` set
 //! from the same rule as proxima's `kv_extent` (`generate/load_model.rs`: positions needed =
 //! prompt ids + max tokens, rounded up to the 32-token bucket, capped at the context length),
 //! `-ctk/-ctv`, `--no-warmup`, `--seed 1`. Request 1 is the cold TTFT; request 2 is the warm TTFT
 //! and the decode. Both send the prompt as the token-id array proxima's tokenizer produced
 //! (`encode_with_bos_eos` under `wants_bos`, mirrored here because `wants_bos` is crate-private),
-//! `n_predict` 128, temperature 0, `top_k` 1, seed 1, `cache_prompt` false, `ignore_eos` true,
-//! `return_tokens` true. Metrics come from the response `timings` object.
+//! and proxima receives that same array through `PROXIMA_PROMPT_IDS`, so the two arms cannot
+//! tokenize the text differently. `n_predict` 128, temperature 0, `top_k` 1, seed 1,
+//! `cache_prompt` false, `ignore_eos` true, `return_tokens` true. Metrics come from the response
+//! `timings` object.
 //!
 //! The HTTP client below is a minimal copy of the one in `decode_arms.rs`; examples cannot share
 //! code.

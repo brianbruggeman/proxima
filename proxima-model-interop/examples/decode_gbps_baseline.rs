@@ -1,38 +1,19 @@
-//! MEASUREMENT 0a/0b baseline: real gemma4-E2B decode, steady-state
-//! wall-clock vs the CLEAN aggregate `metal_stage_totals().gpu_exec_ticks`
-//! counter (never the per-dispatch stage-boundary path, which is known to
-//! inflate 50-100x on this box -- `gemma4_dispatch_profile_widths.rs`'s own
-//! doc names that floor-doubling defect).
+//! Real-checkpoint greedy decode baseline over `LoadedModel::generate_streaming` or
+//! `generate_from_ids`.
 //!
-//! Reuses the ALREADY-WIRED `PROXIMA_DEBUG_METAL_STAGES` env-var convention
-//! (`generate/load_model.rs::emit_token_breakdown`/`emit_token_breakdown_metal`)
-//! -- this file adds zero new instrumentation, only a runnable entry point
-//! over `LoadedModel::generate_streaming`, the same decode loop
-//! `generate_with_serving_config`/`gemma4_correctness_gate.rs` already
-//! exercise on the real checkpoint, given a real `on_token` instead of
-//! `&mut |_| Continue` so `TokenEvent::elapsed_ms` (Instant-based, compiled
-//! on every build) is readable without the diagnostic-only `instrument`
-//! feature. Run with `PROXIMA_DEBUG_METAL_STAGES=1` set in the environment;
-//! every decode EVALUATION then emits one `token_breakdown_wall` and one
-//! `token_breakdown_metal` line to stderr, parsed by the caller. Speculation
-//! runs at the production default, so a verify evaluation commits several
-//! tokens and the following steps evaluate nothing: lines are per evaluation,
-//! `step_time` and `decode_ms_per_token` are per token.
-//! `PROXIMA_RUNS=<n>` (default `1`) repeats the same generation `n` times in
-//! this one process, reusing the loaded model/runtime so runs after the
-//! first skip step-0 pipeline compilation.
-//! `PROXIMA_SPECULATIVE_TYPES=none` turns speculative decoding off: the serving
-//! settings' own key (`SpeculativeSettings`, `speculative_settings.rs`), read
-//! through `SpeculativeSettings::from_env` with every other `PROXIMA_SPECULATIVE_*`
-//! field; unset keeps the serving default, ngram-simple.
-//! `PROXIMA_SERVING_ATTENTION_DECOMPOSITION=flash_where_admitted` selects Flash attention on every op
-//! the flash admission accepts (needs `metal` + `metal-attn-variants`); it is `ServingSettings`' own
-//! key, lowered through `as_serving_config`, default `legacy`. `PROXIMA_PROMPT` carries the prompt text.
-//! `PROXIMA_SERVING_IGNORE_EOS=1` sets `ServingConfig::ignore_eos`: generate exactly the
-//! requested max tokens instead of stopping at the end-of-generation id.
-//! A half-width KV cache (`PROXIMA_KV_CACHE_TYPE=f16`) runs with speculation on: a verify step
-//! reads it through the row-tiled kernel (`kv_cache_format::row_tiled_reads`); only a pair that
-//! predicate rejects needs speculation off.
+//! Effective serving config: `PROXIMA_SERVING_CONFIG` (default
+//! `proxima-model-interop/examples/granite_llama.toml`) loaded through
+//! `ServingSettings`, overlaid by `PROXIMA_SERVING_*`; `run=start` prints the eight
+//! requested values and `config_diff_count`. Example-only knobs: `PROXIMA_RUNS`,
+//! `PROXIMA_MAX_TOKENS`, `PROXIMA_PROMPT`, `PROXIMA_PROMPT_IDS`,
+//! `PROXIMA_SPECULATIVE_*`, `PROXIMA_SERVING_WARM_MODEL_BUFFERS_AT_LOAD`, the
+//! resident-budget overrides and dispatch/bucket overrides.
+//!
+//! `PROXIMA_STEP_TIMES=1` emits one `step_time` line per token; every `run=done`
+//! carries TTFT, decode ms/token, steady RSS/footprint and generated text.
+//! `PROXIMA_MEASURE_QUIET=1` samples memory once at the end instead of per token.
+//! `warm_resident_buffers` and `warm_prefill` run after load, so the first request
+//! does not pay the chunk-pipeline compile.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use core::ops::ControlFlow;

@@ -4,8 +4,9 @@
 //! are served. Arm A (default) gives each request a fresh `std::thread::spawn`
 //! joined before the next, the shape of ragd's proxima provider. Arm B
 //! (`PROXIMA_SAME_THREAD=1`) serves every request on one long-lived spawned
-//! thread. Env, model loading and the `run=done` fields follow
-//! `decode_gbps_baseline.rs`.
+//! thread. Model loading and the `run=done` fields follow
+//! `decode_gbps_baseline.rs`; this example still reads its own legacy
+//! `PROXIMA_*` env surface rather than `ServingSettings`.
 //!
 //! `footprint_in_thread_bytes` is read on the serving thread right after the
 //! request returns, `footprint_after_join_bytes` on main after the thread has
