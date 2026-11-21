@@ -551,7 +551,7 @@ pub struct RowGather {
 /// step reads can be gathered on the host (see [`hoist_row_gather`]). A leaf
 /// that any other op also reads (a tied output head's matmul) is not returned.
 ///
-/// Composes [`is_gather_only_operand`], the predicate the CPU evaluator also
+/// Composes `is_gather_only_operand`, the predicate the CPU evaluator also
 /// uses, plus a whole-program reference count so a `Reduce` reading the leaf
 /// directly refuses it too.
 #[must_use]

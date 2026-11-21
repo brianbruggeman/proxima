@@ -1236,7 +1236,7 @@ pub(super) fn walk_last_reads<F: FnMut(NodeId, usize)>(resolved: &[BoundOp], mut
 }
 
 /// Every node one op reads: operand sources, gather and scatter indices, and
-/// every `RoundBatchedReduce` route. The one read set [`walk_last_reads`] (so
+/// every `RoundBatchedReduce` route. The one read set `walk_last_reads` (so
 /// retirement) and a dependency graph over `resolved` both consume.
 pub fn op_read_nodes<F: FnMut(NodeId)>(node: &BoundOp, mut record: F) {
     for (source, _, gather) in node.all_read_sources() {

@@ -1285,7 +1285,7 @@ pub fn causal_mask_end_aligned(
     Ok((is_masked, neg_infinity))
 }
 
-/// [`causal_mask_cached_windowed`]'s counterpart for the end-aligned query of
+/// `causal_mask_cached_windowed`'s counterpart for the end-aligned query of
 /// [`causal_mask_end_aligned`]: the cache range's padding mask is unchanged
 /// (`key >= cached_len`, query-independent), and the window distance is read
 /// from the query's absolute row `cached_len + N - 1`. With no window it is
