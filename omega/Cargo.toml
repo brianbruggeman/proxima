@@ -497,6 +497,12 @@ onnx-door = ["door", "dep:proxima-onnx", "dep:sha2", "dep:bon"]
 mil-writer = ["door", "dep:proxima-mil"]
 # the Core ML edge (`coreml`): compiles the written package with `xcrun coremlcompiler` and caches the result by package sha256; macOS only.
 coreml-lane = ["mil-writer", "dep:sha2"]
+# the training seam (`crate::train`): graphs built by `proxima-autograd`
+# (differentiate_wanted + Adam/AdamW) planned and executed through the same
+# plan/execute pair as inference, with the parameter/optimizer state owned
+# by the step. Default-off: inference builds never compile autograd.
+train = ["std", "dep:proxima-autograd"]
+
 [dependencies]
 bytemuck = { version = "1.25.2", optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
@@ -538,6 +544,7 @@ proxima-mil = { version = "0.1.0", path = "../proxima-mil", features = ["std"], 
 proxima-core = { workspace = true, features = ["alloc"] }
 arc-swap.workspace = true
 libloading = { version = "0.9.0", optional = true }
+proxima-autograd = { version = "0.1.0", path = "../proxima-autograd", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # objc2: the message-send runtime (Retained<T>, extern_methods!) every Metal
