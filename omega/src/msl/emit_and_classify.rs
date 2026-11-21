@@ -2253,6 +2253,11 @@ pub(crate) fn kernel_cache_key_for_grid_with_layout(
         ),
         numeric_policy,
     );
+    // the flash QK operand changes the rendered source, so it keys the pipeline as it does the entry name
+    #[cfg(feature = "metal-attn-split-rows")]
+    if matches!(resolved.kind, BoundOpKind::CachedAttention { .. }) && row_schedule.for_op(&resolved.kind).is_flash() {
+        identity.push_str(&flash_qk_token(knobs.flash_qk_operand));
+    }
     if let Some((_, _, _, _, experts)) =
         crate::msl::route_compaction_key(resolved, packed_operands, knobs)
     {
