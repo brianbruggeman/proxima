@@ -9,7 +9,7 @@
 //! RAM read.
 //!
 //! Llama arm: one `llama-server` process per (prompt, KV config, round) with `-fa on`, `-b`/`-ub`
-//! from the same `ServingSettings` as proxima (`proxima-model-interop/examples/granite_llama.toml`,
+//! from the same `ServingSettings` as proxima (`proxima-model-interop/examples/llama_matched.toml`,
 //! overlaid by `PROXIMA_SERVING_*`), `-c` set
 //! from the same rule as proxima's `kv_extent` (`generate/load_model.rs`: positions needed =
 //! prompt ids + max tokens, rounded up to the 32-token bucket, capped at the context length),
@@ -124,14 +124,18 @@ const BUSY_PATTERN: &str = "cargo|rustc|nextest|kv_scoreboard|llama-server";
 /// TOML, overlaid by `PROXIMA_SERVING_*` when the caller sets one.
 fn llama_matched_settings() -> ServingSettings {
     let path = std::env::var("PROXIMA_SERVING_CONFIG")
-        .unwrap_or_else(|_| "proxima-model-interop/examples/granite_llama.toml".to_owned());
+        .unwrap_or_else(|_| "proxima-model-interop/examples/llama_matched.toml".to_owned());
     if Path::new(&path).is_file() {
         conflaguration::from_file_then_env(Path::new(&path))
             .unwrap_or_else(|error| panic!("load {path}: {error}"))
     } else {
-        conflaguration::from_toml_str(include_str!("granite_llama.toml"))
-            .unwrap_or_else(|error| panic!("parse granite_llama.toml: {error}"))
+        conflaguration::from_toml_str(include_str!("llama_matched.toml"))
+            .unwrap_or_else(|error| panic!("parse llama_matched.toml: {error}"))
     }
+}
+
+fn serving_config_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/llama_matched.toml")
 }
 const INVARIANT_COUNT: usize = 12;
 const INVARIANT_NAMES: [&str; INVARIANT_COUNT] = [
@@ -227,12 +231,21 @@ impl Kv {
 
     fn proxima_env(self) -> Vec<(&'static str, &'static str)> {
         match self {
-            Kv::F32 => vec![("PROXIMA_KV_CACHE_TYPE", "f32")],
-            Kv::F16 => vec![("PROXIMA_KV_CACHE_TYPE", "f16")],
-            Kv::Bf16 => vec![("PROXIMA_KV_CACHE_TYPE", "bf16")],
+            Kv::F32 => vec![
+                ("PROXIMA_SERVING_KV_CACHE_KEY_QUANT", "f32"),
+                ("PROXIMA_SERVING_KV_CACHE_VALUE_QUANT", "f32"),
+            ],
+            Kv::F16 => vec![
+                ("PROXIMA_SERVING_KV_CACHE_KEY_QUANT", "f16"),
+                ("PROXIMA_SERVING_KV_CACHE_VALUE_QUANT", "f16"),
+            ],
+            Kv::Bf16 => vec![
+                ("PROXIMA_SERVING_KV_CACHE_KEY_QUANT", "bf16"),
+                ("PROXIMA_SERVING_KV_CACHE_VALUE_QUANT", "bf16"),
+            ],
             Kv::Q4K => vec![
-                ("PROXIMA_KV_CACHE_TYPE", "f16"),
-                ("PROXIMA_KV_CACHE_KEY_TYPE", "q4_0"),
+                ("PROXIMA_SERVING_KV_CACHE_VALUE_QUANT", "f16"),
+                ("PROXIMA_SERVING_KV_CACHE_KEY_QUANT", "q4_0"),
             ],
         }
     }
@@ -1881,6 +1894,11 @@ fn run_proxima(context: &RunContext, cell: &Cell, binary: &Path, row: &mut Row) 
     command.env("PROXIMA_STEP_TIMES", "1");
     command.env("PROXIMA_MAX_TOKENS", MAX_TOKENS.to_string());
     command.env("PROXIMA_RUNS", "3");
+    command.env("PROXIMA_SERVING_CONFIG", serving_config_path());
+    command.env(
+        "PROXIMA_SERVING_CONTEXT_LENGTH",
+        context.prompt.capacity.to_string(),
+    );
     command.env(
         "PROXIMA_PROMPT_IDS",
         context.prompt.ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(","),
@@ -2618,11 +2636,11 @@ fn proxima_command(config: &Config, binary: &Path, text: &str, profile: Option<&
     command.arg("-l").arg(binary);
     command.env("PROXIMA_SPECULATIVE_TYPES", "none");
     command.env("PROXIMA_STEP_TIMES", "1");
-    command.env("PROXIMA_IGNORE_EOS", "1");
     command.env("PROXIMA_RUNS", runs);
     command.env("PROXIMA_MAX_TOKENS", tokens.to_string());
     command.env("PROXIMA_PROMPT", text);
     command.env("PROXIMA_DECODE_MODEL_GGUF", &config.model);
+    command.env("PROXIMA_SERVING_CONFIG", serving_config_path());
     for (key, value) in config.stage_kv.proxima_env() {
         command.env(key, value);
     }

@@ -1,10 +1,10 @@
 use proxima_model_interop::{ContextLength, ServingSettings};
 use proxima_numeric::NumericFormat;
 
-const CONFIG: &str = include_str!("../examples/granite_llama.toml");
+const CONFIG: &str = include_str!("../examples/llama_matched.toml");
 
 #[test]
-fn granite_llama_config_matches_the_incumbent_flags() {
+fn llama_matched_config_matches_the_incumbent_flags() {
     let settings: ServingSettings =
         conflaguration::from_toml_str(CONFIG).expect("the granite/llama TOML parses");
     let base = settings.as_serving_config(&[]);
@@ -33,7 +33,7 @@ fn granite_llama_config_matches_the_incumbent_flags() {
 }
 
 #[test]
-fn granite_llama_ubatch_override_reaches_the_serving_config() {
+fn llama_matched_ubatch_override_reaches_the_serving_config() {
     let settings: ServingSettings = conflaguration::from_toml_str("ubatch_size = 128")
         .expect("a one-key override parses");
     assert_eq!(settings.as_serving_config(&[]).ubatch_size, 128);

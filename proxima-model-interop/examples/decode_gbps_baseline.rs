@@ -2,7 +2,7 @@
 //! `generate_from_ids`.
 //!
 //! Effective serving config: `PROXIMA_SERVING_CONFIG` (default
-//! `proxima-model-interop/examples/granite_llama.toml`) loaded through
+//! `proxima-model-interop/examples/llama_matched.toml`) loaded through
 //! `ServingSettings`, overlaid by `PROXIMA_SERVING_*`; `run=start` prints the eight
 //! requested values and `config_diff_count`. Example-only knobs: `PROXIMA_RUNS`,
 //! `PROXIMA_MAX_TOKENS`, `PROXIMA_PROMPT`, `PROXIMA_PROMPT_IDS`,
@@ -74,13 +74,13 @@ fn process_memory_bytes() -> (u64, u64) {
 /// TOML, overlaid by `PROXIMA_SERVING_*` when the caller sets one.
 fn llama_matched_settings() -> ServingSettings {
     let path = std::env::var("PROXIMA_SERVING_CONFIG")
-        .unwrap_or_else(|_| "proxima-model-interop/examples/granite_llama.toml".to_owned());
+        .unwrap_or_else(|_| "proxima-model-interop/examples/llama_matched.toml".to_owned());
     if std::path::Path::new(&path).is_file() {
         conflaguration::from_file_then_env(std::path::Path::new(&path))
             .unwrap_or_else(|error| panic!("load {path}: {error}"))
     } else {
-        conflaguration::from_toml_str(include_str!("granite_llama.toml"))
-            .unwrap_or_else(|error| panic!("parse granite_llama.toml: {error}"))
+        conflaguration::from_toml_str(include_str!("llama_matched.toml"))
+            .unwrap_or_else(|error| panic!("parse llama_matched.toml: {error}"))
     }
 }
 
