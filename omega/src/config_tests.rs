@@ -954,3 +954,23 @@ fn dense_mma_layout_env_spelling_falls_back_to_any_float_layout_name() {
     }
     assert!(DenseMmaInputLayout::from_env_str("float7").is_err());
 }
+
+#[test]
+fn rocm_gpu_driver_builder_env_and_toml_agree_and_the_error_lists_it() {
+    let from_builder = RuntimeConfig::builder()
+        .with_gpu_driver("rocm")
+        .build()
+        .expect("rocm is an accepted gpu driver");
+    let from_toml: RuntimeConfig =
+        toml::from_str("gpu_driver = 'rocm'\n").expect("config TOML deserializes");
+    let from_env = temp_env::with_vars([("OMEGA_GPU_DRIVER", Some("rocm"))], || {
+        RuntimeConfig::from_env().expect("env config validates")
+    });
+
+    assert_eq!(from_builder.gpu_driver, "rocm");
+    assert_eq!(runtime_config_difference_count(&from_builder, &from_toml), 0);
+    assert_eq!(runtime_config_difference_count(&from_builder, &from_env), 0);
+
+    let error = validation_text(RuntimeConfig::builder().with_gpu_driver("hip").build());
+    assert!(error.contains("expected auto|metal|wgpu|cuda|rocm"), "{error}");
+}

@@ -297,11 +297,11 @@ impl Validate for RuntimeConfig {
                 format!("unknown engine '{}'; expected cpu|gpu", self.engine),
             ));
         }
-        if !matches!(self.gpu_driver.as_str(), "auto" | "metal" | "wgpu" | "cuda") {
+        if !matches!(self.gpu_driver.as_str(), "auto" | "metal" | "wgpu" | "cuda" | "rocm") {
             errors.push(ValidationMessage::new(
                 "gpu_driver",
                 format!(
-                    "unknown gpu driver '{}'; expected auto|metal|wgpu|cuda",
+                    "unknown gpu driver '{}'; expected auto|metal|wgpu|cuda|rocm",
                     self.gpu_driver
                 ),
             ));
