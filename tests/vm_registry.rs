@@ -700,11 +700,28 @@ fn output_past_the_configured_capacity_is_a_named_error() {
     );
 }
 
+/// Where the host places the stack for this image: the end of the last loaded
+/// segment, rounded up to a page, read from the same ELF the host loads.
+fn stack_start_of(guest_elf: &Path) -> u64 {
+    const GUEST_PAGE_SIZE: u64 = 4096;
+    let image = std::fs::read(guest_elf).expect("read the guest elf the host will load");
+    let (_entry, segments) =
+        proxima_vm::elf::parse_elf::<MAX_SEGMENTS>(&image).expect("the built guest elf parses");
+    let extent = segments
+        .iter()
+        .map(|segment| segment.virtual_address() + segment.memory_size())
+        .max()
+        .expect("the guest elf has at least one loadable segment");
+    extent.div_ceil(GUEST_PAGE_SIZE) * GUEST_PAGE_SIZE
+}
+
 /// Exit proof d: a `guest_memory_size` below what the image's segments need
 /// fails the call, naming both numbers.
 fn guest_memory_too_small_for_the_image_is_a_named_error() {
     let fixture = Fixture::new();
     let config = fixture.config("guest_memory_size = 65536\n");
+
+    let needed = stack_start_of(&fixture.guest_elf);
 
     let error = fixture
         .signed_self
@@ -712,8 +729,13 @@ fn guest_memory_too_small_for_the_image_is_a_named_error() {
         .expect_err("a 64 KiB guest cannot hold the elf image");
 
     assert!(
-        error.contains("guest_memory_size 65536 is too small")
-            && error.contains("stack need 335872 bytes"),
+        needed > 65536,
+        "the fixture image must really exceed the 64 KiB under test: needs {needed}"
+    );
+    assert!(
+        error.contains(&format!(
+            "guest_memory_size 65536 is too small: the image's segments and stack need {needed} bytes"
+        )),
         "the failure must name the configured size and what the image needs: {error}"
     );
 }
