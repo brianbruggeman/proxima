@@ -20,7 +20,7 @@ const KV_HEADS: u32 = 1;
 const HEAD_DIM: u32 = 64;
 const LAYERS: u32 = 2;
 
-fn resolved_at(cached_len: u64) -> Vec<BoundOp> {
+fn resolved_at(cached_len: u64, policy: NumericPolicy) -> Vec<BoundOp> {
     let (program, logits, _) = qk_norm_cached_forward_program(
         VOCAB,
         EMBEDDING,
@@ -33,17 +33,19 @@ fn resolved_at(cached_len: u64) -> Vec<BoundOp> {
     .expect("the gqa decode program builds");
     let shapes = infer(&program, &[1, cached_len]).expect("the decode program infers");
     let outputs: Vec<NodeId> = vec![logits];
-    let bound = bind_with_fusion(&program, &shapes, &outputs, false, NumericPolicy::default())
-        .expect("the decode program binds");
+    let bound = bind_with_fusion(&program, &shapes, &outputs, false, policy)
+        .expect("the decode program binds with the CUDA lane's own narrowing policy");
     prune_dead(bound, &outputs)
 }
 
 #[test]
 fn reused_kernels_equal_fresh_emit_for_every_op_of_a_real_decode_program() {
-    let policy = NumericPolicy::default();
+    let policy = NumericPolicy::default()
+        .with_accumulator_narrowing()
+        .with_flash_narrowing(true);
     let packed = BTreeMap::new();
-    let previous = resolved_at(31);
-    let resolved = resolved_at(33);
+    let previous = resolved_at(31, policy);
+    let resolved = resolved_at(33, policy);
     let previous_kernels = previous
         .iter()
         .map(|bound| emit_cuda_with_policy(bound, &packed, policy).expect("previous op emits"))
@@ -84,11 +86,14 @@ fn reused_kernels_equal_fresh_emit_for_every_op_of_a_real_decode_program() {
 
 #[test]
 fn reused_cooperative_kernels_equal_fresh_emit_across_cached_length_jumps() {
-    let policy = NumericPolicy::default().with_reassociation(true);
+    let policy = NumericPolicy::default()
+        .with_reassociation(true)
+        .with_accumulator_narrowing()
+        .with_flash_narrowing(true);
     let packed = BTreeMap::new();
     for (from, to) in [(8, 3), (3, 6), (0, 1), (1, 7), (31, 2), (2, 33)] {
-        let previous = resolved_at(from);
-        let resolved = resolved_at(to);
+        let previous = resolved_at(from, policy);
+        let resolved = resolved_at(to, policy);
         let previous_kernels = previous
             .iter()
             .map(|bound| emit_cuda_with_policy(bound, &packed, policy).expect("previous op emits"))
