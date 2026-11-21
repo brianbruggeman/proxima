@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use proxima_numeric::DType;
 use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 use proxima_tensor::spec::{
-    RopePairing, elementwise_like, fused_rope_pair, layer_norm_no_affine, modulate,
+    RopePairing, elementwise_like, fused_rope_pair, layer_norm, layer_norm_no_affine, modulate,
     multi_axis_rope_tables, non_causal_attention, reduce_like, scalar_constant_like, tap_layers,
 };
 
@@ -308,4 +308,29 @@ async fn tap_layers_gradient_matches_finite_differences_and_routes_only_to_tappe
         differentiated.gradient_of_named("layer1").is_none(),
         "an untapped layer receives no gradient"
     );
+}
+
+#[proxima::test]
+async fn grad_layer_norm_matches_finite_differences_for_x_weight_and_bias() {
+    let (s, d) = (3u32, 4u32);
+    let mut program = Vec::new();
+    let x = input(&mut program, "x", &[s, d]);
+    let weight = input(&mut program, "weight", &[d]);
+    let bias = input(&mut program, "bias", &[d]);
+    let out = layer_norm(&mut program, x, weight, bias, d, 1e-5).expect("layer norm builds");
+    let loss = weighted_loss(&mut program, out, "sd", &[s, d]);
+    let bound = [
+        ("x", Lcg::values(11, 12)),
+        ("weight", Lcg::values(12, 4)),
+        ("bias", Lcg::values(13, 4)),
+        ("w", Lcg::values(14, 12)),
+    ];
+    let reports = check(
+        "layer_norm",
+        &program,
+        loss,
+        &bound,
+        &["x", "weight", "bias"],
+    );
+    assert_eq!(reports.len(), 3);
 }

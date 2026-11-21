@@ -84,6 +84,39 @@ pub fn layer_norm_no_affine(
     )
 }
 
+/// Affine LayerNorm: `layer_norm_no_affine(x) * weight + bias` over the last axis of
+/// `x` (`[s, d]`), with `weight` and `bias` one `[d]` vector each broadcast over `s`.
+/// Composes [`layer_norm_no_affine`] with an `Elementwise` multiply and add (the
+/// `"d->sd"` operand map [`modulate`] uses); no new `Reduce`, so autograd differentiates
+/// it with the rules it already has. Reach for [`layer_norm_no_affine`] when the norm
+/// carries no learned parameters.
+///
+/// # Errors
+///
+/// [`TensorError`] when a node is not part of `program`.
+pub fn layer_norm(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    weight: NodeId,
+    bias: NodeId,
+    width: u32,
+    eps: f32,
+) -> Result<NodeId, TensorError> {
+    let normed = layer_norm_no_affine(program, x, width, eps)?;
+    let scaled = elementwise_like(
+        program,
+        x,
+        ScalarOp::Multiply,
+        &[(normed, "sd->sd"), (weight, "d->sd")],
+    )?;
+    elementwise_like(
+        program,
+        x,
+        ScalarOp::Add,
+        &[(scaled, "sd->sd"), (bias, "d->sd")],
+    )
+}
+
 /// adaLN modulation: `normed * (1 + scale) + shift`, with `shift` and `scale`
 /// one `[d]` vector each (per sample, broadcast over the sequence axis).
 ///
@@ -276,4 +309,66 @@ pub fn tap_layers(
         )?;
     }
     Ok(stacked)
+}
+
+#[cfg(test)]
+mod layer_norm_tests {
+    use super::*;
+    use crate::spec::input_leaf;
+
+    fn reference(x: &[f32], weight: &[f32], bias: &[f32], width: usize, eps: f32) -> Vec<f32> {
+        let mut out = Vec::new();
+        for row in x.chunks(width) {
+            let mean = row.iter().sum::<f32>() / width as f32;
+            let variance = row.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / width as f32;
+            let inverse = 1.0 / (variance + eps).sqrt();
+            for (column, value) in row.iter().enumerate() {
+                out.push((value - mean) * inverse * weight[column] + bias[column]);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn affine_layer_norm_matches_naive_reference_on_a_non_model_shape() {
+        let (rows, width) = (3usize, 5usize);
+        let x: Vec<f32> = (0..rows * width)
+            .map(|i| ((i * 7 % 11) as f32) - 4.5)
+            .collect();
+        let weight = [0.5_f32, -1.0, 2.0, 1.5, 0.25];
+        let bias = [0.1_f32, -0.2, 0.3, -0.4, 0.5];
+        let mut program = Vec::new();
+        let shape = |dims: &[u32]| dims.iter().map(|&d| Extent::Static(d)).collect::<Vec<_>>();
+        let x_node = input_leaf(
+            &mut program,
+            DType::FLOAT32,
+            shape(&[rows as u32, width as u32]),
+            "x",
+        );
+        let w_node = input_leaf(
+            &mut program,
+            DType::FLOAT32,
+            shape(&[width as u32]),
+            "weight",
+        );
+        let b_node = input_leaf(&mut program, DType::FLOAT32, shape(&[width as u32]), "bias");
+        let out = layer_norm(&mut program, x_node, w_node, b_node, width as u32, 1e-5)
+            .expect("affine layer norm builds");
+        let evaluated = crate::cpu::evaluate_named(
+            &program,
+            &[],
+            &[("x", &x), ("weight", &weight), ("bias", &bias)],
+            &[out],
+        )
+        .expect("affine layer norm evaluates");
+        let got = evaluated.get(out).expect("output requested").0.to_vec();
+        let want = reference(&x, &weight, &bias, width, 1e-5);
+        assert_eq!(got.len(), rows * width);
+        for (index, (actual, expected)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "element {index}: {actual} vs {expected}"
+            );
+        }
+    }
 }
