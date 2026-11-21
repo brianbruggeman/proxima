@@ -1006,15 +1006,20 @@ dependencies = [
 
 [[package]]
 name = "conflaguration"
-version = "2.0.0"
+version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9145383355edcdaa0e4c6d2b42bafdd244ab5e7049aced3431f28d0dedcf26c"
+checksum = "d82a22787f21a131221b8e3b1097d39dc325817c260378a58c494119a75c00c2"
 dependencies = [
  "conflaguration-core",
  "conflaguration-derive",
  "environs",
+ "json5",
+ "quick-xml",
+ "ron",
  "serde",
  "serde-value",
+ "serde_json",
+ "serde_yaml",
  "thiserror 2.0.19",
  "toml 0.8.23",
 ]
@@ -4249,6 +4254,7 @@ name = "proxima-config"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "conflaguration",
  "fastrand",
  "json5",
  "proxima-core",

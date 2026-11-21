@@ -150,7 +150,7 @@ bumpalo = { version = "3.16", default-features = false }
 bytes = { version = "1.7", default-features = false }
 cel = "0.16.0"
 clap = "4.5"
-conflaguration = { version = "2.0.0" }
+conflaguration = { version = "2.1.0" }
 core_affinity = "0.8.3"
 criterion = { version = "0.8.2", default-features = false }
 crossbeam-deque = "0.8.6"
@@ -378,7 +378,7 @@ rayon = { workspace = true, optional = true }
 h2 = { workspace = true, features = ["unstable"], optional = true }
 rustc-hash = { workspace = true }
 bon = { workspace = true }
-conflaguration = { workspace = true, features = ["derive", "toml"] }
+conflaguration = { workspace = true, features = ["derive", "json", "toml", "xml"] }
 h3 = { workspace = true, optional = true }
 quinn-proto = { workspace = true, features = ["rustls-aws-lc-rs"], optional = true }
 h3-quinn = { workspace = true, optional = true }

@@ -33,7 +33,7 @@ proxima-core = { workspace = true, default-features = false, optional = true }
 # (`WireError`) are hard dependencies, not gated behind `client`/`listen`.
 bon = { workspace = true, optional = true }
 bytes = { workspace = true, default-features = false }
-conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+conflaguration = { workspace = true, features = ["derive", "json", "toml", "xml"], optional = true }
 futures = { workspace = true, features = ["std", "async-await"], optional = true }
 futures-timer = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }

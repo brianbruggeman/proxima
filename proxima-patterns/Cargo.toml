@@ -130,7 +130,7 @@ proxima-telemetry = { workspace = true, features = ["emit"], optional = true }
 proxima-auth = { workspace = true, optional = true, features = ["std", "signing", "digest", "negotiate"] }
 base64 = { workspace = true, optional = true }
 bon = { workspace = true, optional = true }
-conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+conflaguration = { workspace = true, features = ["derive", "json", "toml"], optional = true }
 fastrand = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 zeroize = { version = "1.9.0", default-features = false, features = ["alloc"], optional = true }

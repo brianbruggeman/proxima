@@ -28,7 +28,7 @@ proxima-primitives = { workspace = true, default-features = false, features = ["
 proxima-core = { workspace = true, default-features = false, optional = true }
 bon = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
-conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+conflaguration = { workspace = true, features = ["derive", "json", "toml", "xml"], optional = true }
 futures = { workspace = true, features = ["std", "async-await"], optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 serde_json = { workspace = true, optional = true }

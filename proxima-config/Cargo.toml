@@ -24,6 +24,7 @@ std = [
     "dep:ron",
     "dep:serde_norway",
     "dep:toml",
+    "dep:conflaguration",
 ]
 
 # pure desugar pass for the TOML/JSON pipe spec — folded in from the former
@@ -35,7 +36,7 @@ sugar = ["alloc"]
 # adds `SchemaRegistry`, the toml emitter, and the `serde_value` escape
 # hatch; `schema-derive` adds `#[derive(Schema)]`.
 schema = ["alloc", "dep:serde", "dep:regex", "dep:thiserror", "dep:time", "dep:url"]
-schema-std = ["schema", "proxima-core/std", "dep:arc-swap", "dep:toml", "dep:serde-value"]
+schema-std = ["schema", "proxima-core/std", "dep:arc-swap", "dep:toml", "dep:serde-value", "dep:conflaguration"]
 schema-derive = ["schema", "dep:proxima-macros"]
 
 # k8s-style desired-state file store — folded in from the former
@@ -65,6 +66,7 @@ regex = { version = "1.12.3", default-features = false, features = ["perf", "uni
 time = { version = "0.3.47", default-features = false, features = ["parsing", "macros"], optional = true }
 url = { version = "2.5.8", default-features = false, optional = true }
 thiserror = { workspace = true, optional = true }
+conflaguration = { workspace = true, features = ["toml", "json", "yaml", "xml", "ron", "json5"], optional = true }
 
 [dev-dependencies]
 temp-env = { workspace = true }

@@ -23,7 +23,7 @@ proxima-core = { workspace = true, default-features = false }
 proxima-auth = { workspace = true, optional = true, features = ["alloc"] }
 bon = { workspace = true }
 bytes = { workspace = true }
-conflaguration = { workspace = true, features = ["derive", "toml"] }
+conflaguration = { workspace = true, features = ["derive", "json", "toml", "xml"] }
 dashmap = { workspace = true }
 futures = { workspace = true, features = ["std", "async-await"] }
 rand = { workspace = true }

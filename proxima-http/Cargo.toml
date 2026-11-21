@@ -58,7 +58,7 @@ h3 = { workspace = true, optional = true }
 h3-quinn = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true, features = ["rustls-aws-lc-rs", "runtime-tokio"] }
 bon = { workspace = true }
-conflaguration = { workspace = true, features = ["derive", "toml"] }
+conflaguration = { workspace = true, features = ["derive", "json", "toml"] }
 xxhash-rust = { workspace = true, optional = true, features = ["xxh3"] }
 thiserror = { workspace = true, optional = true }
 crossbeam-queue.workspace = true

@@ -30,7 +30,7 @@ proxima-recording = { version = "0.1.0", path = "../proxima-recording", features
 blake3 = { workspace = true, optional = true }
 # non-optional: ca.rs (always compiled) sets cert validity windows with it.
 time = { workspace = true, features = ["macros"] }
-conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }
+conflaguration = { workspace = true, features = ["derive", "json", "toml", "xml"], optional = true }
 bon = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 proxima-http = { workspace = true, optional = true, features = ["http3-native"] }
