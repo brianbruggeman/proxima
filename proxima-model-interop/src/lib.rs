@@ -60,6 +60,8 @@ mod generate;
 pub use generate::BackendRuntime;
 #[cfg(all(feature = "std", feature = "cuda", feature = "interop-bgpool"))]
 pub use generate::CudaServingPipe;
+#[cfg(test)]
+mod generic_lowering;
 #[cfg(feature = "std")]
 mod hf_bind;
 mod hf_config;
