@@ -40,6 +40,12 @@ fn guided(iterations: Option<u32>, mode: LoopCdMode, strength: f32) -> Recurrent
     }
 }
 
+fn tiny_names() -> Vec<String> {
+    let bytes = tiny_ouro_safetensors();
+    let manifest = proxima_safetensors::parse_complete(&bytes).expect("parse the safetensors");
+    manifest.tensors.into_iter().map(|tensor| tensor.name).collect()
+}
+
 fn data_start(bytes: &[u8]) -> u64 {
     u64::from_le_bytes(bytes[..8].try_into().expect("eight header bytes")) + 8
 }
@@ -49,7 +55,7 @@ fn recurrent_mainline_hf_descriptor_reads_the_config_and_the_profile() {
     let config = parse_hf_config(TINY_OURO_HF_CONFIG).expect("parse the HF config");
 
     let (architecture, descriptor) =
-        ouro_descriptor_from_hf_config(&config, RecurrentConfig::neutral())
+        ouro_descriptor_from_hf_config(&config, &tiny_names(), RecurrentConfig::neutral())
             .expect("derive the descriptor");
 
     assert_eq!(
@@ -75,7 +81,7 @@ fn recurrent_mainline_hf_descriptor_refuses_what_it_cannot_lower() {
     let refuse = |edit: &dyn Fn(&mut crate::hf_config::HfConfig)| {
         let mut config = parse_hf_config(TINY_OURO_HF_CONFIG).expect("parse the HF config");
         edit(&mut config);
-        let outcome = ouro_descriptor_from_hf_config(&config, RecurrentConfig::neutral());
+        let outcome = ouro_descriptor_from_hf_config(&config, &tiny_names(), RecurrentConfig::neutral());
         assert!(
             matches!(outcome, Err(InteropError::InvalidRecurrentConfig { .. })),
             "{:?}",
@@ -91,7 +97,7 @@ fn recurrent_mainline_hf_descriptor_refuses_what_it_cannot_lower() {
     let mut config = parse_hf_config(TINY_OURO_HF_CONFIG).expect("parse the HF config");
     config.total_ut_steps = None;
     assert!(matches!(
-        ouro_descriptor_from_hf_config(&config, RecurrentConfig::neutral()),
+        ouro_descriptor_from_hf_config(&config, &tiny_names(), RecurrentConfig::neutral()),
         Err(InteropError::MissingMetadataKey { .. })
     ));
 }
@@ -100,7 +106,7 @@ fn recurrent_mainline_hf_descriptor_refuses_what_it_cannot_lower() {
 fn recurrent_mainline_hf_shared_descriptor_literal() {
     let config = parse_hf_config(TINY_OURO_HF_CONFIG).expect("parse the HF config");
     let (architecture, descriptor) =
-        ouro_descriptor_from_hf_config(&config, RecurrentConfig::neutral())
+        ouro_descriptor_from_hf_config(&config, &tiny_names(), RecurrentConfig::neutral())
             .expect("derive the descriptor");
     let bytes = tiny_ouro_safetensors();
     let manifest = proxima_safetensors::parse_complete(&bytes).expect("parse the safetensors");
@@ -135,7 +141,7 @@ fn recurrent_mainline_hf_shared_descriptor_literal() {
 fn recurrent_mainline_hf_sibling_graphs_share_one_binding() {
     let config = parse_hf_config(TINY_OURO_HF_CONFIG).expect("parse the HF config");
     let (architecture, descriptor) =
-        ouro_descriptor_from_hf_config(&config, RecurrentConfig::neutral())
+        ouro_descriptor_from_hf_config(&config, &tiny_names(), RecurrentConfig::neutral())
             .expect("derive the descriptor");
     let bytes = tiny_ouro_safetensors();
     let manifest = proxima_safetensors::parse_complete(&bytes).expect("parse the safetensors");
@@ -153,7 +159,7 @@ fn recurrent_mainline_hf_sibling_graphs_share_one_binding() {
     .expect("load");
 
     let shallow_policy = guided(Some(1), LoopCdMode::Disabled, 0.0);
-    let (_, shallow_descriptor) = ouro_descriptor_from_hf_config(&config, shallow_policy)
+    let (_, shallow_descriptor) = ouro_descriptor_from_hf_config(&config, &tiny_names(), shallow_policy)
         .expect("derive the one-pass descriptor");
     let shallow = deep
         .with_forward_descriptor(&shallow_descriptor)
@@ -186,4 +192,64 @@ fn recurrent_mainline_hf_sibling_graphs_share_one_binding() {
         "{:?}",
         refused.err()
     );
+}
+
+fn differing_lines(served: &proxima_tensor::spec::FamilyProfile, row: &proxima_tensor::spec::FamilyProfile) -> (usize, usize) {
+    let served_text = format!("{served:#?}");
+    let row_text = format!("{row:#?}");
+    let compared = row_text.lines().count();
+    let differing = served_text.lines().zip(row_text.lines()).filter(|(left, right)| left != right).count();
+    (compared, differing)
+}
+
+#[test]
+fn hf_profile_seam_equals_the_family_row_on_the_tiny_ouro_checkpoint() {
+    let config = serde_json::to_value(parse_hf_config(TINY_OURO_HF_CONFIG).expect("parse the HF config"))
+        .expect("config as json");
+    let names = tiny_names();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+
+    let served = crate::inferred_profile::inferred_profile_from_hf(
+        &config,
+        "ouro",
+        &names,
+        &crate::inferred_profile::ProfileSourceSettings::default(),
+    )
+    .expect("facts accept the checkpoint")
+    .expect("inference ran: the checkpoint matched a template, not the row fallback");
+    let row = crate::profiles::family_profile("ouro").expect("ouro row");
+
+    let (compared, differing) = differing_lines(&served, &row);
+    assert!(compared > 0, "compared {compared} lines");
+    assert_eq!(differing, 0, "{served:#?} vs {row:#?}");
+}
+
+#[cfg(feature = "host-checkpoints")]
+#[test]
+fn hf_profile_seam_equals_the_family_row_on_the_local_qwen3_checkpoint() {
+    use std::io::Read;
+    let path = std::path::PathBuf::from(std::env::var("HOME").expect("HOME"))
+        .join("models/image_gen/flux2-klein-4b/comfy/qwen_3_4b.safetensors");
+    let mut file = std::fs::File::open(&path).expect("local qwen3 checkpoint");
+    let mut length = [0u8; 8];
+    file.read_exact(&mut length).expect("header length");
+    let mut header = vec![0u8; usize::try_from(u64::from_le_bytes(length)).expect("header fits")];
+    file.read_exact(&mut header).expect("header bytes");
+    let table: serde_json::Value = serde_json::from_slice(&header).expect("header json");
+    let names: Vec<&str> = table.as_object().expect("header object").keys().map(String::as_str).collect();
+
+    let config = serde_json::json!({"hidden_act": "silu"});
+    let served = crate::inferred_profile::inferred_profile_from_hf(
+        &config,
+        "qwen3",
+        &names,
+        &crate::inferred_profile::ProfileSourceSettings::default(),
+    )
+    .expect("facts accept the checkpoint")
+    .expect("inference ran: the checkpoint matched a template, not the row fallback");
+    let row = crate::profiles::family_profile("qwen3").expect("qwen3 row");
+
+    let (compared, differing) = differing_lines(&served, &row);
+    assert!(compared > 0, "compared {compared} lines");
+    assert_eq!(differing, 0, "{served:#?} vs {row:#?}");
 }

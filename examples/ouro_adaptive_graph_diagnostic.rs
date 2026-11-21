@@ -7,9 +7,9 @@ use std::env;
 #[cfg(all(feature = "proxima-tensor", target_os = "macos"))]
 use std::fs::{self, File, OpenOptions};
 #[cfg(all(feature = "proxima-tensor", target_os = "macos"))]
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 #[cfg(all(feature = "proxima-tensor", target_os = "macos"))]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(all(feature = "proxima-tensor", target_os = "macos"))]
 use omega::backend::{self, Engine, GpuDriver};
@@ -19,6 +19,8 @@ use proxima_model_interop::{
 };
 #[cfg(all(feature = "proxima-tensor", target_os = "macos"))]
 use proxima_numeric::NumericPolicy;
+#[cfg(all(feature = "proxima-tensor", target_os = "macos"))]
+use proxima_safetensors::SafetensorsParser;
 #[cfg(all(feature = "proxima-tensor", target_os = "macos"))]
 use proxima_tensor::QuantizedBlock;
 #[cfg(all(feature = "proxima-tensor", target_os = "macos"))]
@@ -531,8 +533,10 @@ mod diagnostic {
             strength: MAX_STRENGTH,
             reference_iteration: 1,
         };
+        let header_names = safetensors_tensor_names(&model_directory.join("model.safetensors"))?;
+        let tensor_names: Vec<&str> = header_names.iter().map(String::as_str).collect();
         let (architecture, mut descriptor) =
-            ouro_descriptor_from_hf_config(&hf_config, recurrent).map_err(io::Error::other)?;
+            ouro_descriptor_from_hf_config(&hf_config, &tensor_names, recurrent).map_err(io::Error::other)?;
         if architecture.vocab != descriptor.vocab {
             return Err(invalid_data(
                 "descriptor vocabulary differs from HF architecture",
@@ -757,6 +761,22 @@ mod diagnostic {
             process::exit(1);
         }
     }
+
+    fn safetensors_tensor_names(path: &Path) -> io::Result<Vec<String>> {
+        let mut file = fs::File::open(path)?;
+        let mut length = [0u8; 8];
+        file.read_exact(&mut length)?;
+        let header_len = usize::try_from(u64::from_le_bytes(length)).map_err(io::Error::other)?;
+        let mut bytes = length.to_vec();
+        bytes.resize(8 + header_len, 0);
+        file.read_exact(&mut bytes[8..])?;
+        let manifest = SafetensorsParser::new()
+            .push(&bytes)
+            .map_err(io::Error::other)?
+            .into_manifest()
+            .map_err(io::Error::other)?;
+        Ok(manifest.tensors.into_iter().map(|tensor| tensor.name).collect())
+    }
 }
 
 #[cfg(all(feature = "proxima-tensor", target_os = "macos"))]
@@ -769,3 +789,4 @@ fn main() {
     eprintln!("build with --features proxima-tensor on macOS to run the Metal diagnostic");
     process::exit(1);
 }
+

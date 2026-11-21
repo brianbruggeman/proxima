@@ -22,7 +22,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::InteropError;
 use crate::profiles::family_profile;
 use crate::families::{
-    CheckpointSha, DecoderFamily, FactsTable, TensorShape, gguf_config, infer, infer_profile,
+    CheckpointSha, DecoderFamily, FactsTable, TensorShape, gguf_config, infer,
+    infer_profile,
 };
 
 const UNHASHED: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -124,6 +125,66 @@ pub(crate) fn resolved_profile(parsed: &ParsedGguf, family: &str) -> Result<Fami
     })?;
     if settings.inferred {
         match inferred_profile(parsed, family, &settings) {
+            Ok(Some(profile)) => return Ok(profile),
+            Ok(None) => {}
+            Err(InteropError::FamilyFacts(refusal)) => {
+                warn!(family = ?family, refusal = ?refusal, "architecture facts refused; serving from the family row");
+            }
+            Err(other) => return Err(other),
+        }
+    }
+    family_profile(family)
+}
+
+pub(crate) fn inferred_profile_from_hf(
+    config: &serde_json::Value,
+    family: &str,
+    tensor_names: &[&str],
+    settings: &ProfileSourceSettings,
+) -> Result<Option<FamilyProfile>, InteropError> {
+    let table = settings.facts(family)?;
+    let Some(facts) = table.get(family) else {
+        return Ok(None);
+    };
+    let invalid = |message: String| InteropError::InvalidFamilyProfile {
+        family: family.into(),
+        message,
+    };
+    let decoder = DecoderFamily::builtin().map_err(|error| invalid(error.to_string()))?;
+    let templates = decoder.templates().map_err(|error| invalid(error.to_string()))?;
+    let tensors: Vec<TensorShape> = tensor_names
+        .iter()
+        .map(|name| TensorShape {
+            name: (*name).into(),
+            shape: Vec::new(),
+        })
+        .collect();
+    let sha = CheckpointSha::parse(UNHASHED).map_err(|error| invalid(error.to_string()))?;
+    let Ok(inferred) = infer(&tensors, config, &templates, sha) else {
+        return Ok(None);
+    };
+    let read = infer_profile(&decoder, &inferred, config).map_err(|error| invalid(error.to_string()))?;
+    Ok(Some(read.settle(facts, family)?.into_profile(family)?))
+}
+
+/// The HF twin of [`resolved_profile`]: the profile a `config.json` and its
+/// safetensors tensor names describe plus the `facts.toml` section for
+/// `family`, with the same transitional row fallback living only here.
+///
+/// # Errors
+///
+/// As [`resolved_profile`].
+pub(crate) fn resolved_profile_from_hf(
+    config: &serde_json::Value,
+    family: &str,
+    tensor_names: &[&str],
+) -> Result<FamilyProfile, InteropError> {
+    let settings = ProfileSourceSettings::from_env().map_err(|error| InteropError::InvalidFamilyProfile {
+        family: family.into(),
+        message: error.to_string(),
+    })?;
+    if settings.inferred {
+        match inferred_profile_from_hf(config, family, tensor_names, &settings) {
             Ok(Some(profile)) => return Ok(profile),
             Ok(None) => {}
             Err(InteropError::FamilyFacts(refusal)) => {

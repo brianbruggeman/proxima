@@ -17,7 +17,7 @@ pub use accept::{Accepted, GoldenRecord, LedgerError, Refusal, accept, parse_led
 #[cfg(feature = "std")]
 pub use accept::{LedgerFileError, read_ledger};
 pub use decoder::{
-    DecoderFamily, Dialect, ProfileFacts, ProfileInferError, Slot, gguf_config, infer_profile,
+    DecoderFamily, Dialect, ProfileFacts, Spellings, ProfileInferError, Slot, gguf_config, infer_profile,
 };
 pub use facts::{ArchFacts, EmbeddingFact, FactsError, FactsTable};
 pub use infer::{

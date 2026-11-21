@@ -31,6 +31,10 @@ pub struct Probe {
     pub key: String,
     pub role: String,
     pub pattern: Pattern,
+    /// Other spellings of the same role: the probe holds in a layer where any
+    /// of `pattern` and these is present.
+    #[serde(default)]
+    pub also: Vec<Pattern>,
     /// `true` asks "in any layer", so a hybrid stack whose layers differ is not
     /// a [`InferError::MixedProbe`]; `false` demands every layer or none.
     #[serde(default)]

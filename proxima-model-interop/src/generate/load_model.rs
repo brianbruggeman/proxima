@@ -842,6 +842,9 @@ pub struct LoadedModel<'file> {
     /// graph over the same weights can be admitted against it
     /// ([`Self::with_forward_descriptor`]); `None` for a GGUF load.
     pub(super) safetensors_descriptor: Option<ModelDescriptor>,
+    /// The canonical single-file descriptor the safetensors load computed from its manifest, so a
+    /// forward-descriptor reuse decides `single_range` against what the first load decided against.
+    pub(super) canonical_descriptor: Option<ModelDescriptor>,
     pub(super) architecture: ModelHparams,
     /// The decode-time cache shape this checkpoint's architecture was measured
     /// with ([`crate::serving_defaults::MeasuredServingDefaults::kv_cache_shape`]);

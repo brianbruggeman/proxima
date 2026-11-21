@@ -65,6 +65,15 @@ claims = [
 [dialects.hf.roles]
 attn_q = "self_attn.q_proj.weight"
 qk_norm = "self_attn.q_norm.weight"
+ffn_norm = "post_attention_layernorm.weight"
+post_attention_norm = "input_layernorm_2.weight"
+post_ffw_norm = ["post_attention_layernorm_2.weight", "post_feedforward_layernorm.weight"]
+post_ffw_norm_1 = "post_feedforward_layernorm_1.weight"
+post_ffw_norm_2 = "post_feedforward_layernorm_2.weight"
+pre_ffw_norm_2 = "pre_feedforward_layernorm_2.weight"
+output_scale = "layer_scalar"
+router = "router.proj.weight"
+router_scale = "router.scale"
 shexp_gate = "mlp.shared_expert.gate_proj.weight"
 shexp_up = "mlp.shared_expert.up_proj.weight"
 shexp_down = "mlp.shared_expert.down_proj.weight"
@@ -73,3 +82,9 @@ expert_bias = "mlp.gate.e_score_correction_bias"
 
 [dialects.hf.metadata]
 activation = "hidden_act"
+loop_count = "total_ut_steps"
+sliding_window_pattern = "sliding_window_pattern"
+full_attention_interval = "full_attention_interval"
+embedding_scale = "embedding_scale"
+expert_gating_func = "expert_gating_func"
+ssm_v_head_reordered = "ssm_v_head_reordered"

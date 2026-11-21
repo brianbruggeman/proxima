@@ -219,7 +219,6 @@ use crate::hf_bind::{HfShard, bind_all_weights_from_safetensors};
 #[cfg(any(test, all(feature = "metal-output-placement", target_os = "macos")))]
 use crate::lowering::KvCacheShape;
 use crate::lowering::{KvLayout, StepInput, bind_symbols, rope_freq_factors, sliding_rope_inputs};
-use crate::profiles::family_profile;
 use crate::serving_defaults::measured_serving_defaults;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use crate::serving_settings::DispatchTypeName;

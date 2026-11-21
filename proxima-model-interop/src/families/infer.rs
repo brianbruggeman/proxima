@@ -279,7 +279,11 @@ fn probe_state(template: &FamilyTemplate, probe: &Probe, shapes: &Shapes) -> Pro
         .unwrap_or_default();
     let present = layers
         .iter()
-        .filter(|layer| shapes.contains_key(probe.pattern.render(**layer).as_str()))
+        .filter(|layer| {
+            core::iter::once(&probe.pattern)
+                .chain(&probe.also)
+                .any(|spelling| shapes.contains_key(spelling.render(**layer).as_str()))
+        })
         .count();
     match present {
         0 => ProbeState::None,

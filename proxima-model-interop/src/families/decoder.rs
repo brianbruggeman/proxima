@@ -35,6 +35,23 @@ use super::template::{FamilyTemplate, Probe, Stack, TemplateError, Value};
 
 const ROLE: &str = "block";
 
+/// A role's tensor suffix: one spelling, or several that name the same function.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum Spellings {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Spellings {
+    fn all(&self) -> &[String] {
+        match self {
+            Self::One(single) => core::slice::from_ref(single),
+            Self::Many(several) => several,
+        }
+    }
+}
+
 /// One checkpoint format's spelling of the family: where the layer stack lives,
 /// the non-layer tensors it carries, and its role and metadata names.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -45,7 +62,7 @@ pub struct Dialect {
     #[serde(default)]
     pub claim_prefixes: Vec<String>,
     #[serde(default)]
-    pub roles: BTreeMap<String, String>,
+    pub roles: BTreeMap<String, Spellings>,
     #[serde(default)]
     pub metadata: BTreeMap<String, String>,
 }
@@ -193,7 +210,7 @@ impl DecoderFamily {
         let probes = spelling
             .roles
             .iter()
-            .map(|(key, suffix)| role_probe(&spelling.layer, key, suffix))
+            .map(|(key, suffix)| role_probe(&spelling.layer, key, suffix.all()))
             .collect::<Result<Vec<_>, _>>()?;
         FamilyTemplate {
             name: format!("{}.{dialect}", self.name),
@@ -226,15 +243,21 @@ impl DecoderFamily {
     }
 }
 
-fn role_probe(layer: &Pattern, key: &str, suffix: &str) -> Result<Probe, TemplateError> {
-    let pattern =
+fn role_probe(layer: &Pattern, key: &str, suffixes: &[String]) -> Result<Probe, TemplateError> {
+    let parse = |suffix: &String| {
         Pattern::parse(&format!("{layer}{suffix}")).map_err(|error| TemplateError::Parse {
             reason: error.to_string(),
-        })?;
+        })
+    };
+    let mut patterns = suffixes.iter().map(parse);
+    let pattern = patterns.next().ok_or_else(|| TemplateError::Parse {
+        reason: format!("role {key:?} lists no spelling"),
+    })??;
     Ok(Probe {
         key: key.to_string(),
         role: ROLE.to_string(),
         pattern,
+        also: patterns.collect::<Result<Vec<_>, _>>()?,
         any: true,
     })
 }
@@ -423,6 +446,9 @@ fn schedule_source(reading: &Reading) -> Slot<ScheduleSource> {
 }
 
 fn ssm_order(reading: &Reading) -> Slot<bool> {
+    if !reading.dialect.roles.contains_key("ssm_state") {
+        return Slot::NotApplicable;
+    }
     match reading.flag("ssm_state") {
         Some(false) => Slot::NotApplicable,
         _ => Slot::from_option(

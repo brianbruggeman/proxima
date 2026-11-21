@@ -2838,6 +2838,7 @@ pub(super) mod memory_fit_gate_tests {
                 &[],
             )),
             safetensors_descriptor: None,
+            canonical_descriptor: None,
             architecture: tiny_architecture(),
             #[cfg(any(test, all(feature = "metal-output-placement", target_os = "macos")))]
             kv_cache_shape: KvCacheShape::Uniform,

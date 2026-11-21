@@ -18,7 +18,7 @@ use proxima_tensor::spec::{LoopCdConfig, ModelDescriptor, RopePairing, gqa_descr
 use crate::bind::ModelHparams;
 use crate::error::InteropError;
 use crate::hf_config::{HfConfig, architecture_from_hf_config};
-use crate::profiles::family_profile;
+use crate::inferred_profile::resolved_profile_from_hf;
 use crate::serving_defaults::measured_serving_defaults;
 use crate::recurrent_config::RecurrentConfig;
 
@@ -34,12 +34,18 @@ use crate::recurrent_config::RecurrentConfig;
 /// family profile lookup can fail with.
 pub fn ouro_descriptor_from_hf_config(
     config: &HfConfig,
+    tensor_names: &[impl AsRef<str>],
     recurrent: RecurrentConfig,
 ) -> Result<(ModelHparams, ModelDescriptor), InteropError> {
     validate_hf_ouro(config)?;
     let architecture = architecture_from_hf_config(config)?;
     validate_dense_attention(&architecture)?;
-    let profile = family_profile(&architecture.family)?;
+    let config_json = serde_json::to_value(config).map_err(|error| InteropError::InvalidFamilyProfile {
+        family: architecture.family.clone(),
+        message: error.to_string(),
+    })?;
+    let names: Vec<&str> = tensor_names.iter().map(AsRef::as_ref).collect();
+    let profile = resolved_profile_from_hf(&config_json, &architecture.family, &names)?;
     if profile.recurrence.is_none() {
         return Err(InteropError::UnsupportedRecurrentConfig {
             family: architecture.family,

@@ -204,8 +204,15 @@ impl<'checkpoint> Model<'checkpoint> {
         {
             index
         } else {
+            let tensor_names: Vec<&str> = self
+                .checkpoint
+                .manifest
+                .tensors
+                .iter()
+                .map(|tensor| tensor.name.as_str())
+                .collect();
             let (architecture, descriptor) =
-                ouro_descriptor_from_hf_config(&self.checkpoint.hf_config, recurrent)
+                ouro_descriptor_from_hf_config(&self.checkpoint.hf_config, &tensor_names, recurrent)
                     .map_err(io::Error::other)?;
             let loaded = if let Some((_, first)) = self.models.first() {
                 first.with_forward_descriptor(&descriptor)

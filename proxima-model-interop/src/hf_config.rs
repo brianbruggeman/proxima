@@ -26,7 +26,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::bind::ModelHparams;
@@ -45,7 +45,7 @@ use proxima_tensor::spec::LayerKind;
 /// `model_type` is stored on [`ModelHparams::family`], the key of the
 /// family profile the HF path reads (see [`architecture_from_hf_config`]);
 /// `architectures` is read for diagnostics only.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HfConfig {
     /// e.g. `"qwen3_moe"` -- the family profile key,
     /// carried to [`ModelHparams::family`] by [`architecture_from_hf_config`].

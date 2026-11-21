@@ -7,8 +7,11 @@ use super::*;
 /// program; any other does not.
 fn canonical_safetensors_descriptor(
     architecture: &ModelHparams,
+    manifest: &proxima_safetensors::Manifest,
 ) -> Result<ModelDescriptor, InteropError> {
-    let profile = family_profile(&architecture.family)?;
+    let names: Vec<&str> = manifest.tensors.iter().map(|tensor| tensor.name.as_str()).collect();
+    let profile =
+        crate::inferred_profile::resolved_profile_from_hf(&serde_json::json!({}), &architecture.family, &names)?;
     let measured = measured_serving_defaults(&architecture.family)?;
     Ok(measured.apply_to_descriptor(gqa_descriptor_from_shape(
         architecture.vocab,
@@ -2968,6 +2971,7 @@ impl<'file> LoadedModel<'file> {
             prewarm_queue: PrewarmQueue::new(),
             weights: Arc::new(SharedWeights::new(bound.weights, file_bytes)),
             safetensors_descriptor: None,
+            canonical_descriptor: None,
             architecture: bound.architecture,
             #[cfg(any(test, all(feature = "metal-output-placement", target_os = "macos")))]
             kv_cache_shape: measured.kv_cache_shape,
@@ -3060,11 +3064,12 @@ impl<'file> LoadedModel<'file> {
     ) -> Result<Self, InteropError> {
         let weights =
             bind_all_weights_from_safetensors(manifest, file_bytes, data_start, &architecture)?;
-        let descriptor = canonical_safetensors_descriptor(&architecture)?;
+        let descriptor = canonical_safetensors_descriptor(&architecture, manifest)?;
         Self::from_safetensors_weights(
             Arc::new(SharedWeights::new(weights, file_bytes)),
             architecture,
             vocab,
+            &descriptor,
             &descriptor,
             file_bytes,
         )
@@ -3098,11 +3103,13 @@ impl<'file> LoadedModel<'file> {
             &architecture,
             descriptor,
         )?;
+        let canonical = canonical_safetensors_descriptor(&architecture, manifest)?;
         Self::from_safetensors_weights(
             Arc::new(SharedWeights::new(weights, file_bytes)),
             architecture,
             vocab,
             descriptor,
+            &canonical,
             file_bytes,
         )
     }
@@ -3148,6 +3155,7 @@ impl<'file> LoadedModel<'file> {
             physical,
             self.vocab.clone(),
             descriptor,
+            self.canonical_descriptor.as_ref().unwrap_or(origin),
             self.checkpoint_mapping,
         )
     }
@@ -3157,6 +3165,7 @@ impl<'file> LoadedModel<'file> {
         architecture: ModelHparams,
         vocab: Vocab,
         descriptor: &ModelDescriptor,
+        canonical: &ModelDescriptor,
         file_bytes: &'file [u8],
     ) -> Result<Self, InteropError> {
         let ForwardProgram {
@@ -3179,8 +3188,10 @@ impl<'file> LoadedModel<'file> {
                 .recurrence
                 .map_or(1, |recurrence| recurrence.iterations as usize),
         );
+        #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+        let _ = canonical;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let single_range = if descriptor == &canonical_safetensors_descriptor(&architecture)? {
+        let single_range = if descriptor == canonical {
             build_single_range_program(&architecture, false)?
         } else {
             None
@@ -3202,6 +3213,7 @@ impl<'file> LoadedModel<'file> {
             prewarm_queue: PrewarmQueue::new(),
             weights,
             safetensors_descriptor: Some(descriptor.clone()),
+            canonical_descriptor: Some(canonical.clone()),
             architecture,
             #[cfg(any(test, all(feature = "metal-output-placement", target_os = "macos")))]
             kv_cache_shape: KvCacheShape::Uniform,
