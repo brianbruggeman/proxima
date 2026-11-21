@@ -1025,6 +1025,65 @@ pub fn append_attention_mixer(
         &[(score_even, "stug->stug"), (score_odd, "stug->stug")],
     )?;
 
+    let attended = append_masked_softmax_mix(
+        program,
+        scores,
+        inv_sqrt_head_dim,
+        Some((is_future, neg_infinity)),
+        attention_sink,
+        group,
+        v,
+    )?;
+
+    let wo_product = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Multiply,
+        &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
+    )?;
+    let attn_out = reduce(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        wo_product,
+        "sugdo->sugdo",
+        "so->sugdo",
+    )?;
+
+    let attn_out = match post_attention_norm_weight {
+        Some(gamma) => rmsnorm(program, attn_out, gamma, inv_dim, eps)?,
+        None => attn_out,
+    };
+
+    let residual = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Add,
+        &[(attn_out, "sd->sd"), (x, "sd->sd")],
+    )?;
+
+    Ok(AttentionMixerOutput {
+        residual,
+        rotated_k_even,
+        rotated_k_odd,
+        v,
+    })
+}
+
+/// Scale, optional mask, softmax over keys (optional sink) and the value mix:
+/// raw `scores` `[s, t, u, g]` to attended values `[s, u, g, d]`. `mask` is
+/// `(is_masked, neg_infinity)`; `None` leaves every key visible.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn append_masked_softmax_mix(
+    program: &mut Vec<Op>,
+    scores: NodeId,
+    inv_sqrt_head_dim: NodeId,
+    mask: Option<(NodeId, NodeId)>,
+    attention_sink: Option<NodeId>,
+    group: u32,
+    v: NodeId,
+) -> Result<NodeId, TensorError> {
     let scores_scaled = elementwise(
         program,
         DType::FLOAT32,
@@ -1032,16 +1091,19 @@ pub fn append_attention_mixer(
         &[(scores, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
     )?;
 
-    let scores_masked = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Select,
-        &[
-            (is_future, "st->stug"),
-            (neg_infinity, "->stug"),
-            (scores_scaled, "stug->stug"),
-        ],
-    )?;
+    let scores_masked = match mask {
+        Some((is_future, neg_infinity)) => elementwise(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Select,
+            &[
+                (is_future, "st->stug"),
+                (neg_infinity, "->stug"),
+                (scores_scaled, "stug->stug"),
+            ],
+        )?,
+        None => scores_scaled,
+    };
 
     let score_max = reduce(
         program,
@@ -1110,41 +1172,7 @@ pub fn append_attention_mixer(
         "stugd->stugd",
         "sugd->stugd",
     )?;
-
-    let wo_product = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
-    )?;
-    let attn_out = reduce(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        wo_product,
-        "sugdo->sugdo",
-        "so->sugdo",
-    )?;
-
-    let attn_out = match post_attention_norm_weight {
-        Some(gamma) => rmsnorm(program, attn_out, gamma, inv_dim, eps)?,
-        None => attn_out,
-    };
-
-    let residual = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        &[(attn_out, "sd->sd"), (x, "sd->sd")],
-    )?;
-
-    Ok(AttentionMixerOutput {
-        residual,
-        rotated_k_even,
-        rotated_k_odd,
-        v,
-    })
+    Ok(attended)
 }
 
 /// The dense-triple SwiGLU FFN branch [`scheduled_forward_program_with_experts`]
