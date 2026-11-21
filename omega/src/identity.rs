@@ -50,7 +50,7 @@ use crate::lowering::PackedOperands;
 /// the description, as 16 hex digits. Two descriptions that differ in any field get different
 /// names, so a cache key or helper name built from it cannot let two formats share a kernel.
 // only the kernel-rendering backends name kernels; a build with none of them has no caller
-#[cfg_attr(not(any(test, feature = "metal-core", feature = "wgpu-backend", feature = "cuda")), allow(dead_code))]
+#[cfg_attr(not(any(test, all(feature = "metal", target_os = "macos"), feature = "wgpu-backend", feature = "cuda")), allow(dead_code))]
 pub(crate) fn description_fingerprint(description: &impl core::fmt::Debug) -> String {
     let hash = format!("{description:?}")
         .bytes()
@@ -94,7 +94,7 @@ pub enum KernelLanguage {
 #[cfg_attr(
     not(any(
         test,
-        feature = "metal-core",
+        all(feature = "metal", target_os = "macos"),
         feature = "wgpu-backend",
         feature = "cuda"
     )),
@@ -579,7 +579,7 @@ pub(crate) fn signed_name_part(value: i64) -> String {
 // fingerprint function itself) is dropped as one unit rather than three.
 #[cfg(any(
     test,
-    feature = "metal-core",
+    all(feature = "metal", target_os = "macos"),
     feature = "wgpu-backend",
     feature = "cuda"
 ))]
@@ -1245,7 +1245,7 @@ mod gated {
 
 #[cfg(any(
     test,
-    feature = "metal-core",
+    all(feature = "metal", target_os = "macos"),
     feature = "wgpu-backend",
     feature = "cuda"
 ))]

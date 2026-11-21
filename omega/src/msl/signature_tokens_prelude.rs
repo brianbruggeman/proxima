@@ -2735,7 +2735,7 @@ fn row_tiled_entry_name(
 /// (`BoundOpKind::CachedAttention`'s own doc).
 #[cfg(any(
     test,
-    feature = "metal-core",
+    all(feature = "metal", target_os = "macos"),
     feature = "wgpu-backend",
     feature = "cuda"
 ))]
@@ -2749,7 +2749,7 @@ pub(crate) fn cached_attention_form(
 
 #[cfg(any(
     test,
-    feature = "metal-core",
+    all(feature = "metal", target_os = "macos"),
     feature = "wgpu-backend",
     feature = "cuda"
 ))]
