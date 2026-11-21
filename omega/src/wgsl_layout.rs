@@ -8,7 +8,7 @@
 use alloc::format;
 use alloc::string::String;
 
-use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
+use proxima_numeric::float_layout::{FloatLayout, NanNarrow, NanWiden, SignEncoding, Specials};
 
 use crate::msl::layout_render::{
     F32_ABS_MASK, F32_FRACTION_BITS, F32_INFINITY_BITS, F32_QUIET_BIT, exponent_ones,
@@ -86,24 +86,27 @@ pub fn layout_load_wgsl(layout: FloatLayout, name: &str) -> String {
 }
 
 fn field_load_reserved(layout: &FloatLayout) -> String {
+    let fraction_shift = F32_FRACTION_BITS - u32::from(layout.mantissa_bits);
+    let kept = match layout.nan.widen {
+        NanWiden::Quiet => format!(" | (mantissa << {fraction_shift}u)"),
+        NanWiden::Canonical => String::new(),
+    };
     if layout.specials == Specials::NanOnly {
         return format!(
-            "    if (exponent == {:#x}u && mantissa == {:#x}u) {{\n        return bitcast<f32>(sign | {F32_INFINITY_BITS:#010x}u | {F32_QUIET_BIT:#x}u | (mantissa << {fraction_shift}u));\n    }}\n",
+            "    if (exponent == {:#x}u && mantissa == {:#x}u) {{\n        return bitcast<f32>(sign | {F32_INFINITY_BITS:#010x}u | {F32_QUIET_BIT:#x}u{kept});\n    }}\n",
             exponent_ones(layout),
-            mantissa_mask(layout),
-            fraction_shift = F32_FRACTION_BITS - u32::from(layout.mantissa_bits)
+            mantissa_mask(layout)
         );
     }
     if !reserves_all_ones(layout) {
         return String::new();
     }
     let ones = exponent_ones(layout);
-    let fraction_shift = F32_FRACTION_BITS - u32::from(layout.mantissa_bits);
     format!(
         "    if (exponent == {ones:#x}u) {{
         var payload = 0u;
         if (mantissa != 0u) {{
-            payload = {F32_QUIET_BIT:#x}u | (mantissa << {fraction_shift}u);
+            payload = {F32_QUIET_BIT:#x}u{kept};
         }}
         return bitcast<f32>(sign | {F32_INFINITY_BITS:#010x}u | payload);
     }}
@@ -184,10 +187,16 @@ fn field_store_nan(layout: &FloatLayout) -> String {
             crate::msl::layout_render::max_normal_code(layout)
         );
     }
+    let kept = match layout.nan.narrow {
+        NanNarrow::Preserve => format!(
+            "((bits & 0x7fffffu) >> {}u) | ",
+            F32_FRACTION_BITS - u32::from(layout.mantissa_bits)
+        ),
+        NanNarrow::Canonical => String::new(),
+    };
     format!(
-        "        return sign | {:#x}u | (((bits & 0x7fffffu) >> {}u) | {:#x}u);\n",
+        "        return sign | {:#x}u | ({kept}{:#x}u);\n",
         infinity_code(layout),
-        F32_FRACTION_BITS - u32::from(layout.mantissa_bits),
         quiet_bit(layout)
     )
 }

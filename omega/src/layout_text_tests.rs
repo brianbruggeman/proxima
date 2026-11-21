@@ -232,6 +232,35 @@ fn float_layout_wgsl_native_types_chosen_by_fields() {
 }
 
 #[test]
+fn float_layout_wgsl_nan_policy_alone_decides_whether_the_payload_is_kept() {
+    let canonical = FloatLayout::E5M2_SATURATING;
+    let quiet = FloatLayout {
+        nan: NanPolicy::IEEE,
+        ..canonical
+    };
+
+    let dropped = [layout_load_wgsl(canonical, "probe_load"), layout_store_wgsl(canonical, "probe_store")].concat();
+    let kept = [layout_load_wgsl(quiet, "probe_load"), layout_store_wgsl(quiet, "probe_store")].concat();
+
+    assert!(
+        !dropped.contains("(mantissa << 21u)"),
+        "canonical widen carries no payload:\n{dropped}"
+    );
+    assert!(
+        kept.contains("(mantissa << 21u)"),
+        "quiet widen shifts the payload to the top of the fraction:\n{kept}"
+    );
+    assert!(
+        kept.contains("((bits & 0x7fffffu) >> 21u)"),
+        "preserve narrow keeps the top payload bits:\n{kept}"
+    );
+    assert!(
+        !dropped.contains("((bits & 0x7fffffu) >> 21u)"),
+        "canonical narrow carries no payload:\n{dropped}"
+    );
+}
+
+#[test]
 fn float_layout_cuda_wgsl_control_changed_bias_changes_constants() {
     let shifted = FloatLayout {
         bias_override: Some(4),
