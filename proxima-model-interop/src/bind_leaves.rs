@@ -33,6 +33,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
+use proxima_gguf::quant::QuantError;
+use proxima_gguf::quant::dispatch;
 use proxima_gguf::tensor::TensorInfo;
 use proxima_gguf::types::GgmlType;
 
@@ -599,13 +601,33 @@ fn push_borrowed_part<'file>(
         }
         return Ok(());
     }
-    let block = codec_from_ggml_type(tensor.ggml_type)
-        .and_then(|codec| as_block(codec, slice))
-        .ok_or_else(|| InteropError::UnrepresentableGgmlType {
+    if let Some(block) =
+        codec_from_ggml_type(tensor.ggml_type).and_then(|codec| as_block(codec, slice))
+    {
+        state.packed.push((leaf.into(), block));
+        return Ok(());
+    }
+    // No packed CPU kernel for this format, but the one format-keyed decoder
+    // may still know it. Ask the decoder rather than keep a second per-codec
+    // list here; a format with no decoder keeps the refusal.
+    let layout = tensor.ggml_type.wire_shape();
+    if layout.block_bytes == 0 || layout.block_elements == 0 {
+        return Err(InteropError::UnrepresentableGgmlType {
             tensor: tensor.name.clone(),
             ggml_type: tensor.ggml_type,
-        })?;
-    state.packed.push((leaf.into(), block));
+        });
+    }
+    let elements = slice.len() / layout.block_bytes as usize * layout.block_elements as usize;
+    let mut decoded = alloc::vec![0.0f32; elements];
+    dispatch::dequantize(tensor.ggml_type, slice, &mut decoded).map_err(|error| match error {
+        QuantError::UnsupportedCodec { .. } => InteropError::UnrepresentableGgmlType {
+            tensor: tensor.name.clone(),
+            ggml_type: tensor.ggml_type,
+        },
+        other => InteropError::Quant(other),
+    })?;
+    state.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
+    state.owned.push((leaf.into(), decoded));
     Ok(())
 }
 
@@ -796,8 +818,8 @@ mod tests {
     use proxima_gguf::quant::q4_k;
     use proxima_gguf::value::{MetadataArray, MetadataValue};
     use proxima_gguf::{GgufModel, TensorPayload, parse_complete, write_complete};
+    use proxima_numeric::{DType, NumericFormat, decode_blocks, encode_blocks};
     use proxima_tensor::{IndexMap, Keep, NodeId, ReduceInit, append, map};
-    use proxima_numeric::{DType};
 
     use super::*;
     use crate::Codec;
@@ -1146,6 +1168,98 @@ mod tests {
         let mut output = vec![0.0f32; rows * q4_k::QK_K];
         q4_k::dequantize(bytes, &mut output).expect("dequantize a bound slice");
         output.chunks(q4_k::QK_K).map(|row| row[0]).collect()
+    }
+
+    /// A Q4_1 payload built by the one proxima-numeric encoder: the format and
+    /// the values come from the numeric crate, never a per-codec fixture.
+    fn q4_1_rows(rows: usize, row_len: usize, row_value: impl Fn(usize) -> f32) -> Vec<u8> {
+        let mut flat = vec![0.0f32; rows * row_len];
+        for row in 0..rows {
+            flat[row * row_len..(row + 1) * row_len].fill(row_value(row));
+        }
+        let format = NumericFormat::Q4_1;
+        let mut encoded = vec![0u8; format.packed_len(flat.len()).expect("whole Q4_1 blocks")];
+        encode_blocks(&format, &flat, &mut encoded).expect("encodes Q4_1");
+        encoded
+    }
+
+    #[test]
+    fn a_codec_without_a_packed_kernel_binds_through_the_numeric_decoder() {
+        let (row_len, rows) = (256_usize, 768_usize);
+        let fused = q4_1_rows(rows, row_len, |row| (row % 17) as f32 - 8.0);
+        let bytes = gguf(&[(
+            "blk.0.shortconv.in_proj.weight",
+            &[row_len as u64, rows as u64],
+            GgmlType::Q4_1,
+            &fused,
+        )]);
+        let mut program = Vec::new();
+        for suffix in ["b", "c", "x"] {
+            input(
+                &mut program,
+                &format!("blk.0.shortconv.in_proj.weight.{suffix}"),
+                &[256, 256],
+            );
+        }
+
+        let weights = bind(&bytes, &program, &fused_thirds())
+            .expect("a decodable codec without a packed kernel binds");
+
+        assert!(weights.packed().is_empty(), "no packed kernel exists");
+        let owned = weights.owned();
+        assert_eq!(owned.len(), 3, "one owned buffer per part");
+        let row_bytes = row_len / usize::from(NumericFormat::Q4_1.elements_per_block())
+            * usize::from(NumericFormat::Q4_1.bytes_per_block());
+        let part_bytes = rows / 3 * row_bytes;
+        for (index, ((name, decoded), suffix)) in owned.iter().zip(["b", "c", "x"]).enumerate() {
+            assert_eq!(name, &format!("blk.0.shortconv.in_proj.weight.{suffix}"));
+            let start = index * part_bytes;
+            let mut expected = vec![0.0f32; rows / 3 * row_len];
+            decode_blocks(
+                &NumericFormat::Q4_1,
+                &fused[start..start + part_bytes],
+                &mut expected,
+            )
+            .expect("the numeric crate's own walker reads the same bytes");
+            assert_eq!(decoded, &expected, "{suffix}");
+        }
+        assert!(
+            weights.resident_bytes() >= 3 * (rows / 3) * row_len * core::mem::size_of::<f32>(),
+            "the widened parts are counted resident"
+        );
+    }
+
+    #[test]
+    fn a_codec_without_a_packed_kernel_that_has_no_decoder_is_still_refused() {
+        let block_bytes = GgmlType::Mxfp4.wire_shape().block_bytes as usize;
+        let payload = vec![0u8; 3 * block_bytes];
+        let bytes = gguf(&[(
+            "blk.0.shortconv.in_proj.weight",
+            &[32, 3],
+            GgmlType::Mxfp4,
+            &payload,
+        )]);
+        let mut program = Vec::new();
+        input(&mut program, "blk.0.shortconv.in_proj.weight.b", &[32]);
+        let profile = BindingProfile {
+            aliases: vec![TensorAlias::Part {
+                leaf: "shortconv.in_proj.weight.b".into(),
+                from: "shortconv.in_proj.weight".into(),
+                part: 0,
+                of: 3,
+            }],
+            ..BindingProfile::default()
+        };
+
+        let refused = bind(&bytes, &program, &profile);
+
+        match refused {
+            Err(InteropError::UnrepresentableGgmlType { tensor, ggml_type }) => {
+                assert_eq!(tensor, "blk.0.shortconv.in_proj.weight");
+                assert_eq!(ggml_type, GgmlType::Mxfp4);
+            }
+            other => panic!("expected the refusal to survive, got {:?}", other.err()),
+        }
     }
 
     #[test]

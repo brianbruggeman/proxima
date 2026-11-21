@@ -700,6 +700,14 @@ name = "gemma4_kernel_newcount_sweep"
 harness = false
 required-features = ["metal", "instrument"]
 
+# PROXIMAOMEGA-71: bind-time decode of a codec with no packed CPU kernel
+# (Q4_1) through the same ServingSettings llama is measured with, with the
+# format and payload from proxima-numeric.
+[[bench]]
+name = "codec_decode_fallback"
+harness = false
+required-features = ["std"]
+
 [target.'cfg(not(target_os = "windows"))'.dev-dependencies]
 sha2 = { version = "0.10.9", default-features = false, features = ["asm"] }
 
