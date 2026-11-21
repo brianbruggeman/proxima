@@ -1,0 +1,8 @@
+{
+  "header": "x-upstream-auth",
+  "scheme": "oauth",
+  "token_url": "https://idp.example.com/oauth/token",
+  "client_id": "proxima-edge",
+  "client_secret": "s3cr3t-value",
+  "refresh_ahead_ms": 30000
+}

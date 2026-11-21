@@ -1,0 +1,10 @@
+{
+  "max_attempts": 5,
+  "base_delay_ms": 100,
+  "max_delay_ms": 4000,
+  "replay_cap_bytes": 1048576,
+  "retry_on_status": [502, 503, 504],
+  "retry_on_error": true,
+  "idempotent_only": true,
+  "budget": { "capacity": 20, "refill_per_success": 2 }
+}

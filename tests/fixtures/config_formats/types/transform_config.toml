@@ -1,0 +1,33 @@
+[[request_pipeline]]
+op = "set_header"
+name = "x-corr"
+value = "abc"
+
+[[request_pipeline]]
+op = "rewrite_path"
+pattern = "^/old/(.*)"
+template = "/new/$1"
+
+[[request_pipeline]]
+op = "mutate"
+kind = "bit_flip"
+bits = 3
+seed = 42
+
+[request_pipeline.when]
+prob = 0.5
+seed = 7
+
+[[response_pipeline]]
+op = "remove_header"
+name = "x-internal"
+
+[[response_pipeline]]
+op = "mutate"
+kind = "bit_flip"
+bits = 2
+seed = 11
+
+[response_pipeline.when]
+prob = 0.125
+seed = 9

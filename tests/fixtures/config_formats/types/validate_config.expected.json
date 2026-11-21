@@ -1,0 +1,16 @@
+{
+  "schema": {
+    "type": "struct",
+    "value": {
+      "name": "Order",
+      "fields": [
+        { "name": "id", "schema": { "type": "u_int", "value": { "min": 1, "max": 4294967295 } }, "flags": { "optional": false, "deprecated": false } },
+        { "name": "quantity", "schema": { "type": "int", "value": { "min": -5, "max": 100 } }, "flags": { "optional": true, "deprecated": false } },
+        { "name": "ratio", "schema": { "type": "float", "value": { "finite": true } }, "flags": { "optional": false, "deprecated": true } },
+        { "name": "sku", "schema": { "type": "string", "value": { "min_len": 3, "max_len": 32 } }, "flags": { "optional": false, "deprecated": false } },
+        { "name": "blob", "schema": { "type": "bytes", "value": { "max_len": 65536 } }, "flags": { "optional": true, "deprecated": true } },
+        { "name": "tags", "schema": { "type": "seq", "value": { "items": { "type": "string", "value": {} }, "min_items": 1, "max_items": 8 } }, "flags": { "optional": false, "deprecated": false } }
+      ]
+    }
+  }
+}

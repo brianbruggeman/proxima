@@ -1,0 +1,3 @@
+{
+  "dist": { "kind": "range", "min_ms": 10, "max_ms": 250, "seed": 99 }
+}

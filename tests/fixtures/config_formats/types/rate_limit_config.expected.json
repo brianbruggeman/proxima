@@ -1,0 +1,8 @@
+{
+  "capacity": 50,
+  "refill_per_sec": 10,
+  "key": "header",
+  "header_name": "x-api-key",
+  "caps": { "max_keys": 5000, "idle_ttl_ms": 120000, "sweep_ms": 15000 },
+  "retry_after_ms": 1500
+}

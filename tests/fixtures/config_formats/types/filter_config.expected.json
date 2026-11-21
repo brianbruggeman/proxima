@@ -1,0 +1,4 @@
+{
+  "predicate": { "kind": "when", "prob": 0.25, "seed": 11 },
+  "on_reject": "error"
+}

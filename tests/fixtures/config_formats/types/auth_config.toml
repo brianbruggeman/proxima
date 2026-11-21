@@ -1,0 +1,5 @@
+allow = ["token-b", "token-a"]
+header = "x-auth"
+realm = "edge"
+on_unauthorized_status = 403
+strip_prefix = "Bearer "

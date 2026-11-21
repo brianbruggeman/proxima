@@ -608,6 +608,9 @@ macro_rules! run {
 }
 
 #[cfg(test)]
+mod config_formats_tests;
+
+#[cfg(test)]
 #[allow(clippy::disallowed_methods, clippy::unwrap_used, clippy::expect_used)]
 mod drive_macro_tests {
     #[test]

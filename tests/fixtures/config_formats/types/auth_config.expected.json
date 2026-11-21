@@ -1,0 +1,7 @@
+{
+  "allow": ["token-a", "token-b"],
+  "header": "x-auth",
+  "realm": "edge",
+  "on_unauthorized_status": 403,
+  "strip_prefix": "Bearer "
+}

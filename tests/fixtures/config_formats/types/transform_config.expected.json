@@ -1,0 +1,11 @@
+{
+  "request_pipeline": [
+    { "op": "set_header", "name": "x-corr", "value": "abc" },
+    { "op": "rewrite_path", "pattern": "^/old/(.*)", "template": "/new/$1" },
+    { "op": "mutate", "kind": "bit_flip", "bits": 3, "seed": 42, "when": { "prob": 0.5, "seed": 7 } }
+  ],
+  "response_pipeline": [
+    { "op": "remove_header", "name": "x-internal" },
+    { "op": "mutate", "kind": "bit_flip", "bits": 2, "seed": 11, "when": { "prob": 0.125, "seed": 9 } }
+  ]
+}
