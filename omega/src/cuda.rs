@@ -370,7 +370,7 @@ pub(crate) fn emit_on_target(
                 kind: "block_quantize_on_this_target",
             });
         }
-        BoundOpKind::BlockQuantize { .. } => render_block_quantize(resolved, &entry)?,
+        BoundOpKind::BlockQuantize { .. } => render_block_quantize(target, resolved, &entry)?,
         BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::TopFractionSelect { .. }
         | BoundOpKind::RoundBatchedReduce { .. }
@@ -561,7 +561,13 @@ pub fn emit_q8_1_quantize(
         });
     }
     Ok(CudaKernel {
-        source: ["#include <cuda_fp16.h>\n", &quantize_device(&BlockLayout::Q8_1), Q8_1_QUANTIZE_ENTRY_TEXT].concat(),
+        source: [
+            "#include <cuda_fp16.h>\n",
+            &Target::CUDA.lane_mask_define(),
+            &quantize_device(&BlockLayout::Q8_1),
+            Q8_1_QUANTIZE_ENTRY_TEXT,
+        ]
+        .concat(),
         entry: String::from(Q8_1_QUANTIZE_ENTRY),
         bindings: vec![
             Binding::Input(activation),
@@ -2161,6 +2167,7 @@ pub(crate) fn preamble(target: Target, source: &mut String, element_type: &str) 
     if element_type == target.bfloat_type {
         source.push_str(&format!("#include <{}>\n", target.bf16_header));
     }
+    source.push_str(&target.lane_mask_define());
     source.push('\n');
     source.push_str(PROXIMA_ERF_FN_CUDA);
     source.push('\n');
@@ -4527,11 +4534,22 @@ pub(crate) fn cuda_cached_attention_class(kind: &BoundOpKind) -> Option<CudaAtte
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "test-only extractor: a missing shuffle IS the test failing")]
+pub(crate) fn emitted_mask_argument(source: &str) -> &str {
+    let call = source
+        .split_once("_sync(")
+        .expect("the kernel emits a shuffle")
+        .1;
+    call.split_once(',').expect("the mask is the first argument").0.trim()
+}
+
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use alloc::collections::BTreeMap;
     use alloc::vec;
     use alloc::vec::Vec;
+    use alloc::boxed::Box;
 
     use proxima_tensor::{AxisTerm, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, map};
     use proxima_numeric::{DType};
@@ -4820,7 +4838,7 @@ mod tests {
         assert!(kernel.source.contains("(long)in8[0]"));
         assert!(kernel.source.contains("expf(maximum - next_max)"));
         assert!(kernel.source.contains("weighted[local_dimension] * rescale"));
-        assert!(kernel.source.contains("__shfl_xor_sync(0xffffffffu, partial, offset)"));
+        assert!(kernel.source.contains("__shfl_xor_sync(PROXIMA_ALL_LANES, partial, offset)"));
     }
 
     /// One attention vector is one block of `ATTENTION_WARPS` warps, each on a
@@ -5335,9 +5353,49 @@ mod tests {
             ]
         );
         assert_eq!(kernel.entry, "omega_cuda_q8_1_quantize");
-        assert!(kernel.source.contains("__shfl_xor_sync"));
+        assert!(kernel.source.contains("#define PROXIMA_ALL_LANES 0xffffffffu"));
+        assert!(kernel.source.contains("__shfl_xor_sync(PROXIMA_ALL_LANES,"));
+        assert!(
+            kernel.source.find("#define PROXIMA_ALL_LANES").expect("define")
+                < kernel.source.find("PROXIMA_ALL_LANES,").expect("use"),
+            "the hand-built source must bind the token before it uses it"
+        );
         assert!(kernel.source.contains("cuda_fp16.h"));
         assert!(kernel.prologue.is_empty());
+    }
+
+    #[test]
+    fn a_block_quantize_kernel_binds_the_lane_mask_it_uses() {
+        let layout = BlockLayout::Q8_1;
+        let width = 512_usize;
+        let bytes = (width / usize::from(layout.elements) * usize::from(layout.block_bytes)) as u64;
+        let bound = BoundOp {
+            node: NodeId(1),
+            dtype: DType::UINT8,
+            extents: vec![3, bytes],
+            kind: BoundOpKind::BlockQuantize {
+                operands: vec![(
+                    NodeId(0),
+                    Layout {
+                        base: 0,
+                        strides: vec![width as i64, 1].into(),
+                    },
+                    None,
+                )],
+                layout: Box::new(layout),
+            },
+        };
+
+        let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::default())
+            .expect("a q8_1 run layout emits a quantize kernel");
+
+        assert!(kernel.source.contains("#define PROXIMA_ALL_LANES 0xffffffffu"));
+        assert!(kernel.source.contains("__shfl_xor_sync(PROXIMA_ALL_LANES,"));
+        assert!(
+            kernel.source.find("#define PROXIMA_ALL_LANES").expect("define")
+                < kernel.source.find("PROXIMA_ALL_LANES,").expect("use"),
+            "the block-quantize source must bind the token before it uses it"
+        );
     }
 
     #[test]
@@ -6167,16 +6225,17 @@ mod tests {
             .expect("broadcast emits");
         assert!(source.contains("broadcast_out_strides[2]"));
         assert!(source.contains("broadcast_full_coord[1]"));
-        assert!(source.contains("    accumulator = __shfl_sync(0xffffffffu, accumulator, 0);\n"));
+        assert!(source.contains("    accumulator = __shfl_sync(PROXIMA_ALL_LANES, accumulator, 0);\n"));
         assert!(
-            !source.contains("    __shfl_sync(0xffffffffu, accumulator, 0);\n"),
+            !source.contains("    __shfl_sync(PROXIMA_ALL_LANES, accumulator, 0);\n"),
             "the broadcast must assign its result; a bare shuffle leaves lanes 1..31 holding partial sums"
         );
 
         let hip_source = render_reduce(Target::HIP, &bound, "entry", &[None], NumericPolicy::llama_relaxed(), EmitDevice::default())
             .expect("hip broadcast emits");
-        assert!(hip_source.contains("    accumulator = __shfl_sync(0xffffffffffffffffull, accumulator, 0);\n"));
-        assert!(!hip_source.contains("    __shfl_sync(0xffffffffffffffffull, accumulator, 0);\n"));
+        assert!(hip_source.contains("#define PROXIMA_ALL_LANES 0xffffffffffffffffull"));
+        assert!(hip_source.contains("    accumulator = __shfl_sync(PROXIMA_ALL_LANES, accumulator, 0);\n"));
+        assert!(!hip_source.contains("    __shfl_sync(PROXIMA_ALL_LANES, accumulator, 0);\n"));
 
         let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
             .expect("broadcast kernel emits");
@@ -6849,7 +6908,8 @@ mod rocm_tests {
         )
         .expect("reduce hip emits");
 
-        assert!(kernel.source.contains("0xffffffffffffffffull"));
+        assert!(kernel.source.contains("#define PROXIMA_ALL_LANES 0xffffffffffffffffull"));
+        assert!(kernel.source.contains("__shfl_down_sync(PROXIMA_ALL_LANES,"));
         assert!(kernel.source.contains("for (int shift = 32; shift > 0; shift >>= 1)"));
         assert!(kernel.source.contains("(gid % 64)"));
         assert_eq!(kernel.grid.block_width, Some(64));
@@ -6869,11 +6929,52 @@ mod rocm_tests {
         )
         .expect("wave32 hip emits");
 
-        assert!(kernel.source.contains("0xffffffffu"));
-        assert!(!kernel.source.contains("0xffffffffffffffffull"));
+        assert!(kernel.source.contains("#define PROXIMA_ALL_LANES 0xffffffffull"));
+        assert!(!kernel.source.contains("0xffffffffu,"));
+        assert_eq!(emitted_mask_argument(&kernel.source), "PROXIMA_ALL_LANES");
+        assert!(kernel.source.contains("__shfl_down_sync(PROXIMA_ALL_LANES,"));
         assert!(kernel.source.contains("for (int shift = 16; shift > 0; shift >>= 1)"));
         assert!(kernel.entry.ends_with("_hip_w32_gid64c8"));
         assert_eq!(kernel.grid.block_width, Some(32));
+    }
+
+    /// HIP's `_sync` shuffles take a 64-bit mask on both wavefront widths; a 32-lane wave sets 32
+    /// lanes in that 64-bit word rather than falling back to CUDA's 32-bit `unsigned int`.
+    #[test]
+    fn every_hip_wavefront_width_emits_a_64_bit_shuffle_mask() {
+        let bound = matmul_reduce(4, 4096);
+        assert_eq!(Target::hip_wave(32).lane_mask_literal(), "0xffffffffull");
+        assert_eq!(
+            Target::hip_wave(64).lane_mask_literal(),
+            "0xffffffffffffffffull"
+        );
+        assert_eq!(Target::CUDA.lane_mask_literal(), "0xffffffffu");
+
+        for wave in [HipWave::Wave32, HipWave::Wave64] {
+            let kernel = emit_hip_at_wave(
+                wave,
+                &bound,
+                &no_packed(),
+                NumericPolicy::llama_relaxed(),
+                EmitDevice::default(),
+            )
+            .expect("hip reduce emits");
+            let expected = match wave {
+                HipWave::Wave32 => "#define PROXIMA_ALL_LANES 0xffffffffull",
+                HipWave::Wave64 => "#define PROXIMA_ALL_LANES 0xffffffffffffffffull",
+            };
+            assert!(kernel.source.contains(expected), "{wave:?} must spell a 64-bit mask");
+            assert_eq!(
+                kernel.source.matches("0xffffffff").count(),
+                1,
+                "{wave:?} binds the literal once, in the preamble"
+            );
+            assert_eq!(emitted_mask_argument(&kernel.source), "PROXIMA_ALL_LANES");
+            assert!(
+                kernel.source.matches("PROXIMA_ALL_LANES").count() >= 2,
+                "the preamble binding and the shuffle call both name the mask"
+            );
+        }
     }
 
     #[test]

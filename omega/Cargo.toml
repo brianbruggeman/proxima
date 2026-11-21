@@ -754,6 +754,11 @@ name = "q4_0_matvec"
 harness = false
 required-features = ["metal"]
 
+[[bench]]
+name = "hip_shuffle_mask"
+harness = false
+required-features = ["cuda"]
+
 [[example]]
 name = "q8_0_flat_gate"
 required-features = ["metal", "instrument"]

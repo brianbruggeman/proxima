@@ -135,7 +135,7 @@ pub(crate) const TILED_ATTENTION_BODY: &str = "\
             const float masked = live ? score[slot] * scale : negative_infinity;
             float tile_max = masked;
             for (int offset = 16; offset > 0; offset >>= 1) {
-                tile_max = fmaxf(tile_max, __shfl_xor_sync(0xffffffffu, tile_max, offset));
+                tile_max = fmaxf(tile_max, __shfl_xor_sync(PROXIMA_ALL_LANES, tile_max, offset));
             }
             const float next_max = fmaxf(running_max[slot], tile_max);
             const float rescale = (running_max[slot] == negative_infinity) ? 0.0f : expf(running_max[slot] - next_max);
@@ -187,7 +187,7 @@ pub(crate) const TILED_ATTENTION_BODY: &str = "\
     }
     for (int slot = 0; slot < per_warp; slot++) {
         float total = running_sum[slot];
-        for (int offset = 16; offset > 0; offset >>= 1) { total += __shfl_xor_sync(0xffffffffu, total, offset); }
+        for (int offset = 16; offset > 0; offset >>= 1) { total += __shfl_xor_sync(PROXIMA_ALL_LANES, total, offset); }
         if (item_row[slot] < 0) { continue; }
         const int item = warp * per_warp + slot;
         const long head = kv_head * query_groups + item % (int)query_groups;

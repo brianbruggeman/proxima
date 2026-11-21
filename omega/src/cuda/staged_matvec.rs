@@ -305,9 +305,9 @@ fn push_contiguous_stage(source: &mut String, plan: &StagedMatvec) {
          \x20           const unsigned int group = first + (lane >> 3u);\n\
          \x20           const float4 value = group < {groups}u ? activation_quads[group * 8u + quad_in_group] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n\
          \x20           float amax = fmaxf(fmaxf(fabsf(value.x), fabsf(value.y)), fmaxf(fabsf(value.z), fabsf(value.w)));\n\
-         \x20           amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 4));\n\
-         \x20           amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 2));\n\
-         \x20           amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 1));\n\
+         \x20           amax = fmaxf(amax, __shfl_xor_sync(PROXIMA_ALL_LANES, amax, 4));\n\
+         \x20           amax = fmaxf(amax, __shfl_xor_sync(PROXIMA_ALL_LANES, amax, 2));\n\
+         \x20           amax = fmaxf(amax, __shfl_xor_sync(PROXIMA_ALL_LANES, amax, 1));\n\
          \x20           if (group >= {groups}u) {{ continue; }}\n\
          \x20           const float scale = amax / 127.0f;\n\
          \x20           const float inverse = amax == 0.0f ? 0.0f : 127.0f / amax;\n\
@@ -369,7 +369,7 @@ fn push_stage(source: &mut String, plan: &StagedMatvec) {
          \x20           if (group >= {groups}u) {{ continue; }}\n\
          \x20           float amax = fabsf(values[batch]);\n\
          \x20           #pragma unroll\n\
-         \x20           for (int shift = 16; shift > 0; shift >>= 1) {{ amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, shift)); }}\n\
+         \x20           for (int shift = 16; shift > 0; shift >>= 1) {{ amax = fmaxf(amax, __shfl_xor_sync(PROXIMA_ALL_LANES, amax, shift)); }}\n\
          \x20           float scale = amax / 127.0f;\n\
          \x20           int level = amax == 0.0f ? 0 : __float2int_rn(values[batch] / scale);\n\
          \x20           ((signed char *)staged_q)[group * 32u + lane] = (signed char)level;\n\
@@ -632,9 +632,9 @@ fn contiguous_prepass_body(plan: &StagedMatvec) -> String {
          \x20   const float4 *activation_quads = (const float4 *)(in{activation_slot} + u.operand_base[{activation_slot}]);\n\
          \x20   const float4 value = group < {groups}u ? activation_quads[group * 8u + quad_in_group] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n\
          \x20   float amax = fmaxf(fmaxf(fabsf(value.x), fabsf(value.y)), fmaxf(fabsf(value.z), fabsf(value.w)));\n\
-         \x20   amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 4));\n\
-         \x20   amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 2));\n\
-         \x20   amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 1));\n\
+         \x20   amax = fmaxf(amax, __shfl_xor_sync(PROXIMA_ALL_LANES, amax, 4));\n\
+         \x20   amax = fmaxf(amax, __shfl_xor_sync(PROXIMA_ALL_LANES, amax, 2));\n\
+         \x20   amax = fmaxf(amax, __shfl_xor_sync(PROXIMA_ALL_LANES, amax, 1));\n\
          \x20   if (group >= {groups}u) {{ return; }}\n\
          \x20   const float scale = amax / 127.0f;\n\
          \x20   const float inverse = amax == 0.0f ? 0.0f : 127.0f / amax;\n\
@@ -662,7 +662,7 @@ fn strided_prepass_body(plan: &StagedMatvec) -> String {
          \x20   }}\n\
          \x20   float amax = fabsf(value);\n\
          \x20   #pragma unroll\n\
-         \x20   for (int shift = 16; shift > 0; shift >>= 1) {{ amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, shift)); }}\n\
+         \x20   for (int shift = 16; shift > 0; shift >>= 1) {{ amax = fmaxf(amax, __shfl_xor_sync(PROXIMA_ALL_LANES, amax, shift)); }}\n\
          \x20   if (group >= {groups}u) {{ return; }}\n\
          \x20   const float scale = amax / 127.0f;\n\
          \x20   const int level = amax == 0.0f ? 0 : __float2int_rn(value / scale);\n\
@@ -740,7 +740,7 @@ fn push_write(source: &mut String, resolved: &BoundOp, output_rank: usize, rows:
          \x20   for (int row = 0; row < {rows}; row++) {{\n\
          \x20       float total = accumulator[row];\n\
          \x20       #pragma unroll\n\
-         \x20       for (int shift = 16; shift > 0; shift >>= 1) {{ total += __shfl_down_sync(0xffffffffu, total, shift); }}\n\
+         \x20       for (int shift = 16; shift > 0; shift >>= 1) {{ total += __shfl_down_sync(PROXIMA_ALL_LANES, total, shift); }}\n\
          \x20       if (lane == 0u && first_row + row < u.output_total) {{\n"
     ));
     if let BoundOpKind::Reduce {

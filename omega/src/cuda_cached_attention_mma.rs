@@ -164,8 +164,8 @@ pub(crate) const MMA_ATTENTION_BODY: &str = "\
                     tile_max = fmaxf(tile_max, masked);
                 }
             }
-            tile_max = fmaxf(tile_max, __shfl_xor_sync(0xffffffffu, tile_max, 1));
-            tile_max = fmaxf(tile_max, __shfl_xor_sync(0xffffffffu, tile_max, 2));
+            tile_max = fmaxf(tile_max, __shfl_xor_sync(PROXIMA_ALL_LANES, tile_max, 1));
+            tile_max = fmaxf(tile_max, __shfl_xor_sync(PROXIMA_ALL_LANES, tile_max, 2));
             const float next_max = fmaxf(running_max[slot], tile_max);
             const float rescale = (running_max[slot] == negative_infinity) ? 0.0f : expf(running_max[slot] - next_max);
             float tile_sum = 0.0f;
@@ -207,8 +207,8 @@ pub(crate) const MMA_ATTENTION_BODY: &str = "\
     #pragma unroll
     for (int slot = 0; slot < 2; slot++) {
         float total = running_sum[slot];
-        total += __shfl_xor_sync(0xffffffffu, total, 1);
-        total += __shfl_xor_sync(0xffffffffu, total, 2);
+        total += __shfl_xor_sync(PROXIMA_ALL_LANES, total, 1);
+        total += __shfl_xor_sync(PROXIMA_ALL_LANES, total, 2);
         if (item_row[slot] < 0) { continue; }
         const int item = block_item + group_id + 8 * slot;
         const long head = kv_head * query_groups + item % (int)query_groups;

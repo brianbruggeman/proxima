@@ -157,7 +157,7 @@ const SPLIT_BODY: &str = "\
         for (long column = (long)lane; column < pass_dim; column += 32L) {
             partial += pass_query[qpass + column] * (cached ? pass_cached_key[kpass + column] : pass_new_key[kpass + column]);
         }
-        for (int offset = 16; offset > 0; offset >>= 1) { partial += __shfl_xor_sync(0xffffffffu, partial, offset); }
+        for (int offset = 16; offset > 0; offset >>= 1) { partial += __shfl_xor_sync(PROXIMA_ALL_LANES, partial, offset); }
         const float score = partial * scale;
         const float next_max = fmaxf(maximum, score);
         const float weight = expf(score - next_max);

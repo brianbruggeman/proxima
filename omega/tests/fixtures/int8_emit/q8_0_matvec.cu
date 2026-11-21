@@ -1,12 +1,13 @@
 #include <cuda_fp16.h>
+#define PROXIMA_ALL_LANES 0xffffffffu
 __device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float *out, long group, unsigned int lane) {
     float x = in[group * 32 + lane];
     float amax = fabsf(x);
-    for (int offset = 16; offset > 0; offset >>= 1) { amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, offset)); }
+    for (int offset = 16; offset > 0; offset >>= 1) { amax = fmaxf(amax, __shfl_xor_sync(PROXIMA_ALL_LANES, amax, offset)); }
     float d = amax / 127.0f;
     int q = amax == 0.0f ? 0 : (int)roundf(x / d);
     int qsum = q;
-    for (int offset = 16; offset > 0; offset >>= 1) { qsum += __shfl_xor_sync(0xffffffffu, qsum, offset); }
+    for (int offset = 16; offset > 0; offset >>= 1) { qsum += __shfl_xor_sync(PROXIMA_ALL_LANES, qsum, offset); }
     unsigned char *bytes = (unsigned char *)out + (group / 4) * 144;
     const long run = group % 4;
     unsigned char *header = bytes + 0 + run * 4;
@@ -35,6 +36,7 @@ extern "C" __global__ void __launch_bounds__(256) omega_cuda_block_quantize_e128
     omega_q8_1_quantize_block(in0, out, group, (unsigned int)(gid & 31));
 }
 #include <cuda_fp16.h>
+#define PROXIMA_ALL_LANES 0xffffffffu
 
 __device__ __forceinline__ float proxima_erf(float x) {
     float sign = x < 0.0f ? -1.0f : 1.0f;
@@ -435,7 +437,7 @@ extern "C" __global__ void __launch_bounds__(256) omega_cuda_reduce_r3_ax0_1_n2_
     for (int row = 0; row < 4; row++) {
         float total = accumulator[row];
         #pragma unroll
-        for (int shift = 16; shift > 0; shift >>= 1) { total += __shfl_down_sync(0xffffffffu, total, shift); }
+        for (int shift = 16; shift > 0; shift >>= 1) { total += __shfl_down_sync(PROXIMA_ALL_LANES, total, shift); }
         if (lane == 0u && first_row + row < u.output_total) {
             out[out_offset[row]] = total;
         }

@@ -12,6 +12,7 @@ pub use proxima_tensor::Missing;
 use proxima_tensor::{ACTIVATION_GROUP_ELEMENTS, BoundOp, BoundOpKind, is_int8_run_layout, quantize_rule_is_served};
 
 use super::{CudaGridSpec, EmitError, MAX_GRID_BLOCKS};
+use super::target::Target;
 use crate::grid::checked_product;
 
 const QUANTIZE_THREADS: u64 = 256;
@@ -106,11 +107,11 @@ pub(super) fn quantize_device(layout: &BlockLayout) -> String {
         "__device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float *out, long group, unsigned int lane) {{\n\
          \x20   float x = in[group * 32 + lane];\n\
          \x20   float amax = fabsf(x);\n\
-         \x20   for (int offset = 16; offset > 0; offset >>= 1) {{ amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, offset)); }}\n\
+         \x20   for (int offset = 16; offset > 0; offset >>= 1) {{ amax = fmaxf(amax, __shfl_xor_sync(PROXIMA_ALL_LANES, amax, offset)); }}\n\
          \x20   float d = amax / 127.0f;\n\
          \x20   int q = amax == 0.0f ? 0 : (int)roundf(x / d);\n\
          \x20   int qsum = q;\n\
-         \x20   for (int offset = 16; offset > 0; offset >>= 1) {{ qsum += __shfl_xor_sync(0xffffffffu, qsum, offset); }}\n\
+         \x20   for (int offset = 16; offset > 0; offset >>= 1) {{ qsum += __shfl_xor_sync(PROXIMA_ALL_LANES, qsum, offset); }}\n\
          \x20   unsigned char *bytes = (unsigned char *)out + (group / {runs}) * {block_bytes};\n\
          \x20   const long run = group % {runs};\n\
          \x20   unsigned char *header = bytes + {scale_base} + run * {scale_stride};\n\
@@ -128,11 +129,16 @@ pub(super) fn quantize_device(layout: &BlockLayout) -> String {
     )
 }
 
-pub(super) fn render_block_quantize(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
+pub(super) fn render_block_quantize(
+    target: Target,
+    resolved: &BoundOp,
+    entry: &str,
+) -> Result<String, EmitError> {
     let layout = servable_layout(resolved)?;
     let device = quantize_device(layout);
+    let lane_mask_define = target.lane_mask_define();
     Ok(format!(
-        "#include <cuda_fp16.h>\n{device}\n\
+        "#include <{header}>\n{lane_mask_define}{device}\n\
          struct Uniforms {{ long groups; }};\n\n\
          extern \"C\" __global__ void __launch_bounds__({QUANTIZE_THREADS}) {entry}(\n\
          \x20   const float* __restrict__ in0,\n\
@@ -146,5 +152,6 @@ pub(super) fn render_block_quantize(resolved: &BoundOp, entry: &str) -> Result<S
          \x20   omega_q8_1_quantize_block(in0, out, group, (unsigned int)(gid & {lane_mask}));\n\
          }}\n",
         lane_mask = GROUP_ELEMENTS - 1,
+        header = target.fp16_header,
     ))
 }

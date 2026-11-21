@@ -5885,6 +5885,11 @@ pub mod rocm {
     mod rocm_tests {
         use super::*;
 
+        use proxima_numeric::{DType, NumericPolicy};
+        use proxima_tensor::{
+            Extent, IndexMap, Keep, Reduce, ReduceInit, ScalarOp, append, bind, infer, map,
+        };
+
         #[test]
         fn an_absent_runtime_is_a_typed_error_naming_the_sonames_tried() {
             match HipApi::load() {
@@ -6003,6 +6008,60 @@ pub mod rocm {
                     "element {index}: {found} vs {}",
                     expected + 1.0
                 );
+            }
+        }
+
+        /// hiprtc 9.x static-asserts that a `_sync` mask is 8 bytes at every wavefront width. This
+        /// compiles the emitted reduce at both widths through the same runtime path a plan uses;
+        /// a host without ROCm names the skip instead of pretending to have compiled.
+        #[test]
+        fn hiprtc_compiles_the_emitted_wave32_and_wave64_masks() {
+            let mut program = Vec::new();
+            let input = append(
+                &mut program,
+                Op::Input {
+                    dtype: DType::FLOAT32,
+                    shape: vec![Extent::Static(4), Extent::Static(4096)],
+                    name: None,
+                },
+            );
+            let root = append(
+                &mut program,
+                Op::Reduce(Reduce {
+                    dtype: DType::FLOAT32,
+                    body: ScalarOp::Add,
+                    init: ReduceInit::Zero,
+                    operand: input,
+                    in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                    out_map: IndexMap::Affine(map::projection(2, &[0])),
+                    keep: Keep::Reduce,
+                    name: Some("hiprtc_mask_reduce".into()),
+                }),
+            );
+            let shapes = infer(&program, &[]).expect("the reduce infers");
+            let bound = bind(&program, &shapes, &[root], NumericPolicy::llama_relaxed())
+                .expect("the reduce binds under the reassociation policy");
+            let packed = BTreeMap::new();
+            let device = match HipDevice::open(0) {
+                Ok(device) => device,
+                Err(HipDriverError::RuntimeNotInstalled { tried }) => {
+                    eprintln!("skipped: rocm runtime not installed ({tried})");
+                    return;
+                }
+                Err(error) => panic!("a ROCm host failed to open device 0: {error}"),
+            };
+            for wave in [HipWave::Wave32, HipWave::Wave64] {
+                let kernel = emit_hip_at_wave(
+                    wave,
+                    &bound[0],
+                    &packed,
+                    NumericPolicy::llama_relaxed(),
+                    EmitDevice::default(),
+                )
+                .expect("the reduce emits");
+                device
+                    .compile_kernel(&kernel)
+                    .unwrap_or_else(|error| panic!("{wave:?} mask did not compile: {error}"));
             }
         }
     }

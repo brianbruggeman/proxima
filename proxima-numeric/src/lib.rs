@@ -61,6 +61,7 @@ pub mod format_codec;
 pub mod format_id;
 pub mod fused;
 pub mod int8_dot;
+pub mod lane;
 pub mod numeric;
 pub mod numerics;
 #[cfg(feature = "alloc")]
@@ -83,6 +84,7 @@ pub use float_layout::{FloatLayout, SignEncoding, Specials};
 pub use format::{LevelFormat, LevelGeometry, LevelTable, NumericFormat};
 pub use format_id::FormatId;
 pub use int8_dot::{Int8DotShape, int8_dot_shape};
+pub use lane::all_lanes_mask;
 pub use numeric::{NumericPolicy, NumericRewrite, admit, dense_matmul_uses_bf16_tiles};
 pub use numerics::Numerics;
 pub use rng::{Philox, RngError, RngKind};

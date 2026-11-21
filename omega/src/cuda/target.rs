@@ -13,7 +13,10 @@
 //! - **the include and the bfloat spelling.** `<cuda_fp16.h>` vs
 //!   `<hip/hip_fp16.h>`; `__nv_bfloat16` vs `__hip_bfloat16`.
 //! - **the warp-shuffle mask type.** CUDA's `_sync` intrinsics take a 32-bit
-//!   mask; HIP's take a 64-bit one on a wave64 target.
+//!   mask; HIP's take a 64-bit one on every wavefront width, and the header
+//!   static-asserts that size even when the wave is 32 lanes. The value is the
+//!   wave's lanes, from [`proxima_numeric::all_lanes_mask`]; only its spelling
+//!   differs here.
 //!
 //! A fourth difference is a capability, not a dialect fact: inline PTX
 //! (`mma.sync`) has no HIP equivalent in this crate, so [`Target::card_asm`]
@@ -25,6 +28,8 @@
 
 use alloc::string::String;
 
+use proxima_numeric::all_lanes_mask;
+
 use crate::identity::KernelLanguage;
 
 /// The AMD wavefront width every CDNA part (gfx90a, gfx942, the MI series)
@@ -33,6 +38,11 @@ use crate::identity::KernelLanguage;
 /// so neither is read from the device at emit time — emission has no device
 /// handle, and the driver must launch at the width the text was built for.
 pub const HIP_WAVE64: u64 = 64;
+
+/// The name every emitted `_sync` shuffle passes as its mask. The preamble
+/// defines it for the active target, so the emitted text carries one symbolic
+/// all-lanes value rather than a literal each renderer could get wrong.
+pub(crate) const LANE_MASK_TOKEN: &str = "PROXIMA_ALL_LANES";
 
 /// One emission target: the card-C dialect plus the hardware wavefront width
 /// the emitted text's lane arithmetic is built for.
@@ -111,10 +121,32 @@ impl Target {
         }
     }
 
-    /// The all-lanes-active mask the `_sync` shuffle intrinsics require, in
-    /// the width this dialect's intrinsics take.
+    /// The all-lanes-active mask the `_sync` shuffle intrinsics require. The
+    /// preamble defines this token from [`Self::lane_mask_literal`], so no
+    /// renderer spells a mask of its own and the dialect's type cannot drift
+    /// away from a call site.
     pub const fn lane_mask(&self) -> &'static str {
-        if self.wave == 64 { "0xffffffffffffffffull" } else { "0xffffffffu" }
+        LANE_MASK_TOKEN
+    }
+
+    /// The typed all-lanes literal the preamble binds `LANE_MASK_TOKEN` to.
+    /// HIP's `_sync` mask is `unsigned long long` on every wavefront width, so
+    /// a 32-lane wave still emits a 64-bit-typed value with its 32 lanes set.
+    pub fn lane_mask_literal(&self) -> String {
+        let lanes = u32::try_from(self.wave).unwrap_or(u32::MAX);
+        let mask = all_lanes_mask(lanes);
+        if self.language == KernelLanguage::Hip {
+            alloc::format!("{mask:#x}ull")
+        } else {
+            alloc::format!("{mask:#x}u")
+        }
+    }
+
+    /// The one `#define` that binds [`LANE_MASK_TOKEN`] for this target. A
+    /// renderer that builds its source without [`crate::cuda::preamble`] must
+    /// still start from this, or its `_sync` call names an undefined token.
+    pub(crate) fn lane_mask_define(&self) -> String {
+        alloc::format!("#define {LANE_MASK_TOKEN} {}\n", self.lane_mask_literal())
     }
 
     /// A complete statement that broadcasts `value` from `lane` into `dest`.

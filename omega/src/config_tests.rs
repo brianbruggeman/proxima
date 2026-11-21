@@ -11,7 +11,8 @@ use super::{
     ResourceConstraints, RuntimeConfig, SelectionConfig, SelectionMode, SpeculationStrategy,
     WeightConversionStrategy,
 };
-
+#[cfg(feature = "cuda")]
+use crate::cuda::{HipWave, target::Target};
 const CLEAN_ENVIRONMENT: [(&str, Option<&str>); 32] = [
     ("OMEGA_ENGINE", None),
     ("OMEGA_GPU_DRIVER", None),
@@ -994,6 +995,25 @@ fn hip_wave_builder_env_and_toml_agree_and_only_device_32_or_64_validate() {
     assert_eq!(runtime_config_difference_count(&from_builder, &from_toml), 0);
     assert_eq!(runtime_config_difference_count(&from_builder, &from_env), 0);
     assert_eq!(RuntimeConfig::default().hip_wave, 0, "zero means device-derived");
+    #[cfg(feature = "cuda")]
+    for (wave, literal) in [(32_u32, "0xffffffffull"), (64_u32, "0xffffffffffffffffull")] {
+        let config: RuntimeConfig = toml::from_str(&format!("gpu_driver = 'hip'\nhip_wave = {wave}\n"))
+            .expect("config TOML deserializes");
+        let selected = HipWave::from_lanes(u64::from(config.hip_wave))
+            .expect("validation admits exactly the device and the two wave widths");
+        assert_eq!(selected.lanes(), u64::from(wave));
+        #[cfg(feature = "cuda-driver")]
+        assert_eq!(
+            crate::cuda_driver::rocm::hip_wave_of(&config),
+            Some(selected),
+            "the production config-to-wave mapping must agree with HipWave::from_lanes"
+        );
+        assert_eq!(
+            Target::hip_wave(selected.lanes()).lane_mask_literal(),
+            literal,
+            "the configured wave must select the 64-bit-typed all-lanes literal"
+        );
+    }
     let error = validation_text(RuntimeConfig::builder().with_hip_wave(48).build());
     assert!(error.contains("hip_wave"), "{error}");
 }

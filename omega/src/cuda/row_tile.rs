@@ -252,7 +252,7 @@ pub(super) fn push_row_tiled_cooperative_body(
         WARP_SIZE / 2
     ));
     source.push_str(&format!(
-        "            {element_type} shuffled = __shfl_down_sync(0xffffffffu, accumulator[slot], shift);\n"
+        "            {element_type} shuffled = __shfl_down_sync(PROXIMA_ALL_LANES, accumulator[slot], shift);\n"
     ));
     let shuffle_expr = shuffle_combine_expr(
         resolved.node,

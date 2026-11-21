@@ -577,7 +577,7 @@ pub(super) fn push_mma_gemm_body(
             ));
         }
         if has_minimum {
-            source.push_str("        half_sum += __shfl_xor_sync(0xffffffffu, half_sum, 1);
+            source.push_str("        half_sum += __shfl_xor_sync(PROXIMA_ALL_LANES, half_sum, 1);
 ");
             source.push_str(&format!(
                 "        if ((load_segment & 15) == 0) {{ act_sum[{row}][load_segment >> 4] = half_sum; }}
