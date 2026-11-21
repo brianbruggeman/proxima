@@ -40,6 +40,8 @@
 //! `timings.predicted_per_token_ms` stays its own `server_predicted_per_token_ms` column, so the
 //! difference between the two is the server's overhead. `--prompts` / `--kvs` select a subset of
 //! cells; `--quiet-gate off` runs without waiting and marks every row INVALID on I10.
+//! `--serving-config PATH` selects the TOML the proxima child loads (default
+//! `proxima-model-interop/examples/llama_matched.toml`).
 //!
 //! Stage-matrix mode (`--stages DIR`, PROXNUM-184): every pipeline stage of both engines on
 //! `DIR/wp_{84,510,2024,4069}.txt`, one TSV row per (round, engine, prompt, metric) in
@@ -134,8 +136,10 @@ fn llama_matched_settings() -> ServingSettings {
     }
 }
 
-fn serving_config_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/llama_matched.toml")
+fn serving_config_path(config: &Config) -> PathBuf {
+    config.serving_config.clone().unwrap_or_else(|| {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/llama_matched.toml")
+    })
 }
 const INVARIANT_COUNT: usize = 12;
 const INVARIANT_NAMES: [&str; INVARIANT_COUNT] = [
@@ -1451,9 +1455,11 @@ struct Config {
     incumbent_cache: Option<PathBuf>,
     /// ignores cache hits and overwrites the cached samples with fresh runs
     refresh_incumbent: bool,
+    /// serving TOML the proxima child loads; absent means `examples/llama_matched.toml`
+    serving_config: Option<PathBuf>,
 }
 
-const VALUE_FLAGS: [&str; 20] = [
+const VALUE_FLAGS: [&str; 21] = [
     "--incumbent-cache",
     "--stages",
     "--stage-kv",
@@ -1474,6 +1480,7 @@ const VALUE_FLAGS: [&str; 20] = [
     "--context-length",
     "--features",
     "--llama-commit",
+    "--serving-config",
 ];
 
 fn parse_value<T: std::str::FromStr>(
@@ -1575,6 +1582,7 @@ fn parse_config(arguments: impl IntoIterator<Item = String>) -> Result<Config, H
         text_edges,
         incumbent_cache: values.get("--incumbent-cache").map(PathBuf::from),
         refresh_incumbent,
+        serving_config: values.get("--serving-config").map(PathBuf::from),
         proxima,
         rounds,
         time_bin: values
@@ -1895,7 +1903,7 @@ fn run_proxima(context: &RunContext, cell: &Cell, binary: &Path, row: &mut Row) 
     command.env("PROXIMA_MAX_TOKENS", MAX_TOKENS.to_string());
     command.env("PROXIMA_RUNS", "3");
     command.env("PROXIMA_DECODE_MODEL_GGUF", &context.config.model);
-    command.env("PROXIMA_SERVING_CONFIG", serving_config_path());
+    command.env("PROXIMA_SERVING_CONFIG", serving_config_path(context.config));
     command.env(
         "PROXIMA_SERVING_CONTEXT_LENGTH",
         context.prompt.capacity.to_string(),
@@ -2641,7 +2649,7 @@ fn proxima_command(config: &Config, binary: &Path, text: &str, profile: Option<&
     command.env("PROXIMA_MAX_TOKENS", tokens.to_string());
     command.env("PROXIMA_PROMPT", text);
     command.env("PROXIMA_DECODE_MODEL_GGUF", &config.model);
-    command.env("PROXIMA_SERVING_CONFIG", serving_config_path());
+    command.env("PROXIMA_SERVING_CONFIG", serving_config_path(config));
     for (key, value) in config.stage_kv.proxima_env() {
         command.env(key, value);
     }
