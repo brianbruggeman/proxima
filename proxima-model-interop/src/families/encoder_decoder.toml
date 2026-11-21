@@ -1,0 +1,149 @@
+# family: an audio-or-text encoder stack feeding a decoder stack through
+# cross-attention. Named by structure, never by a checkpoint. Slots are filled
+# from tensor names and shapes first, config.json second, cited defaults last.
+name = "encoder_decoder"
+requires = ["cross_attention"]
+# one golden record per stage, against the incumbent, before the model runs
+required_stages = ["mel", "encoder", "logits", "tokens"]
+claims = [
+    "model.encoder.conv1.weight",
+    "model.encoder.conv1.bias",
+    "model.encoder.conv2.weight",
+    "model.encoder.conv2.bias",
+    "model.encoder.embed_positions.weight",
+    "model.encoder.layer_norm.weight",
+    "model.encoder.layer_norm.bias",
+    "model.decoder.embed_tokens.weight",
+    "model.decoder.embed_positions.weight",
+    "model.decoder.layer_norm.weight",
+    "model.decoder.layer_norm.bias",
+]
+
+[[stacks]]
+role = "encoder"
+pattern = "model.encoder.layers.{L}."
+
+[[stacks]]
+role = "decoder"
+pattern = "model.decoder.layers.{L}."
+
+[[probes]]
+key = "cross_attention"
+role = "decoder"
+pattern = "model.decoder.layers.{L}.encoder_attn.k_proj.weight"
+
+[[probes]]
+key = "k_proj_bias"
+role = "encoder"
+pattern = "model.encoder.layers.{L}.self_attn.k_proj.bias"
+
+[[dims]]
+key = "d_model"
+tensor = "model.encoder.conv1.weight"
+axis = 0
+rank = 3
+
+[[dims]]
+key = "d_model"
+tensor = "model.decoder.embed_tokens.weight"
+axis = 1
+
+[[dims]]
+key = "mel_bins"
+tensor = "model.encoder.conv1.weight"
+axis = 1
+rank = 3
+
+[[dims]]
+key = "conv1d_kernel"
+tensor = "model.encoder.conv1.weight"
+axis = 2
+rank = 3
+
+[[dims]]
+key = "encoder_ffn_dim"
+tensor = "model.encoder.layers.0.fc1.weight"
+axis = 0
+
+[[dims]]
+key = "decoder_ffn_dim"
+tensor = "model.decoder.layers.0.fc1.weight"
+axis = 0
+
+[[dims]]
+key = "vocab_size"
+tensor = "model.decoder.embed_tokens.weight"
+axis = 0
+
+[[dims]]
+key = "source_positions"
+tensor = "model.encoder.embed_positions.weight"
+axis = 0
+
+[[dims]]
+key = "target_positions"
+tensor = "model.decoder.embed_positions.weight"
+axis = 0
+
+[[knobs]]
+key = "check_encoder_layers"
+config = "encoder_layers"
+agrees_with = "encoder_layers"
+
+[[knobs]]
+key = "check_decoder_layers"
+config = "decoder_layers"
+agrees_with = "decoder_layers"
+
+[[knobs]]
+key = "check_d_model"
+config = "d_model"
+agrees_with = "d_model"
+
+[[knobs]]
+key = "check_mel_bins"
+config = "num_mel_bins"
+agrees_with = "mel_bins"
+
+[[knobs]]
+key = "check_vocab_size"
+config = "vocab_size"
+agrees_with = "vocab_size"
+
+[[knobs]]
+key = "check_source_positions"
+config = "max_source_positions"
+agrees_with = "source_positions"
+
+[[knobs]]
+key = "check_target_positions"
+config = "max_target_positions"
+agrees_with = "target_positions"
+
+[[knobs]]
+key = "check_encoder_ffn_dim"
+config = "encoder_ffn_dim"
+agrees_with = "encoder_ffn_dim"
+
+[[knobs]]
+key = "check_decoder_ffn_dim"
+config = "decoder_ffn_dim"
+agrees_with = "decoder_ffn_dim"
+
+[[knobs]]
+key = "activation"
+config = "activation_function"
+
+[[knobs]]
+key = "encoder_heads"
+config = "encoder_attention_heads"
+
+[[knobs]]
+key = "decoder_heads"
+config = "decoder_attention_heads"
+
+[[knobs]]
+key = "layer_norm_eps"
+config = "layer_norm_eps"
+default = 1e-5
+cite = "incumbent tag v1.9.5 (d1be6fde), main model source line 608: hparams.eps = 1e-5f; same as the torch LayerNorm default"
