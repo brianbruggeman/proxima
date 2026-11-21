@@ -1,0 +1,27 @@
+version = 1
+
+[[output]]
+name = "sum"
+node = "n2"
+
+[[node]]
+op = "iota"
+id = "n0"
+dtype = "float32"
+extent = 4
+
+[[node]]
+op = "constant"
+id = "n1"
+dtype = "float32"
+shape = [4]
+value = 10.0
+
+[[node]]
+op = "elementwise"
+id = "n2"
+dtype = "float32"
+body = "add"
+inputs = ["n0", "n1"]
+maps = ["i->i", "i->i"]
+name = "sum"
