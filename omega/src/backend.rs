@@ -189,6 +189,9 @@ pub enum GpuDriver {
     Wgpu,
     #[cfg(feature = "cuda-driver")]
     Cuda,
+    /// AMD HIP through the CUDA renderer's HIP dialect; `wave` is the configured width, `None` reads it from the device.
+    #[cfg(feature = "cuda-driver")]
+    Hip { wave: Option<crate::cuda::HipWave> },
 }
 
 impl GpuDriver {
@@ -223,6 +226,8 @@ impl GpuDriver {
             GpuDriver::Wgpu => "wgpu",
             #[cfg(feature = "cuda-driver")]
             GpuDriver::Cuda => "cuda",
+            #[cfg(feature = "cuda-driver")]
+            GpuDriver::Hip { .. } => "hip",
         }
     }
 
@@ -363,6 +368,10 @@ pub enum BackendError {
     #[cfg(feature = "cuda-driver")]
     #[error(transparent)]
     Cuda(#[from] CudaDriverError),
+
+    #[cfg(feature = "cuda-driver")]
+    #[error(transparent)]
+    Hip(#[from] crate::cuda_driver::rocm::HipDriverError),
 }
 
 impl From<conflaguration::Error> for BackendError {
@@ -407,6 +416,8 @@ pub enum Plan {
     Wgpu(Box<wgpu_driver::WgpuPlan>),
     #[cfg(feature = "cuda-driver")]
     Cuda(Box<crate::cuda_driver::CudaPlan>),
+    #[cfg(feature = "cuda-driver")]
+    Rocm(Box<crate::cuda_driver::rocm::RocmPlan>),
 }
 
 /// Raw cold and synchronized execution observations for one candidate.
@@ -603,6 +614,21 @@ fn prefer_candidate<T: PartialEq>(candidates: &mut Vec<T>, preferred: &T) {
     }
 }
 
+/// `auto` considers HIP last, after every driver `for_target` prefers, and only
+/// when the ROCm runtime resolves on this host (a run-time fact, so this cannot
+/// live in the `const fn`).
+#[cfg(feature = "cuda-driver")]
+fn auto_hip_driver(config: &RuntimeConfig) -> Option<GpuDriver> {
+    crate::cuda_driver::rocm::HipApi::is_available().then(|| GpuDriver::Hip {
+        wave: crate::cuda::HipWave::from_lanes(u64::from(config.hip_wave)),
+    })
+}
+
+#[cfg(not(feature = "cuda-driver"))]
+fn auto_hip_driver(_config: &RuntimeConfig) -> Option<GpuDriver> {
+    None
+}
+
 fn configured_driver(
     config: &RuntimeConfig,
     engine: Engine,
@@ -612,6 +638,7 @@ fn configured_driver(
     }
     match config.gpu_driver.as_str() {
         "auto" => GpuDriver::for_target()
+            .or_else(|| auto_hip_driver(config))
             .map(Some)
             .ok_or(BackendError::NoGpuDriver),
         "metal" => Ok(Some(GpuDriver::Metal)),
@@ -625,6 +652,21 @@ fn configured_driver(
             {
                 Err(BackendError::NotCompiled {
                     backend: "cuda",
+                    feature: "cuda-driver",
+                })
+            }
+        }
+        "hip" | "rocm" => {
+            #[cfg(feature = "cuda-driver")]
+            {
+                Ok(Some(GpuDriver::Hip {
+                    wave: crate::cuda::HipWave::from_lanes(u64::from(config.hip_wave)),
+                }))
+            }
+            #[cfg(not(feature = "cuda-driver"))]
+            {
+                Err(BackendError::NotCompiled {
+                    backend: "hip",
                     feature: "cuda-driver",
                 })
             }
@@ -654,6 +696,10 @@ fn ordered_candidates(
     let candidates = candidates
         .into_iter()
         .chain([(Engine::Gpu, Some(GpuDriver::Cuda))])
+        .chain(
+            auto_hip_driver(config)
+                .map(|driver| (Engine::Gpu, Some(driver))),
+        )
         .collect();
     let mut candidates: Vec<_> = candidates;
     let engine = config.engine.parse()?;
@@ -813,6 +859,10 @@ fn plan_configured_gpu(
                 .plan_with_config(program, symbols, outputs, named, config)
                 .map_err(map_cuda_configuration_error)?,
         ))),
+        #[cfg(feature = "cuda-driver")]
+        GpuDriver::Hip { .. } => Ok(Plan::Rocm(Box::new(
+            crate::cuda_driver::rocm::RocmPlan::plan(config, program, symbols, named, outputs)?,
+        ))),
     }
 }
 
@@ -915,6 +965,8 @@ fn binding_policy(plan: &Plan, numeric: NumericPolicy) -> NumericPolicy {
         Plan::Wgpu(_) => numeric.with_accumulator_narrowing().with_flash_narrowing(true),
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(_) => numeric.with_accumulator_narrowing().with_flash_narrowing(true),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => numeric.with_accumulator_narrowing().with_flash_narrowing(true),
         #[cfg(not(any(
             feature = "cpu",
             all(feature = "metal", target_os = "macos"),
@@ -939,6 +991,8 @@ fn plan_executes(plan: &Plan) -> Executes {
         Plan::Wgpu(_) => crate::wgpu_driver::executes(),
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(_) => crate::cuda::executes(&crate::cuda::target::Target::CUDA),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(rocm) => crate::cuda::executes(&crate::cuda::target::Target::hip_wave(rocm.wave().lanes())),
         #[cfg(not(any(
             feature = "cpu",
             all(feature = "metal", target_os = "macos"),
@@ -1027,6 +1081,12 @@ fn fill_candidate_identity(
                 measurement.device_buffer_reserved_bytes = Some(total);
                 measurement.largest_device_buffer_bytes = Some(largest);
             }
+        }
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(rocm) => {
+            measurement.device_identity = rocm.device_name().to_string();
+            measurement.resolved_op_count = rocm.kernels().len();
+            measurement.kernel_identities = rocm.kernels().iter().map(|kernel| kernel.entry.clone()).collect();
         }
     }
     let _ = (plan, named);
@@ -1214,6 +1274,10 @@ pub fn plan_named(
                 GpuDriver::Cuda => {
                     plan_named_cuda(_program, _symbols, _named, _outputs, _numeric_policy)
                 }
+                #[cfg(feature = "cuda-driver")]
+                GpuDriver::Hip { wave } => {
+                    plan_named_hip(wave, _program, _symbols, _named, _outputs, _numeric_policy)
+                }
             }
         }
     }
@@ -1289,6 +1353,11 @@ pub fn execute_plan_named_with_resident_names(
                 .execute_named(_named, _resident_names)
                 .map_err(map_cuda_configuration_error)?)
         }
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(rocm_plan) => {
+            reject_gpu_expert_sources("hip", _expert_sources)?;
+            Ok(rocm_plan.execute_named(_named)?)
+        }
         // `Plan` is uninhabited with every backend feature off; `*plan {}`
         // is the never-pattern proof of that rather than a runtime `todo!`.
         #[cfg(not(any(
@@ -1349,6 +1418,8 @@ pub fn mark_resident(plan: &mut Plan, resident_names: &std::collections::BTreeSe
         Plan::Wgpu(_) => {}
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(cuda_plan) => cuda_plan.mark_resident(resident_names),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => {}
         // `Plan` is uninhabited with every backend feature off; `*plan {}`
         // is the never-pattern proof of that rather than a runtime `todo!`.
         #[cfg(not(any(
@@ -1378,6 +1449,8 @@ pub fn mark_plan_time_constants_resident(plan: &mut Plan) {
         Plan::Wgpu(_) => {}
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(_) => {}
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => {}
         #[cfg(not(any(
             feature = "cpu",
             all(feature = "metal", target_os = "macos"),
@@ -1402,6 +1475,8 @@ pub fn plan_arena_allocated_bytes(plan: &Plan) -> usize {
         Plan::Wgpu(_) => 0,
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(_) => 0,
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => 0,
         #[cfg(not(any(
             feature = "cpu",
             all(feature = "metal", target_os = "macos"),
@@ -1436,6 +1511,8 @@ pub fn set_math_mode(plan: &mut Plan, math_mode: metal::MathMode) -> Result<(), 
         Plan::Wgpu(_) => Ok(()),
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(_) => Ok(()),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => Ok(()),
         #[cfg(not(any(
             feature = "cpu",
             all(feature = "metal", target_os = "macos"),
@@ -1467,6 +1544,8 @@ pub fn refit_symbols(plan: &mut Plan, symbols: &[u64]) -> Result<bool, metal::Me
         Plan::Wgpu(_) => Ok(false),
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(_) => Ok(false),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => Ok(false),
         #[cfg(not(any(
             feature = "cpu",
             all(feature = "metal", target_os = "macos"),
@@ -1560,6 +1639,8 @@ pub fn plan_pads_kv(plan: &Plan, is_kv_input: impl Fn(&str) -> bool) -> bool {
         Plan::Metal(metal_plan) => metal_plan.pads_kv_safely(is_kv_input),
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(cuda_plan) => cuda_plan.pads_kv_safely(is_kv_input),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => false,
         // only reachable while a variant this arm is not naming exists
         #[cfg(any(feature = "cpu", feature = "wgpu-backend"))]
         _ => {
@@ -1623,6 +1704,8 @@ pub fn set_dispatch_type(plan: &mut Plan, dispatch_type: metal::DispatchType) {
         Plan::Wgpu(_) => {}
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(_) => {}
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => {}
         #[cfg(not(any(
             feature = "cpu",
             all(feature = "metal", target_os = "macos"),
@@ -1652,6 +1735,8 @@ pub fn set_attention_variant(
         Plan::Wgpu(_) => Err(BackendError::AttentionVariantRequiresMetal),
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(_) => Err(BackendError::AttentionVariantRequiresMetal),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => Err(BackendError::AttentionVariantRequiresMetal),
         #[cfg(not(any(feature = "cpu", feature = "wgpu-backend", feature = "cuda-driver")))]
         _ => match *plan {},
     }
@@ -1672,6 +1757,8 @@ pub fn set_command_buffer_chunks(plan: &mut Plan, chunks: u32, decode_shaped: bo
         Plan::Wgpu(_) => {}
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(_) => {}
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => {}
         #[cfg(not(any(
             feature = "cpu",
             all(feature = "metal", target_os = "macos"),
@@ -2013,6 +2100,25 @@ fn execute_plan_named_wgpu(
 }
 
 #[cfg(feature = "cuda-driver")]
+fn plan_named_hip(
+    wave: Option<crate::cuda::HipWave>,
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'_>)],
+    outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
+) -> Result<Plan, BackendError> {
+    let config = RuntimeConfig {
+        numeric: numeric_policy,
+        hip_wave: wave.map_or(0, |value| value.lanes() as u32),
+        ..RuntimeConfig::default()
+    };
+    Ok(Plan::Rocm(Box::new(crate::cuda_driver::rocm::RocmPlan::plan(
+        &config, program, symbols, named, outputs,
+    )?)))
+}
+
+#[cfg(feature = "cuda-driver")]
 fn plan_named_cuda(
     program: &[Op],
     symbols: &[u64],
@@ -2073,6 +2179,8 @@ pub fn execute_plan_named_metal_op_timed(
         Plan::Wgpu(_) => Err(BackendError::NotImplemented { backend: "wgpu" }),
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(_) => Err(BackendError::NotImplemented { backend: "cuda" }),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => Err(BackendError::NotImplemented { backend: "hip" }),
     }
 }
 
@@ -2103,6 +2211,8 @@ pub fn execute_plan_named_metal_op_timed_with_expert_sources(
         Plan::Wgpu(_) => Err(BackendError::NotImplemented { backend: "wgpu" }),
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(_) => Err(BackendError::NotImplemented { backend: "cuda" }),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => Err(BackendError::NotImplemented { backend: "hip" }),
     }
 }
 
@@ -2457,5 +2567,70 @@ mod tests {
             "gpu with no driver compiled must never silently run on cpu",
         );
         assert!(matches!(error, BackendError::NoGpuDriver));
+    }
+}
+
+#[cfg(all(test, feature = "cuda-driver"))]
+mod hip_routing_tests {
+    use proxima_numeric::DType;
+    use proxima_tensor::{Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, projection};
+
+    use super::{BackendError, GpuDriver, plan_named_with_config};
+    use crate::config::RuntimeConfig;
+    use crate::cuda::HipWave;
+    use crate::cuda_driver::rocm::{HipApi, HipDriverError};
+
+    fn negate_program() -> Vec<Op> {
+        vec![
+            Op::Input { dtype: DType::FLOAT32, shape: vec![Extent::Static(2)], name: Some("input".into()) },
+            Op::Elementwise {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Negate,
+                operands: vec![(NodeId(0), IndexMap::Affine(projection(1, &[0])))],
+                name: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn hip_and_rocm_both_resolve_to_the_hip_driver_with_the_configured_wave() {
+        for (name, wave, expected) in [("hip", 0, None), ("rocm", 32, Some(HipWave::Wave32)), ("hip", 64, Some(HipWave::Wave64))] {
+            let config = RuntimeConfig::builder()
+                .with_engine("gpu")
+                .with_gpu_driver(name)
+                .with_hip_wave(wave)
+                .build()
+                .expect("hip configs validate");
+
+            let driver = super::configured_driver(&config, super::Engine::Gpu).expect("hip resolves");
+
+            assert_eq!(driver, Some(GpuDriver::Hip { wave: expected }), "{name} wave {wave}");
+        }
+    }
+
+    #[test]
+    fn planning_on_a_host_without_the_rocm_runtime_is_a_typed_error_naming_the_library() {
+        if HipApi::is_available() {
+            return;
+        }
+        let config = RuntimeConfig::builder()
+            .with_engine("gpu")
+            .with_gpu_driver("hip")
+            .build()
+            .expect("hip configs validate");
+        let input = [1.0_f32, 2.0];
+        let named = [("input", QuantizedBlock::Float32(&input))];
+
+        let error = match plan_named_with_config(&config, &negate_program(), &[], &named, &[NodeId(1)]) {
+            Ok(_) => panic!("no rocm runtime is installed, so planning must not succeed"),
+            Err(error) => error,
+        };
+
+        match error {
+            BackendError::Hip(HipDriverError::RuntimeNotInstalled { tried }) => {
+                assert!(tried.contains("amdhip64"), "tried: {tried}");
+            }
+            other => panic!("expected a typed rocm-unavailable error, got {other:?}"),
+        }
     }
 }

@@ -4729,7 +4729,12 @@ pub mod rocm {
     use std::ptr;
     use std::sync::Arc;
 
-    use crate::cuda::HipKernel;
+    use std::collections::BTreeMap;
+
+    use crate::config::RuntimeConfig;
+    use crate::cuda::{EmitDevice, HipKernel, HipWave, emit_hip_at_wave};
+    use crate::lowering::PackedOperands;
+    use proxima_tensor::{Evaluated, NodeId, Op, QuantizedBlock, Shapes, bind_unfused, block_node_ids, infer, prune_dead, resolve_named_blocks};
     use crate::lowering::Binding;
 
     /// Shared objects the runtime half probes, in order. The versioned names come
@@ -4825,6 +4830,14 @@ pub mod rocm {
         GridTooLarge { threads: u64 },
         #[error("smoke input is too large for the launch ABI: {0} elements")]
         InputTooLarge(usize),
+        #[error("hip wave width {0} is not supported; expected 32 or 64")]
+        UnsupportedWaveWidth(u32),
+        #[error("hip graph path rejected the graph: {reason}")]
+        UnsupportedGraph { reason: &'static str },
+        #[error("hip graph node {node:?} could not be emitted: {error}")]
+        Emit { node: NodeId, error: String },
+        #[error("hip graph buffer for node {0:?} is missing")]
+        MissingBuffer(NodeId),
     }
 
     type HipInit = unsafe extern "C" fn(u32) -> c_int;
@@ -5555,6 +5568,200 @@ pub mod rocm {
             prologue: Vec::new(),
         }
     }
+
+    /// Probe kernel: writes the device's `warpSize`, so the wave width the
+    /// emitter is built for comes from the hardware, never from a card table.
+    fn warp_size_kernel() -> HipKernel {
+        HipKernel {
+            source: String::from(
+                "extern \"C\" __global__ void proxima_warp_size(float *out, const unsigned int *u) {\n\
+                 \x20   if (threadIdx.x == 0) out[0] = (float)warpSize;\n\
+                 }\n",
+            ),
+            entry: String::from("proxima_warp_size"),
+            bindings: vec![
+                Binding::Output(proxima_tensor::NodeId(0)),
+                Binding::Uniforms,
+            ],
+            grid: crate::cuda::HipGridSpec {
+                threads: 1,
+                block_width: None,
+            },
+            extra_outputs: Vec::new(),
+            prologue: Vec::new(),
+        }
+    }
+
+    impl HipDevice {
+        /// The device's wavefront width, read by launching a one-thread kernel
+        /// that stores `warpSize`.
+        ///
+        /// # Errors
+        /// As [`HipDevice::launch_f32`].
+        pub fn warp_size(&self) -> Result<u32, HipDriverError> {
+            let lanes = self.launch_f32(&warp_size_kernel(), &[], &[0u8; 4])?;
+            Ok(lanes.first().map_or(0, |value| *value as u32))
+        }
+    }
+
+    /// The wavefront width a plan is emitted for: the configured override when
+    /// it is non-zero, otherwise what the device reports.
+    ///
+    /// # Errors
+    /// [`HipDriverError::UnsupportedWaveWidth`] for a width other than 32 or 64.
+    pub fn resolve_wave(configured: u32, device: &HipDevice) -> Result<HipWave, HipDriverError> {
+        let lanes = if configured == 0 { device.warp_size()? } else { configured };
+        HipWave::from_lanes(u64::from(lanes)).ok_or(HipDriverError::UnsupportedWaveWidth(lanes))
+    }
+
+    /// A planned HIP graph: every op bound and emitted through the shared card-C
+    /// renderer at the device's wave width, launched one kernel at a time.
+    ///
+    /// This is the ROCm counterpart of [`super::CudaPlan`] for float32 graphs of
+    /// ops the generic (non-inline-assembly) renderer covers. Anything else is
+    /// refused with a typed error naming the node, never run elsewhere.
+    #[derive(Debug)]
+    pub struct RocmPlan {
+        device: HipDevice,
+        wave: HipWave,
+        program: Vec<Op>,
+        shapes: Shapes,
+        block_nodes: Vec<NodeId>,
+        kernels: Vec<HipKernel>,
+        uniforms: Vec<Vec<u8>>,
+        outputs: Vec<NodeId>,
+    }
+
+    impl RocmPlan {
+        /// Opens device 0, resolves the wave width and emits every op.
+        ///
+        /// # Errors
+        /// [`HipDriverError::RuntimeNotInstalled`] (or `RtcNotInstalled`) on a host
+        /// without ROCm, and the typed refusals documented on [`HipDriverError`].
+        pub fn plan(
+            config: &RuntimeConfig,
+            program: &[Op],
+            symbols: &[u64],
+            named: &[(&str, QuantizedBlock<'_>)],
+            outputs: &[NodeId],
+        ) -> Result<Self, HipDriverError> {
+            let device = HipDevice::open(0)?;
+            let wave = resolve_wave(config.hip_wave, &device)?;
+            let blocks = resolve_named_blocks(program, named)
+                .map_err(|_| HipDriverError::UnsupportedGraph { reason: "named input resolution failed" })?;
+            if blocks.iter().any(|block| !matches!(block, QuantizedBlock::Float32(_))) {
+                return Err(HipDriverError::UnsupportedGraph { reason: "only float32 inputs run on hip so far" });
+            }
+            let shapes = infer(program, symbols)
+                .map_err(|_| HipDriverError::UnsupportedGraph { reason: "shape inference failed" })?;
+            let root = program
+                .len()
+                .checked_sub(1)
+                .map(|last| NodeId(last as u32))
+                .ok_or(HipDriverError::UnsupportedGraph { reason: "empty program" })?;
+            let outputs = if outputs.is_empty() { vec![root] } else { outputs.to_vec() };
+            let policy = config.numeric.with_accumulator_narrowing().with_flash_narrowing(true);
+            let bound = bind_unfused(program, &shapes, &outputs, policy)
+                .map_err(|_| HipDriverError::UnsupportedGraph { reason: "graph binding failed" })?;
+            let resolved = prune_dead(bound, &outputs);
+            let packed = PackedOperands::new();
+            let kernels = resolved
+                .iter()
+                .map(|bound| {
+                    emit_hip_at_wave(wave, bound, &packed, policy, EmitDevice::default())
+                        .map_err(|error| HipDriverError::Emit { node: bound.node, error: error.to_string() })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let uniforms = resolved
+                .iter()
+                .map(|bound| {
+                    crate::cuda::pack_cuda_uniforms(bound)
+                        .map_err(|error| HipDriverError::Emit { node: bound.node, error: error.to_string() })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Self {
+                device,
+                wave,
+                program: program.to_vec(),
+                shapes,
+                block_nodes: block_node_ids(program),
+                kernels,
+                uniforms,
+                outputs,
+            })
+        }
+
+        /// The device name the plan runs on.
+        #[must_use]
+        pub fn device_name(&self) -> &str {
+            self.device.name()
+        }
+
+        /// The wavefront width this plan was emitted for.
+        #[must_use]
+        pub fn wave(&self) -> HipWave {
+            self.wave
+        }
+
+        /// The emitted kernels in launch order.
+        #[must_use]
+        pub fn kernels(&self) -> &[HipKernel] {
+            &self.kernels
+        }
+
+        /// Runs every kernel in order over `named` float32 inputs.
+        ///
+        /// # Errors
+        /// [`HipDriverError::UnsupportedGraph`] for inputs that are not float32 or
+        /// kernels with prologues or extra outputs, and any [`HipDevice::launch_f32`] error.
+        pub fn execute_named(&self, named: &[(&str, QuantizedBlock<'_>)]) -> Result<Evaluated, HipDriverError> {
+            let blocks = resolve_named_blocks(&self.program, named)
+                .map_err(|_| HipDriverError::UnsupportedGraph { reason: "named input resolution failed" })?;
+            let mut buffers: BTreeMap<NodeId, Vec<f32>> = BTreeMap::new();
+            for (node, block) in self.block_nodes.iter().zip(&blocks) {
+                let QuantizedBlock::Float32(values) = block else {
+                    return Err(HipDriverError::UnsupportedGraph { reason: "only float32 inputs run on hip so far" });
+                };
+                buffers.insert(*node, values.to_vec());
+            }
+            for (kernel, uniforms) in self.kernels.iter().zip(&self.uniforms) {
+                if !kernel.prologue.is_empty() || !kernel.extra_outputs.is_empty() {
+                    return Err(HipDriverError::UnsupportedGraph { reason: "kernel prologues and extra outputs are not launched on hip yet" });
+                }
+                let inputs = kernel
+                    .bindings
+                    .iter()
+                    .filter_map(|binding| match binding {
+                        Binding::Input(node) => Some(buffers.get(node).map(Vec::as_slice).ok_or(HipDriverError::MissingBuffer(*node))),
+                        _ => None,
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let output = self.device.launch_f32(kernel, &inputs, uniforms)?;
+                let target = kernel
+                    .bindings
+                    .iter()
+                    .find_map(|binding| match binding {
+                        Binding::Output(node) => Some(*node),
+                        _ => None,
+                    })
+                    .ok_or(HipDriverError::BindingContract)?;
+                buffers.insert(target, output);
+            }
+            let results = self
+                .outputs
+                .iter()
+                .map(|node| {
+                    buffers
+                        .remove(node)
+                        .map(|values| (*node, self.shapes.of(*node).to_vec(), values))
+                        .ok_or(HipDriverError::MissingBuffer(*node))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let root = self.program.len().checked_sub(1).map_or(NodeId(0), |index| NodeId(index as u32));
+            Ok(Evaluated::from_parts(root, results, None))
+        }
+    }
+
 
     #[cfg(test)]
     mod rocm_tests {

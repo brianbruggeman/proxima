@@ -6517,7 +6517,7 @@ pub type HipKernel = CudaKernel;
 pub type HipGridSpec = CudaGridSpec;
 
 /// Lanes per HIP wavefront.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum HipWave {
     /// 64 lanes: CDNA / `gfx9`, the default for a ROCm server part.
     #[default]
@@ -6527,6 +6527,17 @@ pub enum HipWave {
 }
 
 impl HipWave {
+    /// The wave for a lane count a device or config reports; `None` for any
+    /// width the emitter is not built for.
+    #[must_use]
+    pub const fn from_lanes(lanes: u64) -> Option<Self> {
+        match lanes {
+            HIP_WAVE64 => Some(HipWave::Wave64),
+            32 => Some(HipWave::Wave32),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub const fn lanes(self) -> u64 {
         match self {

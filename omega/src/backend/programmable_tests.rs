@@ -20,6 +20,8 @@ fn cpu_plan(plan: &Plan) -> &CpuPlan {
         Plan::Wgpu(_) => panic!("cpu requested"),
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(_) => panic!("cpu requested"),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => panic!("cpu requested"),
     }
 }
 
@@ -523,6 +525,8 @@ fn config_cpu_budget_trims_retained_capacity_before_repeat() {
         Plan::Wgpu(_) => panic!("cpu requested"),
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(_) => panic!("cpu requested"),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => panic!("cpu requested"),
     }
     let second = named(&[2.0, -1.0, 4.0, -3.0], &[10.0, 20.0, 30.0, 40.0]);
     assert_outputs(
@@ -538,6 +542,8 @@ fn config_cpu_budget_trims_retained_capacity_before_repeat() {
         Plan::Wgpu(_) => panic!("cpu requested"),
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(_) => panic!("cpu requested"),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => panic!("cpu requested"),
     }
 }
 
