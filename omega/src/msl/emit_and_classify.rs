@@ -48,6 +48,7 @@ fn effective_attention_row_schedule(
     row_schedule.without_kv_reuse()
 }
 
+#[cfg(feature = "metal-attn-split-rows")]
 /// The flash entry suffix of a QK operand selection: none for binary32 (today's kernel), `_qkc` for the cache's own layout, `_qk<name>` otherwise.
 fn flash_qk_token(selection: Option<FloatLayout>) -> String {
     match selection {
@@ -351,6 +352,7 @@ pub(crate) fn emit_inner_with_mma_selection_and_layout(
     if matches!(resolved.kind, BoundOpKind::CachedAttention { .. }) {
         entry.push_str(mma_selection.cache_token());
         entry.push_str(&row_schedule.cache_token());
+        #[cfg(feature = "metal-attn-split-rows")]
         if row_schedule.for_op(&resolved.kind).is_flash() {
             entry.push_str(&flash_qk_token(knobs.flash_qk_operand));
         }

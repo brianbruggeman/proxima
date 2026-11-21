@@ -196,6 +196,8 @@ pub(super) fn render_cached_attention_with_mma_selection(
     (cached_key_codec, cached_kv_codec): (Option<Codec>, Option<Codec>),
     mma_selection: AttentionMmaSelection,
     row_schedule: AttentionRowSchedule,
+    // only the row-tiled flash kernel reads the operand; without split-rows it is inert
+    #[cfg_attr(not(feature = "metal-attn-split-rows"), allow(unused_variables))]
     flash_qk_operand: Option<FloatLayout>,
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
