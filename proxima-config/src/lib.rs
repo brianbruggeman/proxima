@@ -456,6 +456,9 @@ mod alloc_tier_tests {
     }
 }
 
+#[cfg(test)]
+mod config_formats_tests;
+
 // every case below reaches a std-gated format or the registry, so the test
 // module follows the code it covers rather than the crate's default features.
 #[cfg(all(test, feature = "std"))]

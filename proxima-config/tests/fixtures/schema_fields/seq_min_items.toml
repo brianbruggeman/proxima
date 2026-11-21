@@ -1,0 +1,5 @@
+type = "seq"
+[value]
+min_items = 1
+[value.items]
+type = "bool"

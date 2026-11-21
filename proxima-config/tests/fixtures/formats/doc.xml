@@ -1,0 +1,10 @@
+<config>
+  <count>42</count>
+  <enabled>true</enabled>
+  <server>
+    <host>localhost</host>
+    <port>8080</port>
+  </server>
+  <tags>alpha</tags>
+  <tags>beta</tags>
+</config>

@@ -1,0 +1,9 @@
+type = "struct"
+[value]
+name = "S"
+[[value.fields]]
+name = "f"
+[value.fields.schema]
+type = "bool"
+[value.fields.flags]
+optional = true

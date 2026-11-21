@@ -1,0 +1,5 @@
+type = "seq"
+[value]
+max_items = 8
+[value.items]
+type = "bool"

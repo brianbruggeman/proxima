@@ -1,0 +1,7 @@
+{
+  // json5 allows comments and bare keys
+  count: 42,
+  enabled: true,
+  server: { host: 'localhost', port: 8080 },
+  tags: ['alpha', 'beta'],
+}

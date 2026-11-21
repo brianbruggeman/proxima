@@ -1,0 +1,3 @@
+type = "int"
+[value]
+max = 100
