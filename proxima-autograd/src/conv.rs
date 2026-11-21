@@ -2097,7 +2097,7 @@ mod tests {
         assert_within_spec_bound("conv1d stride 1", &rows);
     }
 
-    /// Whisper's conv stack shape: a stride-1 padded layer feeds a stride-2
+    /// A stride-1 padded layer feeds a stride-2
     /// layer, so the second layer's input is the first layer's output and the
     /// gradient must keep flowing into `weight1` through the mask-composed
     /// window (a gather window would stop there).

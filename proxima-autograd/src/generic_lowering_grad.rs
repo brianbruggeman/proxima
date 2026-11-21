@@ -337,7 +337,7 @@ async fn grad_layer_norm_matches_finite_differences_for_x_weight_and_bias() {
     assert_eq!(reports.len(), 3);
 }
 
-// cross-attention, non-Whisper shape: s = 3 queries over t = 5 memory positions.
+// cross-attention, a small shape: s = 3 queries over t = 5 memory positions.
 const CROSS_S: u32 = 3;
 const CROSS_T: u32 = 5;
 const CROSS_U: u32 = 2;
