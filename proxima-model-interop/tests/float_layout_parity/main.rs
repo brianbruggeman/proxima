@@ -296,6 +296,20 @@ fn float_layout_parity_bf8_e5m2_exponent_31_specials_msl_equals_cpu() {
 }
 
 #[test]
+fn float_layout_parity_bf8_e5m2_nan_payload_encode_msl_equals_cpu() {
+    let layout = FloatLayout::E5M2_SATURATING;
+    let values: Vec<f32> = [0x7fa0_0001, 0x7fe1_2345, 0xffa0_0001, 0xffe1_2345, 0x7fc0_0000]
+        .into_iter()
+        .map(f32::from_bits)
+        .collect();
+    let expected = narrow(layout, &values);
+
+    let observed = gpu_encode(&Gpu::open(), layout, &values);
+
+    assert_eq!(observed, expected);
+}
+
+#[test]
 fn float_layout_parity_control_cpu_output_through_the_comparator_passes() {
     let layout = FloatLayout::BF16;
     let codes = narrow(layout, granite());

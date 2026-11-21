@@ -13,7 +13,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use proxima_numeric::block_layout::{BlockLayout, CodeRegion, Coded, Field, Plane};
-use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
+use proxima_numeric::float_layout::{FloatLayout, NanNarrow, NanWiden, SignEncoding, Specials};
 use proxima_numeric::{DType, FormatCodec, LevelFormat, LevelGeometry, LevelTable, NumericFormat};
 
 pub(crate) const F32_FRACTION_BITS: u32 = 23;
@@ -274,11 +274,14 @@ fn field_load_reserved_msl(
     exponent_ones: u32,
     fraction_shift: u32,
 ) -> String {
+    let payload = match layout.nan.widen {
+        NanWiden::Quiet => format!(" | (mantissa << {fraction_shift}u)"),
+        NanWiden::Canonical => String::new(),
+    };
     if layout.specials == Specials::NanOnly {
         return format!(
-            "    if (exponent == {exponent_ones:#x}u && mantissa == {:#x}u) {{\n        return as_type<float>(sign | {F32_INFINITY_BITS:#010x}u | {F32_QUIET_BIT:#x}u | (mantissa << {fraction_shift}u));\n    }}\n",
-            mantissa_mask(layout),
-            fraction_shift = F32_FRACTION_BITS - u32::from(layout.mantissa_bits)
+            "    if (exponent == {exponent_ones:#x}u && mantissa == {:#x}u) {{\n        return as_type<float>(sign | {F32_INFINITY_BITS:#010x}u | {F32_QUIET_BIT:#x}u{payload});\n    }}\n",
+            mantissa_mask(layout)
         );
     }
     if !reserves_all_ones(layout) {
@@ -286,7 +289,7 @@ fn field_load_reserved_msl(
     }
     format!(
         "    if (exponent == {exponent_ones:#x}u) {{
-        return as_type<float>(sign | {F32_INFINITY_BITS:#010x}u | (mantissa == 0u ? 0u : ({F32_QUIET_BIT:#x}u | (mantissa << {fraction_shift}u))));
+        return as_type<float>(sign | {F32_INFINITY_BITS:#010x}u | (mantissa == 0u ? 0u : ({F32_QUIET_BIT:#x}u{payload})));
     }}
 "
     )
@@ -321,10 +324,16 @@ fn field_store_nan_msl(layout: &FloatLayout) -> String {
     if !reserves_all_ones(layout) {
         return format!("        return {:#x}u;\n", max_normal_code(layout));
     }
+    let payload = match layout.nan.narrow {
+        NanNarrow::Preserve => format!(
+            "((bits & 0x7fffffu) >> {}u) | ",
+            F32_FRACTION_BITS - u32::from(layout.mantissa_bits)
+        ),
+        NanNarrow::Canonical => String::new(),
+    };
     format!(
-        "        return sign | {:#x}u | (((bits & 0x7fffffu) >> {}u) | {:#x}u);\n",
+        "        return sign | {:#x}u | ({payload}{:#x}u);\n",
         infinity_code(layout),
-        F32_FRACTION_BITS - u32::from(layout.mantissa_bits),
         quiet_bit(layout)
     )
 }

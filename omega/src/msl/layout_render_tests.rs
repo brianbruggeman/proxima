@@ -279,6 +279,35 @@ fn the_row_tiled_kernel_reads_binary32_bf16_and_bf8_and_refuses_f16_and_quantize
 }
 
 #[test]
+fn float_layout_msl_nan_policy_alone_decides_whether_the_payload_is_kept() {
+    let canonical = FloatLayout::E5M2_SATURATING;
+    let quiet = FloatLayout {
+        nan: NanPolicy::IEEE,
+        ..canonical
+    };
+
+    let dropped = rendered(canonical);
+    let kept = rendered(quiet);
+
+    assert!(
+        !dropped.contains("(mantissa << 21u)"),
+        "canonical widen carries no payload:\n{dropped}"
+    );
+    assert!(
+        kept.contains("(mantissa << 21u)"),
+        "quiet widen shifts the payload to the top of the fraction:\n{kept}"
+    );
+    assert!(
+        kept.contains("((bits & 0x7fffffu) >> 21u)"),
+        "preserve narrow keeps the top payload bits:\n{kept}"
+    );
+    assert!(
+        !dropped.contains("((bits & 0x7fffffu) >> 21u)"),
+        "canonical narrow carries no payload:\n{dropped}"
+    );
+}
+
+#[test]
 fn float_layout_msl_control_changed_bias_changes_the_constants() {
     let shifted = FloatLayout {
         bias_override: Some(4),

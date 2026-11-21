@@ -1062,7 +1062,7 @@ static inline float bf8_e5m2_element_value(uint code) {
     uint exponent = (code >> 2u) & 0x1fu;
     uint sign = ((code >> 7u) & 1u) << 31u;
     if (exponent == 0x1fu) {
-        return as_type<float>(sign | 0x7f800000u | (mantissa == 0u ? 0u : (0x400000u | (mantissa << 21u))));
+        return as_type<float>(sign | 0x7f800000u | (mantissa == 0u ? 0u : (0x400000u)));
     }
     uint significand = exponent == 0u ? mantissa : (0x4u | mantissa);
     int scale = exponent == 0u ? (1 - (15) - 2) : ((int)exponent - (15) - 2);
