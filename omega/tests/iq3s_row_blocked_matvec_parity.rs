@@ -11,11 +11,14 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
+use omega::EmitKnobs;
+use omega::backend::{execute_plan_named, plan_named_with_config};
+use omega::config::RuntimeConfig;
 use proxima_gguf::parser::{GgufEvent, GgufParser};
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::types::GgmlType;
 use proxima_numeric::codec::Codec;
-use proxima_numeric::{DType, NumericPolicy};
+use proxima_numeric::DType;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, map};
 
@@ -134,8 +137,8 @@ fn activation(reduction: usize, case: &Case) -> Vec<f32> {
     (0..rows * reduction).map(|_| lcg.next_unit() * 4.0 - 2.0).collect()
 }
 
-fn input(program: &mut Vec<Op>, dtype: DType, shape: &[usize]) -> NodeId {
-    append(program, Op::Input { dtype, shape: shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(), name: None })
+fn input(program: &mut Vec<Op>, name: &str, dtype: DType, shape: &[usize]) -> NodeId {
+    append(program, Op::Input { dtype, shape: shape.iter().map(|&extent| Extent::Static(extent as u32)).collect(), name: Some(name.into()) })
 }
 
 fn expert_gather_map(route: NodeId) -> IndexMap {
@@ -151,12 +154,12 @@ fn expert_gather_map(route: NodeId) -> IndexMap {
 fn program(reduction: usize, case: &Case) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let tokens = case.tokens;
-    let weight = input(&mut program, DType::UINT8, &[EXPERTS, ROWS, reduction]);
-    let route = input(&mut program, DType::FLOAT32, &[tokens, SELECTED]);
+    let weight = input(&mut program, "weight", DType::UINT8, &[EXPERTS, ROWS, reduction]);
+    let route = input(&mut program, "route", DType::FLOAT32, &[tokens, SELECTED]);
     let (activation, activation_map) = if case.per_selected_activation {
-        (input(&mut program, case.variant.dtype(), &[tokens, SELECTED, reduction]), map::projection(4, &[0, 1, 3]))
+        (input(&mut program, "activation", case.variant.dtype(), &[tokens, SELECTED, reduction]), map::projection(4, &[0, 1, 3]))
     } else {
-        (input(&mut program, case.variant.dtype(), &[tokens, reduction]), map::projection(4, &[0, 3]))
+        (input(&mut program, "activation", case.variant.dtype(), &[tokens, reduction]), map::projection(4, &[0, 3]))
     };
     let product = append(
         &mut program,
@@ -202,13 +205,23 @@ struct Run {
 }
 
 fn run(case: &Case, slab: &Slab, activation: &[f32]) -> Run {
+    run_with_emit(case, slab, activation, EmitKnobs::default())
+}
+
+/// plans through `RuntimeConfig`, so the emit switches are the plan's own data and never the process environment.
+fn run_with_emit(case: &Case, slab: &Slab, activation: &[f32], emit: EmitKnobs) -> Run {
     let (program, output) = program(slab.reduction, case);
     let route: Vec<f32> = (0..case.tokens * SELECTED).map(|pair| expert_of(pair / SELECTED, pair % SELECTED) as f32).collect();
-    let blocks = [QuantizedBlock::Packed { codec: Codec::Iq3S, bytes: &slab.bytes }, QuantizedBlock::Float32(&route), QuantizedBlock::Float32(activation)];
-    let outputs = [output];
-    let plan = omega::plan(&program, &[], &blocks, &outputs, NumericPolicy::default()).expect("metal plans the expert product");
-    let kernel_keys = plan.kernel_keys().expect("the plan exposes its kernel keys");
-    let evaluated = omega::execute_plan(&plan, &blocks).expect("metal runs the expert product");
+    let bindings = [
+        ("weight", QuantizedBlock::Packed { codec: Codec::Iq3S, bytes: &slab.bytes }),
+        ("route", QuantizedBlock::Float32(&route)),
+        ("activation", QuantizedBlock::Float32(activation)),
+    ];
+    let config = RuntimeConfig { engine: "gpu".into(), gpu_driver: "metal".into(), allow_fusion: true, emit, ..RuntimeConfig::default() };
+    let (mut plan, records) = plan_named_with_config(&config, &program, &[], &bindings, &[output]).expect("metal plans the expert product");
+    assert!(records[0].selected, "the configured candidate is selected");
+    let kernel_keys = records[0].kernel_identities.clone();
+    let evaluated = execute_plan_named(&mut plan, &bindings).expect("metal runs the expert product");
     Run { output: evaluated.root().to_vec(), kernel_keys }
 }
 
@@ -299,16 +312,16 @@ fn worst_distance(output: &[f32], want: &[(f64, f64)]) -> f64 {
     output.iter().zip(want).map(|(got, (reduced, magnitude))| (f64::from(*got) - reduced).abs() / magnitude.max(1.0e-9)).fold(0.0f64, f64::max)
 }
 
-/// The cooperative per-element kernel (`PROXIMA_PACKED_ROW_DISABLE` keeps the codec off the row-blocked matvec) on the
+/// The cooperative per-element kernel (`EmitKnobs::packed_row_disable` keeps the codec off the row-blocked matvec) on the
 /// same inputs and the same f64 reference: the rendered matvec must be no further from the reference than it.
 #[test]
 fn iq3s_row_blocked_matvec_is_no_further_from_the_host_decode_than_the_cooperative_kernel() {
     let slab = read_slab(&GATE_BATCH);
     let activation = activation(slab.reduction, &GATE_BATCH);
     let want = reference(&GATE_BATCH, &slab, &activation);
-    let cooperative = temp_env::with_var("PROXIMA_PACKED_ROW_DISABLE", Some("iq3s"), || run(&GATE_BATCH, &slab, &activation));
+    let cooperative = run_with_emit(&GATE_BATCH, &slab, &activation, EmitKnobs::default().with_packed_row_disable(vec!["iq3s".to_string()]));
     assert!(cooperative.kernel_keys.iter().all(|key| !key.contains(ROW_BLOCKED_KEY)), "the switch must keep the codec off the row-blocked kernel: {:?}", cooperative.kernel_keys);
-    let rendered = temp_env::with_var("PROXIMA_PACKED_ROW_DISABLE", None::<&str>, || run(&GATE_BATCH, &slab, &activation));
+    let rendered = run(&GATE_BATCH, &slab, &activation);
     assert!(rendered.kernel_keys.iter().any(|key| key.contains(ROW_BLOCKED_KEY)), "the row-blocked kernel was never selected: {:?}", rendered.kernel_keys);
     let (rendered_worst, cooperative_worst) = (worst_distance(&rendered.output, &want), worst_distance(&cooperative.output, &want));
     assert!(rendered_worst <= cooperative_worst, "rendered {rendered_worst:e} is further from the f64 reduction than cooperative {cooperative_worst:e}");
