@@ -789,7 +789,11 @@ fn route_contribution(
     match operand_map {
         IndexMap::Affine(pattern) => {
             let operand_rank = shapes.of(*operand_node).len() as u16;
-            let projected = expr::is_pure_projection(pattern);
+            let projected = expr::is_full_extent_projection(
+                pattern,
+                shapes.of(consumer),
+                shapes.of(*operand_node),
+            );
             let routed_rank = if projected {
                 pattern.axes.len() as u16
             } else {
@@ -1049,7 +1053,7 @@ fn route_through_in_map(
     if reduce.in_map == full {
         return Ok(contribution);
     }
-    if expr::is_pure_projection(pattern) {
+    if expr::is_full_extent_projection(pattern, iteration_extents, shapes.of(reduce.operand)) {
         return Ok(expr::reduce(
             program,
             operand_dtype,

@@ -245,11 +245,20 @@ async fn non_causal_attention_gradient_matches_finite_differences_for_q_k_and_v(
 }
 
 #[proxima::test]
-async fn fused_rope_pair_gradient_matches_finite_differences_with_multi_axis_tables() {
+#[case::interleaved(false)]
+#[case::split_half(true)]
+async fn fused_rope_pair_gradient_matches_finite_differences_with_multi_axis_tables(
+    #[case] split_half: bool,
+) {
     let (s, h) = (3u32, 2u32);
     let sections = [4u32, 2];
     let width: u32 = sections.iter().sum();
     let pairs = width / 2;
+    let pairing = if split_half {
+        RopePairing::SplitHalf { pairs }
+    } else {
+        RopePairing::Interleaved
+    };
     let positions = [0.0f32, 1.0, 1.0, 0.0, 2.0, 3.0];
     let (cos_bytes, sin_bytes) =
         multi_axis_rope_tables(&positions, &sections, &[10000.0, 100.0], DType::FLOAT32)
@@ -266,8 +275,8 @@ async fn fused_rope_pair_gradient_matches_finite_differences_with_multi_axis_tab
     let x = input(&mut program, "x", &[s, h, width]);
     let cos = input(&mut program, "cos", &[s, pairs]);
     let sin = input(&mut program, "sin", &[s, pairs]);
-    let (first, second) = fused_rope_pair(&mut program, x, 'h', cos, sin, RopePairing::Interleaved)
-        .expect("rope builds");
+    let (first, second) =
+        fused_rope_pair(&mut program, x, 'h', cos, sin, pairing).expect("rope builds");
     let weighted_first = weighted_loss_named(&mut program, first, "shi", "w1", &[s, h, pairs]);
     let weighted_second = weighted_loss_named(&mut program, second, "shi", "w2", &[s, h, pairs]);
     let loss = elementwise_like(

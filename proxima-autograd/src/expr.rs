@@ -41,15 +41,40 @@ pub(crate) fn broadcast(iter_rank: u16) -> IndexMap {
     IndexMap::Affine(map::projection(iter_rank, &[]))
 }
 
-/// Every axis of `pattern` is exactly one unit-coefficient term — the same
-/// rule `proxima-tensor/src/shape.rs:446` (`project_output_shape`) applies
-/// to a `Reduce::out_map` before lowering it. An operand map failing this
-/// cannot be reused as a backward `Reduce`'s `out_map`.
+/// Every axis of `pattern` is exactly one unit-coefficient, zero-offset term --
+/// the same rule `proxima-tensor/src/shape.rs:446` (`project_output_shape`)
+/// applies to a `Reduce::out_map` before lowering it (which sizes the output
+/// from the iteration extent and ignores `offset`, so an offset read like
+/// `i+P` must never be reused as an `out_map`).
 pub(crate) fn is_pure_projection(pattern: &IndexPattern) -> bool {
     pattern
         .axes
         .iter()
-        .all(|axis| matches!(axis.terms.as_slice(), [term] if term.coeff == 1))
+        .all(|axis| axis.offset == 0 && matches!(axis.terms.as_slice(), [term] if term.coeff == 1))
+}
+
+/// [`is_pure_projection`] AND every projected axis spans its operand axis
+/// whole, so a backward `Reduce(Add)` with `pattern` as its `out_map` yields
+/// a gradient of exactly the operand's shape. A narrower pair axis (`i@P`
+/// reading the first half of a `2P`-wide axis) fails this and takes
+/// `crate::affine_scatter` instead.
+pub(crate) fn is_full_extent_projection(
+    pattern: &IndexPattern,
+    iteration_extents: &[u64],
+    operand_extents: &[u64],
+) -> bool {
+    is_pure_projection(pattern)
+        && pattern.axes.len() == operand_extents.len()
+        && pattern
+            .axes
+            .iter()
+            .zip(operand_extents)
+            .all(|(axis, extent)| {
+                axis.terms
+                    .first()
+                    .and_then(|term| iteration_extents.get(usize::from(term.axis)))
+                    == Some(extent)
+            })
 }
 
 fn push(program: &mut Vec<Op>, dtype: DType, body: ScalarOp, operands: Vec<Operand>) -> NodeId {

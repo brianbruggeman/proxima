@@ -31,8 +31,13 @@ use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 
 use crate::expr;
 
-fn is_regular(axis: &AxisIndex) -> bool {
-    matches!(axis.terms.as_slice(), [term] if term.coeff == 1)
+/// a unit-coefficient, zero-offset single term spanning the operand axis
+/// whole writes each `g[i]` to its own coordinate; anything else (a stride, an
+/// offset, a narrower extent) needs the mask.
+fn is_regular(axis: &AxisIndex, iteration_extents: &[u64], operand_extent: u64) -> bool {
+    matches!(axis.terms.as_slice(), [term] if term.coeff == 1
+        && axis.offset == 0
+        && iteration_extents.get(usize::from(term.axis)) == Some(&operand_extent))
 }
 
 fn static_extent(extent: u64) -> Option<Extent> {
@@ -197,7 +202,7 @@ pub(crate) fn scatter_add_along_map(
     }
     let mut irregular: Vec<usize> = Vec::new();
     for (index, axis) in pattern.axes.iter().enumerate() {
-        if is_regular(axis) {
+        if is_regular(axis, iteration_extents, operand_extents[index]) {
             continue;
         }
         if !axis_in_range(axis, iteration_extents, operand_extents[index])? {
