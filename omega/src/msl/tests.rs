@@ -1861,21 +1861,22 @@ fn flattened_selected_axis_gathered_q4k_matmul_gathers_expert_base_once_per_toke
     let source = emit(&bound, &q4k, NumericPolicy::default())
         .expect("emits gathered packed-row source")
         .source;
-    // `selected`/`sequence` now take the SAME token/feature split a
-    // dense op would -- proof this is the multi-row body, not the old
-    // "treat every output element as its own row" collapse.
+    // two selected rows sit below the tiled minimum, so
+    // `routed_axes_leave_one_token_row` collapses them to single-row matvecs
+    // (token axes empty, `selected` folded into the feature rows), each row
+    // adding its own expert's slab offset to `weight_base[q]`.
     assert!(
-        source.contains("token_first = token_group"),
-        "gathered rows must take the dense token/feature split, not the flattened-feature fallback:\n{source}"
+        !source.contains("token_first = token_group"),
+        "routed rows below the tiled minimum take the single-row body, not the multi-row token split:\n{source}"
     );
     assert!(
-        source.contains("weight_expert_base"),
-        "each token slot's expert base must be its own value, not shared:\n{source}"
+        source.contains("weight_base[q] += fetched0 * u.gather_element_stride[0]"),
+        "each feature row must add its own routed expert's slab offset:\n{source}"
     );
     assert_eq!(
         source.matches("long fetched0").count(),
         1,
-        "the route must be resolved ONCE per token slot, not once per feature row:\n{source}"
+        "the route must be resolved ONCE per feature row's expert fetch, not once per reduce step:\n{source}"
     );
     assert!(
         source.contains("q4k_element"),
@@ -1916,13 +1917,13 @@ fn gathered_packed_row_reads_each_selected_experts_slab_exactly_once() {
 
     assert_eq!(
         gathered_feature_total,
-        u64::from(rows),
-        "one weight row per d_out -- never one per (token, d_out) pair"
+        u64::from(selected) * u64::from(rows),
+        "8 selected experts sit below the tiled minimum, so the classifier folds the selected axis into \
+         the feature rows: one weight row per (selected, d_out) pair, each on its own expert"
     );
     assert_eq!(
-        gathered_token_total,
-        u64::from(selected),
-        "one token slot per selected expert -- the flattened axis gathered_matmul_op builds"
+        gathered_token_total, 1,
+        "the routed rows collapse to single-row matvecs: no activation group shares a weight row"
     );
     let gathered_row_reads = gathered_feature_total * gathered_token_total;
     assert_eq!(
