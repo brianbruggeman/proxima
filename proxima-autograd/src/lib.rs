@@ -13,7 +13,7 @@
 //!   / [`activation::silu`] / [`activation::gelu`] — graph-building functions
 //!   composing existing [`proxima_tensor::op::ScalarOp`]s, never a new
 //!   variant.
-//! - [`conv::conv2d`] — the same graph-building shape, `Conv2d` as a
+//! - [`conv::conv2d`] / [`conv::conv1d`] — the same graph-building shape, `Conv2d` as a
 //!   mask-composed sliding window (`Iota`/`Equal`/`Multiply`/`Reduce(Add)`,
 //!   never a window-shaped `IndexMap`) feeding an ordinary
 //!   `Elementwise(Multiply)` + `Reduce(Add)` matmul against the reshaped

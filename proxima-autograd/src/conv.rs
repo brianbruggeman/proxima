@@ -1,4 +1,4 @@
-//! `conv2d`, spelled as a graph-building function over
+//! `conv2d` and `conv1d`, spelled as a graph-building function over
 //! [`proxima_tensor::op::Op`] — never a new `Op`/`ScalarOp`/[`IndexMap`]
 //! variant, and never the two-term-affine window
 //! `proxima-onnx/src/lower.rs`'s `window_materialize` builds for forward-only
@@ -136,12 +136,12 @@ pub fn conv2d(
     // image axes: n=0, c=1, h=2, w=3 -- window h first (axis 2), reducing it
     // away and landing the two new axes (oy, ky) at the end: [n, c, w, oy, ky].
     let windowed_h = masked_window_axis(
-        program, dtype, image, 4, 2, height, out_h, kernel_h, stride_h,
+        program, dtype, image, 4, 2, height, out_h, kernel_h, stride_h, 1, 0,
     );
     // windowed_h axes: n=0, c=1, w=2, oy=3, ky=4 -- window w next (now axis
     // 2), landing [n, c, oy, ky, ox, kx].
     let windowed = masked_window_axis(
-        program, dtype, windowed_h, 5, 2, width, out_w, kernel_w, stride_w,
+        program, dtype, windowed_h, 5, 2, width, out_w, kernel_w, stride_w, 1, 0,
     );
 
     // shared iteration space: 0=n 1=co 2=ci 3=oy 4=ky 5=ox 6=kx
@@ -182,6 +182,99 @@ pub fn conv2d(
     Some(result)
 }
 
+/// `[n, c, length]` signal extents.
+pub type SignalShape = (u64, u64, u64);
+/// `[out_channels, in_channels, kernel]` extents.
+pub type Kernel1dShape = (u64, u64, u64);
+
+/// `[n, out_channels, out_length]` for a 1-D convolution with `stride`,
+/// symmetric zero `padding` and `dilation`, or `None` when the dilated kernel
+/// does not fit the padded signal, a channel count disagrees, or `stride` or
+/// `dilation` is zero. `out_length = (length + 2*padding - dilation*(kernel-1)
+/// - 1) / stride + 1`, the ONNX `Conv` rule.
+#[must_use]
+pub fn conv1d_output_shape(
+    signal_shape: SignalShape,
+    weight_shape: Kernel1dShape,
+    stride: u64,
+    padding: u64,
+    dilation: u64,
+) -> Option<SignalShape> {
+    let (batch, in_channels, length) = signal_shape;
+    let (out_channels, weight_in_channels, kernel) = weight_shape;
+    if weight_in_channels != in_channels || stride == 0 || dilation == 0 || kernel == 0 {
+        return None;
+    }
+    let reach = dilation * (kernel - 1) + 1;
+    let padded = length + 2 * padding;
+    (padded >= reach).then(|| (batch, out_channels, (padded - reach) / stride + 1))
+}
+
+/// `Conv1d`, `group = 1`: `[n, ci, l]` signal, `[co, ci, k]` weight, optional
+/// `[co]` bias, `[n, co, out_l]` result. The one-spatial-axis case of
+/// [`conv2d`]: the same mask-composed window (`masked_window_axis`, never a
+/// window on a `Reduce`'s `in_map`) read once, then `Multiply` against the
+/// weight and `Reduce(Add)` over `(ci, k)`. Padding and dilation live in the
+/// mask, so signal, weight and bias all differentiate through
+/// [`crate::adjoint::differentiate`], and a stacked pair of layers carries the
+/// gradient back to the first layer's weight.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn conv1d(
+    program: &mut Vec<Op>,
+    dtype: DType,
+    signal: NodeId,
+    signal_shape: SignalShape,
+    weight: NodeId,
+    weight_shape: Kernel1dShape,
+    bias: Option<NodeId>,
+    stride: u64,
+    padding: u64,
+    dilation: u64,
+) -> Option<NodeId> {
+    let (_, _, length) = signal_shape;
+    let (_, _, kernel) = weight_shape;
+    let (_, _, out_length) =
+        conv1d_output_shape(signal_shape, weight_shape, stride, padding, dilation)?;
+
+    // signal axes n=0 c=1 l=2 -> windowed [n, c, o, k]
+    let windowed = masked_window_axis(
+        program, dtype, signal, 3, 2, length, out_length, kernel, stride, dilation, padding,
+    );
+
+    // shared iteration space: 0=n 1=co 2=ci 3=o 4=k
+    let windowed_pattern = IndexMap::Affine(map::projection(5, &[0, 2, 3, 4]));
+    let weight_pattern = IndexMap::Affine(map::projection(5, &[1, 2, 4]));
+    let product = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (windowed, windowed_pattern),
+        (weight, weight_pattern),
+    );
+    let reduced = expr::reduce(
+        program,
+        dtype,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        product,
+        expr::identity(5),
+        IndexMap::Affine(map::projection(5, &[0, 1, 3])),
+    );
+
+    let result = match bias {
+        Some(bias) => expr::binary(
+            program,
+            dtype,
+            ScalarOp::Add,
+            (reduced, expr::identity(3)),
+            (bias, IndexMap::Affine(map::projection(3, &[1]))),
+        ),
+        None => reduced,
+    };
+    Some(result)
+}
+
 /// Replaces `source`'s axis `windowed_axis` (out of `source_rank` total, with
 /// static extent `source_extent`) with two new trailing axes `(out_position,
 /// kernel_position)`, `Reduce(Add)`-ing the original axis away under a
@@ -202,13 +295,21 @@ fn masked_window_axis(
     out_extent: u64,
     kernel_extent: u64,
     stride: u64,
+    dilation: u64,
+    padding: u64,
 ) -> NodeId {
     let widened_rank = source_rank + 2;
     let widened_rank_u16 = widened_rank as u16;
     let out_position_axis = source_rank as u16;
     let kernel_position_axis = out_position_axis + 1;
 
-    let mask = window_mask(program, source_extent, out_extent, kernel_extent, stride);
+    let mask = window_mask(
+        program,
+        source_extent,
+        out_extent,
+        kernel_extent,
+        (stride, dilation, padding),
+    );
     let source_axes: Vec<u16> = (0..source_rank as u16).collect();
     let source_pattern = IndexMap::Affine(map::projection(widened_rank_u16, &source_axes));
     let mask_pattern = IndexMap::Affine(map::projection(
@@ -244,17 +345,18 @@ fn masked_window_axis(
 }
 
 /// `mask[source_position, out_position, kernel_position] = (source_position
-/// == out_position*stride + kernel_position)` -- the exact
+/// == out_position*stride + kernel_position*dilation - padding)` -- the exact
 /// `Iota`/`Multiply`/`Add`/`Equal` composition
 /// `proxima-onnx/src/lower.rs`'s `scatter_mask_axis` builds for
-/// `ConvTranspose`'s general case, without that function's `pad` term (this
-/// module builds no padding; see this module's own doc).
+/// `ConvTranspose`'s general case. `dilation` scales the kernel position and
+/// `padding` shifts it down, so a padded source position matches nothing and
+/// reads as zero (`dilation` 1 and `padding` 0 add no ops).
 fn window_mask(
     program: &mut Vec<Op>,
     source_extent: u64,
     out_extent: u64,
     kernel_extent: u64,
-    stride: u64,
+    (stride, dilation, padding): (u64, u64, u64),
 ) -> NodeId {
     let source_position = op::append(
         program,
@@ -278,6 +380,7 @@ fn window_mask(
         },
     );
 
+    let kernel_offset = offset_kernel_positions(program, kernel_position, dilation, padding);
     let stride_const = expr::constant(program, DType::FLOAT32, stride as f32);
     let scaled_out = expr::binary(
         program,
@@ -291,7 +394,7 @@ fn window_mask(
         DType::FLOAT32,
         ScalarOp::Add,
         (scaled_out, IndexMap::Affine(map::projection(2, &[0]))),
-        (kernel_position, IndexMap::Affine(map::projection(2, &[1]))),
+        (kernel_offset, IndexMap::Affine(map::projection(2, &[1]))),
     );
 
     expr::binary(
@@ -301,6 +404,42 @@ fn window_mask(
         (source_position, IndexMap::Affine(map::projection(3, &[0]))),
         (combined, IndexMap::Affine(map::projection(3, &[1, 2]))),
     )
+}
+
+/// `kernel_position * dilation - padding` over the kernel axis, skipping each
+/// op when it would be the identity so `conv2d`'s graph stays unchanged.
+fn offset_kernel_positions(
+    program: &mut Vec<Op>,
+    kernel_position: NodeId,
+    dilation: u64,
+    padding: u64,
+) -> NodeId {
+    let dilated = match dilation {
+        1 => kernel_position,
+        _ => {
+            let dilation_const = expr::constant(program, DType::FLOAT32, dilation as f32);
+            expr::binary(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Multiply,
+                (kernel_position, expr::identity(1)),
+                (dilation_const, expr::broadcast(1)),
+            )
+        }
+    };
+    match padding {
+        0 => dilated,
+        _ => {
+            let padding_const = expr::constant(program, DType::FLOAT32, -(padding as f32));
+            expr::binary(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Add,
+                (dilated, expr::identity(1)),
+                (padding_const, expr::broadcast(1)),
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1697,5 +1836,342 @@ mod tests {
             None,
             "weight in-channels must match the image"
         );
+    }
+
+    /// Reference `Conv1d` on `[n, ci, l]` / `[co, ci, k]` with ONNX
+    /// stride/pad/dilation semantics, written as the definition (a sum over
+    /// `ci` and `k` of `signal[o*stride + k*dilation - pad] * weight`).
+    #[allow(clippy::too_many_arguments)]
+    fn brute_force_conv1d(
+        signal: &[f32],
+        shape: SignalShape,
+        weight: &[f32],
+        weight_shape: Kernel1dShape,
+        stride: u64,
+        padding: u64,
+        dilation: u64,
+    ) -> Vec<f32> {
+        let (batch, in_channels, length) = (shape.0 as i64, shape.1 as usize, shape.2 as i64);
+        let (_, out_channels, kernel) = (0, weight_shape.0 as usize, weight_shape.2 as i64);
+        let (_, _, out_length) =
+            conv1d_output_shape(shape, weight_shape, stride, padding, dilation).unwrap();
+        let mut out = Vec::new();
+        for sample in 0..batch {
+            for co in 0..out_channels {
+                for position in 0..out_length as i64 {
+                    let mut total = 0.0f32;
+                    for ci in 0..in_channels {
+                        for tap in 0..kernel {
+                            let at =
+                                position * stride as i64 + tap * dilation as i64 - padding as i64;
+                            if at < 0 || at >= length {
+                                continue;
+                            }
+                            let signal_index = (sample as usize * in_channels + ci)
+                                * length as usize
+                                + at as usize;
+                            let weight_index =
+                                (co * in_channels + ci) * kernel as usize + tap as usize;
+                            total += signal[signal_index] * weight[weight_index];
+                        }
+                    }
+                    out.push(total);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn conv1d_output_shape_follows_the_onnx_rule() {
+        assert_eq!(
+            conv1d_output_shape((1, 80, 3000), (384, 80, 3), 1, 1, 1),
+            Some((1, 384, 3000))
+        );
+        assert_eq!(
+            conv1d_output_shape((1, 384, 3000), (384, 384, 3), 2, 1, 1),
+            Some((1, 384, 1500))
+        );
+        assert_eq!(
+            conv1d_output_shape((1, 1, 7), (1, 1, 3), 1, 0, 2),
+            Some((1, 1, 3))
+        );
+        assert_eq!(conv1d_output_shape((1, 1, 2), (1, 1, 3), 1, 0, 1), None);
+        assert_eq!(conv1d_output_shape((1, 2, 4), (1, 3, 2), 1, 0, 1), None);
+    }
+
+    #[test]
+    fn conv1d_forward_matches_brute_force_across_stride_padding_and_dilation() {
+        let cases: [(u64, u64, u64); 5] = [(1, 0, 1), (1, 1, 1), (2, 1, 1), (1, 2, 2), (3, 2, 2)];
+        for (stride, padding, dilation) in cases {
+            let shape: SignalShape = (2, 2, 9);
+            let weight_shape: Kernel1dShape = (3, 2, 3);
+            let signal_values = pseudo_random(0xA5A5_1234, 2 * 2 * 9);
+            let weight_values = pseudo_random(0x1357_9BDF, 3 * 2 * 3);
+            let bias_values = [0.25f32, -0.5, 0.75];
+            let mut program = Vec::new();
+            let signal = leaf(&mut program, "signal", static_extents(&[2, 2, 9]));
+            let weight = leaf(&mut program, "weight", static_extents(&[3, 2, 3]));
+            let bias = leaf(&mut program, "bias", static_extents(&[3]));
+            let out = conv1d(
+                &mut program,
+                DType::FLOAT32,
+                signal,
+                shape,
+                weight,
+                weight_shape,
+                Some(bias),
+                stride,
+                padding,
+                dilation,
+            )
+            .expect("kernel fits");
+            let evaluated = proxima_tensor::cpu::evaluate_named(
+                &program,
+                &[],
+                &[
+                    ("signal", &signal_values),
+                    ("weight", &weight_values),
+                    ("bias", &bias_values),
+                ],
+                &[out],
+            )
+            .expect("conv1d program evaluates");
+            let (got, _) = evaluated.get(out).expect("output requested");
+            let mut want = brute_force_conv1d(
+                &signal_values,
+                shape,
+                &weight_values,
+                weight_shape,
+                stride,
+                padding,
+                dilation,
+            );
+            let out_length = want.len() / (2 * 3);
+            for (index, value) in want.iter_mut().enumerate() {
+                *value += bias_values[(index / out_length) % 3];
+            }
+            assert_eq!(
+                got.len(),
+                want.len(),
+                "stride {stride} pad {padding} dil {dilation}"
+            );
+            for (index, (&have, &expect)) in got.iter().zip(&want).enumerate() {
+                assert!(
+                    (have - expect).abs() < 1e-4,
+                    "stride {stride} pad {padding} dil {dilation} element {index}: {have} vs {expect}"
+                );
+            }
+        }
+    }
+
+    fn static_extents(dims: &[u32]) -> Vec<Extent> {
+        dims.iter().map(|&dim| Extent::Static(dim)).collect()
+    }
+
+    /// `sum(out * out)` over a rank-`rank` result: the spec's gradient-check
+    /// loss, `|f| <= 10 * max|g|` by construction on small shapes.
+    fn sum_of_squares(program: &mut Vec<Op>, out: NodeId, rank: u16) -> NodeId {
+        let squared = crate::expr::binary(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Multiply,
+            (out, crate::expr::identity(rank)),
+            (out, crate::expr::identity(rank)),
+        );
+        crate::expr::reduce(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            squared,
+            crate::expr::identity(rank),
+            crate::expr::broadcast(rank),
+        )
+    }
+
+    /// Central-difference check on every element of every named input, the
+    /// spec's metric `max|g_ad - g_fd| / max|g_fd|` per input at `h = 5e-3`
+    /// (SPEC "Gradient tolerance (R10)", DERIVED ceiling 5e-4). Returns the
+    /// `(name, elements compared, error)` rows.
+    fn central_difference_errors(
+        program: &[Op],
+        loss: NodeId,
+        inputs: &[(&str, Vec<f32>)],
+    ) -> Vec<(String, usize, f32)> {
+        const STEP: f32 = 5e-3;
+        let differentiated =
+            crate::adjoint::differentiate(program, loss).expect("conv1d program differentiates");
+        let borrowed = |values: &[(&str, Vec<f32>)]| -> Vec<(String, Vec<f32>)> {
+            values
+                .iter()
+                .map(|(name, v)| ((*name).into(), v.clone()))
+                .collect()
+        };
+        let loss_at = |values: &[(&str, Vec<f32>)]| {
+            let owned = borrowed(values);
+            let refs: Vec<(&str, &[f32])> = owned
+                .iter()
+                .map(|(name, v)| (name.as_str(), v.as_slice()))
+                .collect();
+            proxima_tensor::cpu::evaluate_named(program, &[], &refs, &[loss])
+                .expect("forward evaluates")
+                .get(loss)
+                .expect("loss requested")
+                .0[0]
+        };
+        let mut rows = Vec::new();
+        for (slot, (name, values)) in inputs.iter().enumerate() {
+            let grad = differentiated
+                .gradient_of_named(name)
+                .unwrap_or_else(|| panic!("{name} feeds the loss and has a gradient"));
+            let owned = borrowed(inputs);
+            let refs: Vec<(&str, &[f32])> = owned
+                .iter()
+                .map(|(label, v)| (label.as_str(), v.as_slice()))
+                .collect();
+            let evaluated =
+                proxima_tensor::cpu::evaluate_named(&differentiated.program, &[], &refs, &[grad])
+                    .expect("adjoint evaluates");
+            let analytic = evaluated.get(grad).expect("gradient requested").0.to_vec();
+            assert_eq!(analytic.len(), values.len(), "{name} gradient size");
+            let mut probe: Vec<(&str, Vec<f32>)> = inputs.to_vec();
+            let (mut worst_difference, mut largest) = (0.0f32, 0.0f32);
+            for index in 0..values.len() {
+                probe[slot].1[index] = values[index] + STEP;
+                let plus = loss_at(&probe);
+                probe[slot].1[index] = values[index] - STEP;
+                let minus = loss_at(&probe);
+                probe[slot].1[index] = values[index];
+                let numeric = (plus - minus) / (2.0 * STEP);
+                worst_difference = worst_difference.max((analytic[index] - numeric).abs());
+                largest = largest.max(numeric.abs());
+            }
+            assert!(
+                largest > 0.0,
+                "{name}: central-difference gradient is identically zero"
+            );
+            rows.push(((*name).into(), values.len(), worst_difference / largest));
+        }
+        rows
+    }
+
+    fn assert_within_spec_bound(label: &str, rows: &[(String, usize, f32)]) {
+        for (name, count, error) in rows {
+            std::eprintln!("{label} wrt={name} n={count} max|g_ad-g_fd|/max|g_fd|={error:e}");
+            assert!(*count > 0, "{label} {name}: compared zero elements");
+            assert!(
+                *error <= 5e-4,
+                "{label} {name}: error {error} exceeds the derived 5e-4"
+            );
+        }
+    }
+
+    #[proxima::test]
+    async fn conv1d_gradient_matches_central_difference_stride_1() {
+        let mut program = Vec::new();
+        let signal = leaf(&mut program, "signal", static_extents(&[1, 2, 7]));
+        let weight = leaf(&mut program, "weight", static_extents(&[3, 2, 3]));
+        let bias = leaf(&mut program, "bias", static_extents(&[3]));
+        let out = conv1d(
+            &mut program,
+            DType::FLOAT32,
+            signal,
+            (1, 2, 7),
+            weight,
+            (3, 2, 3),
+            Some(bias),
+            1,
+            1,
+            1,
+        )
+        .expect("kernel fits");
+        let loss = sum_of_squares(&mut program, out, 3);
+        let inputs = [
+            ("signal", pseudo_random(0x9E37_79B9, 14)),
+            ("weight", pseudo_random(0x8542_D2C3, 18)),
+            ("bias", vec![0.1f32, -0.2, 0.3]),
+        ];
+        let rows = central_difference_errors(&program, loss, &inputs);
+        assert_eq!(rows.len(), 3);
+        assert_within_spec_bound("conv1d stride 1", &rows);
+    }
+
+    /// Whisper's conv stack shape: a stride-1 padded layer feeds a stride-2
+    /// layer, so the second layer's input is the first layer's output and the
+    /// gradient must keep flowing into `weight1` through the mask-composed
+    /// window (a gather window would stop there).
+    #[proxima::test]
+    async fn conv1d_gradient_matches_central_difference_stride_2_stacked() {
+        let mut program = Vec::new();
+        let signal = leaf(&mut program, "signal", static_extents(&[1, 2, 8]));
+        let weight1 = leaf(&mut program, "weight1", static_extents(&[3, 2, 3]));
+        let bias1 = leaf(&mut program, "bias1", static_extents(&[3]));
+        let weight2 = leaf(&mut program, "weight2", static_extents(&[2, 3, 3]));
+        let bias2 = leaf(&mut program, "bias2", static_extents(&[2]));
+        let hidden = conv1d(
+            &mut program,
+            DType::FLOAT32,
+            signal,
+            (1, 2, 8),
+            weight1,
+            (3, 2, 3),
+            Some(bias1),
+            1,
+            1,
+            1,
+        )
+        .expect("first layer fits");
+        let out = conv1d(
+            &mut program,
+            DType::FLOAT32,
+            hidden,
+            (1, 3, 8),
+            weight2,
+            (2, 3, 3),
+            Some(bias2),
+            2,
+            1,
+            1,
+        )
+        .expect("second layer fits");
+        let loss = sum_of_squares(&mut program, out, 3);
+        let inputs = [
+            ("signal", pseudo_random(0x1111_2222, 16)),
+            ("weight1", pseudo_random(0x3333_4444, 18)),
+            ("bias1", vec![0.05f32, -0.1, 0.15]),
+            ("weight2", pseudo_random(0x5555_6666, 18)),
+            ("bias2", vec![-0.2f32, 0.25]),
+        ];
+        let rows = central_difference_errors(&program, loss, &inputs);
+        assert_eq!(rows.len(), 5);
+        assert_within_spec_bound("conv1d stride 2 stacked", &rows);
+    }
+
+    #[proxima::test]
+    async fn conv1d_padded_dilated_gradient_agrees_with_central_difference() {
+        let mut program = Vec::new();
+        let signal = leaf(&mut program, "signal", static_extents(&[1, 2, 9]));
+        let weight = leaf(&mut program, "weight", static_extents(&[2, 2, 3]));
+        let out = conv1d(
+            &mut program,
+            DType::FLOAT32,
+            signal,
+            (1, 2, 9),
+            weight,
+            (2, 2, 3),
+            None,
+            2,
+            2,
+            2,
+        )
+        .expect("kernel fits");
+        let loss = sum_of_squares(&mut program, out, 3);
+        let inputs = [
+            ("signal", pseudo_random(0x7777_8888, 18)),
+            ("weight", pseudo_random(0x9999_AAAA, 12)),
+        ];
+        let rows = central_difference_errors(&program, loss, &inputs);
+        assert_within_spec_bound("conv1d padded dilated", &rows);
     }
 }
