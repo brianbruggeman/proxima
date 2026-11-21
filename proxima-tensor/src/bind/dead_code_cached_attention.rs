@@ -1659,9 +1659,12 @@ pub(super) fn cached_attention_candidates(
                 );
                 continue;
             }
+            // the kernel addresses a row by the group stride alone, so a value shared across groups reads
+            // kv head 0 for every head: exact for one kv head only (`softmax_weights_axes`)
             softmax_weights_eligible = via_gemma_template
                 && !split_decode_admitted
                 && softmax_weights_scale_unity
+                && query_shape.get(1) == Some(&1)
                 && executes.forms.contains(Form::CachedSoftmaxWeights);
         }
         let Some(rotary_width) = query_shape[3].checked_mul(2) else {
