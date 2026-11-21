@@ -1588,6 +1588,8 @@ pub fn refit_cuda_symbols(
 pub fn cuda_refit_counters(plan: &Plan) -> Option<[u64; 5]> {
     match plan {
         Plan::Cuda(cuda_plan) => Some(cuda_plan.refit_counters()),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => None,
         // only reachable while a variant this arm is not naming exists
         #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cpu", feature = "wgpu-backend"))]
         _ => None,
@@ -1603,6 +1605,8 @@ pub fn cuda_refit_counters(plan: &Plan) -> Option<[u64; 5]> {
 pub fn cuda_replace_kernel_source(plan: &mut Plan, position: usize, source: String) -> bool {
     match plan {
         Plan::Cuda(cuda_plan) => cuda_plan.replace_kernel_source(position, source),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => false,
         // only reachable while a variant this arm is not naming exists
         #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cpu", feature = "wgpu-backend"))]
         _ => false,
@@ -1614,6 +1618,8 @@ pub fn cuda_replace_kernel_source(plan: &mut Plan, position: usize, source: Stri
 pub fn cuda_kernel_launches(plan: &Plan) -> Option<Vec<String>> {
     match plan {
         Plan::Cuda(cuda_plan) => Some(cuda_plan.kernel_launches()),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => None,
         // only reachable while a variant this arm is not naming exists
         #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cpu", feature = "wgpu-backend"))]
         _ => None,
@@ -1625,6 +1631,8 @@ pub fn cuda_kernel_launches(plan: &Plan) -> Option<Vec<String>> {
 pub fn cuda_kernel_identities(plan: &Plan) -> Option<Vec<String>> {
     match plan {
         Plan::Cuda(cuda_plan) => Some(cuda_plan.kernel_identities()),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => None,
         // only reachable while a variant this arm is not naming exists
         #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cpu", feature = "wgpu-backend"))]
         _ => None,
@@ -2254,6 +2262,8 @@ pub fn carry_cuda_rows(plan: &mut Plan, pairs: &[(NodeId, NodeId)], cached_rows:
 pub fn drain_cuda_appended_rows(plan: &mut Plan) -> Result<Vec<(NodeId, Vec<f32>)>, BackendError> {
     match plan {
         Plan::Cuda(cuda_plan) => Ok(cuda_plan.drain_appended_rows()?),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => Ok(Vec::new()),
         // only reachable while a variant this arm is not naming exists
         #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cpu", feature = "wgpu-backend"))]
         _ => Ok(Vec::new()),
@@ -2269,6 +2279,8 @@ pub fn drain_cuda_appended_rows(plan: &mut Plan) -> Result<Vec<(NodeId, Vec<f32>
 pub fn accept_cuda_rows(plan: &mut Plan, kept: u64) -> Result<(), BackendError> {
     match plan {
         Plan::Cuda(cuda_plan) => cuda_plan.accept_rows(kept)?,
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => {}
         // only reachable while a variant this arm is not naming exists
         #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cpu", feature = "wgpu-backend"))]
         _ => {}
@@ -2282,6 +2294,8 @@ pub fn accept_cuda_rows(plan: &mut Plan, kept: u64) -> Result<(), BackendError> 
 pub fn park_cuda_carried(plan: &mut Plan) {
     match plan {
         Plan::Cuda(cuda_plan) => cuda_plan.park_carried(),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(_) => {}
         // only reachable while a variant this arm is not naming exists
         #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cpu", feature = "wgpu-backend"))]
         _ => {}
