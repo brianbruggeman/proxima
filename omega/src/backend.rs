@@ -619,9 +619,16 @@ fn prefer_candidate<T: PartialEq>(candidates: &mut Vec<T>, preferred: &T) {
 /// live in the `const fn`).
 #[cfg(feature = "cuda-driver")]
 fn auto_hip_driver(config: &RuntimeConfig) -> Option<GpuDriver> {
-    crate::cuda_driver::rocm::HipApi::is_available().then(|| GpuDriver::Hip {
-        wave: crate::cuda::HipWave::from_lanes(u64::from(config.hip_wave)),
-    })
+    crate::cuda_driver::rocm::HipApi::is_available().then(|| hip_driver(config))
+}
+
+/// The one place `RuntimeConfig::hip_wave` becomes a driver value; planning
+/// reads the wave from the driver, never from the config a second time.
+#[cfg(feature = "cuda-driver")]
+fn hip_driver(config: &RuntimeConfig) -> GpuDriver {
+    GpuDriver::Hip {
+        wave: crate::cuda_driver::rocm::hip_wave_of(config),
+    }
 }
 
 #[cfg(not(feature = "cuda-driver"))]
@@ -659,9 +666,7 @@ fn configured_driver(
         "hip" | "rocm" => {
             #[cfg(feature = "cuda-driver")]
             {
-                Ok(Some(GpuDriver::Hip {
-                    wave: crate::cuda::HipWave::from_lanes(u64::from(config.hip_wave)),
-                }))
+                Ok(Some(hip_driver(config)))
             }
             #[cfg(not(feature = "cuda-driver"))]
             {
@@ -860,8 +865,8 @@ fn plan_configured_gpu(
                 .map_err(map_cuda_configuration_error)?,
         ))),
         #[cfg(feature = "cuda-driver")]
-        GpuDriver::Hip { .. } => Ok(Plan::Rocm(Box::new(
-            crate::cuda_driver::rocm::RocmPlan::plan(config, program, symbols, named, outputs)?,
+        GpuDriver::Hip { wave } => Ok(Plan::Rocm(Box::new(
+            crate::cuda_driver::rocm::RocmPlan::plan(config, wave, program, symbols, named, outputs)?,
         ))),
     }
 }
@@ -2110,11 +2115,10 @@ fn plan_named_hip(
 ) -> Result<Plan, BackendError> {
     let config = RuntimeConfig {
         numeric: numeric_policy,
-        hip_wave: wave.map_or(0, |value| value.lanes() as u32),
         ..RuntimeConfig::default()
     };
     Ok(Plan::Rocm(Box::new(crate::cuda_driver::rocm::RocmPlan::plan(
-        &config, program, symbols, named, outputs,
+        &config, wave, program, symbols, named, outputs,
     )?)))
 }
 

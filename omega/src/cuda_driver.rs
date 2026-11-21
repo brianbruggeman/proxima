@@ -117,6 +117,12 @@ pub enum CudaDriverError {
     ActivationStorage(#[from] Box<ActivationRefusal>),
 }
 
+impl From<rocm::HipDriverError> for CudaDriverError {
+    fn from(error: rocm::HipDriverError) -> Self {
+        Self::Driver(error.to_string())
+    }
+}
+
 impl From<StateCarryError<NodeId>> for CudaDriverError {
     fn from(error: StateCarryError<NodeId>) -> Self {
         Self::KvCarry(error.to_string())
@@ -5150,6 +5156,53 @@ pub mod rocm {
         }
     }
 
+    /// A compiled kernel: the loaded code object and the entry point resolved from
+    /// it. The function handle is only valid while `module` is alive, which this
+    /// pairing guarantees.
+    pub struct CompiledKernel {
+        module: HipModule,
+        function: *mut c_void,
+    }
+
+    impl core::fmt::Debug for CompiledKernel {
+        fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            formatter.write_str("CompiledKernel")
+        }
+    }
+
+    // SAFETY: a HIP code object and its function handle are process-wide runtime
+    // state, usable from any thread that has selected the owning device.
+    unsafe impl Send for CompiledKernel {}
+
+    impl CompiledKernel {
+        /// The loaded code object the entry point belongs to.
+        #[must_use]
+        pub fn module(&self) -> &HipModule {
+            &self.module
+        }
+    }
+
+    /// Fills `slot` with `build()` on first use and counts each build in
+    /// `compiles`, so a kernel launched repeatedly compiles once.
+    ///
+    /// # Errors
+    /// Whatever `build` returns; a failed build leaves the slot empty.
+    fn cached<'slot, T, E>(
+        slot: &'slot mut Option<T>,
+        compiles: &mut u64,
+        build: impl FnOnce() -> Result<T, E>,
+    ) -> Result<&'slot T, E> {
+        let value = match slot.take() {
+            Some(value) => value,
+            None => {
+                let built = build()?;
+                *compiles += 1;
+                built
+            }
+        };
+        Ok(slot.insert(value))
+    }
+
     /// One ROCm device, resolved through the runtime API.
     #[derive(Debug)]
     pub struct HipDevice {
@@ -5432,12 +5485,40 @@ pub mod rocm {
             if kernel.bindings.len() != inputs.len() + 2 {
                 return Err(HipDriverError::ArgumentCountMismatch);
             }
+            let compiled = self.compile_kernel(kernel)?;
+            self.launch_compiled(kernel, &compiled, inputs, uniforms)
+        }
+
+        /// Compiles `kernel`'s source and resolves its entry point, so a caller that
+        /// launches the same kernel repeatedly pays for hipRTC once.
+        ///
+        /// # Errors
+        /// [`HipDriverError::CompileLog`], [`HipDriverError::Rtc`] or [`HipDriverError::Runtime`].
+        pub fn compile_kernel(&self, kernel: &HipKernel) -> Result<CompiledKernel, HipDriverError> {
+            let module = self.compile(&kernel.source, &[])?;
+            let function = module.function(&kernel.entry)?;
+            Ok(CompiledKernel { module, function })
+        }
+
+        /// Launches an already compiled `kernel` over `inputs`; see [`HipDevice::launch_f32`].
+        ///
+        /// # Errors
+        /// As [`HipDevice::launch_f32`], minus the compile errors.
+        pub fn launch_compiled(
+            &self,
+            kernel: &HipKernel,
+            compiled: &CompiledKernel,
+            inputs: &[&[f32]],
+            uniforms: &[u8],
+        ) -> Result<Vec<f32>, HipDriverError> {
+            check_binding_contract(kernel, inputs.len())?;
+            if kernel.bindings.len() != inputs.len() + 2 {
+                return Err(HipDriverError::ArgumentCountMismatch);
+            }
             let output_len = usize::try_from(kernel.grid.threads)
                 .map_err(|_| HipDriverError::InputTooLarge(usize::MAX))?;
             let (blocks, block_width) = launch_geometry(kernel)?;
-
-            let module = self.compile(&kernel.source, &[])?;
-            let function = module.function(&kernel.entry)?;
+            let function = compiled.function;
 
             let device_inputs = inputs
                 .iter()
@@ -5604,14 +5685,26 @@ pub mod rocm {
         }
     }
 
+    /// The wave `RuntimeConfig::hip_wave` selects: `None` for 0, which means the
+    /// device reports it. The one place the config value becomes a [`HipWave`].
+    #[must_use]
+    pub fn hip_wave_of(config: &RuntimeConfig) -> Option<HipWave> {
+        HipWave::from_lanes(u64::from(config.hip_wave))
+    }
+
     /// The wavefront width a plan is emitted for: the configured override when
     /// it is non-zero, otherwise what the device reports.
     ///
     /// # Errors
     /// [`HipDriverError::UnsupportedWaveWidth`] for a width other than 32 or 64.
-    pub fn resolve_wave(configured: u32, device: &HipDevice) -> Result<HipWave, HipDriverError> {
-        let lanes = if configured == 0 { device.warp_size()? } else { configured };
-        HipWave::from_lanes(u64::from(lanes)).ok_or(HipDriverError::UnsupportedWaveWidth(lanes))
+    pub fn resolve_wave(configured: Option<HipWave>, device: &HipDevice) -> Result<HipWave, HipDriverError> {
+        match configured {
+            Some(wave) => Ok(wave),
+            None => {
+                let lanes = device.warp_size()?;
+                HipWave::from_lanes(u64::from(lanes)).ok_or(HipDriverError::UnsupportedWaveWidth(lanes))
+            }
+        }
     }
 
     /// A planned HIP graph: every op bound and emitted through the shared card-C
@@ -5630,6 +5723,8 @@ pub mod rocm {
         kernels: Vec<HipKernel>,
         uniforms: Vec<Vec<u8>>,
         outputs: Vec<NodeId>,
+        compiled: BTreeMap<String, Option<CompiledKernel>>,
+        compilations: u64,
     }
 
     impl RocmPlan {
@@ -5640,13 +5735,14 @@ pub mod rocm {
         /// without ROCm, and the typed refusals documented on [`HipDriverError`].
         pub fn plan(
             config: &RuntimeConfig,
+            wave: Option<HipWave>,
             program: &[Op],
             symbols: &[u64],
             named: &[(&str, QuantizedBlock<'_>)],
             outputs: &[NodeId],
         ) -> Result<Self, HipDriverError> {
             let device = HipDevice::open(0)?;
-            let wave = resolve_wave(config.hip_wave, &device)?;
+            let wave = resolve_wave(wave, &device)?;
             let blocks = resolve_named_blocks(program, named)
                 .map_err(|_| HipDriverError::UnsupportedGraph { reason: "named input resolution failed" })?;
             if blocks.iter().any(|block| !matches!(block, QuantizedBlock::Float32(_))) {
@@ -5688,6 +5784,8 @@ pub mod rocm {
                 kernels,
                 uniforms,
                 outputs,
+                compiled: BTreeMap::new(),
+                compilations: 0,
             })
         }
 
@@ -5703,6 +5801,12 @@ pub mod rocm {
             self.wave
         }
 
+        /// How many hipRTC compiles this plan has run: one per distinct kernel entry.
+        #[must_use]
+        pub fn compilations(&self) -> u64 {
+            self.compilations
+        }
+
         /// The emitted kernels in launch order.
         #[must_use]
         pub fn kernels(&self) -> &[HipKernel] {
@@ -5714,7 +5818,7 @@ pub mod rocm {
         /// # Errors
         /// [`HipDriverError::UnsupportedGraph`] for inputs that are not float32 or
         /// kernels with prologues or extra outputs, and any [`HipDevice::launch_f32`] error.
-        pub fn execute_named(&self, named: &[(&str, QuantizedBlock<'_>)]) -> Result<Evaluated, HipDriverError> {
+        pub fn execute_named(&mut self, named: &[(&str, QuantizedBlock<'_>)]) -> Result<Evaluated, HipDriverError> {
             let blocks = resolve_named_blocks(&self.program, named)
                 .map_err(|_| HipDriverError::UnsupportedGraph { reason: "named input resolution failed" })?;
             let mut buffers: BTreeMap<NodeId, Vec<f32>> = BTreeMap::new();
@@ -5736,7 +5840,9 @@ pub mod rocm {
                         _ => None,
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let output = self.device.launch_f32(kernel, &inputs, uniforms)?;
+                let slot = self.compiled.entry(kernel.entry.clone()).or_default();
+                let compiled = cached(slot, &mut self.compilations, || self.device.compile_kernel(kernel))?;
+                let output = self.device.launch_compiled(kernel, compiled, &inputs, uniforms)?;
                 let target = kernel
                     .bindings
                     .iter()
@@ -5791,6 +5897,22 @@ pub mod rocm {
                 vec![String::from("hiprtc0602.dll"), String::from("hiprtc.dll")]
             );
             assert_eq!(hiprtc_windows_candidates(0), vec![String::from("hiprtc.dll")]);
+        }
+
+        #[test]
+        fn a_kernel_launched_repeatedly_compiles_once_and_a_failed_compile_is_retried() {
+            let mut slot: Option<u32> = None;
+            let mut compiles = 0_u64;
+
+            let failed: Result<&u32, &str> = cached(&mut slot, &mut compiles, || Err("hiprtc rejected the source"));
+            assert!(failed.is_err());
+            assert_eq!(compiles, 0, "a failed compile is not counted and leaves the slot empty");
+
+            for _ in 0..3 {
+                let value: Result<&u32, &str> = cached(&mut slot, &mut compiles, || Ok(7));
+                assert_eq!(value, Ok(&7));
+            }
+            assert_eq!(compiles, 1, "three launches share one compile");
         }
 
         #[test]
