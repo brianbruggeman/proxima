@@ -42,13 +42,13 @@ use crate::recording::{AccumulatingSink, DynRecordingSink, LazyFanOut, deferred_
 use crate::recording::{BinSourceFactory, JsonlSourceFactory};
 use crate::request::{Request, Response};
 #[cfg(feature = "tokio")]
+use crate::scenarios::cel::Program;
+#[cfg(feature = "tokio")]
 use crate::scenarios::cel::compile_expression;
 use crate::schema::SchemaRegistry;
 #[cfg(feature = "http1")]
 use crate::shared_http::SharedHttpClient;
 use crate::telemetry::{Metrics, NoopTelemetry, TelemetryHandle};
-#[cfg(feature = "tokio")]
-use crate::scenarios::cel::Program;
 
 /// The shared hyper client pool, when the `http1` feature (hyper-backed)
 /// is built; a zero-sized placeholder otherwise. `LoadContext::http_client`
