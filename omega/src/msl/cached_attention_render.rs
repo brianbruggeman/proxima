@@ -1096,7 +1096,7 @@ pub fn cached_attention_row_tiled_kv_codec_for(format: &Codec) -> Result<Option<
 /// The codec the cached-attention emitter reads a K/V cache stored as `format` with: `Ok(None)`
 /// when `format` is the plain buffer every kernel form reads (the graph's own f32 output lands in
 /// it directly), `Ok(Some(codec))` for a narrow cache the step must be narrowed into, and the
-/// emitter's own error for a format no kernel form reads. This asks [`cached_attention_kv_codec`],
+/// emitter's own error for a format no kernel form reads. This asks `cached_attention_kv_codec`,
 /// the classifier the emit path runs, so a caller never keeps a second list of readable formats.
 ///
 /// # Errors

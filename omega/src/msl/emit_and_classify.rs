@@ -71,7 +71,7 @@ pub(crate) fn ambient_knobs() -> EmitKnobs {
     EmitKnobs::default()
 }
 
-/// Emits `resolved` under the process-ambient knobs ([`ambient_knobs`]). Compose
+/// Emits `resolved` under the process-ambient knobs (`ambient_knobs`). Compose
 /// [`emit_with_knobs`] instead when two configurations must coexist in one process.
 pub fn emit(
     resolved: &BoundOp,
@@ -757,11 +757,11 @@ pub fn emit_with_uniform_expert_source(
 }
 
 /// The launch grid [`emit_with_expert_sources`] / [`emit_with_uniform_expert_source`] render for `resolved`, without rendering.
-/// It differs from [`kernel_dispatch_shape`]'s grid (the ordinary kernel's, `expert_source_mode` false), and a cached expert
+/// It differs from `kernel_dispatch_shape`'s grid (the ordinary kernel's, `expert_source_mode` false), and a cached expert
 /// kernel's own grid belongs to the call that rendered it, so a cache-hit launch takes this one for its own row count.
 ///
 /// # Errors
-/// [`validate`]'s structural rejection and [`grid_threads`]' unlaunchable grid.
+/// `validate`'s structural rejection and `grid_threads`' unlaunchable grid.
 pub fn expert_source_grid(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,

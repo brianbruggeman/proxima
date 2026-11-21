@@ -1778,7 +1778,7 @@ pub(super) fn checkpoint_mapping_offset(
 pub(super) const MAPPING_VIEW_OFFSET_ALIGNMENT: usize = 8;
 
 /// Counts tensors inside a registered mapping that took the copy path
-/// because their offset broke [`MAPPING_VIEW_OFFSET_ALIGNMENT`].
+/// because their offset broke `MAPPING_VIEW_OFFSET_ALIGNMENT`.
 pub static MISALIGNED_MAPPING_OFFSET_COPIES: Counter =
     Counter::new("omega.metal.upload_block.misaligned_mapping_offset_copy");
 

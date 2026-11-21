@@ -640,7 +640,7 @@ pub fn pipeline_static_threadgroup_memory(key: &str) -> Option<usize> {
 }
 
 /// How many distinct pipelines the shared [`MetalDevice`] has compiled -- the
-/// always-on counterpart of the instrument-gated [`pipeline_cache_keys`].
+/// always-on counterpart of the instrument-gated `pipeline_cache_keys`.
 #[must_use]
 pub fn pipeline_cache_len() -> usize {
     MetalDevice::current().map_or(0, |device| device.pipeline_count())
@@ -2040,15 +2040,15 @@ impl Plan {
         );
     }
 
-    /// Drops the [`Self::device_buffers`] entries a finished call left behind
-    /// for every node that is not [`Self::resident_nodes`]: a caller-placed
+    /// Drops the `device_buffers` entries a finished call left behind
+    /// for every node that is not `resident_nodes`: a caller-placed
     /// buffer's clone keeps the caller's allocation alive until the plan's next
     /// call overwrites it, which pins a freed KV or staging buffer for as long
     /// as the plan is kept resident. Every call writes a fresh entry for each
     /// non-resident node before reading it (`execute_plan_with_placements`), so
     /// nothing reads what this removes.
     ///
-    /// Also drops [`Self::chunk_status_buffers`] and its parallel
+    /// Also drops `chunk_status_buffers` and its parallel
     /// diagnostics: a finished call's command buffers are already
     /// `Completed` (`check_all_command_buffers` read their status before the
     /// call returned) and each call clears both before encoding, but a
@@ -2596,7 +2596,7 @@ impl Plan {
 
     /// Moves this plan's transient slot onto the pool's live buffer when that buffer is a
     /// different one that holds the slot, and frees the plan's own. A plan built before a larger
-    /// one keeps the smaller buffer the pool has since replaced ([`TransientPool::lease_outcome`]);
+    /// one keeps the smaller buffer the pool has since replaced (`TransientPool::lease_outcome`);
     /// calling this once all plans are built leaves them one allocation, the largest. `&mut self`
     /// means no execute is in flight, and the slot is looked up per execute, so no cached binding
     /// names the old buffer. Returns whether the plan moved. Call with the serving context active:

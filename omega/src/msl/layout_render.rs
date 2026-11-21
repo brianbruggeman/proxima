@@ -81,7 +81,7 @@ pub fn hardware_type(layout: &FloatLayout) -> Option<&'static str> {
 /// The dtype a kernel can write one element of a `format` cache row as, at the cache's own width,
 /// or `None` when it cannot. A scalar layout equal field by field to the Metal `half` is stored
 /// and computed at 16 bits; every other scalar layout (`bfloat` included) is computed in `float`
-/// ([`device_scalar_token`](super::signature_tokens_prelude::device_scalar_token)), so its device
+/// (`device_scalar_token`), so its device
 /// element is wider than its stored element and a row of it needs a host narrowing. A block or
 /// level format has no scalar element at all.
 ///
@@ -919,7 +919,7 @@ pub fn level_run_decode_msl(
 
 /// The variant of [`level_run_decode_msl`] that loads every in-block word as one `uint` with no
 /// alignment select, or `None` when the layout does not prove it: it requires a block size and
-/// every run's plane byte offset to be multiples of 4 ([`RunWords::word_aligned`]), so the only
+/// every run's plane byte offset to be multiples of 4 (`RunWords::word_aligned`), so the only
 /// remaining fact is that the block origin is word-aligned, which the caller selects on at run time
 /// (one uniform per kernel) and which a misaligned binding never satisfies. The decision reads the
 /// layout description alone, never a format name.

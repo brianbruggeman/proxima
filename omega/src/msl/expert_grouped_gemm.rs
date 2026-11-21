@@ -27,7 +27,7 @@ pub(super) const GROUPED_TILE_DEPTH: u64 = STAGED_K_STEP_ELEMENTS;
 /// configuration. The MSL type names, vector and `simdgroup` spellings and byte sizes all derive
 /// from these through [`layout_render::hardware_stage_type`]; a layout with no Metal type is a
 /// [`EmitError::RenderKindMismatch`], never a fallback. Composes `proxima_numeric::FloatLayout`;
-/// [`ActivationStaging`] is the activation tile's conversion from the device `float`.
+/// `ActivationStaging` is the activation tile's conversion from the device `float`.
 ///
 /// `Default` is llama b12110's `kernel_mul_mm_id` (`kernels/mul_mm.metal:561-562,615,716,729`): half
 /// weight tile and MMA A, half activation tile and MMA B (a round-to-nearest-even cast from the
