@@ -6674,7 +6674,7 @@ impl HipWave {
 ///     proxima_numeric::NumericPolicy::default(),
 /// )?;
 /// let packed_operands = omega::PackedOperands::new();
-/// let kernel = omega::emit_hip(&bound_ops[0], &packed_operands)?;
+/// let kernel = omega::cuda::emit_hip(&bound_ops[0], &packed_operands)?;
 /// assert!(kernel.source.contains("#include <hip/hip_fp16.h>"));
 /// assert!(kernel.source.contains("extern \"C\" __global__"));
 /// assert!(kernel.source.contains("tanhf("));
