@@ -31,6 +31,10 @@ pub struct Probe {
     pub key: String,
     pub role: String,
     pub pattern: Pattern,
+    /// `true` asks "in any layer", so a hybrid stack whose layers differ is not
+    /// a [`InferError::MixedProbe`]; `false` demands every layer or none.
+    #[serde(default)]
+    pub any: bool,
 }
 
 /// A dimension bound from one tensor's shape axis; `rank` pins the rank.
@@ -61,6 +65,11 @@ pub struct FamilyTemplate {
     pub stacks: Vec<Stack>,
     #[serde(default)]
     pub claims: Vec<String>,
+    /// Name prefixes of another family's tensors that ride in the same file
+    /// (a vision tower, a speculative head); claimed so the file is accepted,
+    /// and counted in the `companion_tensors` fact so they are not hidden.
+    #[serde(default)]
+    pub claim_prefixes: Vec<String>,
     #[serde(default)]
     pub probes: Vec<Probe>,
     #[serde(default)]

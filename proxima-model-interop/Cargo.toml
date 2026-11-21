@@ -16,6 +16,8 @@ default = []
 test-support = ["proxima-tensor/test-support", "proxima-gguf/test-support"]
 # the 250 mb codec saving only exists on the full checkpoint; minutes per run
 slow-tests = []
+# reads the GGUF headers of the host's local checkpoints (tests/local_checkpoints.rs); headers only
+host-checkpoints = ["std"]
 # joins the final routed gather to the logits suffix without crossing a router boundary.
 moe-linked-suffix = ["std"]
 # advisory one-layer-ahead mmap warming for the HOBBIT/DynaExq route
@@ -822,3 +824,8 @@ required-features = ["std", "test-support"]
 [[example]]
 name = "mlx_export_telemetry"
 required-features = ["std"]
+
+# the decoder-only profile inferred from each local checkpoint's header against today's profile
+[[test]]
+name = "local_checkpoints"
+required-features = ["std", "test-support", "host-checkpoints"]

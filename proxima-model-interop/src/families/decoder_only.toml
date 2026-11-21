@@ -1,0 +1,74 @@
+# family: a causal stack of attention + feed-forward blocks, named by structure.
+# A role is a tensor suffix per dialect; a dialect says how one checkpoint
+# format spells it. Slots are filled from tensor presence first and metadata
+# keys second; a fact no file states is reported unresolved, never guessed.
+name = "decoder_only"
+required_stages = ["logits"]
+# a causal stack with no attention projection in any layer is some other family
+requires = ["attn_q"]
+
+[dialects.gguf]
+layer = "blk.{L}."
+claims = [
+    "token_embd.weight",
+    "output_norm.weight",
+    "output.weight",
+    "rope_freqs.weight",
+    "token_embd_norm.weight",
+    "per_layer_token_embd.weight",
+    "per_layer_model_proj.weight",
+    "per_layer_proj_norm.weight",
+]
+# a vision tower, a projector and a multi-token-prediction head are other
+# families' weights in the same file; counted as companion_tensors, not read
+claim_prefixes = ["v.", "mm.", "mtp."]
+
+[dialects.gguf.roles]
+attn_q = "attn_q.weight"
+qk_norm = "attn_q_norm.weight"
+post_attention_norm = "post_attention_norm.weight"
+output_scale = "layer_output_scale.weight"
+router = "ffn_gate_inp.weight"
+router_scale = "ffn_gate_inp.scale"
+expert_output_scale = "ffn_down_exps.scale"
+expert_bias = "exp_probs_b.bias"
+post_ffw_norm = "post_ffw_norm.weight"
+post_ffw_norm_1 = "post_ffw_norm_1.weight"
+post_ffw_norm_2 = "post_ffw_norm_2.weight"
+pre_ffw_norm_2 = "pre_ffw_norm_2.weight"
+shexp_gate = "ffn_gate_shexp.weight"
+shexp_up = "ffn_up_shexp.weight"
+shexp_down = "ffn_down_shexp.weight"
+shexp_router = "ffn_gate_inp_shexp.weight"
+ssm_state = "ssm_a"
+
+# metadata keys, spelled without the `{arch}.` prefix the loader strips
+[dialects.gguf.metadata]
+embedding_scale = "embedding_scale"
+expert_gating_func = "expert_gating_func"
+sliding_window_pattern = "attention.sliding_window_pattern"
+full_attention_interval = "full_attention_interval"
+loop_count = "num_loops"
+ssm_v_head_reordered = "ssm.v_head_reordered"
+
+[dialects.hf]
+layer = "model.layers.{L}."
+claims = [
+    "model.embed_tokens.weight",
+    "model.norm.weight",
+    "lm_head.weight",
+]
+
+# only roles whose spelling names the same function in every checkpoint that
+# uses it; a role this dialect omits is unresolved, not absent
+[dialects.hf.roles]
+attn_q = "self_attn.q_proj.weight"
+qk_norm = "self_attn.q_norm.weight"
+shexp_gate = "mlp.shared_expert.gate_proj.weight"
+shexp_up = "mlp.shared_expert.up_proj.weight"
+shexp_down = "mlp.shared_expert.down_proj.weight"
+shexp_router = "mlp.shared_expert_gate.weight"
+expert_bias = "mlp.gate.e_score_correction_bias"
+
+[dialects.hf.metadata]
+activation = "hidden_act"

@@ -188,7 +188,13 @@ pub fn infer(
     let family = select(&shapes, templates)?;
     let mut facts = Facts::new();
     fill_stacks(family, &shapes, &mut facts)?;
-    check_claims(family, &shapes)?;
+    let companions = check_claims(family, &shapes)?;
+    if !family.claim_prefixes.is_empty() {
+        let source = Source::Stack {
+            pattern: family.claim_prefixes.join(","),
+        };
+        facts.insert("companion_tensors".to_string(), fact(Value::Int(companions), source));
+    }
     fill_probes(family, &shapes, &mut facts)?;
     fill_dims(family, &shapes, &mut facts)?;
     fill_knobs(family, config, &mut facts)?;
@@ -277,6 +283,7 @@ fn probe_state(template: &FamilyTemplate, probe: &Probe, shapes: &Shapes) -> Pro
         .count();
     match present {
         0 => ProbeState::None,
+        _ if probe.any => ProbeState::All,
         count if count == layers.len() => ProbeState::All,
         _ => ProbeState::Mixed,
     }
@@ -311,9 +318,18 @@ fn fact(value: Value, source: Source) -> Fact {
     Fact { value, source }
 }
 
-fn check_claims(template: &FamilyTemplate, shapes: &Shapes) -> Result<(), InferError> {
+/// The count of tensors only a `claim_prefixes` entry claims: another family's
+/// weights riding in the same file, counted so they are reported, not hidden.
+fn check_claims(template: &FamilyTemplate, shapes: &Shapes) -> Result<u64, InferError> {
+    let companion = |name: &str| {
+        template
+            .claim_prefixes
+            .iter()
+            .any(|prefix| name.starts_with(prefix.as_str()))
+    };
     let claimed = |name: &str| {
-        template.claims.iter().any(|claim| claim == name)
+        companion(name)
+            || template.claims.iter().any(|claim| claim == name)
             || template
                 .stacks
                 .iter()
@@ -325,7 +341,7 @@ fn check_claims(template: &FamilyTemplate, shapes: &Shapes) -> Result<(), InferE
         .map(ToString::to_string)
         .collect();
     match names.is_empty() {
-        true => Ok(()),
+        true => Ok(shapes.keys().filter(|name| companion(name)).count() as u64),
         false => Err(InferError::UnclaimedTensors {
             family: template.name.clone(),
             names,

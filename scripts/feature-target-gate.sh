@@ -94,6 +94,7 @@ matrix=(
     "proxima-tensor:std,gated-delta-net-fusion"
     "proxima-tensor:std,reduce-epilogue-fusion,identity-copy-alias,moe-stacked-combine,epilogue-profile-probe,kv-capacity-bucket"
     "proxima-model-interop:std,slow-tests"
+    "proxima-model-interop:std,host-checkpoints"
     "proxima-model-interop:std,metal,instrument,metal-attn-variants,metal-reduction-literal"
     "proxima-model-interop:std,metal,moe-expert-prefetch"
     "proxima-numeric:std"
