@@ -2248,4 +2248,192 @@ mod tests {
             "no runtime installed, nothing to ack"
         );
     }
+
+    use proxima_config::{ConfigFormatFactory, TomlConfigFormat};
+
+    fn reads_fixture(raw: &str) -> Value {
+        TomlConfigFormat.parse(raw).expect("fixture parses as toml")
+    }
+
+    async fn loaded_app(raw: &str) -> App {
+        let mut app = App::new().expect("app");
+        app.load_full(reads_fixture(raw)).await.expect("load_full");
+        app
+    }
+
+    async fn load_full_error(raw: &str) -> String {
+        let mut app = App::new().expect("app");
+        let outcome = app.load_full(reads_fixture(raw)).await;
+        outcome.err().expect("load_full errs").to_string()
+    }
+
+    async fn mount_router(raw: &str) -> Router {
+        let mut app = App::new().expect("app");
+        app.pipe("p", json!({"synth": {"status": 200, "body": "ok"}}))
+            .await
+            .expect("register p");
+        let value = reads_fixture(raw);
+        app.build_listener_router("http", &value["listen"][0])
+            .expect("router")
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_schema_absent() {
+        let app = loaded_app(include_str!(
+            "../tests/fixtures/config_formats/reads/schema_absent.toml"
+        ))
+        .await;
+        let baseline = App::new().expect("app").load_context.schemas.names();
+        assert_eq!(app.load_context.schemas.names(), baseline);
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_schema_typed() {
+        let app = loaded_app(include_str!(
+            "../tests/fixtures/config_formats/reads/schema_typed.toml"
+        ))
+        .await;
+        let baseline = App::new().expect("app").load_context.schemas.names();
+        let mut added = app.load_context.schemas.names();
+        added.retain(|name| !baseline.contains(name));
+        assert_eq!(added, vec!["s".to_string()]);
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_schema_wrong_typed() {
+        let text = load_full_error(include_str!(
+            "../tests/fixtures/config_formats/reads/schema_wrong_typed.toml"
+        ))
+        .await;
+        assert_eq!(text, "config: [[schema]] requires `name`");
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_pipe_absent() {
+        let app = loaded_app(include_str!(
+            "../tests/fixtures/config_formats/reads/pipe_absent.toml"
+        ))
+        .await;
+        assert!(app.pipes.is_empty());
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_pipe_typed() {
+        let app = loaded_app(include_str!(
+            "../tests/fixtures/config_formats/reads/pipe_typed.toml"
+        ))
+        .await;
+        assert_eq!(
+            app.pipes.keys().cloned().collect::<Vec<_>>(),
+            vec!["p".to_string()]
+        );
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_pipe_wrong_typed() {
+        let text = load_full_error(include_str!(
+            "../tests/fixtures/config_formats/reads/pipe_wrong_typed.toml"
+        ))
+        .await;
+        assert_eq!(text, "config: [[pipe]] requires `name`");
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_listen_typed() {
+        let mut app = App::new().expect("app");
+        let handles = app
+            .load_full(reads_fixture(include_str!(
+                "../tests/fixtures/config_formats/reads/listen_typed.toml"
+            )))
+            .await
+            .expect("load_full");
+        assert_eq!(handles.len(), 1);
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_mount_typed() {
+        let router = mount_router(include_str!(
+            "../tests/fixtures/config_formats/reads/mount_typed.toml"
+        ))
+        .await;
+        assert_eq!(router.mounts().len(), 1);
+        assert_eq!(router.mounts()[0].path.raw(), "/x");
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_methods_absent() {
+        let router = mount_router(include_str!(
+            "../tests/fixtures/config_formats/reads/methods_absent.toml"
+        ))
+        .await;
+        let methods = &router.mounts()[0].methods;
+        assert!(methods.matches(b"GET") && methods.matches(b"DELETE"));
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_methods_typed() {
+        let router = mount_router(include_str!(
+            "../tests/fixtures/config_formats/reads/methods_typed.toml"
+        ))
+        .await;
+        let methods = &router.mounts()[0].methods;
+        assert!(methods.matches(b"GET") && !methods.matches(b"DELETE"));
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_host_absent() {
+        let router = mount_router(include_str!(
+            "../tests/fixtures/config_formats/reads/host_absent.toml"
+        ))
+        .await;
+        let host = &router.mounts()[0].host;
+        assert!(host.matches(None) && host.matches(Some("b.example")));
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_host_typed() {
+        let router = mount_router(include_str!(
+            "../tests/fixtures/config_formats/reads/host_typed.toml"
+        ))
+        .await;
+        let host = &router.mounts()[0].host;
+        assert!(host.matches(Some("a.example")) && !host.matches(Some("b.example")));
+    }
+
+    fn chain_settings() -> crate::settings::ProximaSettings {
+        let mut settings = crate::settings::ProximaSettings::default();
+        settings.upstreams.insert(
+            "a".into(),
+            crate::settings::RegistryEntry {
+                r#type: "synth".into(),
+                spec: json!({"status": 200}),
+            },
+        );
+        settings
+    }
+
+    fn chain_entry(raw: &str) -> crate::settings::RegistryEntry {
+        crate::settings::RegistryEntry {
+            r#type: "pipe".into(),
+            spec: reads_fixture(raw),
+        }
+    }
+
+    #[test]
+    fn ctl_format_read_chain_absent() {
+        let entry = chain_entry(include_str!(
+            "../tests/fixtures/config_formats/reads/chain_absent.toml"
+        ));
+        let composed = compose_pipe_spec(&entry, &chain_settings()).expect("composed");
+        assert_eq!(composed, json!({"name": "c", "type": "pipe"}));
+    }
+
+    #[test]
+    fn ctl_format_read_chain_typed() {
+        let entry = chain_entry(include_str!(
+            "../tests/fixtures/config_formats/reads/chain_typed.toml"
+        ));
+        let composed = compose_pipe_spec(&entry, &chain_settings()).expect("composed");
+        assert_eq!(composed, json!({"status": 200, "type": "synth"}));
+    }
 }

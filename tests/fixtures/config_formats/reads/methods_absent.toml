@@ -1,0 +1,6 @@
+[[listen]]
+bind = "127.0.0.1:0"
+
+[[listen.mount]]
+path = "/x"
+pipe = "p"

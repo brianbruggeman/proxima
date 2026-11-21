@@ -1735,4 +1735,22 @@ mod tests {
             "configured_tool: typed value differs from expected.json"
         );
     }
+
+    #[test]
+    fn ctl_format_read_tools_typed() {
+        let value = proxima_config::TomlConfigFormat
+            .parse(include_str!(
+                "../../tests/fixtures/config_formats/reads/tools_typed.toml"
+            ))
+            .expect("tools_typed.toml parses");
+        let tools = configured_tools(&value).expect("tools read");
+        let wanted = ConfiguredTool {
+            name: "review_ticket".into(),
+            description: "review a ticket".into(),
+            input_schema: json!({ "type": "object" }),
+            method: "PUT".into(),
+            path: "/review".into(),
+        };
+        assert_eq!(tools, vec![wanted]);
+    }
 }

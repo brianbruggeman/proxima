@@ -1,0 +1,5 @@
+select = { algorithm = "weighted_round_robin" }
+upstreams = [
+  { synth = { status = 200, body = "a" }, weight = 3 },
+  { synth = { status = 200, body = "b" } },
+]

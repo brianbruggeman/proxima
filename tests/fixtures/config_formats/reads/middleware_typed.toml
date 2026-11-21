@@ -1,0 +1,5 @@
+name = "m"
+upstreams = [{ synth = { status = 200, body = "ok" } }]
+
+[[middleware]]
+type = "retry"

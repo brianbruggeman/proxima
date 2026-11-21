@@ -1611,4 +1611,281 @@ mod tests {
         // see load_inline_kv_cache_returns_kv_upstream_handle above.
         let _ = &handle;
     }
+
+    use proxima_config::{ConfigFormatFactory, TomlConfigFormat};
+
+    fn reads_fixture(raw: &str) -> Value {
+        TomlConfigFormat.parse(raw).expect("fixture parses as toml")
+    }
+
+    fn two_upstreams(primary_label: &str) -> (Vec<BuiltUpstream>, Arc<dyn KvHandle>) {
+        let backend = build_kv_cache(&json!({"max_entries": 10})).expect("kv cache");
+        let cache: Arc<dyn KvHandle> = backend.clone();
+        let handle =
+            |kv: Arc<crate::upstreams::kv_cache::KvCache>| into_handle(KvUpstream::new(kv));
+        let primary = BuiltUpstream {
+            handle: handle(backend.clone()),
+            kv_backend: None,
+            label: primary_label.into(),
+        };
+        let second = BuiltUpstream {
+            handle: handle(backend),
+            kv_backend: Some(cache.clone()),
+            label: "cache".into(),
+        };
+        (vec![primary, second], cache)
+    }
+
+    struct RecordingMiddleware {
+        seen: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl crate::pipe_factory::PipeFactory for RecordingMiddleware {
+        fn name(&self) -> &str {
+            "retry"
+        }
+
+        fn build(
+            &self,
+            spec: &Value,
+            inner: Option<PipeHandle>,
+        ) -> Pin<Box<dyn Future<Output = Result<PipeHandle, ProximaError>> + Send + '_>> {
+            let kind = spec.get("type").and_then(Value::as_str).map(str::to_string);
+            self.seen.lock().expect("seen lock").extend(kind);
+            Box::pin(async move { inner.ok_or_else(|| ProximaError::Config("no inner".into())) })
+        }
+    }
+
+    fn recording_context(seen: Arc<std::sync::Mutex<Vec<String>>>) -> LoadContext {
+        let mut context = LoadContext::with_default_registry().expect("ctx");
+        let registry = Arc::new(PipeFactoryRegistry::new());
+        registry
+            .register(Arc::new(SynthPipeFactory))
+            .expect("register synth");
+        registry
+            .register(Arc::new(RecordingMiddleware { seen }))
+            .expect("register retry");
+        context.registry = registry;
+        context
+    }
+
+    async fn applied_middleware(raw: &str) -> Vec<String> {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let context = recording_context(seen.clone());
+        load(reads_fixture(raw), &context).await.expect("load");
+        let applied = seen.lock().expect("seen lock");
+        applied.clone()
+    }
+
+    fn get_request(path: &str) -> Request<Bytes> {
+        Request::builder()
+            .method("GET")
+            .path(path)
+            .build()
+            .expect("request")
+    }
+
+    async fn body_text(handle: &PipeHandle) -> String {
+        let response = SendPipe::call(handle, get_request("/"))
+            .await
+            .expect("call");
+        let body = response.collect_body().await.expect("body");
+        String::from_utf8(body.to_vec()).expect("utf8")
+    }
+
+    async fn first_four_bodies(raw: &str) -> String {
+        let context = LoadContext::with_default_registry().expect("ctx");
+        let handle = load(reads_fixture(raw), &context).await.expect("load");
+        let mut seen = String::new();
+        for _ in 0..4 {
+            seen.push_str(&body_text(&handle).await);
+        }
+        seen
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_middleware_absent() {
+        let applied = applied_middleware(include_str!(
+            "../tests/fixtures/config_formats/reads/middleware_absent.toml"
+        ))
+        .await;
+        assert!(applied.is_empty(), "applied {applied:?}");
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_middleware_typed() {
+        let applied = applied_middleware(include_str!(
+            "../tests/fixtures/config_formats/reads/middleware_typed.toml"
+        ))
+        .await;
+        assert_eq!(applied, vec!["retry".to_string()]);
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_middleware_wrong_typed() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let context = recording_context(seen);
+        let value = reads_fixture(include_str!(
+            "../tests/fixtures/config_formats/reads/middleware_wrong_typed.toml"
+        ));
+        let handle = load(json!({"synth": {"status": 200, "body": "ok"}}), &context)
+            .await
+            .expect("inner");
+        let err = apply_middleware_stack(handle, &value, &context)
+            .await
+            .err()
+            .expect("entry check errs");
+        assert_eq!(
+            err.to_string(),
+            "config: [[middleware]] entries require `type`"
+        );
+    }
+
+    #[test]
+    fn ctl_format_read_miss_on_absent() {
+        let value = reads_fixture(include_str!(
+            "../tests/fixtures/config_formats/reads/miss_on_absent.toml"
+        ));
+        let policy = parse_miss_policy(&value).expect("policy");
+        let default = MissPolicy::fallthrough_default();
+        assert_eq!(policy.on_no_data, default.on_no_data);
+        assert_eq!(policy.on_status, default.on_status);
+        assert_eq!(policy.on_error, default.on_error);
+        assert!(policy.on_no_data, "default is miss on no_data");
+    }
+
+    #[test]
+    fn ctl_format_read_miss_on_typed() {
+        let value = reads_fixture(include_str!(
+            "../tests/fixtures/config_formats/reads/miss_on_typed.toml"
+        ));
+        let policy = parse_miss_policy(&value).expect("policy");
+        assert!(policy.on_no_data);
+        assert!(policy.on_status.is_empty());
+        assert!(!policy.on_error);
+    }
+
+    #[test]
+    fn ctl_format_read_miss_on_wrong_typed() {
+        let value = reads_fixture(include_str!(
+            "../tests/fixtures/config_formats/reads/miss_on_wrong_typed.toml"
+        ));
+        let err = parse_miss_policy(&value).expect_err("entry check errs");
+        assert_eq!(err.to_string(), "config: `miss_on` entries must be strings");
+    }
+
+    #[test]
+    fn ctl_format_read_write_back_absent() {
+        let value = reads_fixture(include_str!(
+            "../tests/fixtures/config_formats/reads/write_back_absent.toml"
+        ));
+        let (upstreams, _) = two_upstreams("primary");
+        let targets = parse_write_back_targets(&value, &upstreams).expect("targets");
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn ctl_format_read_write_back_typed() {
+        let value = reads_fixture(include_str!(
+            "../tests/fixtures/config_formats/reads/write_back_typed.toml"
+        ));
+        let (upstreams, cache) = two_upstreams("primary");
+        let targets = parse_write_back_targets(&value, &upstreams).expect("targets");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].label, "cache");
+        assert!(Arc::ptr_eq(&targets[0].backend, &cache));
+    }
+
+    #[test]
+    fn ctl_format_read_1182_typed() {
+        let value = reads_fixture(include_str!(
+            "../tests/fixtures/config_formats/reads/1182_typed.toml"
+        ));
+        let (upstreams, cache) = two_upstreams("primary");
+        let target = parse_write_back_entry(&value["entry"], &upstreams).expect("target");
+        assert_eq!(target.label, "cache");
+        assert!(Arc::ptr_eq(&target.backend, &cache));
+    }
+
+    #[test]
+    fn ctl_format_read_1206_typed() {
+        let value = reads_fixture(include_str!(
+            "../tests/fixtures/config_formats/reads/1206_typed.toml"
+        ));
+        let (upstreams, _) = two_upstreams("primary");
+        assert_eq!(
+            resolve_upstream_index(&value["idx"], &upstreams).expect("index"),
+            1
+        );
+    }
+
+    #[test]
+    fn ctl_format_read_1206_label_typed() {
+        let value = reads_fixture(include_str!(
+            "../tests/fixtures/config_formats/reads/1206_label_typed.toml"
+        ));
+        let (upstreams, _) = two_upstreams("1");
+        assert_eq!(
+            resolve_upstream_index(&value["idx"], &upstreams).expect("index"),
+            0
+        );
+    }
+
+    #[test]
+    fn ctl_format_read_stage_output_typed() {
+        let value = reads_fixture(include_str!(
+            "../tests/fixtures/config_formats/reads/stage_output_typed.toml"
+        ));
+        let output = parse_pipeline_output(value.get("out")).expect("output");
+        assert_eq!(output, PipelineOutput::Stage("b".into()));
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_upstreams_typed() {
+        let context = LoadContext::with_default_registry().expect("ctx");
+        let value = reads_fixture(include_str!(
+            "../tests/fixtures/config_formats/reads/upstreams_typed.toml"
+        ));
+        // the label is observable only through write_back resolving it by name
+        load(value, &context).await.expect("label `a` resolves");
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_list_mode_absent() {
+        let context = LoadContext::with_default_registry().expect("ctx");
+        let value = reads_fixture(include_str!(
+            "../tests/fixtures/config_formats/reads/list_mode_absent.toml"
+        ));
+        let handle = load(value, &context).await.expect("load");
+        let outcome = SendPipe::call(&handle, get_request("/")).await;
+        assert!(matches!(outcome, Err(ProximaError::NoData)), "no list mode");
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_list_mode_typed() {
+        let context = LoadContext::with_default_registry().expect("ctx");
+        let value = reads_fixture(include_str!(
+            "../tests/fixtures/config_formats/reads/list_mode_typed.toml"
+        ));
+        let handle = load(value, &context).await.expect("load");
+        assert_eq!(body_text(&handle).await, "[]");
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_weight_absent() {
+        let bodies = first_four_bodies(include_str!(
+            "../tests/fixtures/config_formats/reads/weight_absent.toml"
+        ))
+        .await;
+        assert_eq!(bodies.matches('a').count(), 2, "bodies {bodies}");
+    }
+
+    #[proxima::test]
+    async fn ctl_format_read_weight_typed() {
+        let bodies = first_four_bodies(include_str!(
+            "../tests/fixtures/config_formats/reads/weight_typed.toml"
+        ))
+        .await;
+        assert_eq!(bodies.matches('a').count(), 3, "bodies {bodies}");
+    }
 }

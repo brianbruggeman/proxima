@@ -468,3 +468,46 @@ fn ctl_format_member_proxima_settings() {
         fixture!("proxima_settings", "expected.json"),
     );
 }
+
+#[test]
+fn ctl_format_read_max_bytes_typed() {
+    let value = toml_value(
+        "max_bytes",
+        include_str!("../tests/fixtures/config_formats/reads/max_bytes_typed.toml"),
+    );
+    let parsed = crate::upstreams::kv_cache::parse_size_value(&value["max_bytes"]);
+    assert_eq!(parsed.expect("some").expect("ok"), 67_108_864);
+}
+
+// the built source hides its period, so this control observes only that
+// `period_ms = 250` builds
+#[test]
+fn ctl_format_read_period_ms_typed() {
+    use proxima_primitives::pipe::SourceFactory;
+
+    let value = toml_value(
+        "period_ms",
+        include_str!("../tests/fixtures/config_formats/reads/period_ms_typed.toml"),
+    );
+    let inner =
+        crate::pipe::into_handle(crate::upstreams::synth::SynthUpstream::new("tick", 200, ""));
+    let factory =
+        proxima_primitives::pipe::interval_pipe::IntervalSourceFactory::new("tick", inner);
+    factory
+        .build(&value)
+        .map(|_| ())
+        .expect("period_ms = 250 builds an interval source");
+}
+
+#[proxima::test]
+async fn ctl_format_client_toml() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/client_config/client.toml");
+    let client = crate::client::Client::from_path(path)
+        .await
+        .expect("client.toml loads");
+    let response = client.get("/").send().await.expect("one request");
+    assert_eq!(response.status(), 201);
+    let body = response.bytes().await.expect("body");
+    assert_eq!(&body[..], b"created");
+}

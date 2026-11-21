@@ -1,0 +1,3 @@
+kv = "cache"
+max_entries = 100
+list_mode = true

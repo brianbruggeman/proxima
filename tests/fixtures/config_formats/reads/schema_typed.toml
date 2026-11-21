@@ -1,0 +1,12 @@
+[[schema]]
+name = "s"
+
+[schema.schema]
+type = "string"
+
+[schema.schema.value]
+min_len = 1
+max_len = 9
+
+[[listen]]
+bind = "127.0.0.1:0"

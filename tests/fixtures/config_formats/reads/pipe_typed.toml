@@ -1,0 +1,6 @@
+[[pipe]]
+name = "p"
+synth = { status = 200, body = "ok" }
+
+[[listen]]
+bind = "127.0.0.1:0"

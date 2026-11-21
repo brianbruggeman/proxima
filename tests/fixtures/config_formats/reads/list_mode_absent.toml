@@ -1,0 +1,2 @@
+kv = "cache"
+max_entries = 100

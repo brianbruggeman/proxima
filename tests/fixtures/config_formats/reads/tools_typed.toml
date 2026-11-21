@@ -1,0 +1,8 @@
+[[tools]]
+name = "review_ticket"
+description = "review a ticket"
+method = "PUT"
+path = "/review"
+
+[tools.inputSchema]
+type = "object"
