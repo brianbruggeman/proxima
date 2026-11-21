@@ -4,7 +4,7 @@
 //! consumer of `proxima_test::alloc_count` in this test binary; `cargo val`
 //! gives each test its own process.
 
-#![cfg(all(feature = "alloc-count", feature = "metal", target_os = "macos"))]
+#![cfg(all(feature = "alloc-count", feature = "metal", feature = "metal-attn-variants", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_tensor::QuantizedBlock;
