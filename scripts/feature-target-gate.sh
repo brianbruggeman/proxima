@@ -21,6 +21,9 @@
 #
 # usage: scripts/feature-target-gate.sh [base]        (default: origin/main)
 #        scripts/feature-target-gate.sh --all          every crate below
+#        scripts/feature-target-gate.sh --list [base]  print the selected crates and rows, run nothing
+#        a changed crate also selects every gated crate that depends on it (normal or dev
+#        dependency, transitively), read from `cargo metadata --no-deps`
 #        inside a .wt/ worktree every cargo call goes through `git wt cargo`, which pins
 #        the target to <worktree>/target whatever CARGO_TARGET_DIR the env exports;
 #        elsewhere (main checkout, pre-push hook) bare cargo honours CARGO_TARGET_DIR
@@ -50,12 +53,15 @@ esac
 printf 'feature-target-gate: target=%s\n' "$target_dir"
 
 all=0
+list=0
 base="origin/main"
-case "${1:-}" in
-    --all) all=1 ;;
-    "") ;;
-    *) base="$1" ;;
-esac
+for arg in "$@"; do
+    case "$arg" in
+        --all) all=1 ;;
+        --list) list=1 ;;
+        *) base="$arg" ;;
+    esac
+done
 
 # crate:feature-set pairs. An empty feature set means "default features".
 # crate:@nostd:feature-set is a tier row: `cargo check --lib --no-default-features`
@@ -131,11 +137,35 @@ if [ -n "$unmapped" ]; then
     exit 3
 fi
 
-changed_crates() {
-    if [ "$all" = 1 ]; then
-        printf '%s\n' proxima-tensor proxima-model-interop proxima-omega proxima-numeric proxima-gguf proxima-autograd
-        return
+gated_crates() {
+    printf '%s\n' "${matrix[@]%%:*}" | sort -u
+}
+
+# "<crate> <dependency>" per line for every workspace package, normal and dev dependencies alike
+# (a dev-dependency edge is what puts a crate's test targets in a dependency's blast radius).
+# a failed read or an empty edge list is fatal: empty edges would silently skip every dependent
+dependency_edges() {
+    local metadata edges
+    if ! command -v jq >/dev/null 2>&1; then
+        echo 'feature-target-gate: needs jq to read cargo metadata' >&2
+        exit 3
     fi
+    if ! metadata="$(cargo metadata --format-version 1 --no-deps)"; then
+        echo 'feature-target-gate: cargo metadata failed (stderr above); cannot derive dependents' >&2
+        exit 3
+    fi
+    if ! edges="$(printf '%s' "$metadata" | jq -r '.packages[] | .name as $crate | .dependencies[] | "\($crate) \(.name)"')"; then
+        echo 'feature-target-gate: jq failed reading cargo metadata; cannot derive dependents' >&2
+        exit 3
+    fi
+    if [ -z "$edges" ]; then
+        echo 'feature-target-gate: cargo metadata yielded no dependency edges; cannot derive dependents' >&2
+        exit 3
+    fi
+    printf '%s\n' "$edges"
+}
+
+directly_changed_crates() {
     local dir
     { git diff --name-only "$base"...HEAD 2>/dev/null
       git diff --name-only HEAD 2>/dev/null
@@ -143,7 +173,37 @@ changed_crates() {
         | cut -d/ -f1 \
         | sort -u \
         | while IFS= read -r dir; do package_name "$dir"; done \
-        | grep -Ex 'proxima-tensor|proxima-model-interop|proxima-omega|proxima-numeric|proxima-gguf|proxima-autograd' || true
+        | grep -Fx -f <(gated_crates) || true
+}
+
+# "<crate>\t<reason>" per selected crate: `changed`, or `depends on X` for the first selected X
+# it depends on; repeats until no gated crate is newly pulled in (transitive closure)
+select_crates() {
+    local selected="" crate dep reason grew=1 edges gated
+    if [ "$all" = 1 ]; then
+        gated_crates | while IFS= read -r crate; do printf '%s\tall\n' "$crate"; done
+        return
+    fi
+    edges="$(dependency_edges)" || return 3
+    gated="$(gated_crates)"
+    for crate in $(directly_changed_crates); do
+        selected="$selected $crate"
+        printf '%s\tchanged\n' "$crate"
+    done
+    while [ "$grew" = 1 ]; do
+        grew=0
+        for crate in $gated; do
+            case " $selected " in *" $crate "*) continue ;; esac
+            dep="$(printf '%s\n' "$edges" | awk -v crate="$crate" -v sel="$selected" '
+                BEGIN { n = split(sel, chosen, " "); for (i = 1; i <= n; i++) want[chosen[i]] = 1 }
+                $1 == crate && ($2 in want) { print $2; exit }')"
+            if [ -n "$dep" ]; then
+                selected="$selected $crate"
+                grew=1
+                printf '%s\tdepends on %s\n' "$crate" "$dep"
+            fi
+        done
+    done
 }
 
 # a gate measures the working tree, not the commit: say which one, because a
@@ -154,9 +214,24 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 printf 'feature-target-gate: %s %s\n' "$(git rev-parse --short HEAD)" "$dirty"
 
-crates="$(changed_crates | tr '\n' ' ')"
-if [ -z "$crates" ]; then
+selection="$(select_crates)" || exit 3
+crates="$(printf '%s\n' "$selection" | cut -f1 | tr '\n' ' ')"
+if [ -z "${crates// /}" ]; then
     echo "feature-target-gate: no test-bearing crate changed against $base"
+    exit 0
+fi
+printf '%s\n' "$selection" | while IFS=$'\t' read -r crate reason; do
+    printf 'feature-target-gate: selected %s (%s)\n' "$crate" "$reason"
+done
+
+if [ "$list" = 1 ]; then
+    rows=0
+    for row in "${matrix[@]}"; do
+        case " $crates " in
+            *" ${row%%:*} "*) printf 'feature-target-gate: row %s\n' "$row"; rows=$((rows + 1)) ;;
+        esac
+    done
+    printf 'feature-target-gate: --list %s crates, %s rows, nothing run\n' "$(printf '%s\n' "$crates" | wc -w | tr -d ' ')" "$rows"
     exit 0
 fi
 
