@@ -647,6 +647,12 @@ fn quantize_coded_block(
             format: format_of(layout),
         });
     }
+    if layout.element.packed_radix > 1 {
+        return Err(NumericError::UnsupportedEncode {
+            format: format_of(layout),
+            reason: "a discrete ladder over mixed-radix codes needs the region writer",
+        });
+    }
     block.fill(0);
     let mut cursors = cursors_of(layout);
     for (run, group) in input
@@ -1293,6 +1299,23 @@ mod tests {
             .expect_err("32 nibbles do not fit in one byte");
         assert!(
             matches!(error, NumericError::InvalidGeometry { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_discrete_ladder_over_mixed_radix_codes_is_refused_rather_than_zeroed() {
+        // a caller-built ternary whose level table is explicit instead of the packed ladder: the
+        // code lives in a base-3 region the discrete writer does not address, and writing it
+        // through the bit planes silently stored code 0 for every element
+        let format = NumericFormat::Levels(crate::LevelFormat::from_layout(
+            &BlockLayout::TQ1_0,
+            crate::LevelTable::Explicit(&[-1, 0, 1]),
+        ));
+        let error = encode_blocks(&format, &values(256, 0x723), &mut std::vec![0u8; 54])
+            .expect_err("mixed-radix codes need the region writer");
+        assert!(
+            matches!(error, NumericError::UnsupportedEncode { .. }),
             "{error:?}"
         );
     }
