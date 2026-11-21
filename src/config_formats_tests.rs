@@ -782,49 +782,78 @@ fn ctl_format_buffered_process_tcp_timeout_ms() {
     }
 }
 
-fn assert_xml_c2_is_err<T: DeserializeOwned>(member: &str, raw: &str) {
-    let registry = proxima_config::default_config_format_registry().expect("registry");
-    let value = registry
-        .get_by_extension("xml")
-        .expect("xml arm registered")
-        .parse(raw)
-        .unwrap_or_else(|err| panic!("{member}: xml parse failed: {err}"));
+fn xml_text_tree(member: &str, raw: &str) -> serde_json::Value {
+    let tree = conflaguration::from_xml_str::<conflaguration::Tree>(raw)
+        .unwrap_or_else(|err| panic!("{member}: xml tree failed: {err}"));
+    serde_json::Value::from(tree)
+}
+
+fn xml_c2_error<T: DeserializeOwned>(member: &str, raw: &str) -> String {
+    let value = xml_text_tree(member, raw);
+    match serde_json::from_value::<T>(value.clone()) {
+        Ok(_) => panic!("{member}: from_value accepted the xml tree {value}"),
+        Err(err) => format!("{err}"),
+    }
+}
+
+fn assert_text_where_number_belongs(member: &str, error: &str, number_type: &str, text: &str) {
+    let needle = format!("invalid type: string \"{text}\", expected {number_type}");
     assert!(
-        serde_json::from_value::<T>(value.clone()).is_err(),
-        "{member}: from_value accepted the xml tree {value}"
+        error.contains(&needle),
+        "{member}: expected the error to contain `{needle}`, got `{error}`"
     );
 }
 
 #[test]
 fn config_format_ctl_client_auth() {
-    assert_xml_c2_is_err::<ClientAuthConfig>(
-        "client_auth",
-        buffered_fixture!("client_auth_c2", "xml"),
-    );
+    let raw = buffered_fixture!("client_auth_c2", "xml");
+    let error = xml_c2_error::<ClientAuthConfig>("client_auth", raw);
+    assert_text_where_number_belongs("client_auth", &error, "u64", "30000");
 }
 
 #[test]
 fn config_format_ctl_delay() {
-    assert_xml_c2_is_err::<DelayConfig>("delay", buffered_fixture!("delay_c2", "xml"));
+    let raw = buffered_fixture!("delay_c2", "xml");
+    let error = xml_c2_error::<DelayConfig>("delay", raw);
+    assert_text_where_number_belongs("delay", &error, "u64", "250");
 }
 
 #[test]
 fn config_format_ctl_transform() {
-    assert_xml_c2_is_err::<TransformConfig>("transform", buffered_fixture!("transform_c2", "xml"));
+    let raw = buffered_fixture!("transform_c2", "xml");
+    let error = xml_c2_error::<TransformConfig>("transform", raw);
+    assert_text_where_number_belongs("transform", &error, "u64", "42");
 }
 
 #[test]
 fn config_format_ctl_filter() {
-    assert_xml_c2_is_err::<FilterConfig>("filter", buffered_fixture!("filter_c2", "xml"));
+    let raw = buffered_fixture!("filter_c2", "xml");
+    let error = xml_c2_error::<FilterConfig>("filter", raw);
+    assert_text_where_number_belongs("filter", &error, "f64", "0.25");
 }
 
+// ValidateConfig.schema is an untagged enum, which swallows the inner serde
+// error; the Schema under it is where the C2 fields live, so read it directly
 #[test]
 fn config_format_ctl_validate() {
-    assert_xml_c2_is_err::<ValidateConfig>("validate", buffered_fixture!("validate_c2", "xml"));
+    let raw = buffered_fixture!("validate_c2", "xml");
+    xml_c2_error::<ValidateConfig>("validate", raw);
+    let tree = xml_text_tree("validate", raw);
+    let error = serde_json::from_value::<Schema>(tree["schema"].clone())
+        .expect_err("validate: Schema accepted the xml text tree")
+        .to_string();
+    assert_text_where_number_belongs("validate flags", &error, "a boolean", "false");
+    let uint = tree["schema"]["value"]["fields"][0]["schema"].clone();
+    let error = serde_json::from_value::<Schema>(uint)
+        .expect_err("validate: u_int Schema accepted the xml text tree")
+        .to_string();
+    assert_text_where_number_belongs("validate u_int", &error, "u64", "4294967295");
 }
 
 #[cfg(feature = "tokio")]
 #[test]
 fn config_format_ctl_process() {
-    assert_xml_c2_is_err::<ProcessConfig>("process", buffered_fixture!("process_c2", "xml"));
+    let raw = buffered_fixture!("process_c2", "xml");
+    let error = xml_c2_error::<ProcessConfig>("process", raw);
+    assert_text_where_number_belongs("process", &error, "u64", "7500");
 }
