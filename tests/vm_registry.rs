@@ -563,7 +563,11 @@ impl SignedSelf {
         }
         let mut child = command.spawn().expect("spawn the signed self-copy");
         // a child that exits before reading its input breaks the pipe; its stderr says why
-        let written = child.stdin.take().expect("child stdin is piped").write_all(stdin_body);
+        let written = child
+            .stdin
+            .take()
+            .expect("child stdin is piped")
+            .write_all(stdin_body);
         let output = child.wait_with_output().expect("wait for the child");
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         match (written, output.status.success()) {
@@ -654,7 +658,10 @@ fn multi_chunk_input_round_trips_uppercased_byte_exact() {
 
     assert_eq!(response.len(), text.len());
     assert_eq!(response, text.to_ascii_uppercase());
-    assert_ne!(response, text, "the corpus must contain lowercase to change");
+    assert_ne!(
+        response, text,
+        "the corpus must contain lowercase to change"
+    );
 }
 
 /// Exit proof c, the degenerate control: nothing in, nothing out.
@@ -833,7 +840,8 @@ fn missing_kernel_fails_when_the_config_is_applied() {
         .expect_err("a missing kernel cannot boot");
 
     assert!(
-        error.contains(&format!("vm `{LINUX_PIPE}`")) && error.contains("read kernel `/no/such/vmlinuz`"),
+        error.contains(&format!("vm `{LINUX_PIPE}`"))
+            && error.contains("read kernel `/no/such/vmlinuz`"),
         "the failure must come from the factory build and name the kernel path: {error}"
     );
 }
@@ -886,7 +894,9 @@ fn relative_elf_guest_path_nested_under_record_boots_from_a_different_working_di
             &[PROBE_FLAG, &config_path.to_string_lossy(), PIPE],
             b"hello, nested",
         )
-        .expect("a relative guest_image_path nested under record resolves against the config directory");
+        .expect(
+            "a relative guest_image_path nested under record resolves against the config directory",
+        );
 
     assert_eq!(response, b"HELLO, NESTED");
 }
@@ -982,7 +992,10 @@ fn lambda_example_config_serves_both_guests_over_http() {
         .replace("\"uppercase\"", &format!("\"{}\"", elf.display()))
         .replace("\"uppercase-init\"", &format!("\"{}\"", linux.display()))
         .replace("127.0.0.1:8088", "127.0.0.1:0");
-    assert_ne!(config, shipped, "the example's guest paths must be substituted");
+    assert_ne!(
+        config, shipped,
+        "the example's guest paths must be substituted"
+    );
     let config_path = directory.path().join("proxima.toml");
     std::fs::write(&config_path, config).expect("write the substituted example config");
     let signed_self = SignedSelf::prepare();
@@ -993,7 +1006,10 @@ fn lambda_example_config_serves_both_guests_over_http() {
         .expect("POST /elf through the example listener");
     let linux_request = "hello, linux ".repeat(1024);
     let linux_response = signed_self
-        .run(&[SERVE_FLAG, &config_arg, "/linux"], linux_request.as_bytes())
+        .run(
+            &[SERVE_FLAG, &config_arg, "/linux"],
+            linux_request.as_bytes(),
+        )
         .expect("POST /linux through the example listener");
 
     assert_eq!(elf_response, b"HELLO, ELF");
@@ -1065,7 +1081,11 @@ fn vm_upstream_latency_table() {
 
     let mut report = vec![format!(
         "vm_upstream_latency: n={LATENCY_SAMPLES} body={BENCH_BODY:?} host_profile={} loadavg={}",
-        if cfg!(debug_assertions) { "dev" } else { "release" },
+        if cfg!(debug_assertions) {
+            "dev"
+        } else {
+            "release"
+        },
         std::fs::read_to_string("/proc/loadavg")
             .unwrap_or_default()
             .trim()
@@ -1136,10 +1156,14 @@ fn seed_probe_image(cache_dir: &Path, program: &[u8]) -> String {
         header.set_uid(0);
         header.set_gid(0);
         header.set_mtime(0);
-        builder.append_data(&mut header, path, contents).expect("append tar entry");
+        builder
+            .append_data(&mut header, path, contents)
+            .expect("append tar entry");
     }
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-    encoder.write_all(&builder.into_inner().expect("finish tar")).expect("gzip layer");
+    encoder
+        .write_all(&builder.into_inner().expect("finish tar"))
+        .expect("gzip layer");
     let layer = encoder.finish().expect("finish gzip");
     let config = br#"{"config":{"Entrypoint":["/bin/entry-probe"],"Cmd":["--serve"],"Env":["OCI_PROBE=via-registry"],"WorkingDir":"/"}}"#;
     let (layer_digest, config_digest) = (Digest::of(&layer), Digest::of(config));
@@ -1159,7 +1183,13 @@ fn seed_probe_image(cache_dir: &Path, program: &[u8]) -> String {
     manifest_digest.to_string()
 }
 
-fn write_image_upstream_config(directory: &Path, kernel: &str, oci_init: &Path, cache_dir: &Path, manifest_digest: &str) -> PathBuf {
+fn write_image_upstream_config(
+    directory: &Path,
+    kernel: &str,
+    oci_init: &Path,
+    cache_dir: &Path,
+    manifest_digest: &str,
+) -> PathBuf {
     let config_path = directory.join("proxima-image.toml");
     let toml = format!(
         "[upstreams.{IMAGE_PIPE}]\ntype = \"vm\"\nkernel_path = \"{kernel}\"\nimage = \"probe/app@{manifest_digest}\"\noci_init_path = \"{}\"\nimage_cache_dir = \"{}\"\nwatchdog_millis = 15000\n",
@@ -1179,8 +1209,17 @@ fn config_only_linux_vm_upstream_runs_an_oci_image() {
     let oci_init = build_linux_bin(&target, "oci-init");
     let probe = build_linux_bin(&target, "entry-probe");
     let cache_dir = directory.path().join("oci-cache");
-    let manifest_digest = seed_probe_image(&cache_dir, &std::fs::read(&probe).expect("read entry-probe"));
-    let config = write_image_upstream_config(directory.path(), &host_kernel(), &oci_init, &cache_dir, &manifest_digest);
+    let manifest_digest = seed_probe_image(
+        &cache_dir,
+        &std::fs::read(&probe).expect("read entry-probe"),
+    );
+    let config = write_image_upstream_config(
+        directory.path(),
+        &host_kernel(),
+        &oci_init,
+        &cache_dir,
+        &manifest_digest,
+    );
     let signed_self = SignedSelf::prepare();
 
     let response = signed_self
@@ -1197,8 +1236,9 @@ fn vendored_whoami_blob(digest: &str) -> Vec<u8> {
         Ok(bytes) => bytes,
         Err(_) => {
             let hex_path = raw.with_extension("hex");
-            let text = std::fs::read_to_string(&hex_path)
-                .unwrap_or_else(|error| panic!("blob {} must exist raw or as .hex: {error}", raw.display()));
+            let text = std::fs::read_to_string(&hex_path).unwrap_or_else(|error| {
+                panic!("blob {} must exist raw or as .hex: {error}", raw.display())
+            });
             hex::decode(text.trim()).expect("vendored hex blob decodes")
         }
     }
@@ -1259,10 +1299,19 @@ fn assert_resident_serves(child_flag: &str) {
         .expect("config-registered resident upstream serves sequential GETs");
 
     let report = String::from_utf8(output).expect("child prints text");
-    let statuses: Vec<&str> = report.lines().filter(|line| line.starts_with("status=")).collect();
+    let statuses: Vec<&str> = report
+        .lines()
+        .filter(|line| line.starts_with("status="))
+        .collect();
     assert_eq!(statuses, vec!["status=200"; RESIDENT_REQUESTS], "{report}");
-    assert!(report.contains("GET / HTTP/1.1"), "whoami echoes the request line: {report}");
-    assert!(report.lines().any(|line| line == "boots=1"), "exactly one guest boots: {report}");
+    assert!(
+        report.contains("GET / HTTP/1.1"),
+        "whoami echoes the request line: {report}"
+    );
+    assert!(
+        report.lines().any(|line| line == "boots=1"),
+        "exactly one guest boots: {report}"
+    );
 }
 
 /// `serve-once-init` answers one HTTP request and powers the guest off, so the
@@ -1272,22 +1321,58 @@ fn assert_resident_serves(child_flag: &str) {
 fn a_resident_guest_that_ends_is_booted_again_under_restart_always() {
     let report = restart_report("always");
 
-    assert!(report.lines().any(|line| line == "first=200:serve-once-init"), "the first guest serves: {report}");
-    assert!(report.lines().any(|line| line == "served_after_restart=200:serve-once-init"), "requests after the restart are served: {report}");
-    assert!(report.lines().any(|line| line == "boots=2"), "one restart boots a second guest: {report}");
-    assert!(report.lines().any(|line| line == "restarts=1"), "the restart count is 1: {report}");
-    assert!(report.lines().any(|line| line == "after_supervisor=failed"), "the second guest has ended and nothing boots a third: {report}");
+    assert!(
+        report
+            .lines()
+            .any(|line| line == "first=200:serve-once-init"),
+        "the first guest serves: {report}"
+    );
+    assert!(
+        report
+            .lines()
+            .any(|line| line == "served_after_restart=200:serve-once-init"),
+        "requests after the restart are served: {report}"
+    );
+    assert!(
+        report.lines().any(|line| line == "boots=2"),
+        "one restart boots a second guest: {report}"
+    );
+    assert!(
+        report.lines().any(|line| line == "restarts=1"),
+        "the restart count is 1: {report}"
+    );
+    assert!(
+        report.lines().any(|line| line == "after_supervisor=failed"),
+        "the second guest has ended and nothing boots a third: {report}"
+    );
 }
 
 /// Control: the same self-ending guest under `restart = "never"` is booted once.
 fn a_resident_guest_that_ends_is_not_booted_again_under_restart_never() {
     let report = restart_report("never");
 
-    assert!(report.lines().any(|line| line == "first=200:serve-once-init"), "the first guest serves: {report}");
-    assert!(report.lines().any(|line| line == "boots=1"), "no restart boots no second guest: {report}");
-    assert!(report.lines().any(|line| line == "restarts=0"), "the restart count stays 0: {report}");
-    assert!(!report.contains("served_after_restart"), "no guest exists to serve after the end: {report}");
-    assert!(report.lines().any(|line| line == "after_supervisor=failed"), "the second GET fails: {report}");
+    assert!(
+        report
+            .lines()
+            .any(|line| line == "first=200:serve-once-init"),
+        "the first guest serves: {report}"
+    );
+    assert!(
+        report.lines().any(|line| line == "boots=1"),
+        "no restart boots no second guest: {report}"
+    );
+    assert!(
+        report.lines().any(|line| line == "restarts=0"),
+        "the restart count stays 0: {report}"
+    );
+    assert!(
+        !report.contains("served_after_restart"),
+        "no guest exists to serve after the end: {report}"
+    );
+    assert!(
+        report.lines().any(|line| line == "after_supervisor=failed"),
+        "the second GET fails: {report}"
+    );
 }
 
 fn restart_report(restart: &str) -> String {
@@ -1296,7 +1381,12 @@ fn restart_report(restart: &str) -> String {
     let signed_self = SignedSelf::prepare();
     let output = signed_self
         .run(
-            &[RESTART_FLAG, &host_kernel(), &init.to_string_lossy(), restart],
+            &[
+                RESTART_FLAG,
+                &host_kernel(),
+                &init.to_string_lossy(),
+                restart,
+            ],
             b"",
         )
         .expect("restart child reports");
@@ -1308,7 +1398,10 @@ async fn get_outcome(upstream: &proxima::upstreams::vm_resident::ResidentVmUpstr
         let response = proxima_primitives::pipe::SendPipe::call(upstream, get_request()?).await?;
         let status = response.status;
         let payload = response.collect_body().await?;
-        Ok::<String, Box<dyn Error>>(format!("{status}:{}", String::from_utf8_lossy(&payload).trim_end()))
+        Ok::<String, Box<dyn Error>>(format!(
+            "{status}:{}",
+            String::from_utf8_lossy(&payload).trim_end()
+        ))
     };
     match tokio::time::timeout(RESTART_GET_LIMIT, attempt).await {
         Ok(Ok(outcome)) => outcome,
@@ -1339,16 +1432,25 @@ fn run_restart_child(arguments: &[String]) -> Result<(), Box<dyn Error>> {
         .build()
         .into_spec()?;
     child_runtime(true)?.block_on(async move {
-        let upstream = proxima::upstreams::vm_resident::build_upstream("restart-serve-once", &spec).await?;
+        let upstream =
+            proxima::upstreams::vm_resident::build_upstream("restart-serve-once", &spec).await?;
         let mut status = upstream.status();
         let mut report = format!("first={}\n", get_outcome(&upstream).await);
         while status.changed().await.is_ok() {
             let snapshot = status.borrow_and_update().clone();
-            if snapshot.state == proxima::control_plane::PipeState::Running && snapshot.restart_count == 1 {
-                report.push_str(&format!("served_after_restart={}\n", get_outcome(&upstream).await));
+            if snapshot.state == proxima::control_plane::PipeState::Running
+                && snapshot.restart_count == 1
+            {
+                report.push_str(&format!(
+                    "served_after_restart={}\n",
+                    get_outcome(&upstream).await
+                ));
             }
         }
-        report.push_str(&format!("after_supervisor={}\n", get_outcome(&upstream).await));
+        report.push_str(&format!(
+            "after_supervisor={}\n",
+            get_outcome(&upstream).await
+        ));
         report.push_str(&format!(
             "boots={}\nrestarts={}\n",
             proxima::upstreams::vm_resident::guests_booted(),
@@ -1396,7 +1498,13 @@ fn a_tampered_cached_layer_fails_the_image_upstream_build_before_boot() {
         .find(|path| std::fs::read(path).is_ok_and(|bytes| bytes.starts_with(&[0x1f, 0x8b])))
         .expect("the gzip layer is in the cache");
     std::fs::write(&layer, b"tampered").expect("tamper with the cached layer");
-    let config = write_image_upstream_config(directory.path(), &host_kernel(), &oci_init, &cache_dir, &manifest_digest);
+    let config = write_image_upstream_config(
+        directory.path(),
+        &host_kernel(),
+        &oci_init,
+        &cache_dir,
+        &manifest_digest,
+    );
     let signed_self = SignedSelf::prepare();
 
     let error = signed_self
@@ -1404,7 +1512,8 @@ fn a_tampered_cached_layer_fails_the_image_upstream_build_before_boot() {
         .expect_err("a tampered layer must fail the build");
 
     assert!(
-        error.contains("failed its digest check: expected sha256:") && error.contains("actual sha256:"),
+        error.contains("failed its digest check: expected sha256:")
+            && error.contains("actual sha256:"),
         "the failure must carry both digests: {error}"
     );
 }
