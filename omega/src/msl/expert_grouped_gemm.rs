@@ -1290,7 +1290,7 @@ pub(crate) fn route_compaction_indirect_offset(
 /// Words of the per-expert first-tile table and of the tile-to-expert table the
 /// prepass writes after the list: the GEMM's O(1) replacement for walking the
 /// per-expert tile counts.
-#[cfg(feature = "metal-grouped-gemm")]
+#[cfg(all(feature = "metal-grouped-gemm", any(test, all(feature = "metal", target_os = "macos"))))]
 fn grouped_tile_table_words(tokens: u64, experts: u64) -> u64 {
     experts + grouped_tile_upper_bound(tokens, experts)
 }
@@ -1665,7 +1665,7 @@ pub(crate) fn route_prepass(
     )))
 }
 
-#[cfg(all(feature = "metal-grouped-gemm", any(test, feature = "metal-core")))]
+#[cfg(all(feature = "metal-grouped-gemm", any(test, all(feature = "metal", target_os = "macos"))))]
 fn grouped_block(resolved: &BoundOp, quantized: &[Option<Codec>], knobs: &EmitKnobs) -> Option<TiledGemmBlock> {
     let BoundOpKind::Reduce {
         reduce_op,
@@ -1737,7 +1737,7 @@ pub(crate) fn route_prepass_active(
 /// Two compacted grouped ops with equal keys produce byte-identical
 /// compactions, so the host runs [`route_prepass`] once for both. `None` for
 /// every op that has no prepass.
-#[cfg(all(feature = "metal-grouped-gemm", any(test, feature = "metal-core")))]
+#[cfg(all(feature = "metal-grouped-gemm", any(test, all(feature = "metal", target_os = "macos"))))]
 pub(crate) fn route_compaction_key(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
@@ -1756,7 +1756,7 @@ pub(crate) fn route_compaction_key(
     ))
 }
 
-#[cfg(all(not(feature = "metal-grouped-gemm"), any(test, feature = "metal-core")))]
+#[cfg(all(not(feature = "metal-grouped-gemm"), any(test, all(feature = "metal", target_os = "macos"))))]
 pub(crate) fn route_compaction_key(
     _resolved: &BoundOp,
     _packed_operands: &PackedOperands,

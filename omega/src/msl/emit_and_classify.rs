@@ -2204,7 +2204,7 @@ pub(crate) fn kernel_cache_key_for_grid(
     )
 }
 
-#[cfg(any(test, feature = "metal-core"))]
+#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
 pub(crate) fn kernel_cache_key_for_grid_with_layout(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,

@@ -222,7 +222,7 @@ pub(crate) use elementwise_reduce_core::*;
     all(feature = "metal", target_os = "macos")
 ))]
 pub(crate) use expert_grouped_gemm::ROUTE_COMPACTION_MISMATCH_FAULT;
-#[cfg(any(test, feature = "metal-core"))]
+#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
 pub(crate) use expert_grouped_gemm::route_compaction_key;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) use expert_grouped_gemm::route_compaction_indirect_offset;
