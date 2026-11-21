@@ -2060,6 +2060,66 @@ fn cached_attention_bound_step_runs_online_softmax() {
     assert!((output[1] - (3.0 * cached_weight + 5.0 * (1.0 - cached_weight))).abs() < 1e-6);
 }
 
+/// The same step as [`cached_attention_bound_step_runs_online_softmax`], with the keys held
+/// as one row `[even, odd]` per key: the odd half is the same buffer read at base 1, and the
+/// even half at base 0, both through a row stride of two.
+#[test]
+fn cached_attention_reads_each_key_half_through_its_own_base_of_a_one_row_key() {
+    let cached_keys = vec![1.0f32, 0.0];
+    let new_keys = vec![0.0f32, 1.0];
+    let inputs = [
+        vec![1.0],
+        vec![0.0],
+        cached_keys,
+        new_keys,
+        vec![2.0, 3.0],
+        vec![4.0, 5.0],
+    ];
+    let buffers: Vec<Option<&[f32]>> = inputs.iter().map(|input| Some(input.as_slice())).collect();
+    let row_strides = [0i64, 2, 2, 0, 1];
+    let layout = |base: i64, strides: &[i64]| bind::Layout {
+        base,
+        strides: strides.into(),
+    };
+    let tail = [1i64];
+    let operands = vec![
+        (NodeId(0), layout(0, &tail), None),
+        (NodeId(1), layout(0, &tail), None),
+        (NodeId(2), layout(0, &row_strides), None),
+        (NodeId(2), layout(1, &row_strides), None),
+        (NodeId(3), layout(0, &row_strides), None),
+        (NodeId(3), layout(1, &row_strides), None),
+        (NodeId(4), layout(0, &tail), None),
+        (NodeId(5), layout(0, &tail), None),
+    ];
+    let resolved = BoundOp {
+        node: NodeId(6),
+        dtype: DType::FLOAT32,
+        extents: vec![1, 1, 1, 2],
+        kind: BoundOpKind::CachedAttention {
+            operands,
+            query_rows: 1,
+            cached_key_rows: 1,
+            new_key_rows: 1,
+            kv_heads: 1,
+            query_groups: 1,
+            head_dim: 2,
+            rotary_dim: 2,
+            scale: 1.0,
+            cached_lower_inclusive: -1,
+            new_upper_inclusive: 0,
+            arithmetic: crate::bind::CachedAttentionArithmetic::OnlineF32,
+            attention_sink: false,
+        },
+    };
+    let mut output = vec![0.0; 2];
+    run_node_into(&resolved, &buffers, None, None, None, false, &mut output)
+        .expect("cached attention over one-row keys runs");
+    let cached_weight = 1.0f32.exp() / (1.0f32.exp() + 1.0);
+    assert!((output[0] - (2.0 * cached_weight + 4.0 * (1.0 - cached_weight))).abs() < 1e-6);
+    assert!((output[1] - (3.0 * cached_weight + 5.0 * (1.0 - cached_weight))).abs() < 1e-6);
+}
+
 /// Three query rows over one live cached key and three new keys, every score
 /// zero so each row's output is the mean of the values it can see. With a
 /// two-key window (`cached_lower_inclusive = -1`) row 2 loses the new key 0

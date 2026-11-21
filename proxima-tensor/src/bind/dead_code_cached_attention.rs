@@ -512,6 +512,39 @@ pub(super) fn attention_score_sources(
     Some((rotary.0, rotary.1, rotary.2, rotary.3, None))
 }
 
+/// The even and odd score terms (the two `Reduce` nodes `decode_rotary_terms` reads) under
+/// `score`, in the same order [`attention_score_sources`] reports its even and odd sources.
+#[cfg(feature = "cached-attention-streaming")]
+pub(super) fn rotary_term_nodes(program: &[Op], score: NodeId) -> Option<[NodeId; 2]> {
+    let scaled = binary_elementwise(program, score, ScalarOp::Multiply)?;
+    let outer = binary_elementwise(program, scaled[0], ScalarOp::Add)?;
+    if let Some(rotary_terms) = binary_elementwise(program, outer[0], ScalarOp::Add)
+        && decode_rotary_terms(program, rotary_terms).is_some()
+        && decode_pass_term(program, outer[1]).is_some()
+    {
+        return Some(rotary_terms);
+    }
+    decode_rotary_terms(program, outer)?;
+    Some(outer)
+}
+
+/// The operand entry `source` has in the resolved op that computes one score `term` (the reduce,
+/// or the multiply a fusion folded into it). A key read through two halves of one node has a
+/// different layout per half, so a slot's layout is taken from its own term, never node-keyed.
+#[cfg(feature = "cached-attention-streaming")]
+pub(super) fn term_operand<'a>(
+    resolved: &'a [BoundOp],
+    program: &[Op],
+    term: NodeId,
+    source: NodeId,
+) -> Option<&'a (NodeId, Layout, Option<Lookup>)> {
+    let product = reduced_source(program, term, ScalarOp::Add, ReduceInit::Zero);
+    resolved
+        .iter()
+        .filter(|bound| bound.node == term || Some(bound.node) == product)
+        .find_map(|bound| bound.operands().iter().find(|operand| operand.0 == source))
+}
+
 /// `true` when `node` is exactly [`Op::Iota`] -- the raw key/query index a
 /// causal or padding mask compares against.
 #[cfg(feature = "cached-attention-streaming")]
@@ -1469,8 +1502,28 @@ pub(super) fn cached_attention_candidates(
         if let Some((pass_query, pass_cached_key, pass_new_key)) = pass {
             source_nodes.extend([pass_query, pass_cached_key, pass_new_key]);
         }
+        let (Some(cached_terms), Some(new_terms)) = (
+            rotary_term_nodes(program, cached_scaled_source),
+            rotary_term_nodes(program, *new_scaled),
+        ) else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "key_slot_terms_not_found",
+                "cached_attention decline -- the even/odd score terms of a key slot are not identifiable"
+            );
+            continue;
+        };
+        let key_slot_terms = [
+            None,
+            None,
+            Some(cached_terms[0]),
+            Some(cached_terms[1]),
+            Some(new_terms[0]),
+            Some(new_terms[1]),
+        ];
         let mut operands = Vec::with_capacity(source_nodes.len());
-        for source in &source_nodes {
+        for (slot, source) in source_nodes.iter().enumerate() {
             if discovery {
                 operands.push((
                     *source,
@@ -1482,11 +1535,14 @@ pub(super) fn cached_attention_candidates(
                 ));
                 continue;
             }
-            let Some((_, layout, lookup)) = first_readers
-                .get_or_init(|| first_reader_operands(resolved))
-                .get(source)
-                .copied()
-            else {
+            let entry = match key_slot_terms.get(slot).copied().flatten() {
+                Some(term) => term_operand(resolved, program, term, *source),
+                None => first_readers
+                    .get_or_init(|| first_reader_operands(resolved))
+                    .get(source)
+                    .copied(),
+            };
+            let Some((_, layout, lookup)) = entry else {
                 #[cfg(feature = "instrument")]
                 debug!(
                     node = output.0,
@@ -1525,7 +1581,15 @@ pub(super) fn cached_attention_candidates(
         };
         let query_shape = shapes.of(query_even_grouped);
         let cached_key_shape = shapes.of(cached_key_even);
-        let new_key_shape = shapes.of(new_key_even);
+        // a rows-layout new key is one node [w, u, 2, P] read at its half; the rank-3 [w, u, P] a plane gives
+        let new_key_rows_shape;
+        let new_key_shape = match *shapes.of(new_key_even) {
+            [rows, heads, 2, pair] if pair == query_shape[3] => {
+                new_key_rows_shape = [rows, heads, pair];
+                &new_key_rows_shape[..]
+            }
+            _ => shapes.of(new_key_even),
+        };
         let cached_value_shape = shapes.of(cached_value);
         let new_value_shape = shapes.of(new_value);
         let Some(end_offset) = end_aligned_offset(local_end_aligned, new_key_shape[0]) else {
@@ -1776,13 +1840,25 @@ pub(super) fn cached_attention_candidates(
             0,
             1,
         ];
+        // a rows-layout key reads one half of a 2P-wide row, so its row and head strides span 2P
+        let row_key_strides = [
+            0i64,
+            (query_shape[1] * pair_dim * 2) as i64,
+            (pair_dim * 2) as i64,
+            0,
+            1,
+        ];
+        let key_slot_ok = |slot: usize| {
+            let strides = operands[slot].1.strides.as_slice();
+            strides == key_strides || strides == row_key_strides
+        };
         if !discovery
             && (operands[0].1.strides.as_slice() != query_strides
                 || operands[1].1.strides.as_slice() != query_strides
-                || operands[2].1.strides.as_slice() != key_strides
-                || operands[3].1.strides.as_slice() != key_strides
-                || operands[4].1.strides.as_slice() != key_strides
-                || operands[5].1.strides.as_slice() != key_strides
+                || !key_slot_ok(2)
+                || !key_slot_ok(3)
+                || !key_slot_ok(4)
+                || !key_slot_ok(5)
                 || operands[6].1.strides.as_slice() != value_strides
                 || operands[7].1.strides.as_slice() != value_strides)
         {
@@ -2361,8 +2437,19 @@ pub(super) fn cached_attention_single_range_candidates(
         let source_nodes = [
             query_even, query_odd, key_even, key_odd, key_even, key_odd, value, value,
         ];
+        let Some(terms) = rotary_term_nodes(program, *scores_scaled) else {
+            continue;
+        };
+        let key_slot_terms = [
+            None,
+            None,
+            Some(terms[0]),
+            Some(terms[1]),
+            Some(terms[0]),
+            Some(terms[1]),
+        ];
         let mut operands = Vec::with_capacity(source_nodes.len());
-        for source in source_nodes {
+        for (slot, source) in source_nodes.into_iter().enumerate() {
             if discovery {
                 operands.push((
                     source,
@@ -2374,11 +2461,14 @@ pub(super) fn cached_attention_single_range_candidates(
                 ));
                 continue;
             }
-            let Some((_, layout, lookup)) = first_readers
-                .get_or_init(|| first_reader_operands(resolved))
-                .get(&source)
-                .copied()
-            else {
+            let entry = match key_slot_terms.get(slot).copied().flatten() {
+                Some(term) => term_operand(resolved, program, term, source),
+                None => first_readers
+                    .get_or_init(|| first_reader_operands(resolved))
+                    .get(&source)
+                    .copied(),
+            };
+            let Some((_, layout, lookup)) = entry else {
                 operands.clear();
                 break;
             };

@@ -656,15 +656,21 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
         }
         None => (*new_upper_inclusive, *cached_key_rows),
     };
-    let mut sources = operands.iter().take(8).map(|(node, layout, _)| {
-        if layout.base != 0 || layout.strides.last().copied() != Some(1) {
-            return Err(TensorError::NotLowerable {
-                node: resolved.node,
-                reason: "cached attention requires zero-based contiguous source tails",
-            });
-        }
-        buffer_of(buffers, *node)
-    });
+    let mut sources = operands
+        .iter()
+        .take(8)
+        .enumerate()
+        .map(|(slot, (node, layout, _))| {
+            if !(2..6).contains(&slot) && layout.base != 0
+                || layout.strides.last().copied() != Some(1)
+            {
+                return Err(TensorError::NotLowerable {
+                    node: resolved.node,
+                    reason: "cached attention requires zero-based contiguous source tails",
+                });
+            }
+            buffer_of(buffers, *node)
+        });
     let query_even = sources.next().ok_or(TensorError::NotLowerable {
         node: resolved.node,
         reason: "cached attention query source is missing",
@@ -708,6 +714,47 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
     // exact-length shape check rejecting the mismatch.
     let pair_dim = (*rotary_dim / 2) as usize;
     let live_cached_key_rows_usize = live_cached_key_rows as usize;
+    let key_rows = [live_cached_key_rows_usize, *new_key_rows as usize];
+    let dense_keys = [
+        dense_key(
+            cached_key_even,
+            &operands[2].1,
+            key_rows[0],
+            *kv_heads as usize,
+            pair_dim,
+            resolved.node,
+        )?,
+        dense_key(
+            cached_key_odd,
+            &operands[3].1,
+            key_rows[0],
+            *kv_heads as usize,
+            pair_dim,
+            resolved.node,
+        )?,
+        dense_key(
+            new_key_even,
+            &operands[4].1,
+            key_rows[1],
+            *kv_heads as usize,
+            pair_dim,
+            resolved.node,
+        )?,
+        dense_key(
+            new_key_odd,
+            &operands[5].1,
+            key_rows[1],
+            *kv_heads as usize,
+            pair_dim,
+            resolved.node,
+        )?,
+    ];
+    let [cached_key_even, cached_key_odd, new_key_even, new_key_odd] = [
+        &*dense_keys[0],
+        &*dense_keys[1],
+        &*dense_keys[2],
+        &*dense_keys[3],
+    ];
     let live_pair_len = live_cached_key_rows_usize * *kv_heads as usize * pair_dim;
     let live_value_len = live_cached_key_rows_usize * *kv_heads as usize * *head_dim as usize;
     let out_of_range = TensorError::NotLowerable {
@@ -2765,4 +2812,53 @@ mod collapse_gather_row_tests {
             }
         ));
     }
+}
+
+/// One key operand of a cached attention as the dense `[rows, kv_heads, pair_dim]` buffer the
+/// streaming kernels take: borrowed when its layout already is that, gathered through the
+/// layout's own base and strides when it is a half of a wider row. A non-unit innermost stride
+/// is refused, since the kernels read each pair contiguously.
+fn dense_key<'a>(
+    buffer: &'a [f32],
+    layout: &bind::Layout,
+    rows: usize,
+    kv_heads: usize,
+    pair_dim: usize,
+    node: NodeId,
+) -> Result<Cow<'a, [f32]>, TensorError> {
+    let refused = |reason: &'static str| TensorError::NotLowerable { node, reason };
+    let [_, row_stride, head_stride, _, pair_stride] = layout.strides[..] else {
+        return if layout.base == 0 && layout.strides.last().copied() == Some(1) {
+            Ok(Cow::Borrowed(buffer))
+        } else {
+            Err(refused(
+                "cached attention key operand is not a zero-based contiguous tail or a rank-5 score read",
+            ))
+        };
+    };
+    if pair_stride != 1 || row_stride < 0 || head_stride < 0 || layout.base < 0 {
+        return Err(refused(
+            "cached attention requires unit innermost, non-negative key strides",
+        ));
+    }
+    if layout.base == 0
+        && head_stride as usize == pair_dim
+        && row_stride as usize == kv_heads * pair_dim
+    {
+        return Ok(Cow::Borrowed(buffer));
+    }
+    let out_of_range = refused("cached attention key operand reads past its own buffer");
+    let mut dense = Vec::with_capacity(rows * kv_heads * pair_dim);
+    for row in 0..rows {
+        for head in 0..kv_heads {
+            let start =
+                layout.base as usize + row * row_stride as usize + head * head_stride as usize;
+            dense.extend_from_slice(
+                buffer
+                    .get(start..start + pair_dim)
+                    .ok_or(out_of_range.clone())?,
+            );
+        }
+    }
+    Ok(Cow::Owned(dense))
 }
