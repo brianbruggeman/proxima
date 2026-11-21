@@ -185,6 +185,7 @@ pub(super) fn render_cached_attention(
         (cached_kv_codec, cached_kv_codec),
         AttentionMmaSelection::Legacy,
         AttentionRowSchedule::legacy(),
+        None,
     )
 }
 
@@ -195,6 +196,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
     (cached_key_codec, cached_kv_codec): (Option<Codec>, Option<Codec>),
     mma_selection: AttentionMmaSelection,
     row_schedule: AttentionRowSchedule,
+    flash_qk_operand: Option<FloatLayout>,
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
         query_rows,
@@ -354,11 +356,11 @@ pub(super) fn render_cached_attention_with_mma_selection(
             return render_cached_attention_row_tiled(
                 resolved,
                 entry,
-                rows_per_threadgroup,
-                simdgroups,
+                (rows_per_threadgroup, simdgroups),
                 cached_kv_codec,
                 mma_selection,
                 row_schedule,
+                flash_qk_operand,
             );
         }
     };

@@ -48,6 +48,15 @@ fn effective_attention_row_schedule(
     row_schedule.without_kv_reuse()
 }
 
+/// The flash entry suffix of a QK operand selection: none for binary32 (today's kernel), `_qkc` for the cache's own layout, `_qk<name>` otherwise.
+fn flash_qk_token(selection: Option<FloatLayout>) -> String {
+    match selection {
+        None => String::from("_qkc"),
+        Some(layout) if layout.same_format(&FloatLayout::BF32) => String::new(),
+        Some(layout) => alloc::format!("_qk{}", layout.format_name().unwrap_or("custom")),
+    }
+}
+
 /// The knobs a caller without an explicit [`EmitKnobs`] gets: the process environment on `std`,
 /// the all-default record on the alloc tier. A temporary shim -- every caller that holds a
 /// [`EmitKnobs`] (a `Plan`, a test) passes it down instead.
@@ -342,6 +351,9 @@ pub(crate) fn emit_inner_with_mma_selection_and_layout(
     if matches!(resolved.kind, BoundOpKind::CachedAttention { .. }) {
         entry.push_str(mma_selection.cache_token());
         entry.push_str(&row_schedule.cache_token());
+        if row_schedule.for_op(&resolved.kind).is_flash() {
+            entry.push_str(&flash_qk_token(knobs.flash_qk_operand));
+        }
     }
     let quantized = operand_codecs(resolved, packed_operands);
     let grid = grid_spec_with_tile_height(
@@ -371,6 +383,7 @@ pub(crate) fn emit_inner_with_mma_selection_and_layout(
                     cached_kv_codecs,
                     mma_selection,
                     row_schedule,
+                    knobs.flash_qk_operand,
                 )
             }),
         BoundOpKind::CachedSoftmaxWeights { .. } => {

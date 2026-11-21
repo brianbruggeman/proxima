@@ -130,6 +130,7 @@ pub(super) fn render_cached_attention_flash_tiled(
     resolved: &BoundOp,
     entry: &str,
     cached_kv_codec: Option<Codec>,
+    qk_operand: Option<FloatLayout>,
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
         kv_heads,
@@ -158,10 +159,12 @@ pub(super) fn render_cached_attention_flash_tiled(
             reason: "the binary32 layout has no Metal hardware type",
         },
     )?;
-    let element = cached_kv_codec
+    let cache_layout = cached_kv_codec
         .as_ref()
         .and_then(readable_scalar_cache)
-        .and_then(|(layout, _)| hardware_type(&layout))
+        .map(|(layout, _)| layout);
+    let element = cache_layout
+        .and_then(|layout| hardware_type(&layout))
         .filter(|element| *element != accumulator)
         .ok_or(EmitError::CachedAttentionKvCodecNotSupported {
             node: resolved.node,
@@ -179,9 +182,44 @@ pub(super) fn render_cached_attention_flash_tiled(
     } else {
         ("device", half_dim, "", DEVICE_Q_SETUP)
     };
+    let operand_layout = if staged {
+        qk_operand.or(cache_layout).unwrap_or(FloatLayout::BF32)
+    } else {
+        FloatLayout::BF32
+    };
+    let operand = hardware_type(&operand_layout).ok_or(EmitError::CachedAttentionKvCodecNotSupported {
+        node: resolved.node,
+        reason: "the flash QK operand layout has no Metal hardware type",
+    })?;
+    let widened = operand == accumulator;
+    let (qk_helpers, qk_frags, qk_load, qk_load_rows, qe_read, qo_read) = if widened {
+        (
+            "",
+            "@ACC_FRAG@ qe, qo; typename k_frag<T>::type kef, kof;",
+            "load_k",
+            "load_k_rows",
+            "qe4[index]".to_string(),
+            "qo4[index]".to_string(),
+        )
+    } else {
+        (
+            QK_OPERAND_HELPERS,
+            "@QOP_FRAG@ qe, qo, kef, kof;",
+            "load_qk",
+            "load_qk_rows",
+            format!("{accumulator}4(qe4[index])"),
+            format!("{accumulator}4(qo4[index])"),
+        )
+    };
     let simdgroups = FLASH_SIMDGROUPS;
     let block = flash_block(*head_dim);
     let substitutions = [
+        ("@QK_HELPERS@", qk_helpers.to_string()),
+        ("@QK_FRAGS@", qk_frags.to_string()),
+        ("@QK_LOAD_ROWS@", qk_load_rows.to_string()),
+        ("@QK_LOAD@", qk_load.to_string()),
+        ("@QE4_READ@", qe_read),
+        ("@QO4_READ@", qo_read),
         ("@ENTRY@", entry.to_string()),
         ("@QSPACE@", q_space.to_string()),
         ("@QSTRIDE@", q_stride.to_string()),
@@ -202,6 +240,8 @@ pub(super) fn render_cached_attention_flash_tiled(
         ("@SCALE@", msl_literal(*scale)),
         ("@CACHED_LOWER@", cached_lower),
         ("@ALIGN_ROWS@", flash_row_alignment(&resolved.kind).to_string()),
+        ("@QOP_FRAG@", format!("simdgroup_{operand}8x8")),
+        ("@QOP@", operand.to_string()),
         ("@ELEM_FRAG@", format!("simdgroup_{element}8x8")),
         ("@ACC_FRAG@", format!("simdgroup_{accumulator}8x8")),
         ("@ELEM@", element.to_string()),
@@ -217,13 +257,26 @@ pub(super) fn render_cached_attention_flash_tiled(
     Ok(source)
 }
 
-const STAGED_Q_DECL: &str = "threadgroup @ACC@ sq[16 * (half_dim + 8)];";
+const QK_OPERAND_HELPERS: &str = r#"
+template <typename T> inline void load_qk(thread @QOP_FRAG@& dst, device const T* src, int stride) {
+    simdgroup_matrix<T, 8, 8> wide; simdgroup_load(wide, src, (ulong)stride, ulong2(0, 0), true);
+    dst.thread_elements()[0] = @QOP@(wide.thread_elements()[0]); dst.thread_elements()[1] = @QOP@(wide.thread_elements()[1]);
+}
+inline void load_qk(thread @QOP_FRAG@& dst, device const @QOP@* src, int stride) { simdgroup_load(dst, src, (ulong)stride, ulong2(0, 0), true); }
+template <typename T> inline void load_qk_rows(thread @QOP_FRAG@& dst, device const T* src, int stride, ushort lane, int rows_left) {
+    short quad = (short)(lane / 4); short row = (short)((quad & 4) + ((lane / 2) % 4)); short column = (short)((quad & 2) * 2 + (lane % 2) * 2);
+    int last_key = max(rows_left - 1, 0);
+    dst.thread_elements()[0] = @QOP@(src[min((int)column, last_key) * stride + row]);
+    dst.thread_elements()[1] = @QOP@(src[min((int)column + 1, last_key) * stride + row]);
+}"#;
+
+const STAGED_Q_DECL: &str = "threadgroup @QOP@ sq[16 * (half_dim + 8)];";
 
 const STAGED_Q_SETUP: &str = r#"for (int i = (int)sg * 32 + (int)lane; i < 8 * half_dim; i += @THREADS@) {
         int v = i / half_dim, c = i % half_dim;
-        sq[v * qstride + c] = @ACC@(in0[qbase + i]); sq[(8 + v) * qstride + c] = @ACC@(in1[qbase + i]);
+        sq[v * qstride + c] = @QOP@(in0[qbase + i]); sq[(8 + v) * qstride + c] = @QOP@(in1[qbase + i]);
     }
-    threadgroup const @ACC@* qe_base = sq; threadgroup const @ACC@* qo_base = sq + 8 * qstride;"#;
+    threadgroup const @QOP@* qe_base = sq; threadgroup const @QOP@* qo_base = sq + 8 * qstride;"#;
 
 const DEVICE_Q_SETUP: &str = "device const @ACC@* qe_base = in0 + qbase; device const @ACC@* qo_base = in1 + qbase;";
 
@@ -246,7 +299,7 @@ inline void load_v(thread @ACC_FRAG@& dst, device const @ELEM@* src, int stride)
     @ELEM_FRAG@ narrow; simdgroup_load(narrow, src, (ulong)stride);
     dst.thread_elements()[0] = @ACC@(narrow.thread_elements()[0]); dst.thread_elements()[1] = @ACC@(narrow.thread_elements()[1]);
 }
-inline void load_v(thread @ACC_FRAG@& dst, device const @ACC@* src, int stride) { simdgroup_load(dst, src, (ulong)stride); }
+inline void load_v(thread @ACC_FRAG@& dst, device const @ACC@* src, int stride) { simdgroup_load(dst, src, (ulong)stride); }@QK_HELPERS@
 
 // a tile that ends past the live keys reads only the rows inside them, as the row-tiled kernel's clamped key load and zero-padded value rows: the cache extent need not be a whole number of tiles
 template <typename T>
@@ -300,7 +353,7 @@ inline void flash_softmax(threadgroup @ACC@* ss, threadgroup @ACC@* so, thread @
 
 template <typename T, bool partial>
 inline void flash_block(device const T* ke, device const T* ko, device const T* vv, int key0, int columns, int valid_end, bool cached_phase, int row, long lower,
-                        @QSPACE@ const @ACC@* qe_base, @QSPACE@ const @ACC@* qo_base, threadgroup @ACC@* ss, threadgroup @ACC@* so, thread @ACC@ (&M)[nq], thread @ACC@ (&S)[nq],
+                        @QSPACE@ const @QOP@* qe_base, @QSPACE@ const @QOP@* qo_base, threadgroup @ACC@* ss, threadgroup @ACC@* so, thread @ACC@ (&M)[nq], thread @ACC@ (&S)[nq],
                         int kv_head, ushort lane, ushort sg) {
     const int kstride = kv_heads * half_dim, vstride = kv_heads * head_dim;
     FOR_UNROLL for (int cc = 0; cc < @QK_PER_SG@; ++cc) {                       // QK: key tiles sg and sg + 4
@@ -313,15 +366,15 @@ inline void flash_block(device const T* ke, device const T* ko, device const T* 
                 device const T* kop = ko + (key0 + kt * 8) * kstride + kv_head * half_dim;
                 FOR_UNROLL for (int j = 0; j < half_dim / 8; ++j) {   // chain e0,o0,e1,o1,... as the row-tiled kernel
                     simdgroup_barrier(mem_flags::mem_none);
-                    @ACC_FRAG@ qe, qo; typename k_frag<T>::type kef, kof;
+                    @QK_FRAGS@
                     simdgroup_load(qe, qe_base + 8 * j, (ulong)qstride);
                     simdgroup_load(qo, qo_base + 8 * j, (ulong)qstride);
                     if (!partial || key_rows_left >= 8) {
-                        load_k(kef, kep + 8 * j, kstride);
-                        load_k(kof, kop + 8 * j, kstride);
+                        @QK_LOAD@(kef, kep + 8 * j, kstride);
+                        @QK_LOAD@(kof, kop + 8 * j, kstride);
                     } else {
-                        load_k_rows(kef, kep + 8 * j, kstride, lane, key_rows_left);
-                        load_k_rows(kof, kop + 8 * j, kstride, lane, key_rows_left);
+                        @QK_LOAD_ROWS@(kef, kep + 8 * j, kstride, lane, key_rows_left);
+                        @QK_LOAD_ROWS@(kof, kop + 8 * j, kstride, lane, key_rows_left);
                     }
                     simdgroup_barrier(mem_flags::mem_none);
                     simdgroup_multiply_accumulate(acc, qe, kef, acc);
@@ -354,7 +407,7 @@ inline void flash_block(device const T* ke, device const T* ko, device const T* 
 }
 
 inline void flash_tail(device const @ACC@* ke, device const @ACC@* ko, device const @ACC@* vv, int key0, int columns, int row, long lower,
-                       @QSPACE@ const @ACC@* qe_base, @QSPACE@ const @ACC@* qo_base, threadgroup @ACC@* ss, threadgroup @ACC@* so, thread @ACC@ (&M)[nq], thread @ACC@ (&S)[nq],
+                       @QSPACE@ const @QOP@* qe_base, @QSPACE@ const @QOP@* qo_base, threadgroup @ACC@* ss, threadgroup @ACC@* so, thread @ACC@ (&M)[nq], thread @ACC@ (&S)[nq],
                        int kv_head, ushort lane, ushort sg) {
     const int kstride = kv_heads * half_dim, vstride = kv_heads * head_dim;
     const int pairs = 8 * columns;                                    // the new keys past the last whole 8-key tile: the row-tiled scalar step
@@ -364,13 +417,13 @@ inline void flash_tail(device const @ACC@* ke, device const @ACC@* ko, device co
         int v = pair / columns, column = pair % columns;
         @ACC@ partial = 0.0f;
         if (pair < pairs) {
-            @QSPACE@ const @ACC@4* qe4 = (@QSPACE@ const @ACC@4*)(qe_base + v * qstride);
-            @QSPACE@ const @ACC@4* qo4 = (@QSPACE@ const @ACC@4*)(qo_base + v * qstride);
+            @QSPACE@ const @QOP@4* qe4 = (@QSPACE@ const @QOP@4*)(qe_base + v * qstride);
+            @QSPACE@ const @QOP@4* qo4 = (@QSPACE@ const @QOP@4*)(qo_base + v * qstride);
             device const @ACC@4* ke4 = (device const @ACC@4*)(ke + (key0 + column) * kstride + kv_head * half_dim);
             device const @ACC@4* ko4 = (device const @ACC@4*)(ko + (key0 + column) * kstride + kv_head * half_dim);
             for (short index = tx; index < (short)(half_dim / 4); index += 8) {
-                partial += dot(ke4[index], qe4[index]);
-                partial += dot(ko4[index], qo4[index]);
+                partial += dot(ke4[index], @QE4_READ@);
+                partial += dot(ko4[index], @QO4_READ@);
             }
         }
         partial += simd_shuffle_down(partial, 4);

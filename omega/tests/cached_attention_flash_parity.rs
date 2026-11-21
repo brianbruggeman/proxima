@@ -17,6 +17,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use half::f16;
+use proxima_numeric::float_layout::FloatLayout;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::spec::{
     SLIDING_CACHED_LEN_INPUT,
@@ -150,6 +151,15 @@ fn f16_bytes(values: &[f32]) -> Vec<u8> {
 }
 
 fn logits_under(fixture: &Fixture, decomposition: omega::AttentionDecomposition) -> (Vec<u32>, Vec<String>) {
+    logits_with_qk_operand(fixture, decomposition, Some(FloatLayout::BF32))
+}
+
+/// `qk_operand` is the flash QK MMA operand layout: `None` is the default (the K cache's own layout, half), `Some(BF32)` is the binary32 operand that matches legacy's dot bit for bit.
+fn logits_with_qk_operand(
+    fixture: &Fixture,
+    decomposition: omega::AttentionDecomposition,
+    qk_operand: Option<FloatLayout>,
+) -> (Vec<u32>, Vec<String>) {
     let policy = production_numeric_policy();
     let packed: Vec<Option<Vec<u8>>> = fixture
         .named
@@ -174,6 +184,7 @@ fn logits_under(fixture: &Fixture, decomposition: omega::AttentionDecomposition)
     let roots = [fixture.logits];
     let mut plan = omega::plan_named(&fixture.program, &fixture.symbols, &blocks, &roots, policy)
         .expect("metal plans the flint-shaped prefill");
+    plan.set_flash_qk_operand(qk_operand);
     plan.set_attention_variant(omega::AttentionVariant {
         kv_storage: omega::AttentionKvStorage::F16,
         decomposition,
@@ -405,4 +416,55 @@ fn where_admitted_runs_legacy(head_dim: u32, rows: u64, cached_len: u64) {
 fn flash_where_admitted_runs_legacy_for_ops_legacy_splits() {
     where_admitted_runs_legacy(128, 8, 2048);
     where_admitted_runs_legacy(128, 16, 4096);
+}
+
+struct Divergence {
+    max_abs: f64,
+    max_rel: f64,
+    scaled: f64,
+    rms: f64,
+}
+
+fn divergence(legacy: &[u32], flash: &[u32]) -> Divergence {
+    let pairs = legacy.iter().zip(flash).map(|(left, right)| (f64::from(f32::from_bits(*left)), f64::from(f32::from_bits(*right))));
+    let (mut max_abs, mut max_rel, mut scale, mut square) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for (left, right) in pairs {
+        let gap = (left - right).abs();
+        max_abs = max_abs.max(gap);
+        max_rel = max_rel.max(gap / left.abs().max(1e-6));
+        scale = scale.max(left.abs());
+        square += gap * gap;
+    }
+    Divergence { max_abs, max_rel, scaled: max_abs / scale.max(1e-6), rms: (square / legacy.len() as f64).sqrt() }
+}
+
+/// legacy dots in binary32, so the default flash (half QK operands, binary32 accumulate) differs from it by the half operand
+/// rounding alone. bound = max|flash - legacy| / max|legacy| over the logits; measured worst 1.50e-4 (d128 tail q71 over c72,
+/// 2026-11-21), bound is 2x that rounded up to one figure. per-element relative error is not used: near-zero logits make it reach 3.9.
+const HALF_QK_MAX_SCALED_DIVERGENCE: f64 = 3e-4;
+
+fn default_flash_stays_within_the_half_operand_bound(head_dim: u32) {
+    let mut lines = Vec::new();
+    let mut worst = 0.0f64;
+    for (label, rows, cached_len, window) in WHOLE_AND_TAIL_CELLS {
+        let fixture = fixture(rows, cached_len, window, head_dim);
+        let (legacy, _) = logits_with_qk_operand(&fixture, omega::AttentionDecomposition::Legacy, None);
+        let (flash, keys) = logits_with_qk_operand(&fixture, omega::AttentionDecomposition::Flash, None);
+        assert!(keys.iter().any(|key| key.contains("_flash")), "{label}: the default plan must run the flash kernel");
+        let gap = divergence(&legacy, &flash);
+        assert!(gap.max_abs > 0.0, "{label}: half operands must differ from the binary32 dot, or the default is not the cache layout");
+        worst = worst.max(gap.scaled);
+        lines.push(format!("half qk vs legacy: d{head_dim} {label} max_abs={:e} max_rel={:e} scaled={:e} rms={:e}", gap.max_abs, gap.max_rel, gap.scaled, gap.rms));
+    }
+    assert!(worst <= HALF_QK_MAX_SCALED_DIVERGENCE, "default flash left the half-operand bound {HALF_QK_MAX_SCALED_DIVERGENCE:e}:\n{}", lines.join("\n"));
+}
+
+#[test]
+fn default_flash_with_half_qk_operands_stays_within_the_bound_of_legacy_at_head_dim_128() {
+    default_flash_stays_within_the_half_operand_bound(128);
+}
+
+#[test]
+fn default_flash_with_half_qk_operands_stays_within_the_bound_of_legacy_at_head_dim_256() {
+    default_flash_stays_within_the_half_operand_bound(256);
 }

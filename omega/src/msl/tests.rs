@@ -12033,6 +12033,7 @@ fn a_block_key_cache_is_refused_by_the_generic_cached_attention_forms() {
         (Some(Codec::Q4_0), Some(Codec::Float16)),
         AttentionMmaSelection::Legacy,
         AttentionRowSchedule::legacy(),
+        None,
     )
     .expect_err("a block K beside a scalar V is not a generic-form cache");
     assert!(matches!(error, EmitError::CachedAttentionKvCodecNotSupported { .. }), "{error:?}");

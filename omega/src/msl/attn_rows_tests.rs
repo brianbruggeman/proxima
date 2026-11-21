@@ -1249,11 +1249,11 @@ fn rendered_with_operands(op: &BoundOp, half_operands: bool) -> String {
     cached_attention_row_tiled::render_cached_attention_row_tiled_with(
         op,
         "omega_cached_attention_probe",
-        rows_per_threadgroup,
-        simdgroups,
+        (rows_per_threadgroup, simdgroups),
         half_operands,
         None,
         AttentionRowSchedule::legacy(),
+        None,
     )
     .expect("the row-tiled kernel renders")
 }
@@ -1412,11 +1412,11 @@ fn card_14_k_reuse_declines_when_staging_exceeds_threadgroup_budget() {
     let legacy = cached_attention_row_tiled::render_cached_attention_row_tiled_with(
         &operation,
         "omega_card_14_legacy",
-        4,
-        8,
+        (4, 8),
         false,
         None,
         AttentionRowSchedule::legacy(),
+        None,
     )
     .expect("the same tile fits before K staging");
     assert!(legacy.contains("shared_key_even[1]"));
@@ -1425,11 +1425,11 @@ fn card_14_k_reuse_declines_when_staging_exceeds_threadgroup_budget() {
     let error = cached_attention_row_tiled::render_cached_attention_row_tiled_with(
         &operation,
         "omega_card_14_shared_k",
-        4,
-        8,
+        (4, 8),
         false,
         None,
         AttentionRowSchedule::shared_k(),
+        None,
     )
     .expect_err("K staging is rejected when it exceeds threadgroup memory");
     assert!(matches!(
@@ -1517,21 +1517,21 @@ fn card_15_v_reuse_stages_v_for_distinct_query_owners() {
     let bf16 = cached_attention_row_tiled::render_cached_attention_row_tiled_with(
         &operation,
         "omega_card_15_bf16",
-        8,
-        2,
+        (8, 2),
         false,
         Some(Codec::BFloat16),
         AttentionRowSchedule::shared_kv(),
+        None,
     )
     .expect("BF16 cached V decodes before shared staging");
     let bf8 = cached_attention_row_tiled::render_cached_attention_row_tiled_with(
         &operation,
         "omega_card_15_bf8",
-        8,
-        2,
+        (8, 2),
         true,
         Some(Codec::BFloat8),
         AttentionRowSchedule::shared_kv(),
+        None,
     )
     .expect("BF8 cached V decodes before shared staging");
     assert!(bf16.contains("omega_cache_load_matrix(value_float"));
@@ -1547,11 +1547,11 @@ fn card_15_v_reuse_declines_when_persistent_accumulators_exceed_budget() {
     let error = cached_attention_row_tiled::render_cached_attention_row_tiled_with(
         &operation,
         "omega_card_15_accumulator_decline",
-        4,
-        8,
+        (4, 8),
         false,
         None,
         AttentionRowSchedule::shared_kv(),
+        None,
     )
     .expect_err("the query-owned V path declines above the accumulator budget");
     assert!(matches!(

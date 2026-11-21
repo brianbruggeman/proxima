@@ -3,6 +3,8 @@ use alloc::collections::BTreeMap;
 #[cfg(feature = "metal-grouped-gemm")]
 use crate::epilogue::index32_reach_fits;
 
+#[cfg(feature = "metal-attn-variants")]
+use proxima_numeric::float_layout::FloatLayout;
 use super::tests::embedding_lookup_op;
 #[cfg(feature = "metal-grouped-gemm")]
 use super::tests::gathered_matmul_op;
@@ -781,4 +783,52 @@ fn a_grouped_write_back_stores_four_features_as_one_vector_with_a_scalar_tail_fa
         assert!(kernel.contains(scalar_tail), "rows {rows}");
         assert!(!has_word(&kernel, "long"), "rows {rows}");
     }
+}
+
+#[cfg(feature = "metal-attn-variants")]
+const FLASH_FULL_LAYER_F32_QK: &str =
+    include_str!("../../tests/fixtures/index32/cached_attention_full_layer_flash.f32.base.msl");
+#[cfg(feature = "metal-attn-variants")]
+const FLASH_SLIDING_LAYER_F32_QK: &str =
+    include_str!("../../tests/fixtures/index32/cached_attention_sliding_layer_flash.f32.base.msl");
+
+#[cfg(feature = "metal-attn-variants")]
+fn emitted_flash_with_qk_operand(
+    bound: &BoundOp,
+    packed: &BTreeMap<NodeId, Codec>,
+    operand: Option<FloatLayout>,
+) -> String {
+    let knobs = EmitKnobs::default().with_coord_index32(false).with_flash_qk_operand(operand);
+    emit_with_attention_variant_and_knobs(bound, packed, NumericPolicy::llama_relaxed(), flash_variant(), &knobs)
+        .expect("flash attention emits")
+        .source
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn a_flash_kernel_with_binary32_qk_operands_renders_the_text_it_did_before_the_operand_was_configurable() {
+    let (full, full_packed) = full_layer_op();
+    let (sliding, sliding_packed) = sliding_layer_op();
+
+    assert_eq!(
+        emitted_flash_with_qk_operand(&full, &full_packed, Some(FloatLayout::BF32)),
+        FLASH_FULL_LAYER_F32_QK
+    );
+    assert_eq!(
+        emitted_flash_with_qk_operand(&sliding, &sliding_packed, Some(FloatLayout::BF32)),
+        FLASH_SLIDING_LAYER_F32_QK
+    );
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn a_flash_kernel_defaults_to_qk_operands_in_the_k_cache_layout_with_binary32_accumulators() {
+    let (bound, packed) = full_layer_op();
+
+    let source = emitted_flash_with_qk_operand(&bound, &packed, None);
+
+    assert!(source.contains("simdgroup_half8x8 qe, qo, kef, kof;"));
+    assert!(source.contains("threadgroup half sq["));
+    assert!(source.contains("simdgroup_float8x8 acc = make_filled_simdgroup_matrix<float, 8, 8>"));
+    assert_ne!(source, FLASH_FULL_LAYER_F32_QK);
 }

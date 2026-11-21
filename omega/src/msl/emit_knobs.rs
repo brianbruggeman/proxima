@@ -98,6 +98,9 @@ pub struct EmitKnobs {
     /// Activation staging layout, such as `float16`; `None` is binary32 for the dense GEMM and llama's half for the expert-grouped GEMM; `float32` pins binary32 for both.
     #[cfg_attr(feature = "std", setting(default, resolve_with = "parse_staging_layout"))]
     pub tiled_gemm_staging: Option<FloatLayout>,
+    /// Flash attention QK MMA operand layout, such as `float32`; `None` follows the K cache's storage layout (half for an f16 cache), `float32` stages Q and K in binary32. Accumulators stay binary32.
+    #[cfg_attr(feature = "std", setting(default, resolve_with = "parse_staging_layout"))]
+    pub flash_qk_operand: Option<FloatLayout>,
     /// Store interior output tiles straight to device memory.
     #[cfg_attr(feature = "std", setting(default = true, resolve_with = "parse_on_unless_zero"))]
     pub tiled_gemm_direct_store: bool,
@@ -201,6 +204,7 @@ impl Default for EmitKnobs {
             tiled_gemm_wide_act_load: true,
             tiled_gemm_slim_tgmem: true,
             tiled_gemm_staging: None,
+            flash_qk_operand: None,
             tiled_gemm_direct_store: true,
             tiled_gemm_wide_weight_stage: true,
             tiled_gemm_grid2d: true,
@@ -352,6 +356,13 @@ impl EmitKnobs {
     #[must_use]
     pub fn with_tiled_gemm_staging(mut self, value: Option<FloatLayout>) -> Self {
         self.tiled_gemm_staging = value;
+        self
+    }
+
+    /// Set the flash attention QK operand layout; `None` follows the K cache's storage layout.
+    #[must_use]
+    pub fn with_flash_qk_operand(mut self, value: Option<FloatLayout>) -> Self {
+        self.flash_qk_operand = value;
         self
     }
 
@@ -542,6 +553,7 @@ impl EmitKnobs {
                 base.tiled_gemm_slim_tgmem,
             ),
             tiled_gemm_staging: read_env("PROXIMA_TILED_GEMM_STAGING", parse_staging_layout, base.tiled_gemm_staging),
+            flash_qk_operand: read_env("PROXIMA_FLASH_QK_OPERAND", parse_staging_layout, base.flash_qk_operand),
             tiled_gemm_direct_store: read_env(
                 "PROXIMA_TILED_GEMM_DIRECT_STORE",
                 parse_on_unless_zero,
@@ -731,6 +743,7 @@ pub(crate) fn every_knob_moved_by_the_builder() -> EmitKnobs {
         .with_tiled_gemm_wide_act_load(false)
         .with_tiled_gemm_slim_tgmem(false)
         .with_tiled_gemm_staging(staging)
+        .with_flash_qk_operand(FloatLayout::from_name("float32"))
         .with_tiled_gemm_direct_store(false)
         .with_tiled_gemm_wide_weight_stage(false)
         .with_tiled_gemm_grid2d(false)
@@ -758,7 +771,7 @@ mod tests {
     use super::{EmitKnobs, ReductionLiteral, every_knob_moved_by_the_builder};
     use crate::config::RuntimeConfig;
 
-    const ENV_NAMES: [&str; 33] = [
+    const ENV_NAMES: [&str; 34] = [
         "PROXIMA_PACKED_ROWS",
         "PROXIMA_PACKED_K_SPLIT",
         "PROXIMA_PACKED_ROWS_KSPLIT",
@@ -772,6 +785,7 @@ mod tests {
         "PROXIMA_TILED_GEMM_WIDE_ACT_LOAD",
         "PROXIMA_TILED_GEMM_SLIM_TGMEM",
         "PROXIMA_TILED_GEMM_STAGING",
+        "PROXIMA_FLASH_QK_OPERAND",
         "PROXIMA_TILED_GEMM_DIRECT_STORE",
         "PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE",
         "PROXIMA_TILED_GEMM_GRID2D",
@@ -1067,6 +1081,7 @@ mod tests {
             ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", Some("0")),
             ("PROXIMA_TILED_GEMM_SLIM_TGMEM", Some("0")),
             ("PROXIMA_TILED_GEMM_STAGING", Some("float16")),
+            ("PROXIMA_FLASH_QK_OPERAND", Some("float32")),
             ("PROXIMA_TILED_GEMM_DIRECT_STORE", Some("0")),
             ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("0")),
             ("PROXIMA_TILED_GEMM_GRID2D", Some("0")),

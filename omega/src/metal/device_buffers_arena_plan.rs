@@ -1968,6 +1968,17 @@ impl Plan {
         Ok(())
     }
 
+    /// Selects the flash attention QK MMA operand layout before the next execution: `None` follows the K cache's
+    /// storage layout, `Some(layout)` stages Q and K in `layout` (`Some(BF32)` is the binary32 dot of legacy).
+    /// Resolved pipelines are discarded, as [`Plan::set_attention_variant`] does.
+    #[cfg(feature = "metal-attn-variants")]
+    pub fn set_flash_qk_operand(&mut self, layout: Option<FloatLayout>) {
+        self.emit_knobs.flash_qk_operand = layout;
+        self.resolved_steps.get_mut().take();
+        #[cfg(feature = "metal-horizontal-merge")]
+        self.merged.get_mut().take();
+    }
+
     /// Tells this plan which of its named block inputs are the CALLER's own
     /// static data -- model weights bound once at load and never mutated
     /// again -- so [`execute_plan`]'s upload loop may cache and reuse their

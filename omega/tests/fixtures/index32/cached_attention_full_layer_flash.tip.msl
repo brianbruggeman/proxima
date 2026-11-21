@@ -1130,6 +1130,17 @@ inline void load_v(thread simdgroup_float8x8& dst, device const half* src, int s
     dst.thread_elements()[0] = float(narrow.thread_elements()[0]); dst.thread_elements()[1] = float(narrow.thread_elements()[1]);
 }
 inline void load_v(thread simdgroup_float8x8& dst, device const float* src, int stride) { simdgroup_load(dst, src, (ulong)stride); }
+template <typename T> inline void load_qk(thread simdgroup_half8x8& dst, device const T* src, int stride) {
+    simdgroup_matrix<T, 8, 8> wide; simdgroup_load(wide, src, (ulong)stride, ulong2(0, 0), true);
+    dst.thread_elements()[0] = half(wide.thread_elements()[0]); dst.thread_elements()[1] = half(wide.thread_elements()[1]);
+}
+inline void load_qk(thread simdgroup_half8x8& dst, device const half* src, int stride) { simdgroup_load(dst, src, (ulong)stride, ulong2(0, 0), true); }
+template <typename T> inline void load_qk_rows(thread simdgroup_half8x8& dst, device const T* src, int stride, ushort lane, int rows_left) {
+    short quad = (short)(lane / 4); short row = (short)((quad & 4) + ((lane / 2) % 4)); short column = (short)((quad & 2) * 2 + (lane % 2) * 2);
+    int last_key = max(rows_left - 1, 0);
+    dst.thread_elements()[0] = half(src[min((int)column, last_key) * stride + row]);
+    dst.thread_elements()[1] = half(src[min((int)column + 1, last_key) * stride + row]);
+}
 
 // a tile that ends past the live keys reads only the rows inside them, as the row-tiled kernel's clamped key load and zero-padded value rows: the cache extent need not be a whole number of tiles
 template <typename T>
@@ -1183,7 +1194,7 @@ inline void flash_softmax(threadgroup float* ss, threadgroup float* so, thread f
 
 template <typename T, bool partial>
 inline void flash_block(device const T* ke, device const T* ko, device const T* vv, int key0, int columns, int valid_end, bool cached_phase, int row, long lower,
-                        threadgroup const float* qe_base, threadgroup const float* qo_base, threadgroup float* ss, threadgroup float* so, thread float (&M)[nq], thread float (&S)[nq],
+                        threadgroup const half* qe_base, threadgroup const half* qo_base, threadgroup float* ss, threadgroup float* so, thread float (&M)[nq], thread float (&S)[nq],
                         int kv_head, ushort lane, ushort sg) {
     const int kstride = kv_heads * half_dim, vstride = kv_heads * head_dim;
     FOR_UNROLL for (int cc = 0; cc < 2; ++cc) {                       // QK: key tiles sg and sg + 4
@@ -1196,15 +1207,15 @@ inline void flash_block(device const T* ke, device const T* ko, device const T* 
                 device const T* kop = ko + (key0 + kt * 8) * kstride + kv_head * half_dim;
                 FOR_UNROLL for (int j = 0; j < half_dim / 8; ++j) {   // chain e0,o0,e1,o1,... as the row-tiled kernel
                     simdgroup_barrier(mem_flags::mem_none);
-                    simdgroup_float8x8 qe, qo; typename k_frag<T>::type kef, kof;
+                    simdgroup_half8x8 qe, qo, kef, kof;
                     simdgroup_load(qe, qe_base + 8 * j, (ulong)qstride);
                     simdgroup_load(qo, qo_base + 8 * j, (ulong)qstride);
                     if (!partial || key_rows_left >= 8) {
-                        load_k(kef, kep + 8 * j, kstride);
-                        load_k(kof, kop + 8 * j, kstride);
+                        load_qk(kef, kep + 8 * j, kstride);
+                        load_qk(kof, kop + 8 * j, kstride);
                     } else {
-                        load_k_rows(kef, kep + 8 * j, kstride, lane, key_rows_left);
-                        load_k_rows(kof, kop + 8 * j, kstride, lane, key_rows_left);
+                        load_qk_rows(kef, kep + 8 * j, kstride, lane, key_rows_left);
+                        load_qk_rows(kof, kop + 8 * j, kstride, lane, key_rows_left);
                     }
                     simdgroup_barrier(mem_flags::mem_none);
                     simdgroup_multiply_accumulate(acc, qe, kef, acc);
@@ -1237,7 +1248,7 @@ inline void flash_block(device const T* ke, device const T* ko, device const T* 
 }
 
 inline void flash_tail(device const float* ke, device const float* ko, device const float* vv, int key0, int columns, int row, long lower,
-                       threadgroup const float* qe_base, threadgroup const float* qo_base, threadgroup float* ss, threadgroup float* so, thread float (&M)[nq], thread float (&S)[nq],
+                       threadgroup const half* qe_base, threadgroup const half* qo_base, threadgroup float* ss, threadgroup float* so, thread float (&M)[nq], thread float (&S)[nq],
                        int kv_head, ushort lane, ushort sg) {
     const int kstride = kv_heads * half_dim, vstride = kv_heads * head_dim;
     const int pairs = 8 * columns;                                    // the new keys past the last whole 8-key tile: the row-tiled scalar step
@@ -1247,13 +1258,13 @@ inline void flash_tail(device const float* ke, device const float* ko, device co
         int v = pair / columns, column = pair % columns;
         float partial = 0.0f;
         if (pair < pairs) {
-            threadgroup const float4* qe4 = (threadgroup const float4*)(qe_base + v * qstride);
-            threadgroup const float4* qo4 = (threadgroup const float4*)(qo_base + v * qstride);
+            threadgroup const half4* qe4 = (threadgroup const half4*)(qe_base + v * qstride);
+            threadgroup const half4* qo4 = (threadgroup const half4*)(qo_base + v * qstride);
             device const float4* ke4 = (device const float4*)(ke + (key0 + column) * kstride + kv_head * half_dim);
             device const float4* ko4 = (device const float4*)(ko + (key0 + column) * kstride + kv_head * half_dim);
             for (short index = tx; index < (short)(half_dim / 4); index += 8) {
-                partial += dot(ke4[index], qe4[index]);
-                partial += dot(ko4[index], qo4[index]);
+                partial += dot(ke4[index], float4(qe4[index]));
+                partial += dot(ko4[index], float4(qo4[index]));
             }
         }
         partial += simd_shuffle_down(partial, 4);
@@ -1273,7 +1284,7 @@ inline void flash_tail(device const float* ke, device const float* ko, device co
     threadgroup_barrier(mem_flags::mem_threadgroup);
 }
 
-kernel void omega_cached_attention_h4_g8_d128_s3db504f3_ln9223372036854775808_up0_r1_a2_n4_b64_rt_sk_flash(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]],
+kernel void omega_cached_attention_h4_g8_d128_s3db504f3_ln9223372036854775808_up0_r1_a2_n4_b64_rt_sk_flash_qkc(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]],
     device const half* in2 [[buffer(2)]], device const half* in3 [[buffer(3)]],
     device const float* in4 [[buffer(4)]], device const float* in5 [[buffer(5)]],
     device const half* in6 [[buffer(6)]], device const float* in7 [[buffer(7)]],
@@ -1285,14 +1296,14 @@ kernel void omega_cached_attention_h4_g8_d128_s3db504f3_ln9223372036854775808_up
     int row = rows - 1 - ((int)tgid % rows);                          // heaviest first, as the row-tiled form
     int kv_head = (int)tgid / rows;
     int live = (int)in8[0];
-    threadgroup float sq[16 * (half_dim + 8)]; threadgroup float4 so4[8 * head_dim / 4]; threadgroup float ss[8 * block];
+    threadgroup half sq[16 * (half_dim + 8)]; threadgroup float4 so4[8 * head_dim / 4]; threadgroup float ss[8 * block];
     threadgroup float* so = (threadgroup float*)so4;
     int qbase = (row * (kv_heads * groups) + kv_head * groups) * half_dim;
     for (int i = (int)sg * 32 + (int)lane; i < 8 * half_dim; i += 128) {
         int v = i / half_dim, c = i % half_dim;
-        sq[v * qstride + c] = float(in0[qbase + i]); sq[(8 + v) * qstride + c] = float(in1[qbase + i]);
+        sq[v * qstride + c] = half(in0[qbase + i]); sq[(8 + v) * qstride + c] = half(in1[qbase + i]);
     }
-    threadgroup const float* qe_base = sq; threadgroup const float* qo_base = sq + 8 * qstride;
+    threadgroup const half* qe_base = sq; threadgroup const half* qo_base = sq + 8 * qstride;
     for (int i = (int)sg * 32 + (int)lane; i < 8 * head_dim; i += 128) { so[i] = 0.0f; }
     float M[nq], S[nq];
     FOR_UNROLL for (int jj = 0; jj < nq; ++jj) {

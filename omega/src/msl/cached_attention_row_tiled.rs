@@ -1,3 +1,4 @@
+use proxima_numeric::float_layout::FloatLayout;
 use super::cached_attention_flash_tiled::render_cached_attention_flash_tiled;
 use super::layout_render::{
     block_element_msl, hardware_type, layout_load_msl, readable_block_layout, readable_scalar_cache,
@@ -133,11 +134,11 @@ inline void omega_zero_padded_value_rows(thread simdgroup_float8x8& value, long 
 pub(super) fn render_cached_attention_row_tiled(
     resolved: &BoundOp,
     entry: &str,
-    rows_per_threadgroup: u64,
-    simdgroups: u64,
+    (rows_per_threadgroup, simdgroups): (u64, u64),
     cached_kv_codec: Option<Codec>,
     mma_selection: AttentionMmaSelection,
     row_schedule: AttentionRowSchedule,
+    flash_qk_operand: Option<FloatLayout>,
 ) -> Result<String, EmitError> {
     let half_operands = match mma_selection {
         AttentionMmaSelection::Legacy => crate::sized::ATTENTION_ROWS_MMA_HALF,
@@ -149,22 +150,22 @@ pub(super) fn render_cached_attention_row_tiled(
     render_cached_attention_row_tiled_with(
         resolved,
         entry,
-        rows_per_threadgroup,
-        simdgroups,
+        (rows_per_threadgroup, simdgroups),
         half_operands,
         cached_kv_codec,
         row_schedule,
+        flash_qk_operand,
     )
 }
 
 pub(super) fn render_cached_attention_row_tiled_with(
     resolved: &BoundOp,
     entry: &str,
-    rows_per_threadgroup: u64,
-    simdgroups: u64,
+    (rows_per_threadgroup, simdgroups): (u64, u64),
     half_operands: bool,
     cached_kv_codec: Option<Codec>,
     row_schedule: AttentionRowSchedule,
+    flash_qk_operand: Option<FloatLayout>,
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
         query_rows,
@@ -192,7 +193,7 @@ pub(super) fn render_cached_attention_row_tiled_with(
         });
     }
     if row_schedule.for_op(&resolved.kind).is_flash() {
-        return render_cached_attention_flash_tiled(resolved, entry, cached_kv_codec);
+        return render_cached_attention_flash_tiled(resolved, entry, cached_kv_codec, flash_qk_operand);
     }
     let cached_lower = if *cached_lower_inclusive == i64::MIN {
         "-9223372036854775807L".to_string()
