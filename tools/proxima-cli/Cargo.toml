@@ -22,6 +22,8 @@ path = "src/daemon.rs"
 
 [features]
 vm = ["proxima/vm"]
+# builds the HIP driver into the binary: `OMEGA_GPU_DRIVER=hip` (and `OMEGA_HIP_WAVE`) then select it through omega's RuntimeConfig
+hip = ["proxima-model-interop/hip"]
 
 [dependencies]
 proxima-numeric = { version = "0.1.0", path = "../../proxima-numeric" }

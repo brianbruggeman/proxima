@@ -179,6 +179,9 @@ gpu = ["dep:omega", "dep:libc", "std", "dep:proxima-telemetry", "proxima-telemet
 # 174.4 -> 106.9, with one refit per run instead of one per token.
 # moe-stacked-experts joins on the granite CUDA A/B (PROXNUM-307, versailles RTX 2070); the
 # MoeTopK fusion needs no lane feature because `omega::cuda::executes` admits it at runtime.
+# HIP serving surface: omega's `cuda-driver` feature carries both the NVIDIA lane and the
+# `cuda_driver::rocm` runtime, so this selects `gpu_driver = "hip"` without the cuda lane features.
+hip = ["gpu", "omega/cuda-driver"]
 cuda = [
     "gpu",
     "omega/cuda-driver",
