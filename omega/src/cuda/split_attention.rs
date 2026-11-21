@@ -95,10 +95,12 @@ pub(super) fn split_pass(
         source,
         entry: split_entry,
         bindings,
-        grid: CudaGridSpec {
-            threads: vectors * chunks * ATTENTION_BLOCK_WIDTH,
-            block_width: Some(ATTENTION_BLOCK_WIDTH),
-        },
+        grid: CudaGridSpec::launch(
+            resolved.node,
+            vectors * chunks * ATTENTION_BLOCK_WIDTH,
+            Some(ATTENTION_BLOCK_WIDTH),
+            "cached_attention_split",
+        )?,
         extra_outputs: Vec::new(),
         prologue: Vec::new(),
     })

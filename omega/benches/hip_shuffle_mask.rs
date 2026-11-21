@@ -108,14 +108,14 @@ fn bench_hip_reduce_emission(criterion: &mut Criterion) {
         println!(
             "hip_shuffle_mask label={label} wave={} block_width={:?} token=PROXIMA_ALL_LANES mask={mask} uses={}",
             wave.lanes(),
-            kernel.grid.block_width,
+            kernel.grid.block_width(),
             kernel.source.matches("PROXIMA_ALL_LANES").count()
         );
         assert!(
             mask.ends_with("ull"),
             "{label} must emit an 8-byte mask, got {mask}"
         );
-        assert_eq!(kernel.grid.block_width, Some(wave.lanes()));
+        assert_eq!(kernel.grid.block_width(), Some(wave.lanes()));
 
         group.bench_with_input(
             BenchmarkId::new(label, wave.lanes()),

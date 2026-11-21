@@ -41,6 +41,16 @@ pub enum EmitError {
         limit: u64,
     },
 
+    /// A grid derived no threads for an op the bound-op layer says has live
+    /// output ([`proxima_tensor::BoundOp::launches`]). That is a defect in this
+    /// emitter's grid arithmetic, not an empty tensor: a zero-block launch is
+    /// rejected by CUDA and HIP, so it must never be represented.
+    #[error(
+        "node {node} is a {kind} op with live output but its launch grid has zero threads -- \
+         a zero-block launch is rejected by the driver, so this is a grid-derivation defect"
+    )]
+    ZeroThreadLaunch { node: NodeId, kind: &'static str },
+
     /// The flat 2D grid form rewrites a kernel's linear `gid` and dispatches
     /// whole threadgroups; `reason` names the property of this kernel that the
     /// rewrite cannot preserve.

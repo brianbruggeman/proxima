@@ -138,7 +138,7 @@ pub const WARP_SIZE: u64 = 32;
 /// One compiled CUDA kernel: source text, its `extern "C"` entry point, the
 /// buffer-index -> data mapping a driver needs to bind before launch (the
 /// same [`Binding`] list [`crate::msl::emit`]/[`crate::wgsl::emit_wgsl`]
-/// return), and the thread count this dispatch needs.
+/// return), and the launch geometry this dispatch needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CudaKernel {
     pub source: String,
@@ -156,42 +156,8 @@ pub struct CudaKernel {
     pub prologue: Vec<CudaKernel>,
 }
 
-/// How many threads a driver must launch, and — for a cooperative reduce —
-/// the block width the launch is pinned to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CudaGridSpec {
-    pub threads: u64,
-    /// `Some(WARP_SIZE)` for a warp-shuffle cooperative reduce (see
-    /// `reduce_is_cooperative`): the driver must launch blocks exactly
-    /// this wide so every warp boundary lands on an output-element
-    /// boundary. `None` for every other kernel.
-    pub block_width: Option<u64>,
-}
-
-/// Threads per block for every kernel whose [`CudaGridSpec::block_width`] is
-/// `None`: the driver's choice, named here so the emit-time grid check and the
-/// launch agree on how many blocks a grid needs.
-pub const DEFAULT_BLOCK_WIDTH: u64 = 256;
-
-/// Most blocks a launch's x dimension holds (`gridDim.x <= 2^31 - 1`). The
-/// kernel's own `gid` is 64-bit, so this, not a 32-bit thread index, is the
-/// widest grid `emit_cuda` covers.
-const MAX_GRID_BLOCKS: u64 = i32::MAX as u64;
-
-impl CudaGridSpec {
-    /// The block width this launch runs at: the pinned cooperative width, else
-    /// [`DEFAULT_BLOCK_WIDTH`].
-    #[must_use]
-    pub fn block_width_or_default(&self) -> u64 {
-        self.block_width.unwrap_or(DEFAULT_BLOCK_WIDTH).max(1)
-    }
-
-    /// Blocks needed to cover [`Self::threads`] at [`Self::block_width_or_default`].
-    #[must_use]
-    pub fn blocks(&self) -> u64 {
-        self.threads.div_ceil(self.block_width_or_default())
-    }
-}
+pub use crate::grid::{DEFAULT_BLOCK_WIDTH, LaunchGrid as CudaGridSpec};
+pub(crate) use crate::grid::MAX_GRID_BLOCKS;
 
 /// Emits a CUDA C kernel from a bound [`BoundOp`] — the CUDA counterpart of
 /// [`crate::msl::emit`]. See the module doc for exactly which op shapes v1
@@ -428,7 +394,7 @@ fn prologue_kernels(
     entry: &str,
     source: &str,
 ) -> Result<Vec<CudaKernel>, EmitError> {
-    if !target.card_asm {
+    if !target.card_asm || !resolved.launches() {
         return Ok(Vec::new());
     }
     match (
@@ -451,6 +417,11 @@ fn extent_fields(
     numeric_policy: NumericPolicy,
     device: EmitDevice,
 ) -> Result<(CudaGridSpec, Vec<(NodeId, usize)>), EmitError> {
+    // the bound-op layer owns whether an op dispatches at all; an empty tensor
+    // is an idle grid here, never a zero-thread launch the driver would reject
+    if !resolved.launches() {
+        return Ok((CudaGridSpec::idle(), Vec::new()));
+    }
     if matches!(resolved.kind, BoundOpKind::BlockQuantize { .. }) {
         return Ok((block_quantize_grid(resolved)?, Vec::new()));
     }
@@ -468,17 +439,25 @@ fn extent_fields(
         .card_asm
         .then(|| staged_matvec_plan(resolved, quantized, numeric_policy, device))
         .flatten();
-    let grid = match gemm {
-        _ if staged.is_some() => CudaGridSpec {
-            threads: staged.as_ref().map_or(0, |plan| staged_matvec_threads(resolved, plan)),
-            block_width: Some(STAGED_THREADS),
-        },
-        Some(plan) => CudaGridSpec {
-            threads: mma_gemm_threads(resolved, &plan),
-            block_width: Some(GEMM_THREADS),
-        },
-        None => CudaGridSpec {
-            threads: grid_threads(
+    let kind = resolved.kind.name();
+    let grid = if let Some(plan) = staged.as_ref() {
+        CudaGridSpec::launch(
+            resolved.node,
+            staged_matvec_threads(resolved, plan),
+            Some(STAGED_THREADS),
+            kind,
+        )?
+    } else if let Some(plan) = gemm {
+        CudaGridSpec::launch(
+            resolved.node,
+            mma_gemm_threads(resolved, &plan),
+            Some(GEMM_THREADS),
+            kind,
+        )?
+    } else {
+        CudaGridSpec::launch(
+            resolved.node,
+            grid_threads(
                 target,
                 resolved,
                 numeric_policy,
@@ -487,19 +466,20 @@ fn extent_fields(
                 row_tile,
                 reduce_width,
             )?,
-            block_width: match &resolved.kind {
+            match &resolved.kind {
                 BoundOpKind::MoeTopK { expert_count, .. } => {
                     Some(moe_block_width(target, *expert_count))
                 }
                 BoundOpKind::CachedAttention { .. } => Some(attention_block_width(target)),
                 _ => cooperative.then_some(reduce_width),
             },
-        },
+            kind,
+        )?
     };
     if grid.blocks() > MAX_GRID_BLOCKS {
         return Err(EmitError::GridExceedsThreadIndex {
             node: resolved.node,
-            threads: grid.threads,
+            threads: grid.threads(),
             limit: MAX_GRID_BLOCKS * grid.block_width_or_default(),
         });
     }
@@ -549,14 +529,16 @@ pub fn emit_q8_1_quantize(
         });
     }
     let block_count = element_count / Q8_1_BLOCK_ELEMENTS;
-    let grid = CudaGridSpec {
-        threads: checked_product(activation, [block_count, WARP_SIZE])?,
-        block_width: Some(WARP_SIZE),
-    };
+    let grid = CudaGridSpec::launch(
+        activation,
+        checked_product(activation, [block_count, WARP_SIZE])?,
+        Some(WARP_SIZE),
+        "q8_1_quantize",
+    )?;
     if grid.blocks() > MAX_GRID_BLOCKS {
         return Err(EmitError::GridExceedsThreadIndex {
             node: activation,
-            threads: grid.threads,
+            threads: grid.threads(),
             limit: MAX_GRID_BLOCKS * grid.block_width_or_default(),
         });
     }
@@ -721,13 +703,14 @@ pub(crate) fn refit_grid_on_target(
     let quantized = operand_codecs(new, packed_operands);
     let staged = target
         .card_asm
-        .then(|| staged_matvec_plan(new, &quantized, numeric_policy, device).filter(|plan| plan.scratch))
-        .flatten();
+        .then(|| new.launches().then(|| staged_matvec_plan(new, &quantized, numeric_policy, device)).flatten())
+        .flatten()
+        .filter(|plan| plan.scratch);
     match (staged, kernel.prologue.as_mut_slice()) {
         (Some(plan), [prepass]) => {
             let (grid, extra_outputs) =
                 extent_fields(target, new, &quantized, numeric_policy, device)?;
-            prepass.grid = staged_prepass_grid(&plan);
+            prepass.grid = staged_prepass_grid(&plan, new.node)?;
             kernel.grid = grid;
             kernel.extra_outputs = extra_outputs;
             Ok(())
@@ -5043,8 +5026,8 @@ mod tests {
         let vectors = i64::from_le_bytes(bytes.as_slice().try_into().expect("8 bytes")) as u64;
 
         assert!(vectors > 0);
-        assert_eq!(kernel.grid.block_width, Some(ATTENTION_WARPS * WARP_SIZE));
-        assert_eq!(kernel.grid.threads, vectors * ATTENTION_WARPS * WARP_SIZE);
+        assert_eq!(kernel.grid.block_width(), Some(ATTENTION_WARPS * WARP_SIZE));
+        assert_eq!(kernel.grid.threads(), vectors * ATTENTION_WARPS * WARP_SIZE);
         assert_eq!(kernel.grid.blocks(), vectors);
         assert!(kernel.source.contains("constexpr int warps = 4;"));
         assert!(kernel.source.contains("key += warps"));
@@ -5116,15 +5099,69 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_extent_elementwise_op_launches_nothing_and_has_an_empty_output() {
+    fn zero_extent_elementwise_is_idle() {
         let empty = elementwise_tanh_op(0);
         assert_eq!(empty.output_len(), 0);
         assert!(!empty.launches(), "zero extent is a valid empty tensor, not a launch");
         let kernel = emit_cuda(&empty, &no_packed()).expect("emit succeeds");
-        assert_eq!(kernel.grid.threads, 0, "the grid the shared decision keeps every backend from launching");
+        assert!(kernel.grid.is_idle(), "an empty tensor is an idle grid, never a zero-thread launch");
         let live = elementwise_tanh_op(8);
         assert_eq!(live.output_len(), 8);
         assert!(live.launches());
+        let live_kernel = emit_cuda(&live, &no_packed()).expect("emit succeeds");
+        assert!(!live_kernel.grid.is_idle());
+    }
+
+    #[test]
+    fn zero_extent_staged_matvec_is_idle() {
+        let (bound, weight) = q4_0_matvec_op(0, 64, true);
+        assert!(!bound.launches(), "an empty output row set dispatches nothing");
+        let packed = q4_0_packed(weight);
+        let policy = NumericPolicy::default().with_activation_quantization(true);
+        let quantized = operand_codecs(&bound, &packed);
+        let plan = staged_matvec_plan(&bound, &quantized, policy, EmitDevice::default())
+            .expect("the empty shape still takes the staged plan");
+        assert_eq!(
+            staged_matvec_threads(&bound, &plan),
+            0,
+            "this is the zero the old arm emitted for a live op"
+        );
+        let kernel = emit_cuda_with_policy(&bound, &packed, policy)
+            .expect("an empty staged matvec still emits");
+        assert!(kernel.grid.is_idle(), "the staged arm must not emit threads: 0");
+    }
+
+    #[test]
+    fn refitting_a_live_staged_matvec_onto_an_empty_one_clears_its_launch_and_prologue() {
+        let policy = NumericPolicy::default().with_activation_quantization(true);
+        let (live, weight) = q4_0_matvec_op(8, 8192, true);
+        let mut kernel =
+            emit_cuda_with_policy(&live, &q4_0_packed(weight), policy).expect("the live op emits");
+        assert!(!kernel.grid.is_idle());
+        assert_eq!(kernel.prologue.len(), 1, "the scratch prepass is emitted");
+        let (empty, empty_weight) = q4_0_matvec_op(0, 8192, true);
+        refit_grid(
+            &mut kernel,
+            &empty,
+            &q4_0_packed(empty_weight),
+            policy,
+            EmitDevice::default(),
+        )
+        .expect("the empty refit succeeds");
+        assert!(kernel.grid.is_idle());
+        assert!(kernel.prologue.is_empty(), "an idle op launches no prepass");
+        assert!(kernel.extra_outputs.is_empty());
+    }
+
+    #[test]
+    fn zero_thread_launch_is_a_named_error() {
+        assert_eq!(
+            CudaGridSpec::launch(NodeId(7), 0, Some(64), "keep::reduce fold"),
+            Err(EmitError::ZeroThreadLaunch {
+                node: NodeId(7),
+                kind: "keep::reduce fold",
+            })
+        );
     }
 
     #[test]
@@ -5134,8 +5171,8 @@ mod tests {
         assert!(kernel.source.contains("extern \"C\" __global__"));
         assert!(kernel.source.contains("tanhf("));
         assert_eq!(kernel.bindings.len(), 3);
-        assert_eq!(kernel.grid.threads, 8);
-        assert!(kernel.grid.block_width.is_none());
+        assert_eq!(kernel.grid.threads(), 8);
+        assert!(kernel.grid.block_width().is_none());
     }
 
     #[test]
@@ -5208,8 +5245,8 @@ mod tests {
 
         let kernel = emit_cuda(&bound, &no_packed()).expect("a 32 expert router emits");
 
-        assert_eq!(kernel.grid.block_width, Some(32));
-        assert_eq!(kernel.grid.threads, 5 * 32);
+        assert_eq!(kernel.grid.block_width(), Some(32));
+        assert_eq!(kernel.grid.threads(), 5 * 32);
         assert_eq!(kernel.grid.blocks(), 5);
         assert_eq!(
             kernel.bindings,
@@ -5237,8 +5274,8 @@ mod tests {
         let kernel = emit_cuda(&moe_top_k_op(40, 6, true), &no_packed())
             .expect("a 40 expert stacked router emits");
 
-        assert_eq!(kernel.grid.block_width, Some(64));
-        assert_eq!(kernel.grid.threads, 5 * 64);
+        assert_eq!(kernel.grid.block_width(), Some(64));
+        assert_eq!(kernel.grid.threads(), 5 * 64);
         assert_eq!(kernel.extra_outputs.len(), 12 + 2);
         assert_eq!(kernel.extra_outputs[12], (NodeId(400), 30));
         assert!(kernel.source.contains("stacked_weights"));
@@ -5301,7 +5338,7 @@ mod tests {
         let small = emit_cuda(&elementwise_tanh_op(4), &no_packed()).expect("emit succeeds");
         let large = emit_cuda(&elementwise_tanh_op(4096), &no_packed()).expect("emit succeeds");
         assert_eq!(small.source, large.source);
-        assert_ne!(small.grid.threads, large.grid.threads);
+        assert_ne!(small.grid.threads(), large.grid.threads());
     }
 
     #[cfg(feature = "reduce-epilogue-fusion")]
@@ -5551,8 +5588,8 @@ mod tests {
         let kernel = emit_q8_1_quantize(NodeId(0), NodeId(1), activation.len() as u64)
             .expect("1536 is a whole number of q8_1 blocks");
 
-        assert_eq!(kernel.grid.threads, 48 * WARP_SIZE);
-        assert_eq!(kernel.grid.block_width, Some(WARP_SIZE));
+        assert_eq!(kernel.grid.threads(), 48 * WARP_SIZE);
+        assert_eq!(kernel.grid.block_width(), Some(WARP_SIZE));
         assert_eq!(
             kernel.bindings,
             vec![
@@ -5681,8 +5718,8 @@ mod tests {
         let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
             .expect("emit succeeds");
         assert!(kernel.source.contains("__shfl_down_sync"));
-        assert_eq!(kernel.grid.block_width, Some(WARP_SIZE));
-        assert_eq!(kernel.grid.threads, 4 * WARP_SIZE);
+        assert_eq!(kernel.grid.block_width(), Some(WARP_SIZE));
+        assert_eq!(kernel.grid.threads(), 4 * WARP_SIZE);
     }
 
     #[test]
@@ -5690,7 +5727,7 @@ mod tests {
         let bound = matmul_reduce_op(4, 8, ScalarOp::Subtract);
         let kernel = emit_cuda(&bound, &no_packed()).expect("emit succeeds");
         assert!(!kernel.source.contains("__shfl_down_sync"));
-        assert!(kernel.grid.block_width.is_none());
+        assert!(kernel.grid.block_width().is_none());
     }
 
     fn scan_op(extent: u32) -> BoundOp {
@@ -5732,7 +5769,7 @@ mod tests {
         let bound = scan_op(16);
         let kernel = emit_cuda(&bound, &no_packed()).expect("emit succeeds");
         assert!(kernel.source.contains("if (gid != 0) { return; }"));
-        assert_eq!(kernel.grid.threads, 1);
+        assert_eq!(kernel.grid.threads(), 1);
     }
 
     /// `table[ids[s], d]` over iteration space `(s, d)` — the same worked
@@ -6159,8 +6196,8 @@ mod tests {
         let bound = gathered_reduce_op(16, 64, 4, false);
         let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
             .expect("emit succeeds");
-        assert_eq!(kernel.grid.block_width, Some(WARP_SIZE));
-        assert_eq!(kernel.grid.threads, 4 * WARP_SIZE);
+        assert_eq!(kernel.grid.block_width(), Some(WARP_SIZE));
+        assert_eq!(kernel.grid.threads(), 4 * WARP_SIZE);
         assert!(kernel.source.contains("__shfl_down_sync"));
         let fetch = kernel
             .source
@@ -6179,8 +6216,8 @@ mod tests {
         let bound = gathered_reduce_op(16, 64, 4, true);
         let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
             .expect("emit succeeds");
-        assert!(kernel.grid.block_width.is_none());
-        assert_eq!(kernel.grid.threads, 4);
+        assert!(kernel.grid.block_width().is_none());
+        assert_eq!(kernel.grid.threads(), 4);
         assert!(!kernel.source.contains("__shfl_down_sync"));
     }
 
@@ -6188,8 +6225,8 @@ mod tests {
     fn reduction_invariant_gathered_reduce_under_bit_exact_policy_stays_serial() {
         let bound = gathered_reduce_op(16, 64, 4, false);
         let kernel = emit_cuda(&bound, &no_packed()).expect("emit succeeds");
-        assert!(kernel.grid.block_width.is_none());
-        assert_eq!(kernel.grid.threads, 4);
+        assert!(kernel.grid.block_width().is_none());
+        assert_eq!(kernel.grid.threads(), 4);
         assert!(!kernel.source.contains("__shfl_down_sync"));
     }
 
@@ -6201,7 +6238,7 @@ mod tests {
         let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
             .expect("emit succeeds");
         let source = &kernel.source;
-        assert_eq!(kernel.grid.block_width, Some(WARP_SIZE));
+        assert_eq!(kernel.grid.block_width(), Some(WARP_SIZE));
         let fetch = source.find("long long gather_base0 =").expect("hoisted gather base");
         let row = source
             .find("const long long row0 = u.operand_base[0] + packed_row0 * u.reduction_total + gather_base0;")
@@ -6271,7 +6308,7 @@ mod tests {
             || emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed()),
         )
         .expect("emit succeeds");
-        assert_eq!(kernel.grid.block_width, Some(WARP_SIZE));
+        assert_eq!(kernel.grid.block_width(), Some(WARP_SIZE));
         assert!(kernel.source.contains("gather_base0"));
         assert!(kernel.source.contains("off0 += gather_base0;"));
     }
@@ -6448,7 +6485,7 @@ mod tests {
 
         let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
             .expect("broadcast kernel emits");
-        assert_eq!(kernel.grid.threads, 4 * WARP_SIZE);
+        assert_eq!(kernel.grid.threads(), 4 * WARP_SIZE);
         let uniforms = pack_cuda_uniforms(&bound).expect("broadcast uniforms pack");
         assert_eq!(
             i64::from_ne_bytes(uniforms[..8].try_into().expect("i64 output total")),
@@ -6474,8 +6511,8 @@ mod tests {
         let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
             .expect("broadcast kernel emits");
 
-        assert_eq!(kernel.grid.block_width, Some(1024 / BLOCK_REDUCE_ELEMENTS_PER_THREAD));
-        assert_eq!(kernel.grid.threads, 1024 / BLOCK_REDUCE_ELEMENTS_PER_THREAD);
+        assert_eq!(kernel.grid.block_width(), Some(1024 / BLOCK_REDUCE_ELEMENTS_PER_THREAD));
+        assert_eq!(kernel.grid.threads(), 1024 / BLOCK_REDUCE_ELEMENTS_PER_THREAD);
         assert!(kernel.source.contains("__shared__ float warp_partials[32];"));
         assert!(kernel.source.contains("long long output_index = (long long)blockIdx.x;"));
     }
@@ -6495,8 +6532,8 @@ mod tests {
         let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
             .expect("broadcast kernel emits");
 
-        assert_eq!(kernel.grid.block_width, Some(WARP_SIZE));
-        assert_eq!(kernel.grid.threads, 5 * WARP_SIZE);
+        assert_eq!(kernel.grid.block_width(), Some(WARP_SIZE));
+        assert_eq!(kernel.grid.threads(), 5 * WARP_SIZE);
     }
 
     #[test]
@@ -6718,8 +6755,8 @@ mod tests {
         let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
             .expect("200M cooperative rows emit");
 
-        assert_eq!(kernel.grid.threads, 200_000_000 * WARP_SIZE);
-        assert!(kernel.grid.threads > u64::from(u32::MAX));
+        assert_eq!(kernel.grid.threads(), 200_000_000 * WARP_SIZE);
+        assert!(kernel.grid.threads() > u64::from(u32::MAX));
         assert_eq!(kernel.grid.blocks(), 200_000_000);
         assert!(
             kernel
@@ -6749,10 +6786,7 @@ mod tests {
 
     #[test]
     fn a_default_width_grid_counts_its_blocks_at_the_default_block_width() {
-        let grid = CudaGridSpec {
-            threads: 1_000,
-            block_width: None,
-        };
+        let grid = CudaGridSpec::launch(NodeId(1), 1_000, None, "test").expect("nonzero threads");
 
         assert_eq!(grid.block_width_or_default(), DEFAULT_BLOCK_WIDTH);
         assert_eq!(grid.blocks(), 4);
@@ -7121,8 +7155,8 @@ mod rocm_tests {
         assert!(kernel.source.contains("__shfl_down_sync(PROXIMA_ALL_LANES,"));
         assert!(kernel.source.contains("for (int shift = 32; shift > 0; shift >>= 1)"));
         assert!(kernel.source.contains("(gid % 64)"));
-        assert_eq!(kernel.grid.block_width, Some(64));
-        assert_eq!(kernel.grid.threads, 4 * 64);
+        assert_eq!(kernel.grid.block_width(), Some(64));
+        assert_eq!(kernel.grid.threads(), 4 * 64);
         assert!(!kernel.source.contains("0xffffffffu"));
     }
 
@@ -7144,7 +7178,7 @@ mod rocm_tests {
         assert!(kernel.source.contains("__shfl_down_sync(PROXIMA_ALL_LANES,"));
         assert!(kernel.source.contains("for (int shift = 16; shift > 0; shift >>= 1)"));
         assert!(kernel.entry.ends_with("_hip_w32_gid64c8"));
-        assert_eq!(kernel.grid.block_width, Some(32));
+        assert_eq!(kernel.grid.block_width(), Some(32));
     }
 
     /// HIP's `_sync` shuffles take a 64-bit mask on both wavefront widths; a 32-lane wave sets 32
@@ -7192,7 +7226,7 @@ mod rocm_tests {
         let kernel = emit_hip(&bound, &no_packed()).expect("hip emits");
 
         assert!(!kernel.source.contains("__shfl_down_sync"));
-        assert!(kernel.grid.block_width.is_none());
+        assert!(kernel.grid.block_width().is_none());
     }
 
     #[test]
@@ -7202,7 +7236,7 @@ mod rocm_tests {
             .expect("hip emits under bit-exact");
 
         assert!(!kernel.source.contains("__shfl_down_sync"));
-        assert!(kernel.grid.block_width.is_none());
+        assert!(kernel.grid.block_width().is_none());
     }
 
     #[test]

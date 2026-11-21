@@ -82,6 +82,8 @@ pub enum CudaDriverError {
     InputTooLarge(usize),
     #[error("CUDA launch of {threads} threads needs more blocks than the launch index holds")]
     GridTooLarge { threads: u64 },
+    #[error("CUDA refused to launch an idle grid: an op with no live output dispatches nothing")]
+    IdleLaunch,
     #[error("CUDA kernel binding contract is not inputs, output, uniforms")]
     BindingContract,
     #[error("CUDA graph buffer for node {0:?} is missing")]
@@ -1341,7 +1343,7 @@ impl CudaDriver {
     pub fn smoke_add_one(&self, input: &[f32]) -> Result<Vec<f32>, CudaDriverError> {
         let n =
             i32::try_from(input.len()).map_err(|_| CudaDriverError::InputTooLarge(input.len()))?;
-        let kernel = add_one_kernel(NodeId(0), NodeId(1), input.len());
+        let kernel = add_one_kernel(NodeId(0), NodeId(1), input.len())?;
         self.launch_f32(&kernel, &[input], &n.to_ne_bytes())
     }
 
@@ -1390,9 +1392,9 @@ impl CudaDriver {
             CudaGraphBuffer::F32(self.stream.clone_htod(input)?),
         );
         arena.allocations = 1;
-        let first = add_one_kernel(NodeId(0), NodeId(1), input.len());
+        let first = add_one_kernel(NodeId(0), NodeId(1), input.len())?;
         self.launch_f32_persistent(&mut arena, &first, &n.to_ne_bytes())?;
-        let second = add_one_kernel(NodeId(1), NodeId(2), input.len());
+        let second = add_one_kernel(NodeId(1), NodeId(2), input.len())?;
         self.launch_f32_persistent(&mut arena, &second, &n.to_ne_bytes())?;
         let output = self.read_f32(&arena, NodeId(2))?;
         Ok((output, arena.allocations()))
@@ -1407,6 +1409,9 @@ impl CudaDriver {
         inputs: &[&[f32]],
         uniforms: &[u8],
     ) -> Result<Vec<f32>, CudaDriverError> {
+        if kernel.grid.is_idle() {
+            return Err(CudaDriverError::IdleLaunch);
+        }
         let input_count = kernel
             .bindings
             .iter()
@@ -1421,7 +1426,7 @@ impl CudaDriver {
         {
             return Err(CudaDriverError::BindingContract);
         }
-        let output_len = usize::try_from(kernel.grid.threads)
+        let output_len = usize::try_from(kernel.grid.threads())
             .map_err(|_| CudaDriverError::InputTooLarge(usize::MAX))?;
         let function = self.function_for(kernel)?;
         let device_inputs = inputs
@@ -1455,7 +1460,10 @@ impl CudaDriver {
         kernel: &CudaKernel,
         uniforms: &[u8],
     ) -> Result<(), CudaDriverError> {
-        self.launch_f32_persistent_sized(arena, kernel, uniforms, kernel.grid.threads as usize)
+        if kernel.grid.is_idle() {
+            return Err(CudaDriverError::IdleLaunch);
+        }
+        self.launch_f32_persistent_sized(arena, kernel, uniforms, kernel.grid.threads() as usize)
     }
 
     /// Persistent launch with an output allocation sized independently from
@@ -3019,7 +3027,7 @@ impl CudaPlan {
                 format!(
                     "entry={} grid_threads={} block_width={:?}",
                     kernel.entry,
-                    kernel.grid.threads,
+                    kernel.grid.threads(),
                     kernel.grid.block_width_or_default()
                 )
             })
@@ -3646,7 +3654,7 @@ impl CudaPlan {
                     bound.kind.name(),
                     bound.extents,
                     kernel.bindings,
-                    kernel.grid.threads,
+                    kernel.grid.threads(),
                     output_len,
                     uniforms.len(),
                     if trace_node == Some(bound.node) {
@@ -3656,10 +3664,9 @@ impl CudaPlan {
                     },
                 );
             }
-            // A zero-extent intermediate is a valid tensor, not a valid CUDA
-            // launch.  Skip the dispatch; downstream reductions still see
-            // their identity value over the empty axis.
-            if !bound.launches() {
+            // The emitter already decided this op dispatches nothing: a
+            // zero-extent intermediate is a valid tensor, not a CUDA launch.
+            if kernel.grid.is_idle() {
                 let needs_zero_buffer = !matches!(
                     self.arena.buffers.get(&bound.node),
                     Some(CudaGraphBuffer::F32(buffer)) if buffer.is_empty()
@@ -4011,8 +4018,8 @@ fn block_length(block: &QuantizedBlock<'_>) -> usize {
     }
 }
 
-fn add_one_kernel(input: NodeId, output: NodeId, elements: usize) -> CudaKernel {
-    CudaKernel {
+fn add_one_kernel(input: NodeId, output: NodeId, elements: usize) -> Result<CudaKernel, CudaDriverError> {
+    Ok(CudaKernel {
         source: String::from(
             r#"
         extern "C" __global__ void proxima_add_one(
@@ -4029,13 +4036,16 @@ fn add_one_kernel(input: NodeId, output: NodeId, elements: usize) -> CudaKernel 
             Binding::Output(output),
             Binding::Uniforms,
         ],
-        grid: CudaGridSpec {
-            threads: elements as u64,
-            block_width: None,
-        },
+        grid: CudaGridSpec::launch(
+            output,
+            elements as u64,
+            None,
+            "add_one",
+        )
+        .map_err(|_| CudaDriverError::IdleLaunch)?,
         extra_outputs: Vec::new(),
         prologue: Vec::new(),
-    }
+    })
 }
 
 // PTX ISA 7.0 is accepted by the RTX 2070's driver JIT and is old enough to
@@ -4086,8 +4096,11 @@ $DONE:
 /// silent truncation of an `as u32` cast: `emit_cuda` already rejects a grid
 /// past `gridDim.x`, so this only fires for a `CudaKernel` built by hand.
 fn launch_blocks(grid: &CudaGridSpec) -> Result<u32, CudaDriverError> {
+    if grid.is_idle() {
+        return Err(CudaDriverError::IdleLaunch);
+    }
     u32::try_from(grid.blocks()).map_err(|_| CudaDriverError::GridTooLarge {
-        threads: grid.threads,
+        threads: grid.threads(),
     })
 }
 
@@ -4274,11 +4287,14 @@ mod tests {
     }
 
     #[test]
+    fn cuda_idle_grid_is_refused_before_any_device_call() {
+        let grid = CudaGridSpec::idle();
+        assert!(matches!(launch_blocks(&grid), Err(CudaDriverError::IdleLaunch)));
+    }
+
+    #[test]
     fn launch_blocks_covers_a_grid_at_the_default_block_width() {
-        let grid = CudaGridSpec {
-            threads: 1_000_000,
-            block_width: None,
-        };
+        let grid = CudaGridSpec::launch(NodeId(1), 1_000_000, None, "test").expect("nonzero threads");
 
         assert!(matches!(launch_blocks(&grid), Ok(3907)));
     }
@@ -4286,10 +4302,7 @@ mod tests {
     #[test]
     fn launch_blocks_rejects_a_grid_past_the_launch_index_instead_of_truncating() {
         let threads = (u64::from(u32::MAX) + 1) * 256;
-        let grid = CudaGridSpec {
-            threads,
-            block_width: None,
-        };
+        let grid = CudaGridSpec::launch(NodeId(1), threads, None, "test").expect("nonzero threads");
 
         assert!(matches!(
             launch_blocks(&grid),
@@ -4345,7 +4358,8 @@ mod tests {
     const INPUT: [f32; 3] = [1.0, 2.0, 3.0];
 
     fn add_two_kernel() -> crate::cuda::CudaKernel {
-        let mut kernel = add_one_kernel(NodeId(0), NodeId(1), INPUT.len());
+        let mut kernel = add_one_kernel(NodeId(0), NodeId(1), INPUT.len())
+            .expect("the add-one probe has three elements");
         kernel.source = kernel.source.replace("+ 1.0f", "+ 2.0f");
         kernel
     }
@@ -4384,7 +4398,8 @@ mod tests {
             CudaDriver::new(0)
         })
         .expect("a cuda device is required for the module cache gate");
-        let add_one = add_one_kernel(NodeId(0), NodeId(1), INPUT.len());
+        let add_one = add_one_kernel(NodeId(0), NodeId(1), INPUT.len())
+            .expect("the add-one probe has three elements");
         let add_two = add_two_kernel();
         assert_eq!(
             add_one.entry, add_two.entry,
@@ -4817,6 +4832,8 @@ pub mod rocm {
         DeviceOrdinalTooLarge(u32),
         #[error("a launch of {threads} threads needs more blocks than the launch index holds")]
         GridTooLarge { threads: u64 },
+        #[error("refused to launch an idle grid: an op with no live output dispatches nothing")]
+        IdleLaunch,
         #[error("smoke input is too large for the launch ABI: {0} elements")]
         InputTooLarge(usize),
         #[error("hip wave width {0} is not supported; expected 32 or 64")]
@@ -5590,11 +5607,14 @@ pub mod rocm {
             inputs: &[&[f32]],
             uniforms: &[u8],
         ) -> Result<Vec<f32>, HipDriverError> {
+            if kernel.grid.is_idle() {
+                return Err(HipDriverError::IdleLaunch);
+            }
             check_binding_contract(kernel, inputs.len())?;
             if kernel.bindings.len() != inputs.len() + 2 {
                 return Err(HipDriverError::ArgumentCountMismatch);
             }
-            let output_len = usize::try_from(kernel.grid.threads)
+            let output_len = usize::try_from(kernel.grid.threads())
                 .map_err(|_| HipDriverError::InputTooLarge(usize::MAX))?;
             let (blocks, block_width) = launch_geometry(kernel)?;
             let function = compiled.function;
@@ -5649,7 +5669,7 @@ pub mod rocm {
             if input.is_empty() {
                 return Ok(Vec::new());
             }
-            let kernel = add_one_kernel(input.len());
+            let kernel = add_one_kernel(input.len())?;
             let count =
                 u32::try_from(input.len()).map_err(|_| HipDriverError::InputTooLarge(input.len()))?;
             let mut uniforms = vec![0u8; core::mem::size_of::<u32>()];
@@ -5679,23 +5699,26 @@ pub mod rocm {
             .ok_or(HipDriverError::BindingContract)
     }
 
-    /// What a kernel the shared plan decision (`BoundOp::launches`) says launches
-    /// nothing yields instead of a launch: its output node and a zero-length buffer.
-    fn empty_launch(kernel: &HipKernel, launches: bool) -> Result<Option<(NodeId, Vec<f32>)>, HipDriverError> {
-        if launches {
+    /// What a kernel the emitter marked [`CudaGridSpec::Idle`] yields instead
+    /// of a launch: its output node and a zero-length buffer.
+    fn empty_launch(kernel: &HipKernel) -> Result<Option<(NodeId, Vec<f32>)>, HipDriverError> {
+        if !kernel.grid.is_idle() {
             return Ok(None);
         }
         Ok(Some((output_target(kernel)?, Vec::new())))
     }
 
-    /// (blocks, block width) for one launch, refusing a grid past the launch index.
-    /// HIP's `gridDim.x` ceiling is `2^31 - 1`, the same value the CUDA lane's
-    /// emit-time check uses.
+    /// (blocks, block width) for one launch, refusing an idle grid and a grid
+    /// past the launch index. HIP's `gridDim.x` ceiling is `2^31 - 1`, the same
+    /// value the CUDA lane's emit-time check uses.
     fn launch_geometry(kernel: &HipKernel) -> Result<(u64, u64), HipDriverError> {
+        if kernel.grid.is_idle() {
+            return Err(HipDriverError::IdleLaunch);
+        }
         let blocks = kernel.grid.blocks();
         if blocks > u64::from(i32::MAX as u32) {
             return Err(HipDriverError::GridTooLarge {
-                threads: kernel.grid.threads,
+                threads: kernel.grid.threads(),
             });
         }
         Ok((blocks, kernel.grid.block_width_or_default()))
@@ -5725,8 +5748,8 @@ pub mod rocm {
     /// not produced by the emitter so a failure isolates the launch path from the
     /// renderer. Its layout is the same `inputs, output, uniforms` contract every
     /// emitted kernel follows.
-    fn add_one_kernel(elements: usize) -> HipKernel {
-        HipKernel {
+    fn add_one_kernel(elements: usize) -> Result<HipKernel, HipDriverError> {
+        Ok(HipKernel {
             source: String::from(
                 "extern \"C\" __global__ void proxima_add_one(\n\
                  \x20   const float *in, float *out, const unsigned int *u\n\
@@ -5741,19 +5764,22 @@ pub mod rocm {
                 Binding::Output(proxima_tensor::NodeId(1)),
                 Binding::Uniforms,
             ],
-            grid: crate::cuda::HipGridSpec {
-                threads: elements as u64,
-                block_width: None,
-            },
+            grid: crate::cuda::HipGridSpec::launch(
+                proxima_tensor::NodeId(1),
+                elements as u64,
+                None,
+                "add_one",
+            )
+            .map_err(|_| HipDriverError::IdleLaunch)?,
             extra_outputs: Vec::new(),
             prologue: Vec::new(),
-        }
+        })
     }
 
     /// Probe kernel: writes the device's `warpSize`, so the wave width the
     /// emitter is built for comes from the hardware, never from a card table.
-    fn warp_size_kernel() -> HipKernel {
-        HipKernel {
+    fn warp_size_kernel() -> Result<HipKernel, HipDriverError> {
+        Ok(HipKernel {
             source: String::from(
                 "extern \"C\" __global__ void proxima_warp_size(float *out, const unsigned int *u) {\n\
                  \x20   if (threadIdx.x == 0) out[0] = (float)warpSize;\n\
@@ -5764,13 +5790,16 @@ pub mod rocm {
                 Binding::Output(proxima_tensor::NodeId(0)),
                 Binding::Uniforms,
             ],
-            grid: crate::cuda::HipGridSpec {
-                threads: 1,
-                block_width: None,
-            },
+            grid: crate::cuda::HipGridSpec::launch(
+                proxima_tensor::NodeId(0),
+                1,
+                None,
+                "warp_size_probe",
+            )
+            .map_err(|_| HipDriverError::IdleLaunch)?,
             extra_outputs: Vec::new(),
             prologue: Vec::new(),
-        }
+        })
     }
 
     impl HipDevice {
@@ -5780,7 +5809,7 @@ pub mod rocm {
         /// # Errors
         /// As [`HipDevice::launch_f32`].
         pub fn warp_size(&self) -> Result<u32, HipDriverError> {
-            let lanes = self.launch_f32(&warp_size_kernel(), &[], &[0u8; 4])?;
+            let lanes = self.launch_f32(&warp_size_kernel()?, &[], &[0u8; 4])?;
             Ok(lanes.first().map_or(0, |value| *value as u32))
         }
     }
@@ -5822,7 +5851,6 @@ pub mod rocm {
         resolved: Vec<BoundOp>,
         block_nodes: Vec<NodeId>,
         kernels: Vec<HipKernel>,
-        launches: Vec<bool>,
         uniforms: Vec<Vec<u8>>,
         outputs: Vec<NodeId>,
         compiled: BTreeMap<String, Option<CompiledKernel>>,
@@ -5870,7 +5898,6 @@ pub mod rocm {
                         .map_err(|error| HipDriverError::Emit { node: bound.node, error: error.to_string() })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let launches = resolved.iter().map(proxima_tensor::BoundOp::launches).collect::<Vec<_>>();
             let uniforms = resolved
                 .iter()
                 .map(|bound| {
@@ -5886,7 +5913,6 @@ pub mod rocm {
                 resolved,
                 block_nodes: block_node_ids(program),
                 kernels,
-                launches,
                 uniforms,
                 outputs,
                 compiled: BTreeMap::new(),
@@ -5946,8 +5972,8 @@ pub mod rocm {
                 };
                 buffers.insert(*node, values.to_vec());
             }
-            for ((kernel, uniforms), launches) in self.kernels.iter().zip(&self.uniforms).zip(&self.launches) {
-                if let Some((node, empty)) = empty_launch(kernel, *launches)? {
+            for (kernel, uniforms) in self.kernels.iter().zip(&self.uniforms) {
+                if let Some((node, empty)) = empty_launch(kernel)? {
                     buffers.insert(node, empty);
                     continue;
                 }
@@ -6097,23 +6123,24 @@ pub mod rocm {
         }
 
         #[test]
-        fn a_kernel_the_plan_decided_not_to_launch_yields_an_empty_output_without_a_zero_block_launch() {
-            let kernel = add_one_kernel(0);
-            assert_eq!(launch_geometry(&kernel).expect("geometry").0, 0, "this grid is the one hipModuleLaunchKernel rejects");
-            let skipped = empty_launch(&kernel, false).expect("binding contract");
+        fn an_idle_grid_yields_an_empty_output_and_is_refused_before_any_device_call() {
+            let mut kernel = add_one_kernel(64).expect("nonzero add-one");
+            kernel.grid = crate::cuda::HipGridSpec::idle();
+            assert!(matches!(launch_geometry(&kernel), Err(HipDriverError::IdleLaunch)));
+            let skipped = empty_launch(&kernel).expect("binding contract");
             assert_eq!(skipped, Some((proxima_tensor::NodeId(1), Vec::new())));
-            assert_eq!(empty_launch(&add_one_kernel(64), true).expect("binding contract"), None);
+            assert_eq!(empty_launch(&add_one_kernel(64).expect("nonzero add-one")).expect("binding contract"), None);
         }
 
         #[test]
         fn the_add_one_skeleton_is_inside_the_launch_contract() {
-            let kernel = add_one_kernel(64);
+            let kernel = add_one_kernel(64).expect("nonzero add-one");
             check_binding_contract(&kernel, 1).expect("one input, one output, uniforms");
         }
 
         #[test]
         fn a_kernel_without_a_uniforms_slot_is_refused() {
-            let mut kernel = add_one_kernel(64);
+            let mut kernel = add_one_kernel(64).expect("nonzero add-one");
             kernel.bindings.pop();
             assert!(matches!(
                 check_binding_contract(&kernel, 1),
@@ -6123,7 +6150,7 @@ pub mod rocm {
 
         #[test]
         fn a_kernel_with_the_wrong_input_count_is_refused() {
-            let kernel = add_one_kernel(64);
+            let kernel = add_one_kernel(64).expect("nonzero add-one");
             assert!(matches!(
                 check_binding_contract(&kernel, 0),
                 Err(HipDriverError::BindingContract)
@@ -6136,12 +6163,18 @@ pub mod rocm {
 
         #[test]
         fn launch_geometry_covers_every_thread_at_the_default_block_width() {
-            let mut kernel = add_one_kernel(1000);
+            let mut kernel = add_one_kernel(1000).expect("nonzero add-one");
             let (blocks, width) = launch_geometry(&kernel).expect("a 1000-thread launch fits");
             assert_eq!(width, crate::cuda::DEFAULT_BLOCK_WIDTH);
             assert_eq!(blocks, 1000u64.div_ceil(crate::cuda::DEFAULT_BLOCK_WIDTH));
 
-            kernel.grid.block_width = Some(64);
+            kernel.grid = crate::cuda::HipGridSpec::launch(
+                proxima_tensor::NodeId(1),
+                1000,
+                Some(64),
+                "test",
+            )
+            .expect("nonzero threads");
             let (blocks, width) = launch_geometry(&kernel).expect("a pinned-width launch fits");
             assert_eq!(width, 64);
             assert_eq!(blocks, 16);
@@ -6149,9 +6182,14 @@ pub mod rocm {
 
         #[test]
         fn a_launch_past_the_grid_index_is_refused_before_any_device_call() {
-            let mut kernel = add_one_kernel(1);
-            kernel.grid.threads =
-                (u64::from(i32::MAX as u32) + 1) * crate::cuda::DEFAULT_BLOCK_WIDTH;
+            let mut kernel = add_one_kernel(1).expect("nonzero add-one");
+            kernel.grid = crate::cuda::HipGridSpec::launch(
+                proxima_tensor::NodeId(1),
+                (u64::from(i32::MAX as u32) + 1) * crate::cuda::DEFAULT_BLOCK_WIDTH,
+                None,
+                "test",
+            )
+            .expect("nonzero threads");
             assert!(matches!(
                 launch_geometry(&kernel),
                 Err(HipDriverError::GridTooLarge { .. })

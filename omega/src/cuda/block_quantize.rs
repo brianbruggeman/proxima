@@ -83,14 +83,16 @@ pub(super) fn block_quantize_groups(resolved: &BoundOp) -> Result<u64, EmitError
 
 pub(super) fn block_quantize_grid(resolved: &BoundOp) -> Result<CudaGridSpec, EmitError> {
     let groups = block_quantize_groups(resolved)?;
-    let grid = CudaGridSpec {
-        threads: checked_product(resolved.node, [groups, GROUP_ELEMENTS])?,
-        block_width: Some(QUANTIZE_THREADS),
-    };
+    let grid = CudaGridSpec::launch(
+        resolved.node,
+        checked_product(resolved.node, [groups, GROUP_ELEMENTS])?,
+        Some(QUANTIZE_THREADS),
+        "block_quantize",
+    )?;
     if grid.blocks() > MAX_GRID_BLOCKS {
         return Err(EmitError::GridExceedsThreadIndex {
             node: resolved.node,
-            threads: grid.threads,
+            threads: grid.threads(),
             limit: MAX_GRID_BLOCKS * grid.block_width_or_default(),
         });
     }

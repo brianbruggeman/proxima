@@ -672,8 +672,13 @@ fn strided_prepass_body(plan: &StagedMatvec) -> String {
     )
 }
 
-pub(super) fn staged_prepass_grid(plan: &StagedMatvec) -> CudaGridSpec {
-    CudaGridSpec { threads: prepass_warps(plan) * WARP_SIZE, block_width: Some(STAGED_THREADS) }
+pub(super) fn staged_prepass_grid(plan: &StagedMatvec, node: NodeId) -> Result<CudaGridSpec, EmitError> {
+    CudaGridSpec::launch(
+        node,
+        prepass_warps(plan) * WARP_SIZE,
+        Some(STAGED_THREADS),
+        "staged_matvec_prepass",
+    )
 }
 
 /// The launch that fills the global quantized activation before the matvec reads it. It shares
@@ -710,7 +715,7 @@ pub(super) fn staged_prepass(
             Binding::Output(staged_scratch_node(resolved.node)),
             Binding::Uniforms,
         ],
-        grid: staged_prepass_grid(plan),
+        grid: staged_prepass_grid(plan, resolved.node)?,
         extra_outputs: Vec::new(),
         prologue: Vec::new(),
     })

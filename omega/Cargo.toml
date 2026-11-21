@@ -780,6 +780,11 @@ name = "hip_uniform_abi"
 harness = false
 required-features = ["cuda-driver"]
 
+[[bench]]
+name = "staged_matvec_emit"
+harness = false
+required-features = ["std", "cuda"]
+
 [[example]]
 name = "q8_0_flat_gate"
 required-features = ["metal", "instrument"]

@@ -235,7 +235,8 @@ mod device_scale_dump {
             source,
             entry: "probe".into(),
             bindings: vec![Binding::Input(NodeId(0)), Binding::Output(NodeId(1)), Binding::Uniforms],
-            grid: CudaGridSpec { threads: PROBES as u64, block_width: None },
+            grid: CudaGridSpec::launch(NodeId(1), PROBES as u64, None, "device_probe")
+                .unwrap_or_else(|error| panic!("the probe count is a nonzero constant: {error:?}")),
             extra_outputs: Vec::new(),
             prologue: Vec::new(),
         };

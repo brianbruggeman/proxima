@@ -100,7 +100,7 @@ fn digest(
         numbers,
         entry: kernel.entry.clone(),
         source_hash: text_hash(&kernel.source),
-        threads: kernel.grid.threads,
+        threads: kernel.grid.threads(),
     })
 }
 
