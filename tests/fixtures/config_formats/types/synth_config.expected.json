@@ -1,0 +1,12 @@
+{
+  "name": "canned_orders",
+  "status": 201,
+  "headers": {"content-type": "application/json", "x-synth": "yes"},
+  "body": "{\"id\": 7, \"state\": \"created\"}",
+  "body_template": "{\"trace\": \"{{trace_id}}\", \"count\": 3}",
+  "body_chunks": [
+    {"ts_ms": 0, "b64": "YWI="},
+    {"ts_ms": 150, "b64": "Y2Q="}
+  ],
+  "delay_chunks": true
+}

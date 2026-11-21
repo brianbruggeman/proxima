@@ -1,0 +1,18 @@
+command = "/usr/local/bin/worker"
+name = "worker_proc"
+args = ["--port", "9000", "--verbose"]
+working_dir = "/var/lib/worker"
+restart = "on_failure"
+restart_delay_ms = 2000
+max_restart_attempts = 5
+shutdown_signal = "int"
+shutdown_timeout_ms = 8000
+
+[env]
+RUST_LOG = "info"
+WORKER_MODE = "batch"
+
+[ready_probe]
+type = "stdout_line"
+pattern = "listening on"
+timeout_ms = 7500

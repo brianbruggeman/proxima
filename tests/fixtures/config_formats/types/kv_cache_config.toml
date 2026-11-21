@@ -1,0 +1,7 @@
+name = "session_cache"
+ttl = "1h"
+max_entries = 5000
+max_bytes = 67108864
+eviction = "ttl_only"
+version = "v3"
+list_mode = true

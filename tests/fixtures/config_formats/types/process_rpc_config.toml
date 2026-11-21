@@ -1,0 +1,17 @@
+command = "/usr/local/bin/rpc-worker"
+name = "rpc_worker"
+args = ["--stdio"]
+working_dir = "/var/lib/rpc-worker"
+restart = false
+request_timeout_ms = 12000
+
+[env]
+RPC_LOG = "debug"
+
+[[init]]
+send = '{"op": "hello", "version": 2}'
+reply = false
+
+[[init]]
+send = '{"op": "ping"}'
+reply = true

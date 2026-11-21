@@ -1,0 +1,13 @@
+{
+  "command": "/usr/local/bin/rpc-worker",
+  "name": "rpc_worker",
+  "args": ["--stdio"],
+  "working_dir": "/var/lib/rpc-worker",
+  "env": {"RPC_LOG": "debug"},
+  "restart": false,
+  "request_timeout_ms": 12000,
+  "init": [
+    {"send": "{\"op\": \"hello\", \"version\": 2}", "reply": false},
+    {"send": "{\"op\": \"ping\"}", "reply": true}
+  ]
+}

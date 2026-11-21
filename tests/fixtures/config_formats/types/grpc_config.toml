@@ -1,0 +1,8 @@
+url = "https://collector.example.com:4317"
+name = "otlp_collector"
+
+[tls_client]
+server_name = "collector.example.com"
+root_source = "mozilla"
+ca_bundle_paths = ["/etc/ssl/collector-ca.pem"]
+alpn_protocols = ["h2"]

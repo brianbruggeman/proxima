@@ -1,0 +1,10 @@
+{
+  "name": "disk_cache",
+  "path": "/var/cache/proxima",
+  "ttl": "300s",
+  "max_entries": 10000,
+  "max_bytes": 268435456,
+  "eviction": "fifo",
+  "version": "v1",
+  "list_mode": true
+}

@@ -2,7 +2,29 @@
 
 use std::fmt::Debug;
 
+use crate::upstreams::callback::CallbackConfig;
+use crate::upstreams::fs::FsConfig;
+#[cfg(all(
+    feature = "http-prime",
+    feature = "http2",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+use crate::upstreams::grpc_h2::GrpcConfig;
+#[cfg(all(
+    feature = "h3-native-upstream",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+use crate::upstreams::h3_native::H3NativeConfig;
+use crate::upstreams::kv_cache::KvCacheConfig;
+use crate::upstreams::kv_file::KvFileConfig;
+#[cfg(feature = "tokio")]
+use crate::upstreams::process::ProcessConfig;
+#[cfg(unix)]
+use crate::upstreams::process_rpc::ProcessRpcConfig;
+use crate::upstreams::synth::SynthConfig;
 use proxima_config::{ConfigFormatFactory, TomlConfigFormat};
+#[cfg(feature = "http-prime-deps")]
+use proxima_http::http1::HttpConfig;
 use proxima_patterns::middleware::auth::AuthConfig;
 use proxima_patterns::middleware::client_auth::ClientAuthConfig;
 use proxima_primitives::pipe::delay::DelayConfig;
@@ -148,5 +170,107 @@ fn ctl_format_twin_isolate_config() {
         "isolate_config",
         fixture!("isolate_config", "toml"),
         fixture!("isolate_config", "expected.json"),
+    );
+}
+
+#[test]
+#[cfg(feature = "http-prime-deps")]
+fn ctl_format_twin_http_config() {
+    assert_serialized_twin::<HttpConfig>(
+        "http_config",
+        fixture!("http_config", "toml"),
+        fixture!("http_config", "expected.json"),
+    );
+}
+
+#[test]
+#[cfg(all(
+    feature = "h3-native-upstream",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+fn ctl_format_twin_h3_native_config() {
+    assert_serialized_twin::<H3NativeConfig>(
+        "h3_native_config",
+        fixture!("h3_native_config", "toml"),
+        fixture!("h3_native_config", "expected.json"),
+    );
+}
+
+#[test]
+#[cfg(all(
+    feature = "http-prime",
+    feature = "http2",
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+fn ctl_format_twin_grpc_config() {
+    assert_serialized_twin::<GrpcConfig>(
+        "grpc_config",
+        fixture!("grpc_config", "toml"),
+        fixture!("grpc_config", "expected.json"),
+    );
+}
+
+#[test]
+fn ctl_format_twin_synth_config() {
+    assert_serialized_twin::<SynthConfig>(
+        "synth_config",
+        fixture!("synth_config", "toml"),
+        fixture!("synth_config", "expected.json"),
+    );
+}
+
+#[test]
+fn ctl_format_twin_callback_config() {
+    assert_serialized_twin::<CallbackConfig>(
+        "callback_config",
+        fixture!("callback_config", "toml"),
+        fixture!("callback_config", "expected.json"),
+    );
+}
+
+#[test]
+#[cfg(feature = "tokio")]
+fn ctl_format_twin_process_config() {
+    assert_serialized_twin::<ProcessConfig>(
+        "process_config",
+        fixture!("process_config", "toml"),
+        fixture!("process_config", "expected.json"),
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn ctl_format_twin_process_rpc_config() {
+    assert_serialized_twin::<ProcessRpcConfig>(
+        "process_rpc_config",
+        fixture!("process_rpc_config", "toml"),
+        fixture!("process_rpc_config", "expected.json"),
+    );
+}
+
+#[test]
+fn ctl_format_twin_fs_config() {
+    assert_serialized_twin::<FsConfig>(
+        "fs_config",
+        fixture!("fs_config", "toml"),
+        fixture!("fs_config", "expected.json"),
+    );
+}
+
+#[test]
+fn ctl_format_twin_kv_cache_config() {
+    assert_serialized_twin::<KvCacheConfig>(
+        "kv_cache_config",
+        fixture!("kv_cache_config", "toml"),
+        fixture!("kv_cache_config", "expected.json"),
+    );
+}
+
+#[test]
+fn ctl_format_twin_kv_file_config() {
+    assert_serialized_twin::<KvFileConfig>(
+        "kv_file_config",
+        fixture!("kv_file_config", "toml"),
+        fixture!("kv_file_config", "expected.json"),
     );
 }

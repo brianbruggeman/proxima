@@ -1,0 +1,17 @@
+{
+  "url": "https://api.example.com/v1",
+  "name": "backend_http",
+  "method": "POST",
+  "timeout": "30s",
+  "headers": {
+    "forward": ["accept", "authorization"],
+    "request": {"x-request-source": "proxima", "x-trace": "{{trace_id}}"}
+  },
+  "response": {"body": "drain", "headers": "framing"},
+  "tls_client": {
+    "server_name": "api.example.com",
+    "root_source": "custom_only",
+    "ca_bundle_paths": ["/etc/ssl/internal-ca.pem"],
+    "alpn_protocols": ["h2", "http/1.1"]
+  }
+}

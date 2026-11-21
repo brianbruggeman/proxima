@@ -1,0 +1,5 @@
+addr = "127.0.0.1:4433"
+server_name = "localhost"
+url = "https://127.0.0.1:4433"
+insecure = true
+timeout_ms = 2500
