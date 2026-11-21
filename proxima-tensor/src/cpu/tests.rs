@@ -4752,11 +4752,19 @@ fn head_split_gather_matches_a_hand_written_reference_for_every_index_order() {
     ];
     for key_transposed in [true, false] {
         for (name, order) in orders {
-            let (program, _gathered) =
-                head_split_gather_program(heads as u32, head_dim as u32, seq as u32, key_transposed);
+            let (program, _gathered) = head_split_gather_program(
+                heads as u32,
+                head_dim as u32,
+                seq as u32,
+                key_transposed,
+            );
             let source_data: Vec<f32> = (0..seq * hidden).map(|value| value as f32 + 0.5).collect();
             let ids_data: Vec<f32> = (0..heads)
-                .flat_map(|head| order.iter().map(move |&lane| (head * head_dim + lane) as f32))
+                .flat_map(|head| {
+                    order
+                        .iter()
+                        .map(move |&lane| (head * head_dim + lane) as f32)
+                })
                 .collect();
             let evaluated = evaluate(&program, &[], &[&source_data, &ids_data], &[])
                 .expect("head split gather evaluates");
@@ -5486,12 +5494,7 @@ async fn accelerate_width_gemm_computes_every_head_of_a_batched_attention_matmul
     );
     assert_eq!(
         evaluated.shape(),
-        &[
-            u64::from(heads),
-            u64::from(batch),
-            seq as u64,
-            width as u64
-        ]
+        &[u64::from(heads), u64::from(batch), seq as u64, width as u64]
     );
     assert_all_close(evaluated.root(), &reference, 1e-5);
 }
@@ -8442,7 +8445,10 @@ fn erf_f32_stays_within_epsilon_of_its_libm_exp_baseline_on_a_dense_sweep() {
 
 #[test]
 fn erf_f32_propagates_nan_and_saturates_at_infinity() {
-    assert!(erf_f32(f32::NAN).is_nan(), "NaN must not be swallowed by the exp clamp");
+    assert!(
+        erf_f32(f32::NAN).is_nan(),
+        "NaN must not be swallowed by the exp clamp"
+    );
     assert_eq!(erf_f32(f32::INFINITY), 1.0);
     assert_eq!(erf_f32(f32::NEG_INFINITY), -1.0);
     assert_eq!(erf_f32(0.0), 0.0);
@@ -15671,12 +15677,8 @@ async fn one_end_aligned_query_equals_the_last_row_of_the_full_prefill_attention
         "rows {rows} lower {lower}: the shifted single query must equal the last full row"
     );
 
-    let unshifted = end_aligned_attention_output(
-        (1, rows, head_dim),
-        (lower, 0),
-        last_query,
-        keys_values,
-    );
+    let unshifted =
+        end_aligned_attention_output((1, rows, head_dim), (lower, 0), last_query, keys_values);
     assert_ne!(
         unshifted.as_slice(),
         one.as_slice(),

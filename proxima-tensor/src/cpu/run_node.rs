@@ -826,12 +826,29 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
     ];
     let value_planes = [cached_value, new_value];
     let streamed = match arithmetic {
-        crate::bind::CachedAttentionArithmetic::OnlineF32 => crate::physical::stream_cached_attention_split_gqa(
-            planes, key_planes, value_planes, output, extents, rotary, score,
-        ),
-        crate::bind::CachedAttentionArithmetic::LlamaFlash { interleaved } => crate::physical::stream_cached_attention_llama_flash(
-            planes, key_planes, value_planes, output, &extents, &rotary, &score, *interleaved,
-        ),
+        crate::bind::CachedAttentionArithmetic::OnlineF32 => {
+            crate::physical::stream_cached_attention_split_gqa(
+                planes,
+                key_planes,
+                value_planes,
+                output,
+                extents,
+                rotary,
+                score,
+            )
+        }
+        crate::bind::CachedAttentionArithmetic::LlamaFlash { interleaved } => {
+            crate::physical::stream_cached_attention_llama_flash(
+                planes,
+                key_planes,
+                value_planes,
+                output,
+                &extents,
+                &rotary,
+                &score,
+                *interleaved,
+            )
+        }
     };
     if streamed {
         Ok(())
@@ -1596,11 +1613,11 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
                 resolved,
                 &self.activation_layouts.borrow(),
             )?;
-            self.activation_layouts
-                .borrow_mut()
-                .extend(super::run_int8_activation_dot::quantized_activation_layouts(
+            self.activation_layouts.borrow_mut().extend(
+                super::run_int8_activation_dot::quantized_activation_layouts(
                     core::slice::from_ref(resolved),
-                ));
+                ),
+            );
             if self.fold_island(resolved)? {
                 continue;
             }
@@ -2001,30 +2018,32 @@ pub(super) fn fill_gather_cursors_typed<'a>(
         let _ = source;
         *slot = gather
             .as_ref()
-            .map(|gather_access| -> Result<GatherCursor<'a, i64>, TensorError> {
-                let buffer = index_buffers[gather_access.indices.0 as usize]
-                    .as_deref()
-                    .ok_or(TensorError::NotLowerable {
-                        node: gather_access.indices,
-                        reason: "gather index buffer missing at evaluation time",
-                    })?;
-                let offset = gather_access.index_layout.offset_of(coordinate);
-                #[cfg(feature = "instrument")]
-                {
-                    let row_index = buffer[offset as usize];
-                    if row_index >= 0 {
-                        instrument::record_gather_row(*source, row_index as u64);
+            .map(
+                |gather_access| -> Result<GatherCursor<'a, i64>, TensorError> {
+                    let buffer = index_buffers[gather_access.indices.0 as usize]
+                        .as_deref()
+                        .ok_or(TensorError::NotLowerable {
+                            node: gather_access.indices,
+                            reason: "gather index buffer missing at evaluation time",
+                        })?;
+                    let offset = gather_access.index_layout.offset_of(coordinate);
+                    #[cfg(feature = "instrument")]
+                    {
+                        let row_index = buffer[offset as usize];
+                        if row_index >= 0 {
+                            instrument::record_gather_row(*source, row_index as u64);
+                        }
                     }
-                }
-                Ok(GatherCursor {
-                    buffer,
-                    offset,
-                    stride: stride_dim.map_or(0, |dim| gather_access.index_layout.stride(dim)),
-                    element_stride: gather_access.element_stride,
-                    extent: gather_access.extent,
-                    progression_checked: false,
-                })
-            })
+                    Ok(GatherCursor {
+                        buffer,
+                        offset,
+                        stride: stride_dim.map_or(0, |dim| gather_access.index_layout.stride(dim)),
+                        element_stride: gather_access.element_stride,
+                        extent: gather_access.extent,
+                        progression_checked: false,
+                    })
+                },
+            )
             .transpose()?;
     }
     Ok(())

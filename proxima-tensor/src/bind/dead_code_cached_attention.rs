@@ -845,7 +845,9 @@ pub(super) fn cached_padding_mask_end_aligned_lower_bound(
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
     )?;
-    if distance[1] != key_index || end_absolute[0] != query_absolute || !is_iota(program, new_key_index)
+    if distance[1] != key_index
+        || end_absolute[0] != query_absolute
+        || !is_iota(program, new_key_index)
     {
         return None;
     }
@@ -1217,9 +1219,14 @@ pub(super) fn cached_attention_candidates(
             };
             plain.or_else(end_aligned).map(|found| (found, candidate))
         }) {
-            Some(((inner, bound, via_gemma_template, end_aligned), matched)) => {
-                (inner, bound, true, via_gemma_template, Some(matched), end_aligned)
-            }
+            Some(((inner, bound, via_gemma_template, end_aligned), matched)) => (
+                inner,
+                bound,
+                true,
+                via_gemma_template,
+                Some(matched),
+                end_aligned,
+            ),
             None => (cached_score_parts[0], i64::MIN, false, false, None, false),
         };
         if cached_end_aligned != local_end_aligned && cached_lower_inclusive != i64::MIN {
@@ -1465,7 +1472,14 @@ pub(super) fn cached_attention_candidates(
         let mut operands = Vec::with_capacity(source_nodes.len());
         for source in &source_nodes {
             if discovery {
-                operands.push((*source, Layout { base: 0, strides: SmallVec::new() }, None));
+                operands.push((
+                    *source,
+                    Layout {
+                        base: 0,
+                        strides: SmallVec::new(),
+                    },
+                    None,
+                ));
                 continue;
             }
             let Some((_, layout, lookup)) = first_readers
@@ -1724,8 +1738,9 @@ pub(super) fn cached_attention_candidates(
             continue;
         }
         let attention_sink = match &attention_sink_term {
-            Some(term) if term.addresses_query_heads(query_shape[2])
-                && shapes.of(term.leaf) == [query_shape[1] * query_shape[2]] =>
+            Some(term)
+                if term.addresses_query_heads(query_shape[2])
+                    && shapes.of(term.leaf) == [query_shape[1] * query_shape[2]] =>
             {
                 Some(term.leaf)
             }
@@ -2349,7 +2364,14 @@ pub(super) fn cached_attention_single_range_candidates(
         let mut operands = Vec::with_capacity(source_nodes.len());
         for source in source_nodes {
             if discovery {
-                operands.push((source, Layout { base: 0, strides: SmallVec::new() }, None));
+                operands.push((
+                    source,
+                    Layout {
+                        base: 0,
+                        strides: SmallVec::new(),
+                    },
+                    None,
+                ));
                 continue;
             }
             let Some((_, layout, lookup)) = first_readers
@@ -2691,7 +2713,6 @@ pub fn kv_read_only_by_fused_attention(
     !kv_nodes.is_empty() && fused_readers > 0 && !other_reader && !kv_is_output
 }
 
-
 /// [`kv_read_only_by_fused_attention`] decided from the program alone, without binding it: the
 /// fusion candidates are the ones discovery finds, and a reader is any program op the fusion does
 /// not absorb. An op that bind would drop as dead still counts as a reader, so the answer can only
@@ -2708,18 +2729,36 @@ pub fn kv_read_only_by_fused_attention_in_program(
         .iter()
         .enumerate()
         .filter_map(|(index, op)| match op {
-            Op::Input { name: Some(name), .. } if is_kv_input(name) => Some(NodeId(index as u32)),
+            Op::Input {
+                name: Some(name), ..
+            } if is_kv_input(name) => Some(NodeId(index as u32)),
             _ => None,
         })
         .collect();
-    let mut candidates = cached_attention_candidates(program, shapes, &[], outputs, false, (numeric_policy, &Executes::CPU), true);
-    candidates.extend(cached_attention_single_range_candidates(program, shapes, &[], outputs, numeric_policy, true));
+    let mut candidates = cached_attention_candidates(
+        program,
+        shapes,
+        &[],
+        outputs,
+        false,
+        (numeric_policy, &Executes::CPU),
+        true,
+    );
+    candidates.extend(cached_attention_single_range_candidates(
+        program,
+        shapes,
+        &[],
+        outputs,
+        numeric_policy,
+        true,
+    ));
     let covered: BTreeSet<NodeId> = candidates
         .iter()
         .flat_map(|(fused, absorbed)| absorbed.iter().copied().chain([fused.node]))
         .collect();
     let other_reader = program.iter().enumerate().any(|(index, op)| {
-        !covered.contains(&NodeId(index as u32)) && op.dependencies().iter().any(|node| kv_nodes.contains(node))
+        !covered.contains(&NodeId(index as u32))
+            && op.dependencies().iter().any(|node| kv_nodes.contains(node))
     });
     let kv_is_output = outputs.iter().any(|node| kv_nodes.contains(node));
     !kv_nodes.is_empty() && !candidates.is_empty() && !other_reader && !kv_is_output
@@ -2748,7 +2787,9 @@ fn rope_pairs_are_interleaved(program: &[Op], rotated_first: NodeId) -> bool {
     let Some(difference) = binary_elementwise(program, rotated_first, ScalarOp::Subtract) else {
         return false;
     };
-    let Some([(_, source_map), ..]) = elementwise_operands(program, difference[0], ScalarOp::Multiply) else {
+    let Some([(_, source_map), ..]) =
+        elementwise_operands(program, difference[0], ScalarOp::Multiply)
+    else {
         return false;
     };
     source_map
