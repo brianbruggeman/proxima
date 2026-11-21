@@ -1,47 +1,21 @@
 # Omega 01: configuration in depth
 
-**Prerequisites:** [page 00](./00-hello-tensor.md): `RuntimeConfig` as a file, `RuntimeConfigBuilder` in code, and one run on each.
+**Prerequisites:** [page 00](./00-hello-tensor.md), where you ran a plan and used two fields of the runtime config.
 
-**You will:** see the whole `RuntimeConfig` surface with its defaults, layer defaults over a file, the environment and explicit setters and know which wins, read a validation error by the field it names, and meet the three nested config types plus the two sibling configs omega uses for kernels and CPU evaluation.
+**You will:** start with the four settings you will actually touch; watch four sources layer and see which wins per field; read the full surface as five groups of related fields; cause three validation failures that name the field; and meet the nested config types.
 
-**New concepts (in order):** the field list and its defaults · four sources and their precedence · `from_file` versus `builder().from_file().from_env()` · validation messages that name a field · `SelectionConfig` · `ResourceConstraints` · `NumericPolicy` · `KernelCacheConfig` · `TensorExecutionConfig` · what omega does not do yet.
+**New concepts (in order):** the four settings that matter first · four sources and their precedence · the grouped field list · validation messages · `SelectionConfig` · `ResourceConstraints` · `NumericPolicy` · `KernelCacheConfig` · `TensorExecutionConfig`.
 
-## 1. The whole surface
+## 1. The four you will touch first
 
-`RuntimeConfig` (`omega/src/config.rs:22`) has 28 fields. Page 00 used two; this is all of them, with the line that declares each and the default the `#[setting]` attribute pins:
+Most runs need nothing beyond page 00's two lines. When a program is slow or memory-hungry, these are the next four:
 
-| field | line | default | what it decides |
-|---|---|---|---|
-| `engine` | `:25` | `cpu` | backend family: `cpu` or `gpu` |
-| `gpu_driver` | `:28` | `auto` | which driver renders `gpu` |
-| `hip_wave` | `:31` | `0` | HIP wavefront width; `0` reads it from the device |
-| `allow_fusion` | `:34` | `false` | permit bind-time and execution-time algebraic fusion |
-| `wavefront_schedule` | `:39` | build-time `sized` value | reorder the program into dependency levels so independent ops share a barrier interval |
-| `exact_activations` | `:42` | `true` | require exact activation evaluation where supported |
-| `pipeline_cache` | `:48` | `true` | persist compiled Metal pipelines across processes |
-| `pipeline_cache_dir` | `:52` | `""` (per-user cache dir) | where those entries live |
-| `pipeline_cache_max_bytes` | `:56` | `268435456` | eviction ceiling for that directory |
-| `cpu_workers` | `:59` | build-time `sized` value | CPU evaluator workers |
-| `independent_ops` | `:62` | build-time `sized` value | independent ops admitted per ready DAG level |
-| `parallel_sequences` | `:65` | build-time `sized` value | live generation streams admitted to shared execution |
-| `max_in_flight` | `:68` | build-time `sized` value | submissions awaiting backend completion |
-| `overlap_transfer_compute` | `:71` | `false` | let the driver overlap transfer with compute |
-| `max_device_bytes` | `:74` | `None` | hard device-residency ceiling |
-| `decode_kernel` | `:77` | `automatic` | decode projection kernel policy |
-| `fusion` | `:80` | strategy default | fusion request; `required` rejects planning when absent |
-| `residency` | `:83` | strategy default | cache placement policy |
-| `batching` | `:86` | strategy default | row formation policy |
-| `speculation` | `:89` | `disabled` | speculative decoding policy |
-| `weight_conversion` | `:92` | strategy default | converted-weight cache policy |
-| `moe_grouping` | `:95` | `true` | group already-routed expert rows |
-| `numeric` | `:98` | `NumericPolicy::bit_exact()` | numeric permissions |
-| `numerics` | `:102` | `Numerics::REFERENCE` | storage, activation and accumulator formats |
-| `emit` | `:105` | `EmitKnobs::default()` | Metal emit A/B switches |
-| `dense_mma_input_layout` | `:108` | derived from operands | dense matrix fragment layout |
-| `constraints` | `:111` | no ceilings | hard byte ceilings |
-| `selection` | `:114` | `Configured` | cold-plan candidate selection |
+- `cpu_workers` (`omega/src/config.rs:59`) — how many workers the CPU evaluator uses.
+- `allow_fusion` (`:34`) — whether the planner may join adjacent ops. Off by default, so the numbers you see are the ops you wrote.
+- `pipeline_cache` (`:48`) — whether compiled Metal pipelines survive a process restart. On by default; it is the difference between a 116 ms first request and 21 ms per token once warm (page 04 measures both).
+- `selection.mode` (`:624`) — `Configured` takes the backend you asked for; `MinimumMeasuredWallTime` times the candidates and takes the fastest. The default is `Configured`, which is why nothing you ran on page 00 did any trial runs.
 
-Four of those defaults are not literals in this file: `cpu_workers`, `independent_ops`, `parallel_sequences` and `max_in_flight` resolve from `crate::sized` (`config.rs:59-68`), the build-time constants a per-machine build sets. `wavefront_schedule` reads `crate::sized::COMMAND_BUFFER_WAVEFRONT_SCHEDULE` in `Default` (`config.rs:124`). That is deliberate: a build-time floor and a runtime default that were written twice would drift.
+Everything else has a default that is right until you have a reason. Section 2 shows layering with a runnable example; section 3 is the full list, grouped so you can find the one field you need.
 
 ## 2. Four sources, and which wins
 
@@ -73,16 +47,77 @@ file + env                         engine=gpu  gpu_driver=metal
 file + env + with_engine("cpu")    engine=cpu  gpu_driver=metal
 ```
 
-Read the last row carefully: the setter overrode `engine` and left `gpu_driver` at the environment's value, because a setter changes one field, not the whole config. Layering is per field, in call order.
+Look at the last row: the setter overrode `engine` and left `gpu_driver` where the environment put it. A setter changes one field; layering is per field, in call order.
 
-## 3. When a value is wrong, the error names the field
+## 3. The whole surface, grouped
 
-Validation runs in `from_file`, in `build()`, and again inside `plan_named_with_config` (`backend.rs:490`), so a config that was assembled without a check still cannot reach a backend. Three real failures, each from the run above.
+`RuntimeConfig` (`omega/src/config.rs:22`) has 28 fields, all with a default. They fall into five groups; read the group you need.
 
-A value out of range, `omega/examples/omega_hello_tensor.rs` against a file with `cpu_workers = 0`:
+### Backend and execution shape
+
+| field | line | default | what it decides |
+|---|---|---|---|
+| `engine` | `:25` | `cpu` | backend family: `cpu` or `gpu` |
+| `gpu_driver` | `:28` | `auto` | which driver renders `gpu` |
+| `hip_wave` | `:31` | `0` | HIP wavefront width; `0` reads it from the device |
+| `cpu_workers` | `:59` | from `sized` | CPU evaluator workers |
+| `independent_ops` | `:62` | from `sized` | independent ops admitted per ready DAG level |
+| `parallel_sequences` | `:65` | from `sized` | live generation streams admitted to shared execution |
+| `max_in_flight` | `:68` | from `sized` | submissions awaiting backend completion |
+| `overlap_transfer_compute` | `:71` | `false` | let the driver overlap transfer with compute |
+| `wavefront_schedule` | `:39` | from `sized` | group independent ops into dependency levels so the GPU submits them together instead of one dispatch at a time |
+| `allow_fusion` | `:34` | `false` | permit bind-time and execution-time algebraic fusion |
+| `exact_activations` | `:42` | `true` | require exact activation evaluation where supported |
+
+### Memory and caching
+
+| field | line | default | what it decides |
+|---|---|---|---|
+| `max_device_bytes` | `:74` | `None` | hard device-residency ceiling |
+| `pipeline_cache` | `:48` | `true` | persist compiled Metal pipelines across processes |
+| `pipeline_cache_dir` | `:52` | `""` (per-user cache dir) | where those entries live |
+| `pipeline_cache_max_bytes` | `:56` | `268435456` | eviction ceiling for that directory |
+| `constraints` | `:111` | no ceilings | host and device byte ceilings (`ResourceConstraints`, section 5) |
+
+### Strategy enums
+
+| field | line | default | what it decides |
+|---|---|---|---|
+| `decode_kernel` | `:77` | `automatic` | decode projection kernel policy |
+| `fusion` | `:80` | the enum's `Default` | fusion request; `required` rejects planning when absent |
+| `residency` | `:83` | the enum's `Default` | cache placement policy |
+| `batching` | `:86` | the enum's `Default` | row formation policy |
+| `speculation` | `:89` | `disabled` | speculative decoding policy |
+| `weight_conversion` | `:92` | the enum's `Default` | converted-weight cache policy |
+| `moe_grouping` | `:95` | `true` | group already-routed expert rows |
+
+The six enum-valued fields carry `#[setting(default)]` (`config.rs:78-93`), so their default is the enum's own `Default` — the member each type documents as the safe one.
+
+### Numerics and emission
+
+| field | line | default | what it decides |
+|---|---|---|---|
+| `numeric` | `:98` | `NumericPolicy::bit_exact()` | numeric permissions (`NumericPolicy`, section 5) |
+| `numerics` | `:102` | `Numerics::REFERENCE` | storage, activation and accumulator formats |
+| `emit` | `:105` | `EmitKnobs::default()` | Metal emit A/B switches |
+| `dense_mma_input_layout` | `:108` | derived from operands | dense matrix fragment layout |
+
+### Selection
+
+| field | line | default | what it decides |
+|---|---|---|---|
+| `selection` | `:114` | `Configured` | cold-plan candidate selection (`SelectionConfig`, section 5) |
+
+Five defaults are not literals in this file: `cpu_workers`, `independent_ops`, `parallel_sequences`, `max_in_flight` (`config.rs:59-68`) and `wavefront_schedule` (`config.rs:124`) come from `crate::sized`, the constants a build sets. A binary built for a small machine therefore does not inherit a desktop-sized default.
+
+## 4. When a value is wrong, the error names the field
+
+Validation runs in `from_file`, in `build()`, and again inside `plan_named_with_config` (`backend.rs:490`), so a config assembled without a check still cannot reach a backend. Three real failures from `omega_hello_tensor`.
+
+A value out of range, against `omega/examples/configs/bad_workers.toml` (`cpu_workers = 0`):
 
 ```sh
-cargo run -p proxima-omega --example omega_hello_tensor -- /tmp/bad_workers.toml
+cargo run -p proxima-omega --example omega_hello_tensor -- omega/examples/configs/bad_workers.toml
 ```
 
 ```text
@@ -90,14 +125,14 @@ Error: validation failed:
   - cpu_workers: must be greater than zero
 ```
 
-An engine nobody implements, `/tmp/bad.toml` with `engine = "tpu"`:
+An engine nobody implements, `omega/examples/configs/bad_engine.toml` with `engine = "tpu"`:
 
 ```text
 Error: validation failed:
   - engine: unknown engine 'tpu'; expected cpu|gpu
 ```
 
-A typo in a key, `/tmp/typo.toml` with `engin = "gpu"` (`deny_unknown_fields`, `config.rs:21`):
+A typo in a key, `omega/examples/configs/typo.toml` with `engin = "gpu"` (`deny_unknown_fields`, `config.rs:21`):
 
 ```text
 Error: toml: TOML parse error at line 2, column 1
@@ -107,23 +142,23 @@ Error: toml: TOML parse error at line 2, column 1
 unknown field `engin`, expected one of `engine`, `gpu_driver`, `hip_wave`, `allow_fusion`, `wavefront_schedule`, `exact_activations`, `pipeline_cache`, `pipeline_cache_dir`, `pipeline_cache_max_bytes`, `cpu_workers`, `independent_ops`, `parallel_sequences`, `max_in_flight`, `overlap_transfer_compute`, `max_device_bytes`, `decode_kernel`, `fusion`, `residency`, `batching`, `speculation`, `weight_conversion`, `moe_grouping`, `numeric`, `numerics`, `emit`, `dense_mma_input_layout`, `constraints`, `selection`
 ```
 
-That last message is the surface from section 1, printed by the parser. All three exit `1`.
+The real output repeats that block once more under `Caused by:`, because two layers wrap the same parse error. That list is every key the config accepts, which is the grouped table in section 3 read back to you. All three exit `1`.
 
-## 4. The three nested types
+## 5. The three nested types
 
-`selection` is a `SelectionConfig` (`config.rs:621`) with three fields: `mode` (default `Configured`, `config.rs:624`), `warmup_runs` (`:627`) and `measurement_runs` (`:630`). In `Configured` mode planning takes the backend you configured and does no trial runs; `MinimumMeasuredWallTime` (`config.rs:581`) measures candidates and takes the smallest synchronized mean. The two count fields are overrides; unset means the generated floor (`SelectionConfig::resolved_warmup_runs`, `config.rs:646`).
+`selection` is a `SelectionConfig` (`config.rs:621`) with three fields: `mode` (default `Configured`, `config.rs:624`), `warmup_runs` (`:627`) and `measurement_runs` (`:630`). In `Configured` mode planning takes the backend you configured and does no trial runs; `MinimumMeasuredWallTime` (`config.rs:583`) measures candidates and takes the smallest synchronized mean. The two count fields are overrides; unset means the generated floor (`SelectionConfig::resolved_warmup_runs`, `config.rs:646`).
 
 `constraints` is a `ResourceConstraints` (`config.rs:525`) of three optional byte ceilings: `max_host_tensor_bytes` (`:528`), `max_device_buffer_bytes` (`:531`) and `max_single_device_buffer_bytes` (`:534`). `None` means no ceiling; `Some(0)` is a validation error, because a zero-byte ceiling is a typo rather than a policy.
 
 `numeric` is `proxima_numeric::NumericPolicy` (`proxima-numeric/src/numeric.rs:27`), ten booleans that each permit one class of rewriting: `contraction`, `reassociation`, `nan_assumptions`, `signed_zero`, `approx_functions`, `epilogue_sources`, `activation_quantization`, `bf16_input_rounding`, `flash_narrowing` and `accumulator_narrowing`. All ten are `false` in `NumericPolicy::bit_exact()` (`numeric.rs:126`), which is the default here, so a fresh omega config refuses every rewrite that could change a bit.
 
-## 5. Two sibling configs
+## 6. Two sibling configs
 
-`KernelCacheConfig` (`omega/src/kernel_cache_config.rs:19`) is the CUDA PTX cache: one field, `kernel_cache_dir` (`:24`), whose env prefix is `PROXIMA_CUDA` (`:16`) and whose default is `~/.cache/proxima/cuda-ptx` (`:12`). Its module doc says the derive owns the default and there is no second loader (`:1-7`) — that is the house shape for a config that has exactly one tunable.
+`KernelCacheConfig` (`omega/src/kernel_cache_config.rs:19`) is the CUDA PTX cache: one field, `kernel_cache_dir` (`:24`), whose env prefix is `PROXIMA_CUDA` (`:16`) and whose default is `~/.cache/proxima/cuda-ptx` (`:13`). Its module doc says the derive owns the default (`:1-7`): one field, one loader, no second path to the same value.
 
-`TensorExecutionConfig` (`proxima-tensor/src/config.rs:28`) is the CPU evaluator's policy, and it is also the `[exec]` table of a `ProgramSpec` (`program_spec.rs:44`). Its fields are `numeric` (`:33`), `allow_fusion` (`:39`), `exact_activations` (`:45`), `max_host_tensor_bytes` (`:49`), `parallel_threshold` (`:56`), `oversubscribe` (`:63`) and `split_alignment` (`:70`), with the env prefix `TENSOR_EXECUTION` (`:26`). A plan therefore carries its own execution policy: `[exec] numeric.reassociation = true` in a plan TOML is read by the evaluator that runs it.
+`TensorExecutionConfig` (`proxima-tensor/src/config.rs:28`) is the CPU evaluator's policy, and it is also the `[exec]` table of a `ProgramSpec` (`program_spec.rs:46`). Its fields are `numeric` (`proxima-tensor/src/config.rs:33`), `allow_fusion` (`:39`), `exact_activations` (`:45`), `max_host_tensor_bytes` (`:49`), `parallel_threshold` (`:56`), `oversubscribe` (`:63`) and `split_alignment` (`:70`), with the env prefix `TENSOR_EXECUTION` (`:26`). A plan therefore carries its own execution policy: `[exec] numeric.reassociation = true` in a plan TOML is read by the evaluator that runs it.
 
-## 6. What omega does not do yet
+## 7. What omega does not do yet
 
 - **`numerics` is recorded, not read.** The storage/activation/accumulator formats appear in the config (`config.rs:102`) and lower nothing: the field's own doc says "Recorded here; lowering does not read it yet". A dtype change today is a `ProgramSpec` `dtype` on a node, not a runtime setting.
 - **`emit` is Metal-only.** `EmitKnobs` (`config.rs:105`) switches Metal emit decisions and keeps the historical `PROXIMA_*` spellings (`override_prefix`, `config.rs:104`); there is no emit surface for wgpu or CUDA, whose kernels are not emitted from this crate at run time.

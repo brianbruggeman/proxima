@@ -1,85 +1,14 @@
 # Omega 00: hello, tensor
 
-**Prerequisites:** you read Rust (`struct`, `enum`, `Result`, `?`) and have used PyTorch or burn. Nothing about proxima or omega.
+**Prerequisites:** you know Rust and you have used PyTorch or burn. Nothing about proxima.
 
-**You will:** compute your first tensor on omega in under ten minutes. The first way uses no Rust at all: the computation is a TOML program and one command, and the same plan runs on the CPU or on Metal. The second way embeds those nodes in Rust and drives them from a TOML runtime config, where one line moves the work from the CPU to the GPU.
+**You will:** run a tensor program written in a TOML file, with no Rust at all; run the same plan on the GPU; then run the same three operations from Rust and print the device that served them.
 
-**New concepts (in order):** omega, the thing that fronts the backends · `Engine` and `GpuDriver`, the two-level backend choice · `RuntimeConfig` as a TOML file · `RuntimeConfigBuilder`, the same value built in code · `ProgramSpec`, a program as TOML data · nodes, ids, maps and outputs · running a plan on `proximad` with no Rust · embedding the same plan in Rust · what omega does not do yet.
+**New concepts (in order):** a program as a file · node, id, dtype, extent, map · `proxima tensor run` · omega, and the two-level backend choice (`engine`, then driver) · the runtime config as environment and as a TOML file · `RuntimeConfigBuilder` · the same program as a `Vec<Op>`.
 
-Every code block is copied from a real file in this repository and cited as `path:line`. Every `sh` block is followed by a `text` block holding the real output of that command, from a run on an Apple M1 Max. Nothing here is invented output.
+## 1. Run it
 
-## 1. What omega is
-
-Omega is the crate `proxima-omega` (library name `omega`, `omega/Cargo.toml:2` and `:13`). You give it a tensor program, a description of what to compute and over which named input buffers, and a configuration, and it plans that program for a backend and executes it. The backends it can drive are the CPU evaluator (`proxima_tensor::cpu`), Metal (macOS), wgpu (which renders WGSL, behind the `wgpu-backend` feature), CUDA and HIP (behind `cuda-driver`). The planner-and-executor pair lives in `omega/src/backend.rs`; the module doc at `omega/src/lib.rs:1-3` still describes the crate as the MSL emitter, which is where it started.
-
-PyTorch analogy, and where it breaks: omega is closer to the layer under `torch.compile` plus the device dispatcher than to `torch.Tensor`. There is no tensor object with operators. You describe the computation as data, and the backend is chosen by a config value. That is the point of this series: **everything about how and where a program runs is a configuration.**
-
-Two things the crate's own docs do not say, so we say them here. First, `omega/README.md` is out of date: it describes only MSL emission and the driver-less half. Second, mlx and Core ML exist in the source (`omega/src/lib.rs:87` `pub mod mlx`, `:48` `pub mod coreml`) but are not backends you can select by configuration; see [section 8](#8-what-omega-does-not-do-yet).
-
-## 2. Engine and GpuDriver
-
-Omega's backend choice has two levels, both plain enums in `omega/src/backend.rs`:
-
-- `Engine` (`backend.rs:113`) has exactly two variants, `Cpu` and `Gpu`. Its `name()` is the string `"cpu"` or `"gpu"`, and `FromStr` (`backend.rs:261`) parses those two strings and nothing else.
-- `GpuDriver` (`backend.rs:187`) says which driver renders the `Gpu` engine: `Metal`, `Wgpu`, and, with `cuda-driver`, `Cuda` and `Hip`.
-
-Why two levels: the doc comment on `Engine` (`backend.rs:105-111`) says a driver is not a peer of the CPU engine. "Where does this run" has two answers, a CPU core or a GPU; "which GPU API" is a separate question you only ask when the first answer is `Gpu`. If `engine` is `cpu`, the driver is ignored (`backend.rs:643`).
-
-Which drivers exist in your build is decided at compile time by cargo features. The default feature set is `["std", "metal", "cpu"]` (`omega/Cargo.toml:21`), so a default build on a Mac has the CPU engine and the Metal driver; a default build on Linux has the CPU engine and no GPU driver (asking for `gpu` there returns `BackendError::NoGpuDriver`, `backend.rs:323`).
-
-## 3. The runtime configuration, as a TOML file
-
-The configuration type is `RuntimeConfig` (`omega/src/config.rs:22`). It derives `Deserialize`, so a TOML file is a first-class way to write one, and `deny_unknown_fields` (`config.rs:21`) means a typo in a key is an error rather than a silently ignored line. Two of its fields are all this page needs:
-
-- `engine: String`, default `"cpu"` (`config.rs:25`)
-- `gpu_driver: String`, default `"auto"` (`config.rs:28`)
-
-Everything else (about two dozen more fields: fusion, worker counts, numeric policy, selection) has a default and is [the next page's](./01-config.md) subject. The whole file for this page is two lines, `omega/examples/omega_hello_tensor.toml:1-2`:
-
-```toml
-engine = "cpu"
-gpu_driver = "auto"
-```
-
-`RuntimeConfig::from_file` (`config.rs:389`) reads a TOML, JSON or YAML file, overlays it on the defaults, and validates the result. Validation (`config.rs:298` and `:310`) rejects an `engine` that is not `cpu|gpu` and a `gpu_driver` that is not `auto|metal|wgpu|cuda|hip|rocm`, with a message that names the field.
-
-## 4. The same configuration, as a builder
-
-Proxima's rule is that every configuration is both a file and a fluent builder, and the two must produce an identical value. `RuntimeConfig::builder()` (`config.rs:397`) returns a `RuntimeConfigBuilder` (`config.rs:716`) seeded with the defaults. `with_engine` (`config.rs:841`) and `with_gpu_driver` (`config.rs:848`) set the two fields, and `build()` (`config.rs:938`) validates and returns the `RuntimeConfig`.
-
-The repository checks the equivalence with a test rather than asking you to trust it. This is `omega/src/config_tests.rs:329-340`; the first two keys of the TOML string are the two fields this page uses, and `[constraints]` and `[numeric]` are tables [page 01](./01-config.md) covers:
-
-```rust
-fn runtime_config_builder_matches_serde_config() {
-    let source = "engine = 'gpu'\ngpu_driver = 'metal'\n[constraints]\nmax_device_buffer_bytes = 4096\n[numeric]\nreassociation = true\n";
-    let from_serde: RuntimeConfig = toml::from_str(source).expect("config TOML deserializes");
-    let from_builder = RuntimeConfig::builder()
-        .with_engine("gpu")
-        .with_gpu_driver("metal")
-        .with_constraints(ResourceConstraints::default().with_max_device_buffer_bytes(Some(4096)))
-        .with_numeric(NumericPolicy::bit_exact().with_reassociation(true))
-        .build()
-        .expect("builder config validates");
-
-    assert_eq!(from_builder, from_serde);
-}
-```
-
-The builder can also read a file in the middle of a chain (`RuntimeConfigBuilder::from_file`, `config.rs:722`): later setters win. How layers combine is the whole of [page 01](./01-config.md); for now, know it exists.
-
-Which should you write? The file when the choice belongs to whoever deploys the program (swap the backend without recompiling), the builder when a test or a caller computes the value. Configuration-first means you reach for the file first.
-
-## 5. The program, as TOML
-
-The second half is the program itself, and it is also data. `ProgramSpec` (`proxima-tensor/src/spec/program_spec.rs:26`) is a tensor program written as TOML. It carries a `version`, and the three tables this page uses are:
-
-- `[[node]]` is one operation. Every node has an `id`, and a node may only reference ids defined above it, which mirrors the program's backwards-reference rule so the two representations cannot disagree (`program_spec.rs:26-33`).
-- `[[output]]` names the results you want back (`OutputSpec`, `program_spec.rs:65`). A page-00 program has no `[[bind]]` entries (`BindSpec`, `program_spec.rs:76`), because its leaves are literals rather than caller-supplied buffers.
-- `[exec]` is the evaluation policy; this page leaves it at its default.
-
-The node kinds this page needs are the two leaves and the elementwise map (`NodeSpec`, `program_spec.rs:129`): `input` (`:130`), `elementwise` (`:137`), `reduce` (`:146`), `iota` (`:162`) and `constant` (`:171`). Every node carries a `dtype` and, for the leaf kinds, a `shape` whose entries are a bare integer for a static extent or a symbolic name for a data-dependent one (`ExtentSpec`, `program_spec.rs:87`).
-
-Two vectors and their sum, with no inputs and no Rust, `omega/examples/hello_add.plan.toml:1` (shown whole):
+Here is a complete tensor program. It builds `[0, 1, 2, 3]`, builds four copies of `10.0`, adds them, and names the result `sum`. The file is `omega/examples/hello_add.plan.toml`:
 
 ```toml
 version = 1
@@ -111,20 +40,9 @@ maps = ["i->i", "i->i"]
 name = "sum"
 ```
 
-Read it as four facts:
+Four things to notice. Each `[[node]]` is one operation with an `id` of your choosing. `n0` is the range `0..4` and `n1` is a constant, so this program needs no input data. `n2` adds them, and its `maps` say how each operand lines up with the output — `i->i` is "same axis, same element". `[[output]]` says the caller reads `n2` under the name `sum`.
 
-1. `n0` is `[0, 1, 2, 3]`, from `iota` over four elements.
-2. `n1` is four copies of `10.0`, from `constant`.
-3. `n2` is the `add` of the two, and the `maps` say how each operand's axes line up with the output's: `i->i` is the identity on one axis. The map grammar is `MapSpec` (`program_spec.rs:111`); a matmul needs a contraction such as `ac->abc`, which is [page 02](./02-programs-as-data.md).
-4. `[[output]]` says the caller reads the result of `n2` under the name `sum`.
-
-Nothing in the file says where it runs. That is deliberate: the same plan is the same bytes on every backend. Real programs live in `proxima-tensor/specs/`: 11 files including `conv2d.toml`, `rope.toml`, `attention_block.toml`, `gqa_attention.toml`, `moe_block.toml`, `mistral_layer.toml` and `transformer_block.toml`.
-
-## 6. Run it: no Rust at all
-
-Two binaries make this path work, both in `tools/proxima-cli`: `proxima` (`tools/proxima-cli/Cargo.toml:15`) and `proximad` (`:19`). The daemon evaluates plans; the CLI posts one to it over a Unix socket and prints the outputs.
-
-Start the daemon and note the `READY` line it prints with the socket path:
+Two commands run it. The first starts a daemon, which is the process that evaluates plans; it prints `READY` and the socket it is listening on:
 
 ```sh
 cargo build -p proxima-cli --bins
@@ -135,7 +53,7 @@ cargo build -p proxima-cli --bins
 READY /tmp/proximad.sock
 ```
 
-Then run the plan. `--socket` also reads `PROXIMAD_SOCKET` (`tools/proxima-cli/src/tensor.rs:36`):
+The second hands the plan to it:
 
 ```sh
 ./target/debug/proxima tensor run --socket /tmp/proximad.sock omega/examples/hello_add.plan.toml
@@ -145,9 +63,26 @@ Then run the plan. `--socket` also reads `PROXIMAD_SOCKET` (`tools/proxima-cli/s
 sum [4] [10.0, 11.0, 12.0, 13.0]
 ```
 
-That is the whole first program: a TOML program, a daemon, and one command. The daemon parses the plan into a `ProgramSpec` and rejects it with the failing field named if the TOML is wrong (`tools/proxima-cli/src/tensor_run.rs:53`), so a typo is a message, not a wrong number. The `sum [4] [...]` line comes from `summarize_values` (`tools/proxima-cli/src/summary.rs:17`), which elides past eight values on a large tensor and prints the total instead.
+That is the whole first program. No Rust of your own, and no input files. If the TOML is wrong the daemon says which field is wrong (`tools/proxima-cli/src/tensor_run.rs:53`), and the printed line comes from `summarize_values` (`tools/proxima-cli/src/summary.rs:17`), which shows the first eight values and the total count for a big tensor.
 
-One honest difference from the next section: on this path the runtime config is read from the environment, per request (`tools/proxima-cli/src/tensor_run.rs:59`), so the switch from CPU to Metal here is two environment variables on the daemon plus a build that compiles the driver in, not an edit to `omega_hello_tensor.toml`:
+The format is a `ProgramSpec` (`proxima-tensor/src/spec/program_spec.rs:26`): five node kinds, namely an `input` leaf, an `elementwise` map, a `reduce` reduction, an `iota` range and a `constant` (`program_spec.rs:130` to `:171`) — shapes written as a number or a symbolic `?0` (`ExtentSpec`, `:87`), one addressing string per operand (`MapSpec`, `:111`), and `[[output]]` entries (`OutputSpec`, `:65`). A node may only reference ids above it, which is why `n2` can name `n0` and `n1` and not the other way round.
+
+## 2. What omega is
+
+Omega is the crate `proxima-omega` (library name `omega`, `omega/Cargo.toml:2` and `:13`). It plans a tensor program for a backend and executes it. There is no tensor object and no operators on values: a program is data, and where it runs is a config value.
+
+The backend choice has two levels, both plain enums in `omega/src/backend.rs`:
+
+- **`Engine`** (`backend.rs:113`) is where the work happens: `Cpu` or `Gpu`. There are only two, because there are only two places an op runs.
+- **`GpuDriver`** (`backend.rs:187`) is which API renders the GPU: `Metal`, `Wgpu`, and with the `cuda-driver` feature, `Cuda` and `Hip`.
+
+If you configured `cpu`, the driver is ignored (`backend.rs:643`). If you ask for `gpu` in a build with no driver compiled in, you get `BackendError::NoGpuDriver` (`backend.rs:323`), never a silent fall back to the CPU. The default features are `["std", "metal", "cpu"]` (`omega/Cargo.toml:21`), so a default build on a Mac has the Metal driver and a default build on Linux has none.
+
+The PyTorch comparison, and where it breaks: omega sits where `torch.compile` plus the device dispatcher sit, not where `torch.Tensor` sits. You describe the computation once and choose the device separately — which is the point of the whole series.
+
+## 3. Put it on the GPU
+
+On the daemon path the runtime is the environment, read per request (`tools/proxima-cli/src/tensor_run.rs:59`). Two variables move the work to Metal, and the driver has to be compiled into the daemon:
 
 ```sh
 cargo build -p proxima-cli --bins --features metal
@@ -166,17 +101,55 @@ READY /tmp/proximad-gpu.sock
 sum [4] [10.0, 11.0, 12.0, 13.0]
 ```
 
-Same plan, same numbers. Skip the `--features metal` and the same two variables get you a refusal that names the missing feature, not a silent CPU fallback (`tools/proxima-cli/Cargo.toml:28`):
+Same plan, same numbers. Leave out `--features metal` and the same two variables get you a refusal that names the missing feature rather than a silent CPU fall back (`tools/proxima-cli/Cargo.toml:28`):
 
 ```text
 proxima tensor run: upstream error: tensor run failed: HTTP 400 — omega could not plan the program: backend `metal` needs the `metal` cargo feature, which is not compiled in
 ```
 
-The daemon has no `--runtime <toml>` flag yet, and this CLI does not print which backend served the request, which is why the next section runs the same nodes in Rust and prints the device; see [section 8](#8-what-omega-does-not-do-yet).
+This path does not tell you which device served the request, and it has no runtime-TOML flag yet; both are in [section 6](#6-what-omega-does-not-do-yet). The embedded path in section 5 does tell you, which is the reason to use it.
 
-## 7. Embed it in your program
+## 4. The runtime config as a file
 
-When the program is part of a service, you want the config to be a file *and* the backend identity in your logs. That is what the Rust path gives you. The complete program, `omega/examples/omega_hello_tensor.rs` (under 60 lines):
+When you embed omega, the runtime is a `RuntimeConfig` (`omega/src/config.rs:22`), and it is both a file and a builder. The file is two lines, `omega/examples/omega_hello_tensor.toml:1-2`:
+
+```toml
+engine = "cpu"
+gpu_driver = "auto"
+```
+
+`RuntimeConfig::from_file` (`config.rs:389`) reads TOML, JSON or YAML, overlays it on the defaults, and validates. `deny_unknown_fields` (`config.rs:21`) turns a typo into an error that lists every key it expected, and validation (`config.rs:298`, `:310`) names the field that is wrong:
+
+```text
+Error: validation failed:
+  - engine: unknown engine 'tpu'; expected cpu|gpu
+```
+
+The other 26 fields — worker counts, fusion, cache policy, numeric permissions, candidate selection — have defaults and are [page 01](./01-config.md)'s subject. The two on this page are `engine` (`config.rs:25`) and `gpu_driver` (`config.rs:28`).
+
+The builder produces the same value: `RuntimeConfig::builder()` (`config.rs:397`) returns a `RuntimeConfigBuilder` (`:716`), `with_engine` (`:841`) and `with_gpu_driver` (`:848`) set the fields, and `build()` (`:938`) validates. The repository proves the two forms agree with a test (`omega/src/config_tests.rs:329-340`), which is short enough to read:
+
+```rust
+fn runtime_config_builder_matches_serde_config() {
+    let source = "engine = 'gpu'\ngpu_driver = 'metal'\n[constraints]\nmax_device_buffer_bytes = 4096\n[numeric]\nreassociation = true\n";
+    let from_serde: RuntimeConfig = toml::from_str(source).expect("config TOML deserializes");
+    let from_builder = RuntimeConfig::builder()
+        .with_engine("gpu")
+        .with_gpu_driver("metal")
+        .with_constraints(ResourceConstraints::default().with_max_device_buffer_bytes(Some(4096)))
+        .with_numeric(NumericPolicy::bit_exact().with_reassociation(true))
+        .build()
+        .expect("builder config validates");
+
+    assert_eq!(from_builder, from_serde);
+}
+```
+
+Use the file when whoever deploys the program should choose the backend without a rebuild, and the builder when a test or a caller computes the value. [Page 01](./01-config.md) covers what happens when both, plus the environment, are in play at once.
+
+## 5. Embed it in your program
+
+The same three operations in Rust, printing the device this time. The complete program is `omega/examples/omega_hello_tensor.rs`:
 
 ```rust
 use anyhow::Result;
@@ -225,18 +198,16 @@ fn main() -> Result<()> {
 }
 ```
 
-This example hand-builds the `Vec<Op>` that the TOML program describes, on purpose: it is the same three nodes, so you can see the two forms side by side. The lowering that turns a `ProgramSpec` into that vector is `plan_parts` (`proxima-tensor/src/spec/run.rs:34`), and [page 02](./02-programs-as-data.md) uses it so you never write the vector by hand.
+It builds the `Vec<Op>` by hand on purpose: the three nodes are the ones in section 1, so you can see both forms side by side. The lowering that turns a `ProgramSpec` into that vector is `plan_parts` (`proxima-tensor/src/spec/run.rs:34`), and [page 02](./02-programs-as-data.md) uses it so you never write the vector yourself.
 
-Read the Rust in four steps.
+The four steps, in the order the code runs them:
 
-1. **Load the config** (`RuntimeConfig::from_file`, `config.rs:389`).
-2. **Describe the program.** Nodes 0 and 1 are `Input`s named `"a"` and `"b"`, each a float32 vector of four elements (`Extent::Static(4)`, `op.rs:46`). Node 2 is the `Add` over nodes 0 and 1. `NodeId` (`op.rs:29`) is a newtype over `u32`, so you cannot confuse a node with an arbitrary number.
-3. **Bind data by name.** `named` pairs each input name with a `QuantizedBlock` (`proxima-tensor/src/cpu/epilogue.rs:1459`). `Float32` is the plain f32 case; the other variants are integer and packed quantized weights, which later pages meet. Binding by name, not position, is deliberate: it is how a program's weights load by name and survive being split across devices (the doc on `Op::Input`, `op.rs:195-201`).
-4. **Plan, then execute.** `plan_named_with_config` (`backend.rs:490`) validates the config again and returns a `Plan` (`backend.rs:409`, a reusable, backend-specific program) plus a report of `CandidateMeasurement`s (`backend.rs:425`). With the default `selection.mode` of `Configured` (`config.rs:581`), there is exactly one candidate, the one you configured, and no trial runs. `execute_plan_named` (`backend.rs:1303`) runs the plan against the named data; you could call it again with new data and reuse the plan, which is how a serving loop avoids re-planning per token. The result is an `Evaluated` (`proxima-tensor/src/cpu/arena.rs:20`); `.root()` (`arena.rs:65`) is the output buffer as `&[f32]` and `.shape()` (`arena.rs:70`) its shape.
+1. **Load the config** — `RuntimeConfig::from_file` (`config.rs:389`).
+2. **Describe the program.** Nodes 0 and 1 are `Input`s named `"a"` and `"b"`, four float32 elements each (`Extent::Static(4)`, `op.rs:46`); node 2 adds them. `NodeId` (`op.rs:29`) is a newtype over `u32`, so a node id cannot be confused with any other number.
+3. **Bind data by name.** `named` pairs each input name with a `QuantizedBlock` (`proxima-tensor/src/cpu/epilogue.rs:1459`). `Float32` is the plain case; the other variants carry quantized weights, which later pages use. Binding by name rather than position is what lets weights survive a partition that renumbers slices (`Op::Input`'s doc, `op.rs:195-201`).
+4. **Plan, then execute.** `plan_named_with_config` (`backend.rs:490`) validates the config, builds a `Plan` (`backend.rs:409`) and reports what it chose (`CandidateMeasurement`, `backend.rs:425`). With the default selection mode there is one candidate and no trial runs (page 01 explains when there could be more). `execute_plan_named` (`backend.rs:1303`) runs it; the same plan takes new data on the next call, which is how a serving loop avoids re-planning per token. The result is an `Evaluated` (`proxima-tensor/src/cpu/arena.rs:20`); `.root()` (`:65`) is the buffer and `.shape()` (`:70`) its shape.
 
-A smaller proof that this API does what it says is the doctest on `plan_named_with_config` (`backend.rs:468-487`), which plans a one-op `Negate` program on the default config and asserts `[-1.0, -2.0]`. It is compiled and run by `cargo test`.
-
-The example is auto-discovered by cargo (`omega/Cargo.toml` sets no `autoexamples = false`) and needs no `[[example]]` entry or extra feature: the default features (`omega/Cargo.toml:21`) already include `cpu`, and its dependencies (`anyhow`, `proxima-numeric`, `proxima-tensor`) are already in `omega/Cargo.toml`. On the two-line CPU config from section 3:
+Run it on the CPU config from section 4:
 
 ```sh
 cargo run -p proxima-omega --example omega_hello_tensor
@@ -248,29 +219,22 @@ shape   = [4]
 a + b   = [11.0, 22.0, 33.0, 44.0]
 ```
 
-Now the claim from the top of the page, made concrete. Write these two lines to `/tmp/gpu.toml` and pass that file instead:
-
-```toml
-engine = "gpu"
-gpu_driver = "metal"
-```
-
-Same binary, no rebuild, no code change:
+Now put `engine = "gpu"` and `gpu_driver = "metal"` in `omega/examples/configs/gpu.toml` and pass it as the argument. Same binary, no rebuild:
 
 ```sh
-cargo run -p proxima-omega --example omega_hello_tensor -- /tmp/gpu.toml
+cargo run -p proxima-omega --example omega_hello_tensor -- omega/examples/configs/gpu.toml
 ```
 
 ```text
-backend = Apple M1 Max (config: /tmp/gpu.toml)
+backend = Apple M1 Max (config: omega/examples/configs/gpu.toml)
 shape   = [4]
 a + b   = [11.0, 22.0, 33.0, 44.0]
 ```
 
-Same program, same numbers, a different device, and the `report` line tells you which one served it. A third run against a deliberately bad config shows validation by field name:
+Same program, same numbers, different device, and the `report` line names it. A deliberately bad config shows the field name and exits `1`:
 
 ```sh
-cargo run -p proxima-omega --example omega_hello_tensor -- /tmp/bad.toml
+cargo run -p proxima-omega --example omega_hello_tensor -- omega/examples/configs/bad_engine.toml
 ```
 
 ```text
@@ -278,20 +242,16 @@ Error: validation failed:
   - engine: unknown engine 'tpu'; expected cpu|gpu
 ```
 
-and the process exits `1`. Two caveats worth knowing. Switching to `gpu` requires that the driver be compiled in; otherwise you get `BackendError::NotCompiled` (`backend.rs:314`) or `NoGpuDriver` and never a silent CPU fallback. And a name you invent is a validation error, not a guess.
+The doctest on `plan_named_with_config` (`backend.rs:468-487`) is the smallest executable statement of the contract: it plans a one-op `Negate` program and asserts `[-1.0, -2.0]`. Doctests run under `cargo test`, not `cargo val`.
 
-## 8. What omega does not do yet
+## 6. What omega does not do yet
 
-Each item is something a PyTorch user expects on day one, with the line that shows the gap.
+- **The daemon path has no runtime-TOML surface.** `proxima tensor run` evaluates with `RuntimeConfig::from_env()` per request (`tools/proxima-cli/src/tensor_run.rs:59`). There is no `--runtime <toml>` on `proximad serve`, and the CLI does not report the device that served a plan.
+- **No tensor object and no operators.** There is no `a + b` on a value: you write a `ProgramSpec` or build a `Vec<Op>` and index nodes by `NodeId` (`proxima-tensor/src/op.rs:192`, `:29`). [Page 02](./02-programs-as-data.md) is about the first form.
+- **Two engines, five drivers, and no more.** `Engine` is `Cpu` or `Gpu` (`backend.rs:113`) and the driver is one of `auto|metal|wgpu|cuda|hip|rocm` (`config.rs:310`). There is no `mlx`, `coreml`, `ane` or `npu` value; the `Plan` enum has Cpu, Metal, Wgpu, Cuda and Rocm variants only (`backend.rs:409-421`), and an `Npu`/`Ane` name existed without a lowering and was deleted (`backend.rs:105-111`).
+- **MLX and Core ML are not selectable engines.** `omega/src/mlx.rs:1-5` says execution "remains behind a native adapter" and the module exists only when `PROXIMA_MLX_PREFIX` points at an installed MLX (`omega/build.rs:25-37`). Core ML is a package writer behind `coreml-lane` (`omega/Cargo.toml:499`), not an `engine` value.
+- **Which drivers you have is a compile-time fact.** wgpu and CUDA need features that are off by default (`omega/Cargo.toml:382`, `:241`), and asking for `gpu` without one is `NoGpuDriver` (`backend.rs:323`).
+- **Float32 in, float32 out on this path.** Input blocks are `QuantizedBlock` variants (`epilogue.rs:1459`) and `Evaluated` holds `Vec<f32>` (`arena.rs:22`). The `numerics` setting that would choose storage and accumulator formats is recorded in the config and not read by lowering yet (`config.rs:102`).
+- **No autograd here.** Nothing in `backend.rs` or `config.rs` differentiates a program. `proxima-autograd` is a separate crate, used here only as a dev-dependency (`omega/Cargo.toml:710`); [page 03](./03-train.md) is where training happens.
 
-- **No tensor object and no operators.** There is no `a + b` on a value. You write a `ProgramSpec`, or build a `Vec<Op>` and index nodes by `NodeId` (`proxima-tensor/src/op.rs:192`, `:29`). [Page 02](./02-programs-as-data.md) is the whole of the first form.
-- **The daemon path has no runtime-TOML surface.** `proxima tensor run` evaluates with `RuntimeConfig::from_env()` per request (`tools/proxima-cli/src/tensor_run.rs:59`); there is no `--runtime <toml>` on `proximad serve`, and the CLI does not report the device that served a plan. The file-plus-builder surface in sections 3 and 4 is the embedded path only, today.
-- **Selecting a backend is two choices, not six.** `Engine` has only `Cpu` and `Gpu` (`backend.rs:113`); validation accepts only `auto|metal|wgpu|cuda|hip|rocm` for the driver (`config.rs:310`). There is no `mlx`, `coreml`, `ane` or `npu` value. The `Plan` enum has Cpu, Metal, Wgpu, Cuda and Rocm variants only (`backend.rs:409-421`). An `Npu`/`Ane` engine existed as a name only and was deleted (`backend.rs:105-111`).
-- **MLX is a capability marker, not a backend.** `omega/src/mlx.rs:1-5` says execution "remains behind a native adapter"; it exists only when `PROXIMA_MLX_PREFIX` points at an installed MLX (`omega/build.rs:25-37`), and `backend.rs` does not reference it.
-- **Core ML is a package writer, not a selectable engine.** The `coreml-lane` feature compiles and caches a written package (`omega/Cargo.toml:499`), gated behind `mil-writer` (the same line), and `RuntimeConfig` has no `engine` or `gpu_driver` value that reaches it (`config.rs:298`, `:310`).
-- **Which GPU drivers you have is a compile-time fact.** wgpu and CUDA need cargo features (`omega/Cargo.toml:382`, `:241`) that are off by default; a default Linux build has no GPU engine at all (`backend.rs:323`).
-- **Float32 in, float32 out on this path.** Input blocks are `QuantizedBlock` variants (`epilogue.rs:1459`) and `Evaluated` stores `Vec<f32>` buffers (`arena.rs:22`). The `numerics` setting that would choose storage, activation and accumulator formats is "recorded here; lowering does not read it yet" (`config.rs:100`).
-- **No autograd on this surface.** Nothing in `backend.rs` or `config.rs` differentiates a program. `proxima-autograd` is a separate crate used as a dev-dependency (`omega/Cargo.toml:711`); how training reaches omega is page 03, and nothing on this page claims it is wired.
-- **No performance claim.** This page measures nothing. The targets (burn, PyTorch, llama.cpp, whisper, stable diffusion) are the subject of page 07, and a number there will come from a run, not from this page.
-
-Next: [01: configuration in depth](./01-config.md) covers layering (file, environment, builder), `SelectionConfig` (`config.rs:621`), `KernelCacheConfig`, `TensorExecutionConfig`, and validation.
+Next: [01: configuration in depth](./01-config.md) — the rest of the config surface, how the four sources layer, and the errors that name your field.

@@ -2,21 +2,21 @@
 
 **Prerequisites:** [page 03](./03-train.md) and [page 04](./04-infer-an-llm.md): this page compares what those pages ran, and every command here is one of theirs.
 
-**You will:** see, for each of the five targets, either a measured row with the exact command, the hardware and the variance, or a named gap with the artifact that is missing. There is no third category on this page.
+**You will:** see, for each of the five targets, either a measured row with the exact command, the hardware and the variance, or a named gap with the artifact that is missing.
 
-**New concepts (in order):** what a comparison row must carry · the machine · omega decode measured · llama.cpp on the same checkpoint · burn on the same dataset · PyTorch · whisper.cpp · stable-diffusion.cpp · reading the table.
+**New concepts (in order):** what a comparison row must carry · the machine · omega decode measured · llama.cpp on the same checkpoint · burn's own example, and why it is not the same workload · PyTorch · whisper.cpp · stable-diffusion.cpp · reading the table.
 
 ## 1. What a row must carry
 
-A row is admissible only with all of: the exact command, the build profile, the hardware, the number of runs, the mean, and the spread. A number without those is a measurement, not a result — it cannot tell you whether a difference is the code or the afternoon. Where any of those is missing, the row below says `gap` and names the artifact that would complete it.
+A row needs the command, the build profile, the hardware, the number of runs, the mean and the spread. Without those you cannot tell whether a difference is the code or the afternoon, so where one is missing the row says `gap` and names what would complete it.
 
-The machine for every row: Apple M1 Max, 10 cores, macOS on `arm64`, load average under 30 before each run, one job at a time. The build profile is named per row, because a debug wall clock is not comparable to a release one.
+The machine for every row: Apple M1 Max, 10 cores, macOS on `arm64`, one cargo job at a time. The build profile is named per row, because a debug wall clock is not comparable to a release one, and so is the load the row was taken under when it was not a quiet machine.
 
-The five targets at a glance:
+The five targets, and the answer each one gets today:
 
 | target | row | number, or the missing piece |
 |---|---|---|
-| llama.cpp | measured, same checkpoint | omega 21.08 ms/token warm vs llama.cpp 9.59 ms/token; **omega is 2.20x slower** (N=3 / 5) |
+| llama.cpp | measured, same checkpoint | omega 21.08 ms/token warm vs llama.cpp 9.59 ms/token; **omega is 2.2x slower** (N=3 / 5) |
 | burn | rate measured, accuracy not comparable | 2.25 s per 256-image iteration; its example is a CNN over 20 epochs, page 03 is an MLP over 4 |
 | PyTorch | gap | not installed, and this workspace installs no Python tooling |
 | whisper.cpp | gap | source only, no `ggml-*.bin`, and the converter is Python |
@@ -56,7 +56,9 @@ llama.cpp, the `llama-bench` binary at `~/repos/others/llama.cpp/bin/llama-bench
 
 `104.30 ± 0.98` tokens per second over 5 repetitions is **9.59 ms per token** (CoV 0.94%). Against omega's warm 21.08 ms, the measured ratio is **2.20x slower** on this prompt, this checkpoint and this machine. The cold omega number, 116 ms, is 12x slower and is not the steady-state ratio — report it as first-request cost, never as decode throughput.
 
-Read that as what it is: a 1B f16 decode, one prompt, 24 tokens, on a shared laptop, in a release build on both sides. It says nothing about long context, batching, or another family.
+Both sides of this row were measured back to back, with no other build running. That condition is not decoration: a later window on the same machine under load average 78 put omega between 24 and 64 ms per token for the same command. A decode number without the load it was taken under is not reusable.
+
+That is a 1B f16 decode, one prompt, 24 tokens, in a release build on both sides.
 
 ## 3. burn: training on MNIST
 
@@ -73,12 +75,23 @@ cargo run --release --no-default-features --features ndarray --example mnist -j 
 TrainingProgress { progress: Progress { items_processed: 256, items_total: 320000 }, epoch: 1, epoch_total: 20, iteration: 1 }
 TrainingProgress { progress: Progress { items_processed: 512, items_total: 320000 }, epoch: 1, epoch_total: 20, iteration: 2 }
 TrainingProgress { progress: Progress { items_processed: 768, items_total: 320000 }, epoch: 1, epoch_total: 20, iteration: 3 }
-... (1250 iterations over 20 epochs)
 ```
 
-Read the schedule before any number: `items_total: 320000`, `epoch_total: 20`, batch 256 (`examples/mnist/src/training.rs:43`), an AdamW optimizer with cautious weight decay (`:64-65`), and a two-convolution model with dropout before its linear layers (`examples/mnist/src/model.rs:15-23`, `:34-40`). Page 03 trains a 784-128-10 MLP over 8,000 images for 4 epochs. **These are not the same workload**, so their wall clocks are not comparable and this is not the row the brief asked for.
+It keeps printing one such line per iteration; the run was stopped after the numbers below were taken. Read the schedule before any number: `items_total: 320000`, `epoch_total: 20`, batch 256 (`examples/mnist/src/training.rs:43`), an AdamW optimizer with cautious weight decay (`:64-65`), and a two-convolution model with dropout before its linear layers (`examples/mnist/src/model.rs:15-23`, `:34-40`). Page 03 trains a 784-128-10 MLP over 8,000 images for 4 epochs. **These are not the same workload**, so their wall clocks are not comparable and there is no accuracy number here to set beside page 03.
 
-What the run does give is a rate. From its own log (`/tmp/burn-example-mnist/experiment.log`): iteration 1 at `14:39:45.965`, iteration 50 at `14:41:36.237` — 49 iterations in 110.3 s, **2.25 s per 256-image iteration**, while other work ran on this machine, so it is an upper bound on burn's own speed. At 1250 iterations its schedule is about 47 minutes.
+What the run does give is a rate, taken from the two timestamps the learner writes for itself:
+
+```sh
+grep -m1 "Iteration 1$" /tmp/burn-example-mnist/experiment.log
+grep -m1 "Iteration 50$" /tmp/burn-example-mnist/experiment.log
+```
+
+```text
+2026-11-21T14:39:45.965060Z  INFO burn_train::learner::strategies::single::epoch: Iteration 1
+2026-11-21T14:41:36.236671Z  INFO burn_train::learner::strategies::single::epoch: Iteration 50
+```
+
+49 iterations in 110.3 s is **2.25 s per 256-image iteration**. Other work ran on this machine while it trained, so that number is an upper bound on the time per step, not a lower bound. At 1250 iterations its own schedule is about 47 minutes.
 
 **Gap.** A comparable training row needs burn configured to page 03's network and schedule — 784-128-10, 8,000 examples, batch 32, 4 epochs — which is an edit to `examples/mnist/src/model.rs` and `examples/mnist/src/training.rs:39-45`, not a flag. Until that exists, burn has a measured rate and no accuracy number that could sit beside `0.9180`.
 
@@ -88,14 +101,14 @@ What the run does give is a rate. From its own log (`/tmp/burn-example-mnist/exp
 
 ## 5. whisper.cpp
 
-**Gap.** `~/repos/others/whisper.cpp` is source only (`build/bin` is empty) and there is no `ggml-*.bin` checkpoint on this machine. Converting `~/models/asr/whisper-tiny` (HF safetensors) to ggml needs whisper.cpp's Python converter, which this workspace does not run. The artifact that would complete the row is a `ggml-tiny.bin`, plus a proxima whisper path to compare against — page 05 explains why the second does not exist yet.
+**Gap.** No `ggml-*.bin` exists on this machine and whisper.cpp has never been built here; converting the tiny HF checkpoint needs its Python converter, which this workspace does not run. Page 05 covers the rest: even with a ggml model there is no proxima whisper path to run against it.
 
 ## 6. stable-diffusion.cpp
 
-**Gap.** `~/repos/others/stable-diffusion.cpp/build/bin/sd-cli` exists (`master-1052-f5df5f8`), but there is no image path in omega to run against it, so wall time per image has nothing to compare. The checkpoints on disk (`~/models/image_gen/flux2-klein-4b`, `~/models/diffusion_pixel/ddpm-cifar10-32`) are diffusers layouts, and whether `sd-cli` loads them was not verified. The artifact that would complete the row is a proxima image path (`proxima-model-interop/specs/flux2-klein/SPEC.md`, draft) plus a checkpoint both sides load.
+**Gap.** `sd-cli` exists (`master-1052-f5df5f8`), but omega has no image path, so wall time per image has nothing to compare. Page 06 says what is missing; the row needs that path plus a checkpoint both sides load.
 
-## 7. Reading the table
+## 7. What omega does not do yet, and how to read the table
 
-- **Decode** is the one row where both sides run the same weights and the same token count, so the milliseconds are comparable. It is still one prompt on one machine: it says nothing about long context, batching, or another model family.
+- **Decode** is the one row where both sides run the same weights and the same token count, so the milliseconds are comparable. One prompt on one machine says nothing about long context, batching, or another model family.
 - **Training** is comparable only if both sides use the same data files and the same network; page 03 fixes omega's side, section 3 of this page shows that burn's shipped example does not, and names what would have to change.
-- **A gap is not a loss.** Three of five targets are gaps for missing artifacts, not for missing performance. Saying so is the point of the page: a benchmark you did not run is a fact about your evidence, not about your code.
+- **A gap is not a loss.** Three of five targets have nothing to compare because an artifact is missing, not because omega lost. A benchmark nobody ran tells you about the evidence, not about the code.
