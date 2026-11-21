@@ -132,10 +132,6 @@ pub fn store_moment(
     Ok(())
 }
 
-/// The float32 default of every layout field: binary32 is what the graph computes in, so it is
-/// the identity narrowing and keeps a default config bit-identical to the pre-config code.
-const DEFAULT_LAYOUT: FloatLayout = FloatLayout::BF32;
-
 #[cfg(feature = "config")]
 mod layout_name {
     //! `FloatLayout` as its canonical lowercase name on the wire (`"bfloat16"`), for env, TOML and
@@ -252,17 +248,17 @@ pub struct AdamConfig {
     pub epsilon: Hyper,
     /// Layout the hyper-parameters above are rounded into before they become graph constants.
     #[cfg_attr(feature = "config", setting(default_str = "float32", resolve_with = "parse_layout"))]
-    #[cfg_attr(feature = "config", builder(default = DEFAULT_LAYOUT))]
+    #[cfg_attr(feature = "config", builder(default = FloatLayout::BF32))]
     #[cfg_attr(feature = "config", serde(with = "layout_name"))]
     pub hyper_layout: FloatLayout,
     /// Storage layout of the first moment `m` between steps.
     #[cfg_attr(feature = "config", setting(default_str = "float32", resolve_with = "parse_layout"))]
-    #[cfg_attr(feature = "config", builder(default = DEFAULT_LAYOUT))]
+    #[cfg_attr(feature = "config", builder(default = FloatLayout::BF32))]
     #[cfg_attr(feature = "config", serde(with = "layout_name"))]
     pub first_moment_layout: FloatLayout,
     /// Storage layout of the second moment `v` between steps.
     #[cfg_attr(feature = "config", setting(default_str = "float32", resolve_with = "parse_layout"))]
-    #[cfg_attr(feature = "config", builder(default = DEFAULT_LAYOUT))]
+    #[cfg_attr(feature = "config", builder(default = FloatLayout::BF32))]
     #[cfg_attr(feature = "config", serde(with = "layout_name"))]
     pub second_moment_layout: FloatLayout,
 }
@@ -274,9 +270,9 @@ impl Default for AdamConfig {
             beta1: 0.9,
             beta2: 0.999,
             epsilon: 1e-8,
-            hyper_layout: DEFAULT_LAYOUT,
-            first_moment_layout: DEFAULT_LAYOUT,
-            second_moment_layout: DEFAULT_LAYOUT,
+            hyper_layout: FloatLayout::BF32,
+            first_moment_layout: FloatLayout::BF32,
+            second_moment_layout: FloatLayout::BF32,
         }
     }
 }
@@ -637,7 +633,7 @@ pub struct SgdConfig {
     pub learning_rate: Hyper,
     /// Layout the step size is rounded into before it becomes a graph constant.
     #[cfg_attr(feature = "config", setting(default_str = "float32", resolve_with = "parse_layout"))]
-    #[cfg_attr(feature = "config", builder(default = DEFAULT_LAYOUT))]
+    #[cfg_attr(feature = "config", builder(default = FloatLayout::BF32))]
     #[cfg_attr(feature = "config", serde(with = "layout_name"))]
     pub hyper_layout: FloatLayout,
 }
@@ -646,7 +642,7 @@ impl Default for SgdConfig {
     fn default() -> Self {
         Self {
             learning_rate: 0.01,
-            hyper_layout: DEFAULT_LAYOUT,
+            hyper_layout: FloatLayout::BF32,
         }
     }
 }
@@ -770,12 +766,12 @@ pub struct RmspropConfig {
     pub epsilon: Hyper,
     /// Layout the hyper-parameters above are rounded into before they become graph constants.
     #[cfg_attr(feature = "config", setting(default_str = "float32", resolve_with = "parse_layout"))]
-    #[cfg_attr(feature = "config", builder(default = DEFAULT_LAYOUT))]
+    #[cfg_attr(feature = "config", builder(default = FloatLayout::BF32))]
     #[cfg_attr(feature = "config", serde(with = "layout_name"))]
     pub hyper_layout: FloatLayout,
     /// Storage layout of the second moment `v` between steps.
     #[cfg_attr(feature = "config", setting(default_str = "float32", resolve_with = "parse_layout"))]
-    #[cfg_attr(feature = "config", builder(default = DEFAULT_LAYOUT))]
+    #[cfg_attr(feature = "config", builder(default = FloatLayout::BF32))]
     #[cfg_attr(feature = "config", serde(with = "layout_name"))]
     pub second_moment_layout: FloatLayout,
 }
@@ -786,8 +782,8 @@ impl Default for RmspropConfig {
             learning_rate: 0.001,
             decay: 0.9,
             epsilon: 1e-8,
-            hyper_layout: DEFAULT_LAYOUT,
-            second_moment_layout: DEFAULT_LAYOUT,
+            hyper_layout: FloatLayout::BF32,
+            second_moment_layout: FloatLayout::BF32,
         }
     }
 }
@@ -1008,17 +1004,17 @@ pub struct AdamwConfig {
     pub weight_decay: Hyper,
     /// Layout the hyper-parameters above are rounded into before they become graph constants.
     #[cfg_attr(feature = "config", setting(default_str = "float32", resolve_with = "parse_layout"))]
-    #[cfg_attr(feature = "config", builder(default = DEFAULT_LAYOUT))]
+    #[cfg_attr(feature = "config", builder(default = FloatLayout::BF32))]
     #[cfg_attr(feature = "config", serde(with = "layout_name"))]
     pub hyper_layout: FloatLayout,
     /// Storage layout of the first moment `m` between steps.
     #[cfg_attr(feature = "config", setting(default_str = "float32", resolve_with = "parse_layout"))]
-    #[cfg_attr(feature = "config", builder(default = DEFAULT_LAYOUT))]
+    #[cfg_attr(feature = "config", builder(default = FloatLayout::BF32))]
     #[cfg_attr(feature = "config", serde(with = "layout_name"))]
     pub first_moment_layout: FloatLayout,
     /// Storage layout of the second moment `v` between steps.
     #[cfg_attr(feature = "config", setting(default_str = "float32", resolve_with = "parse_layout"))]
-    #[cfg_attr(feature = "config", builder(default = DEFAULT_LAYOUT))]
+    #[cfg_attr(feature = "config", builder(default = FloatLayout::BF32))]
     #[cfg_attr(feature = "config", serde(with = "layout_name"))]
     pub second_moment_layout: FloatLayout,
 }
@@ -1031,9 +1027,9 @@ impl Default for AdamwConfig {
             beta2: 0.999,
             epsilon: 1e-8,
             weight_decay: 0.01,
-            hyper_layout: DEFAULT_LAYOUT,
-            first_moment_layout: DEFAULT_LAYOUT,
-            second_moment_layout: DEFAULT_LAYOUT,
+            hyper_layout: FloatLayout::BF32,
+            first_moment_layout: FloatLayout::BF32,
+            second_moment_layout: FloatLayout::BF32,
         }
     }
 }
