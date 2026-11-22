@@ -12,7 +12,7 @@ use std::fs::{self, File};
 use memmap2::Mmap;
 use proxima_gguf::pipe::{ParsedGguf, parse_complete};
 use proxima_gguf::tensor::TensorInfo;
-use proxima_gguf::value::MetadataValue;
+use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_gguf::writer::{GgufModel, TensorPayload, write_complete};
 
 const VOCAB_TENSORS: [&str; 2] = ["token_embd.weight", "output.weight"];
@@ -26,6 +26,25 @@ fn block_index(tensor_name: &str) -> Option<usize> {
         .ok()
 }
 
+fn truncate_array(array: &MetadataArray, layers: usize) -> MetadataArray {
+    let mut array = array.clone();
+    match &mut array {
+        MetadataArray::U8(values) => values.truncate(layers),
+        MetadataArray::I8(values) => values.truncate(layers),
+        MetadataArray::U16(values) => values.truncate(layers),
+        MetadataArray::I16(values) => values.truncate(layers),
+        MetadataArray::U32(values) => values.truncate(layers),
+        MetadataArray::I32(values) => values.truncate(layers),
+        MetadataArray::F32(values) => values.truncate(layers),
+        MetadataArray::Bool(values) => values.truncate(layers),
+        MetadataArray::String(values) => values.truncate(layers),
+        MetadataArray::U64(values) => values.truncate(layers),
+        MetadataArray::I64(values) => values.truncate(layers),
+        MetadataArray::F64(values) => values.truncate(layers),
+    }
+    array
+}
+
 fn truncated_metadata(
     parsed: &ParsedGguf,
     layers: u32,
@@ -35,12 +54,28 @@ fn truncated_metadata(
         return Err("general.architecture is missing".into());
     };
     let block_count_key = format!("{architecture}.block_count");
+    let original_layers = match parsed.metadata_value(&block_count_key) {
+        Some(MetadataValue::U32(count)) => *count as usize,
+        _ => return Err(format!("{block_count_key} is missing or not U32").into()),
+    };
+    let family_prefix = format!("{architecture}.");
     Ok(parsed
         .metadata
         .iter()
-        .map(|(key, value)| match key == &block_count_key {
-            true => (key.clone(), MetadataValue::U32(layers)),
-            false => (key.clone(), value.clone()),
+        .map(|(key, value)| {
+            if key == &block_count_key {
+                return (key.clone(), MetadataValue::U32(layers));
+            }
+            if key.starts_with(&family_prefix)
+                && let MetadataValue::Array(array) = value
+                && array.len() == original_layers
+            {
+                return (
+                    key.clone(),
+                    MetadataValue::Array(truncate_array(array, layers as usize)),
+                );
+            }
+            (key.clone(), value.clone())
         })
         .collect())
 }
