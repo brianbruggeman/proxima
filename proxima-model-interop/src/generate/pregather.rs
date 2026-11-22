@@ -23,7 +23,7 @@ fn canonical_safetensors_descriptor(
         architecture.block_count,
         architecture.expert_count,
         architecture.expert_used_count,
-        false,
+        crate::hf_bind::safetensors_has_qk_norm(manifest),
         false,
         false,
         false,

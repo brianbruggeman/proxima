@@ -928,7 +928,7 @@ pub fn permute_rope_rows(
 /// [`permute_rope_rows`] to convert HF's `rotate_half` layout into this
 /// crate's interleaved RoPE pairing, which is why this same presence check
 /// gates both.
-fn safetensors_has_qk_norm(manifest: &Manifest) -> bool {
+pub(crate) fn safetensors_has_qk_norm(manifest: &Manifest) -> bool {
     manifest
         .tensor("model.layers.0.self_attn.q_norm.weight")
         .is_some()
@@ -1326,7 +1326,9 @@ fn bind_dense_decoder_weights<'file>(
             node_names::ffn_norm(layer),
             &mut state,
         )?;
-        if entry.is_some_and(|entry| entry.attention.qk_norm) {
+        if entry.map_or(safetensors_has_qk_norm(manifest), |entry| {
+            entry.attention.qk_norm
+        }) {
             hf_bind_dense(
                 manifest,
                 file_bytes,
@@ -1597,6 +1599,10 @@ mod tests {
     /// [`tiny_dense_architecture`], each an `F32` tensor of the exact shape
     /// the architecture implies.
     fn tiny_dense_checkpoint() -> Vec<u8> {
+        tiny_dense_checkpoint_with_qk_norm(false)
+    }
+
+    fn tiny_dense_checkpoint_with_qk_norm(qk_norm: bool) -> Vec<u8> {
         let architecture = tiny_dense_architecture();
         let embedding = architecture.embedding as usize;
         let feed_forward = architecture.feed_forward as usize;
@@ -1621,6 +1627,10 @@ mod tests {
         push(names::down_proj(0), embedding * feed_forward);
         push(names::final_norm(), embedding);
         push(names::lm_head(), vocab * embedding);
+        if qk_norm {
+            push(names::q_norm(0), embedding);
+            push(names::k_norm(0), embedding);
+        }
 
         let tensors = owned_data
             .iter()
@@ -1640,6 +1650,26 @@ mod tests {
             metadata: alloc::collections::BTreeMap::new(),
         })
         .expect("writes a real safetensors buffer")
+    }
+
+    #[test]
+    fn binds_per_head_qk_norms_when_the_checkpoint_carries_them() {
+        let file_bytes = tiny_dense_checkpoint_with_qk_norm(true);
+        let manifest = proxima_safetensors::parse_complete(&file_bytes)
+            .expect("parses real safetensors buffer");
+        let architecture = tiny_dense_architecture();
+        let data_start = header_data_start(&file_bytes);
+        let bound =
+            bind_all_weights_from_safetensors(&manifest, &file_bytes, data_start, &architecture)
+                .expect("binds the per-head qk norms a qwen3-shaped checkpoint carries");
+        let stored: Vec<&str> = bound
+            .owned
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .chain(bound.packed.iter().map(|(name, _)| name.as_str()))
+            .collect();
+        assert!(stored.contains(&"blk.0.attn_q_norm.weight"));
+        assert!(stored.contains(&"blk.0.attn_k_norm.weight"));
     }
 
     /// Every weight name [`bind_all_weights_from_safetensors`]'s loop looks
