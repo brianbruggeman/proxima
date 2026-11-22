@@ -79,7 +79,7 @@ fn parse(bytes: &[u8]) -> Result<Audio> {
             .0
             .iter()
             .map(|word| {
-                let value = i32::from_le_bytes([word[0], word[1], word[2], 0]) >> 8;
+                let value = i32::from_le_bytes([word[0], word[1], word[2], 0]) << 8 >> 8;
                 value as f32 / 8_388_608.0
             })
             .collect(),
@@ -87,7 +87,7 @@ fn parse(bytes: &[u8]) -> Result<Audio> {
             .as_chunks::<4>()
             .0
             .iter()
-            .map(|word| f32::from_le_bytes(*word))
+            .map(|word| i32::from_le_bytes(*word) as f32 / 2_147_483_648.0)
             .collect(),
         other => bail!("unsupported PCM bit depth {other}"),
     };

@@ -569,29 +569,6 @@ mod golden {
         dot / (aa.sqrt() * bb.sqrt())
     }
 
-    /// The f16 values the published ggml checkpoint carries, widened exactly.
-    /// whisper.cpp's f32 run holds F32 accumulators over F16-rounded weights;
-    /// rounding here makes the two sides read the same checkpoint.
-    fn f16_round(value: f32) -> f32 {
-        let bits = value.to_bits();
-        let sign = bits & 0x8000_0000;
-        let exponent = ((bits >> 23) & 0xff) as i32 - 127 + 15;
-        if exponent <= 0 {
-            return if sign == 0 { 0.0 } else { -0.0 };
-        }
-        if exponent >= 0x1f {
-            return f32::from_bits(sign | 0x7f80_0000);
-        }
-        let mantissa = (bits >> 13) & 0x3ff;
-        let round = (bits >> 12) & 1;
-        let mut half = (exponent as u32) << 10 | mantissa;
-        if round == 1 {
-            half += 1;
-        }
-        let out_exp = ((half >> 10) & 0x1f) as i32 - 15 + 127;
-        let out_mant = (half & 0x3ff) << 13;
-        f32::from_bits(sign | ((out_exp as u32) << 23) | out_mant)
-    }
 
     #[derive(Default)]
     pub struct Tensors {
@@ -616,19 +593,13 @@ mod golden {
             for entry in &manifest.tensors {
                 let (start, end) = entry.data_offsets;
                 let raw = &data[start as usize..end as usize];
-                let mut tensor: Vec<f32> = raw
+                let tensor: Vec<f32> = raw
                     .as_chunks::<4>()
                     .0
                     .iter()
                     .map(|word| f32::from_le_bytes(*word))
                     .collect();
                 let shape: Vec<usize> = entry.shape.iter().map(|&d| d as usize).collect();
-                let f16_weight = shape.len() >= 2
-                    && !entry.name.contains("embed_positions")
-                    && !entry.name.contains("layer_norm");
-                if f16_weight {
-                    tensor.iter_mut().for_each(|v| *v = f16_round(*v));
-                }
                 values.insert(entry.name.clone(), (tensor, shape));
             }
             Ok(Self { values })
@@ -1096,13 +1067,8 @@ mod encoder {
         let conv_dump = transpose_ref(&conv_raw, WIDTH as usize, FRAMES as usize / 2);
         let (conv_error, conv_rms) = maxabs_rel(&values[0], &conv_dump);
         let _ = direct;
-        // The reference's conv path builds im2col at F16 even when the
-        // kernel is F32 (`ggml/src/ggml.c:4632`), so the measured floor is
-        // 3.005e-3, not the F32-derived 2.3e-5.
-        println!(
-            "conv maxabs_rel={conv_error:.3e} rms={conv_rms:.3e} ceiling=6.1e-3 (measured floor 3.005e-3)"
-        );
-        assert!(conv_error <= 6.1e-3, "conv {conv_error:.3e}");
+        println!("conv maxabs_rel={conv_error:.3e} rms={conv_rms:.3e} ceiling=2.3e-5");
+        assert!(conv_error <= 2.3e-5, "conv {conv_error:.3e}");
 
         let enc_dump = read_f32("enc.f32")?;
         let (enc_error, enc_rms) = maxabs_rel(&values[1], &enc_dump);
@@ -1137,7 +1103,7 @@ mod encoder {
             let v_cos = cosine(v, &v_dump);
             println!("cross_v_{layer} maxabs_rel={v_error:.3e} rms={v_rms:.3e} cosine={v_cos:.6}");
             assert!(v_cos >= 0.9995, "cross_v_{layer} cosine {v_cos}");
-            assert!(v_error <= 2.0, "cross_v_{layer} {v_error:.3e}");
+            assert!(v_error <= 1.5, "cross_v_{layer} {v_error:.3e}");
         }
         Ok(())
     }
@@ -1224,10 +1190,7 @@ mod encoder {
         Ok(())
     }
 
-    #[test]
-    fn conv_compare_count_is_ten() {
-        assert_eq!(1 + 1 + 4 + 4, 10);
-    }
+
 }
 
 mod transcript {

@@ -95,21 +95,13 @@ impl Tensors {
         for entry in &manifest.tensors {
             let (start, end) = entry.data_offsets;
             let raw = &data[start as usize..end as usize];
-            let mut tensor: Vec<f32> = raw
+            let tensor: Vec<f32> = raw
                 .as_chunks::<4>()
                 .0
                 .iter()
                 .map(|word| f32::from_le_bytes(*word))
                 .collect();
             let shape: Vec<usize> = entry.shape.iter().map(|&dim| dim as usize).collect();
-            if shape.len() >= 2
-                && !entry.name.contains("embed_positions")
-                && !entry.name.contains("layer_norm")
-            {
-                tensor
-                    .iter_mut()
-                    .for_each(|value| *value = f16_round(*value));
-            }
             values.insert(entry.name.clone(), (tensor, shape));
         }
         Ok(Self { values })
@@ -146,26 +138,6 @@ impl Tensors {
     }
 }
 
-fn f16_round(value: f32) -> f32 {
-    let bits = value.to_bits();
-    let sign = bits & 0x8000_0000;
-    let exponent = ((bits >> 23) & 0xff) as i32 - 127 + 15;
-    if exponent <= 0 {
-        return if sign == 0 { 0.0 } else { -0.0 };
-    }
-    if exponent >= 0x1f {
-        return f32::from_bits(sign | 0x7f80_0000);
-    }
-    let mantissa = (bits >> 13) & 0x3ff;
-    let round = (bits >> 12) & 1;
-    let mut half = (exponent as u32) << 10 | mantissa;
-    if round == 1 {
-        half += 1;
-    }
-    let out_exp = ((half >> 10) & 0x1f) as i32 - 15 + 127;
-    let out_mant = (half & 0x3ff) << 13;
-    f32::from_bits(sign | ((out_exp as u32) << 23) | out_mant)
-}
 
 struct Bound {
     program: Vec<Op>,
