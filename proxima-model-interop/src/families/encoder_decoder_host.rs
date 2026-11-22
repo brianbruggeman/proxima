@@ -18,7 +18,7 @@ use serde_json::Value;
 
 use crate::decode_policy::{DecodeConfig, DecodePolicy};
 use crate::families::encoder_decoder::{
-    DecoderLayer, DecoderStem, EncoderLayer, EncoderStem, Linear, encoder, encoder_conv,
+    DecoderLayer, DecoderStem, EncoderLayer, EncoderStem, Linear, encoder,
 };
 
 /// The dimensions a checkpoint states, read from its `config.json`.
@@ -26,11 +26,14 @@ use crate::families::encoder_decoder::{
 pub struct Shape {
     pub encoder_layers: usize,
     pub decoder_layers: usize,
-    pub heads: u32,
-    pub head_dim: u32,
+    pub encoder_heads: u32,
+    pub encoder_head_dim: u32,
+    pub decoder_heads: u32,
+    pub decoder_head_dim: u32,
     pub width: u32,
     pub mels: u32,
-    pub ffn: u32,
+    pub encoder_ffn: u32,
+    pub decoder_ffn: u32,
     pub source_positions: u32,
     pub target_positions: u32,
     pub vocab: u32,
@@ -48,24 +51,29 @@ impl Shape {
         };
         let encoder_layers = int("encoder_layers")? as usize;
         let decoder_layers = int("decoder_layers")? as usize;
-        let heads = int("encoder_attention_heads")?;
+        let encoder_heads = int("encoder_attention_heads")?;
+        let decoder_heads = int("decoder_attention_heads")?;
         let width = int("d_model")?;
         let mels = int("num_mel_bins")?;
-        let ffn = int("encoder_ffn_dim")?;
+        let encoder_ffn = int("encoder_ffn_dim")?;
+        let decoder_ffn = int("decoder_ffn_dim")?;
         let source_positions = int("max_source_positions")?;
         let target_positions = int("max_target_positions")?;
         let vocab = int("vocab_size")?;
-        if width % heads != 0 {
-            bail!("d_model {width} is not a multiple of {heads} heads");
+        if width % encoder_heads != 0 || width % decoder_heads != 0 {
+            bail!("d_model {width} is not a multiple of its head counts");
         }
         Ok(Self {
             encoder_layers,
             decoder_layers,
-            heads,
-            head_dim: width / heads,
+            encoder_heads,
+            encoder_head_dim: width / encoder_heads,
+            decoder_heads,
+            decoder_head_dim: width / decoder_heads,
             width,
             mels,
-            ffn,
+            encoder_ffn,
+            decoder_ffn,
             source_positions,
             target_positions,
             vocab,
@@ -179,13 +187,13 @@ impl Bound {
         let weight_name = format!("{name}.weight");
         let weight = self.leaf(
             &weight_name,
-            &[self.shape.width, self.shape.heads, self.shape.head_dim],
+            &[self.shape.width, self.shape.encoder_heads, self.shape.encoder_head_dim],
         );
         self.named
             .insert(weight_name, tensors.transposed(&format!("{name}.weight")));
         let bias = bias.then(|| {
             let bias_name = format!("{name}.bias");
-            let node = self.leaf(&bias_name, &[self.shape.heads, self.shape.head_dim]);
+            let node = self.leaf(&bias_name, &[self.shape.encoder_heads, self.shape.encoder_head_dim]);
             self.named.insert(
                 bias_name.clone(),
                 tensors.data(&format!("{name}.bias")).to_vec(),
@@ -199,7 +207,7 @@ impl Bound {
         let weight_name = format!("{name}.weight");
         let weight = self.leaf(
             &weight_name,
-            &[self.shape.heads, self.shape.head_dim, self.shape.width],
+            &[self.shape.encoder_heads, self.shape.encoder_head_dim, self.shape.width],
         );
         self.named
             .insert(weight_name, tensors.transposed(&format!("{name}.weight")));
@@ -248,12 +256,12 @@ impl Bound {
             fc1: self.matrix(
                 &format!("{prefix}.fc1"),
                 self.shape.width,
-                self.shape.ffn,
+                self.shape.encoder_ffn,
                 tensors,
             ),
             fc2: self.matrix(
                 &format!("{prefix}.fc2"),
-                self.shape.ffn,
+                self.shape.encoder_ffn,
                 self.shape.width,
                 tensors,
             ),
@@ -277,12 +285,12 @@ impl Bound {
             fc1: self.matrix(
                 &format!("{prefix}.fc1"),
                 self.shape.width,
-                self.shape.ffn,
+                self.shape.decoder_ffn,
                 tensors,
             ),
             fc2: self.matrix(
                 &format!("{prefix}.fc2"),
-                self.shape.ffn,
+                self.shape.decoder_ffn,
                 self.shape.width,
                 tensors,
             ),
@@ -424,20 +432,29 @@ impl Model {
             },
         )?;
 
-        let padded = pad(wav);
-        let frames = ((padded.len() as u32 - 400) / 160) + 1;
+        let padded = pad(wav)?;
+        let front = front_end(&self.dir)?;
+        if front.mels != self.shape.mels {
+            bail!("preprocessor_config.json says {} mels, config.json says {}", front.mels, self.shape.mels);
+        }
+        let frames = ((padded.len() as u32 - front.n_fft) / front.hop) + 1;
         let mut mel_bound = Bound::new(self.shape.clone());
         let signal = mel_bound.leaf("signal", &[padded.len() as u32]);
-        let filters = mel_filters(&self.dir)?;
-        let bank = mel_bound.leaf("bank", &[self.shape.mels, 201]);
+        let filters = front.filters;
+        let bank = mel_bound.leaf("bank", &[front.mels, front.n_fft / 2 + 1]);
+        let config = StftLogMelConfig {
+            n_fft: front.n_fft,
+            hop: front.hop,
+            ..StftLogMelConfig::default()
+        };
         let mel = stft_log_mel(
             &mut mel_bound.program,
-            &StftLogMelConfig::default(),
+            &config,
             signal,
             padded.len() as u32,
             bank,
         )?;
-        let tables = stft_tables(&StftLogMelConfig::default(), DType::FLOAT32)?;
+        let tables = stft_tables(&config, DType::FLOAT32)?;
         let decode = |bytes: &[u8]| -> Vec<f32> {
             bytes
                 .as_chunks::<4>()
@@ -474,21 +491,13 @@ impl Model {
         let layers: Vec<_> = (0..self.shape.encoder_layers)
             .map(|layer| bound.encoder_layer(layer, &self.tensors))
             .collect();
-        let _conv = encoder_conv(
-            &mut bound.program,
-            mel_leaf,
-            &stem,
-            self.shape.mels,
-            self.shape.width,
-            needed as u32,
-        )?;
         let memory = encoder(
             &mut bound.program,
             mel_leaf,
             &stem,
             &layers,
-            self.shape.heads,
-            self.shape.head_dim,
+            self.shape.encoder_heads,
+            self.shape.encoder_head_dim,
             self.shape.eps,
             self.shape.mels,
             needed as u32,
@@ -503,7 +512,7 @@ impl Model {
                 memory,
                 k,
                 v,
-                self.shape.head_dim,
+                self.shape.decoder_head_dim,
             )?;
             cross.push((k, v));
         }
@@ -537,16 +546,16 @@ impl Model {
                     &k_name,
                     &[
                         self.shape.source_positions,
-                        self.shape.heads,
-                        self.shape.head_dim,
+                        self.shape.decoder_heads,
+                        self.shape.decoder_head_dim,
                     ],
                 );
                 let v_node = decoder.leaf(
                     &v_name,
                     &[
                         self.shape.source_positions,
-                        self.shape.heads,
-                        self.shape.head_dim,
+                        self.shape.decoder_heads,
+                        self.shape.decoder_head_dim,
                     ],
                 );
                 decoder.named.insert(k_name, k.clone());
@@ -560,8 +569,8 @@ impl Model {
                 &stem,
                 &layers,
                 &cross_nodes,
-                self.shape.heads,
-                self.shape.head_dim,
+                self.shape.decoder_heads,
+                self.shape.decoder_head_dim,
                 self.shape.eps,
             )?;
             decoder.named.insert(
@@ -592,9 +601,23 @@ impl Model {
     }
 }
 
-fn mel_filters(dir: &Path) -> Result<Vec<f32>> {
+struct FrontEnd {
+    filters: Vec<f32>,
+    n_fft: u32,
+    hop: u32,
+    mels: u32,
+}
+
+fn front_end(dir: &Path) -> Result<FrontEnd> {
     let text = std::fs::read_to_string(dir.join("preprocessor_config.json"))?;
     let value: Value = serde_json::from_str(&text)?;
+    let integer = |key: &str| -> Result<u32> {
+        value
+            .get(key)
+            .and_then(Value::as_u64)
+            .map(|v| v as u32)
+            .with_context(|| format!("preprocessor_config.json lacks {key}"))
+    };
     let rows = value["mel_filters"]
         .as_array()
         .context("preprocessor_config.json has mel_filters")?;
@@ -604,7 +627,12 @@ fn mel_filters(dir: &Path) -> Result<Vec<f32>> {
             filters.push(cell.as_f64().context("filter cell")? as f32);
         }
     }
-    Ok(filters)
+    Ok(FrontEnd {
+        filters,
+        n_fft: integer("n_fft")?,
+        hop: integer("hop_length")?,
+        mels: integer("feature_size")?,
+    })
 }
 
 fn tokenizer_text(dir: &Path, ids: &[u32]) -> Result<String> {
@@ -620,12 +648,14 @@ fn tokenizer_text(dir: &Path, ids: &[u32]) -> Result<String> {
     proxima_tokenizer::pipe::decode(ids, &vocab).map_err(Into::into)
 }
 
-fn pad(wav: &[f32]) -> Vec<f32> {
+fn pad(wav: &[f32]) -> Result<Vec<f32>> {
+    if wav.len() < 200 || wav.len() > 480_040 {
+        bail!("one 30 s window is 200..=480040 samples; got {}", wav.len());
+    }
     let mut out = vec![0.0_f32; 480_240];
-    let reflect = wav.len().min(200);
-    for index in 0..reflect {
-        out[reflect - 1 - index] = wav[index + 1];
+    for index in 0..200 {
+        out[199 - index] = wav[index + 1];
     }
     out[200..200 + wav.len()].copy_from_slice(wav);
-    out
+    Ok(out)
 }

@@ -50,7 +50,7 @@ dumps and the for-the-oracle-only F32 im2col/GELU path. Build the patched copy
 out of tree:
 
 ```sh
-python3 to_f32_ggml.py ggml-tiny.bin ggml-tiny-f32.bin
+cargo run --release -p proxima-model-interop --features std --example ggml_f32 -- ggml-tiny.bin ggml-tiny-f32.bin
 git -C ~/repos/others/whisper.cpp worktree add /tmp/whisper-dump v1.9.5
 git -C /tmp/whisper-dump apply \
   "$OLDPWD/proxima-model-interop/specs/whisper/oracle/whisper-dump.patch"
