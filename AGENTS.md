@@ -200,6 +200,18 @@ Messages are lowercase, terse, causal — they say *why*; the fields carry *what
   the contract, the body reads as a usage example.
 - prefer faking and stubbing over heavy mock frameworks.
 
+## GPU and model runs
+
+- Every GPU/model run goes through `scripts/guard-run.sh <seconds> -- <command>`. It starts
+  the command in its own process group and kills the group on timeout; a killed parent
+  must not leave a child holding the Metal lane. On 2026-11-21 a tool timeout killed a
+  scoreboard parent and left an unkillable `UE` child; the box had to reboot.
+- A performance row requires a parity row first: run the short I4 cell on the chosen
+  config before any timing. f16 KV currently diverges at token 1; f32 passes with legacy
+  and flash. Do not put a ratio in the scoreboard from a config that fails I4.
+- Run the short cell before the long cell. If load prewarm, TTFT or decode already exceeds
+  the budget, record the long cell as not attempted instead of launching it.
+
 ## Build
 
 ### Landing gate
