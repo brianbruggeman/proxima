@@ -146,7 +146,7 @@ pub use bind::{
     BoundWeights, Codec, bind_dense, bind_dense_as, bind_matmul_weight, bind_matmul_weight_as,
     bind_matmul_weight_transposed_f32, bind_moe_expert_weights, bind_native_f32, find_tensor,
     metadata_f32_optional, metadata_str, metadata_str_opt, metadata_u32, metadata_u32_optional_or,
-    vocab_from_token_embedding,
+    retarget_recoded_leaves, target_has_encoder, vocab_from_token_embedding,
 };
 pub use bind::{ModelHparams, SlidingRope, architecture_from_metadata, gguf_tensor_as_f32};
 #[cfg(feature = "std")]
@@ -200,7 +200,8 @@ pub mod checkpoint_resolver;
 #[cfg(feature = "std")]
 pub use lowering::{
     BoundProgram, KvCacheShape, KvLayout, StepInput, StepState, bind_checkpoint,
-    bind_checkpoint_with_kv_layout, bind_hf_checkpoint, bind_speculative_verify, bind_symbols,
+    bind_checkpoint_with_kv_layout, bind_hf_checkpoint, bind_prefill_row_cut,
+    bind_speculative_verify, bind_symbols,
     header_descriptor, kv_layers, recurrent_descriptor, recurrent_speculative_verify,
     rope_freq_factors, sliding_rope_inputs, step_state, symbols, trained_context_length,
 };

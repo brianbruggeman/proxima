@@ -49,8 +49,6 @@ use proxima_tensor::op::Op;
 use proxima_tensor::spec::{ModelDescriptor, RecurrenceConfig, RopePairing};
 
 use crate::error::InteropError;
-#[cfg(feature = "std")]
-use crate::serving::matching_precision_target;
 #[cfg(all(feature = "std", feature = "instrument"))]
 use proxima_telemetry::debug;
 
@@ -1007,6 +1005,70 @@ pub fn vocab_from_token_embedding(
     Ok((elements / divisor) as u32)
 }
 
+/// One [`WeightPrecisionRule`] with its pattern strings owned, so
+/// [`BoundWeights`] can hold the rules a load applied after the config they
+/// came from has gone out of scope. The public rule type borrows its pattern
+/// from `ServingConfig`, while a `LoadedModel` outlives any one settings
+/// value.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OwnedNamePattern {
+    Exact(String),
+    Prefix(String),
+    Suffix(String),
+}
+
+#[cfg(feature = "std")]
+impl OwnedNamePattern {
+    fn from_pattern(pattern: crate::serving::NamePattern<'_>) -> Self {
+        match pattern {
+            crate::serving::NamePattern::Exact(name) => Self::Exact(String::from(name)),
+            crate::serving::NamePattern::Prefix(prefix) => Self::Prefix(String::from(prefix)),
+            crate::serving::NamePattern::Suffix(suffix) => Self::Suffix(String::from(suffix)),
+        }
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        match self {
+            Self::Exact(pattern) => pattern == name,
+            Self::Prefix(prefix) => name.starts_with(prefix.as_str()),
+            Self::Suffix(suffix) => name.ends_with(suffix.as_str()),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OwnedWeightPrecisionRule {
+    pub(crate) pattern: OwnedNamePattern,
+    pub(crate) target: GgmlType,
+}
+
+#[cfg(feature = "std")]
+impl OwnedWeightPrecisionRule {
+    fn from_rule(rule: &crate::serving::WeightPrecisionRule<'_>) -> Self {
+        Self {
+            pattern: OwnedNamePattern::from_pattern(rule.pattern),
+            target: rule.target,
+        }
+    }
+
+    pub(crate) fn matches(&self, name: &str) -> bool {
+        self.pattern.matches(name)
+    }
+}
+
+/// Owns a borrowed rule slice as the form [`BoundWeights`] stores.
+#[cfg(feature = "std")]
+pub(crate) fn owned_precision_rules(
+    rules: &[crate::serving::WeightPrecisionRule<'_>],
+) -> Vec<OwnedWeightPrecisionRule> {
+    rules
+        .iter()
+        .map(OwnedWeightPrecisionRule::from_rule)
+        .collect()
+}
+
 /// Every weight [`proxima_tensor::spec::gqa_cached_forward_program`]
 /// binds by name, split into owned `f32` buffers (norms, plus
 /// `token_embd.weight`, which is an embedding lookup rather than a matmul
@@ -1034,7 +1096,7 @@ pub struct BoundWeights<'file> {
     )>,
     pub(crate) packed_owned: Vec<(alloc::string::String, Vec<u8>, Codec)>,
     pub(crate) expert_ranges: Vec<(alloc::string::String, Vec<&'file [u8]>, Codec)>,
-    pub(crate) precision: &'file [crate::serving::WeightPrecisionRule<'file>],
+    pub(crate) precision: Vec<OwnedWeightPrecisionRule>,
 }
 
 #[cfg(feature = "std")]
@@ -1048,15 +1110,52 @@ impl<'file> BoundWeights<'file> {
     /// bookkeeping, not a public data shape a caller should read field by
     /// field.
     #[must_use]
-    pub fn new(weight_precision: &'file [crate::serving::WeightPrecisionRule<'file>]) -> Self {
+    pub fn new(weight_precision: &[crate::serving::WeightPrecisionRule<'_>]) -> Self {
         Self {
             resident_bytes: 0,
             owned: Vec::new(),
             packed: Vec::new(),
             packed_owned: Vec::new(),
             expert_ranges: Vec::new(),
-            precision: weight_precision,
+            precision: owned_precision_rules(weight_precision),
         }
+    }
+
+    /// The bound name a [`recode_tensor`] pass produced for `base`, if any:
+    /// `<base>@<codec>`. A lowerer retargets its program's `Op::Input` leaf
+    /// from `base` to this name so the plan reads the recoded bytes; the
+    /// on-disk entry `base` is never bound at all when a rule fired
+    /// ([`recode_tensor`]'s own doc).
+    #[must_use]
+    pub(crate) fn recoded_name_for(&self, base: &str) -> Option<&str> {
+        self.owned
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .chain(self.packed_owned.iter().map(|(name, _, _)| name.as_str()))
+            .find(|name| {
+                name.len() > base.len()
+                    && name.as_bytes().get(base.len()) == Some(&b'@')
+                    && name.starts_with(base)
+            })
+    }
+
+    /// Every recoded entry this bind pass produced, as
+    /// `(bound name, byte length)`. `LoadedModel::recoded_weights` reads
+    /// this so a caller can prove a configured rule reached the bind
+    /// without reaching into bind bookkeeping.
+    #[must_use]
+    pub fn recoded_weights(&self) -> Vec<(alloc::string::String, usize)> {
+        self.owned
+            .iter()
+            .filter(|(name, _)| name.contains('@'))
+            .map(|(name, values)| (name.clone(), core::mem::size_of_val(values.as_slice())))
+            .chain(
+                self.packed_owned
+                    .iter()
+                    .filter(|(name, _, _)| name.contains('@'))
+                    .map(|(name, bytes, _)| (name.clone(), bytes.len())),
+            )
+            .collect()
     }
 
     /// Bytes resident on the device once every weight this bind pass wrote
@@ -1112,6 +1211,29 @@ impl<'file> BoundWeights<'file> {
     #[must_use]
     pub fn expert_ranges(&self) -> &[(alloc::string::String, Vec<&'file [u8]>, Codec)] {
         &self.expert_ranges
+    }
+}
+
+/// Retargets every `Op::Input` leaf this bind pass recoded to the bound
+/// `<leaf>@<codec>` entry [`recode_tensor`] produced. A plan resolves an
+/// operand by the exact name it was bound against, so without this step a
+/// rule would recode bytes into `packed_owned`/`owned` under a name no plan
+/// reads -- the recode would be invisible to the forward pass.
+///
+/// The on-disk-name entry is never bound when a rule fired, so this is a
+/// rename, not an added alias. A no-rule bind changes nothing.
+#[cfg(feature = "std")]
+pub fn retarget_recoded_leaves(program: &mut [Op], weights: &BoundWeights<'_>) {
+    for op in program.iter_mut() {
+        let Op::Input {
+            name: Some(leaf), ..
+        } = op
+        else {
+            continue;
+        };
+        if let Some(recoded) = weights.recoded_name_for(leaf) {
+            *leaf = String::from(recoded);
+        }
     }
 }
 
@@ -1272,6 +1394,31 @@ pub(crate) fn codec_to_ggml_type(codec: Codec) -> Result<GgmlType, InteropError>
     GgmlType::from_numeric_format(&codec).ok_or(InteropError::UnsupportedCodec {
         codec: crate::error::codec_name(codec),
     })
+}
+
+/// Whether [`recode_tensor`] can encode `target`. The ticket's own list: the
+/// eight shipped block/float encoders plus `F32` (an identity encode). A
+/// target outside this set must surface as
+/// [`InteropError::UnsupportedWeightPrecisionTarget`] at the bind, never as a
+/// silent no-op, so config lowering and the allocator consult this before
+/// emitting a rule.
+#[cfg(feature = "std")]
+#[must_use]
+pub fn target_has_encoder(target: GgmlType) -> bool {
+    matches!(
+        codec_from_ggml_type(target),
+        Some(
+            Codec::Float32
+                | Codec::Q8_0
+                | Codec::Q4K
+                | Codec::Q5K
+                | Codec::Q6K
+                | Codec::Q3K
+                | Codec::Q4_0
+                | Codec::Float16
+                | Codec::BFloat16
+        )
+    )
 }
 
 /// Packed byte length for `element_count` elements of `codec` --
@@ -1623,7 +1770,12 @@ fn precision_target_for(
     parsed: &ParsedGguf,
     source_name: &str,
 ) -> Result<Option<GgmlType>, InteropError> {
-    let Some(target) = matching_precision_target(state.precision, source_name) else {
+    let Some(target) = state
+        .precision
+        .iter()
+        .find(|rule| rule.matches(source_name))
+        .map(|rule| rule.target)
+    else {
         return Ok(None);
     };
     let on_disk = find_tensor(parsed, source_name)?.ggml_type;
@@ -2666,7 +2818,7 @@ mod moe_memory_shape {
             packed: Vec::new(),
             packed_owned: Vec::new(),
             expert_ranges: Vec::new(),
-            precision: &[],
+            precision: Vec::new(),
         }
     }
 
@@ -3099,7 +3251,7 @@ mod real_qwen3moe_file {
             packed: Vec::new(),
             packed_owned: Vec::new(),
             expert_ranges: Vec::new(),
-            precision: &[],
+            precision: Vec::new(),
         };
         for (projection, out_dim, in_dim) in [
             (
@@ -3249,7 +3401,7 @@ mod real_qwen3moe_file {
                 packed: Vec::new(),
                 packed_owned: Vec::new(),
                 expert_ranges: Vec::new(),
-                precision: &[],
+                precision: Vec::new(),
             };
             bind_moe_expert_weights(
                 &parsed,

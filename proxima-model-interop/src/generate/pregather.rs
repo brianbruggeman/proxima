@@ -2401,6 +2401,24 @@ impl<'file> LoadedModel<'file> {
         self.checkpoint_bytes
     }
 
+    /// Content hash of the decode program this model runs. Two loads with
+    /// the same checkpoint, descriptor and rule set produce the same value;
+    /// a rule that retargets a recoded leaf changes it.
+    #[must_use]
+    pub const fn program_hash(&self) -> u64 {
+        self.program_hash
+    }
+
+    /// Every bound tensor a configured
+    /// [`crate::ServingConfig::weight_precision`] rule recoded, as
+    /// `(<name>@<codec>, byte length)`. Empty when every rule was absent,
+    /// non-matching, or already satisfied by the on-disk codec. This is the
+    /// reader a caller uses to prove a rule reached the real load path.
+    #[must_use]
+    pub fn recoded_weights(&self) -> alloc::vec::Vec<(alloc::string::String, usize)> {
+        self.weights.recoded_weights()
+    }
+
     /// One post-layer residual root per dense layer
     /// (`crate::lowering::BoundProgram::residual_roots`'s own doc) --
     /// empty on the recurrent-interval hybrid path, which exposes no single per-layer
@@ -2871,7 +2889,14 @@ impl<'file> LoadedModel<'file> {
             || measured_serving_defaults(architecture_name),
             |config| Ok(measured_serving_defaults(architecture_name)?.with_overrides(config)),
         )?;
-        let bound = source.bind(parsed, file_bytes, kv_layout, descriptor)?;
+        let weight_precision = serving_config.map_or(&[][..], |config| config.weight_precision);
+        let bound = source.bind(
+            parsed,
+            file_bytes,
+            kv_layout,
+            descriptor,
+            weight_precision,
+        )?;
         let expert_count =
             descriptor.map_or(bound.architecture.expert_count, |config| config.expert_count);
         let has_experts = checkpoint_has_experts(expert_count);
@@ -2924,7 +2949,7 @@ impl<'file> LoadedModel<'file> {
         // name: a config decides directly, and without one the family's
         // header descriptor does.
         let speculative_verify_program = source
-            .speculative_verify(parsed, file_bytes, kv_layout, descriptor)?
+            .speculative_verify(parsed, file_bytes, kv_layout, descriptor, weight_precision)?
             .map(|verify| (verify.program, verify.logits_root, verify.layer_roots));
         // expert prefill slices its pre-gather plan from `program`'s own node
         // ids, which a second graph does not share, so a model with experts
@@ -2933,7 +2958,7 @@ impl<'file> LoadedModel<'file> {
             None
         } else {
             source
-                .prefill_row_cut(parsed, file_bytes, kv_layout, descriptor)?
+                .prefill_row_cut(parsed, file_bytes, kv_layout, descriptor, weight_precision)?
                 .map(|prefill| (prefill.program, prefill.logits_root, prefill.layer_roots))
         };
         let recurrent_speculative_verify =

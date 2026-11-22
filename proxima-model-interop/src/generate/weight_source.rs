@@ -13,9 +13,11 @@ use proxima_tensor::spec::ModelDescriptor;
 use crate::error::InteropError;
 use crate::hf_bind::HfShard;
 use crate::lowering::{
-    BoundProgram, KvLayout, bind_checkpoint_with_kv_layout, bind_hf_checkpoint,
-    bind_prefill_row_cut, bind_speculative_verify, recurrent_speculative_verify,
+    BoundProgram, KvLayout, bind_checkpoint_with_kv_layout_and_precision, bind_hf_checkpoint,
+    bind_prefill_row_cut_with_precision, bind_speculative_verify_with_precision,
+    recurrent_speculative_verify,
 };
+use crate::serving::WeightPrecisionRule;
 
 pub(super) enum WeightSource<'shards, 'file> {
     Gguf,
@@ -32,10 +34,16 @@ impl<'file> WeightSource<'_, 'file> {
         file_bytes: &'file [u8],
         kv_layout: KvLayout,
         descriptor: Option<&ModelDescriptor>,
+        weight_precision: &[WeightPrecisionRule<'_>],
     ) -> Result<BoundProgram<'file>, InteropError> {
         match self {
             Self::Gguf => {
-                let bound = bind_checkpoint_with_kv_layout(parsed, file_bytes, kv_layout)?;
+                let bound = bind_checkpoint_with_kv_layout_and_precision(
+                    parsed,
+                    file_bytes,
+                    kv_layout,
+                    weight_precision,
+                )?;
                 match descriptor {
                     Some(config) => bound.lowered_from(config, parsed, file_bytes),
                     None => Ok(bound),
@@ -55,9 +63,16 @@ impl<'file> WeightSource<'_, 'file> {
         file_bytes: &'file [u8],
         kv_layout: KvLayout,
         descriptor: Option<&ModelDescriptor>,
+        weight_precision: &[WeightPrecisionRule<'_>],
     ) -> Result<Option<BoundProgram<'file>>, InteropError> {
         match self {
-            Self::Gguf => bind_speculative_verify(parsed, file_bytes, kv_layout, descriptor),
+            Self::Gguf => bind_speculative_verify_with_precision(
+                parsed,
+                file_bytes,
+                kv_layout,
+                descriptor,
+                weight_precision,
+            ),
             Self::Directory { .. } => Ok(None),
         }
     }
@@ -68,9 +83,16 @@ impl<'file> WeightSource<'_, 'file> {
         file_bytes: &'file [u8],
         kv_layout: KvLayout,
         descriptor: Option<&ModelDescriptor>,
+        weight_precision: &[WeightPrecisionRule<'_>],
     ) -> Result<Option<BoundProgram<'file>>, InteropError> {
         match self {
-            Self::Gguf => bind_prefill_row_cut(parsed, file_bytes, kv_layout, descriptor),
+            Self::Gguf => bind_prefill_row_cut_with_precision(
+                parsed,
+                file_bytes,
+                kv_layout,
+                descriptor,
+                weight_precision,
+            ),
             Self::Directory { .. } => Ok(None),
         }
     }

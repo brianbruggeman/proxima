@@ -2833,7 +2833,7 @@ pub(super) mod memory_fit_gate_tests {
                     packed: Vec::new(),
                     packed_owned: Vec::new(),
                     expert_ranges: Vec::new(),
-                    precision: &[],
+                    precision: Vec::new(),
                 },
                 &[],
             )),

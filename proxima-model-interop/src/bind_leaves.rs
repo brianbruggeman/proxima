@@ -99,7 +99,7 @@ pub fn bind_program_leaves<'file>(
     file_bytes: &'file [u8],
     program: &[Op],
     binding: &BindingProfile,
-    weight_precision: &'file [WeightPrecisionRule<'file>],
+    weight_precision: &[WeightPrecisionRule<'_>],
 ) -> Result<BoundWeights<'file>, InteropError> {
     let mut state = BoundWeights::new(weight_precision);
     state.resident_bytes = file_bytes.len();
@@ -153,6 +153,9 @@ pub(crate) fn bind_missing_leaves<'file>(
             continue;
         };
         if !bound.insert(leaf.clone()) {
+            continue;
+        }
+        if state.recoded_name_for(leaf).is_some() {
             continue;
         }
         if let Some(data) = prism.as_ref().and_then(|prism| prism.leaf(leaf)) {

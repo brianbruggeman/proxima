@@ -100,7 +100,7 @@ fn raw_packed_f32_matmul_weight_matches_an_independent_hand_computed_matmul() {
         packed: Vec::new(),
         packed_owned: Vec::new(),
         expert_ranges: Vec::new(),
-        precision: &[],
+        precision: Vec::new(),
     };
     bind_matmul_weight_as(
         &parsed,
@@ -365,7 +365,7 @@ fn q8_0_matmul_weight_binds_packed_and_matches_a_dequantized_oracle() {
         packed: Vec::new(),
         packed_owned: Vec::new(),
         expert_ranges: Vec::new(),
-        precision: &[],
+        precision: Vec::new(),
     };
     bind_matmul_weight_as(
         &parsed,
@@ -505,7 +505,7 @@ fn q8_0_matmul_weight_packed_path_is_sensitive_to_a_corrupted_byte() {
         packed: Vec::new(),
         packed_owned: Vec::new(),
         expert_ranges: Vec::new(),
-        precision: &[],
+        precision: Vec::new(),
     };
     bind_matmul_weight_as(
         &parsed,
@@ -1215,7 +1215,7 @@ fn weight_precision_rule_recodes_q4_k_to_q8_0_within_q8_0_error_bound() {
         packed: Vec::new(),
         packed_owned: Vec::new(),
         expert_ranges: Vec::new(),
-        precision: &rules,
+        precision: crate::bind::owned_precision_rules(&rules),
     };
     bind_dense_as(
         &parsed,
@@ -1322,7 +1322,7 @@ fn weight_precision_rule_recodes_to_f32_bit_identical_to_direct_dequant() {
         packed: Vec::new(),
         packed_owned: Vec::new(),
         expert_ranges: Vec::new(),
-        precision: &rules,
+        precision: crate::bind::owned_precision_rules(&rules),
     };
     bind_dense_as(
         &parsed,
@@ -1380,7 +1380,7 @@ fn weight_precision_rule_to_unencodable_target_names_the_typed_error() {
         packed: Vec::new(),
         packed_owned: Vec::new(),
         expert_ranges: Vec::new(),
-        precision: &rules,
+        precision: crate::bind::owned_precision_rules(&rules),
     };
     let error = bind_dense_as(
         &parsed,
@@ -1432,7 +1432,7 @@ fn no_matching_weight_precision_rule_is_byte_identical_to_the_no_rule_path() {
         packed: Vec::new(),
         packed_owned: Vec::new(),
         expert_ranges: Vec::new(),
-        precision: &non_matching_rules,
+        precision: crate::bind::owned_precision_rules(&non_matching_rules),
     };
     bind_dense_as(
         &parsed,
@@ -1449,7 +1449,7 @@ fn no_matching_weight_precision_rule_is_byte_identical_to_the_no_rule_path() {
         packed: Vec::new(),
         packed_owned: Vec::new(),
         expert_ranges: Vec::new(),
-        precision: &[],
+        precision: Vec::new(),
     };
     bind_dense_as(
         &parsed,
@@ -1512,7 +1512,7 @@ fn sequential_weight_precision_rebinds_produce_distinct_names_and_leave_the_firs
         packed: Vec::new(),
         packed_owned: Vec::new(),
         expert_ranges: Vec::new(),
-        precision: &first_rules,
+        precision: crate::bind::owned_precision_rules(&first_rules),
     };
     bind_dense_as(
         &parsed,
@@ -1525,7 +1525,7 @@ fn sequential_weight_precision_rebinds_produce_distinct_names_and_leave_the_firs
 
     let entry_after_first = state.packed_owned[0].clone();
 
-    state.precision = &second_rules;
+    state.precision = crate::bind::owned_precision_rules(&second_rules);
     bind_dense_as(
         &parsed,
         &file_bytes,
@@ -1603,7 +1603,7 @@ fn f16_token_embedding_binds_packed_not_widened_to_f32() {
         packed: Vec::new(),
         packed_owned: Vec::new(),
         expert_ranges: Vec::new(),
-        precision: &[],
+        precision: Vec::new(),
     };
     bind_gathered_as(&parsed, &file_bytes, &name, name.clone(), &mut state)
         .expect("binds an f16 embedding table");
@@ -1658,7 +1658,7 @@ fn tied_f16_embedding_and_lm_head_bind_packed_over_the_same_bytes() {
         packed: Vec::new(),
         packed_owned: Vec::new(),
         expert_ranges: Vec::new(),
-        precision: &[],
+        precision: Vec::new(),
     };
 
     bind_gathered_as(
@@ -1718,7 +1718,7 @@ fn f16_dense_leaf_outside_the_gather_still_widens_to_owned_f32() {
         packed: Vec::new(),
         packed_owned: Vec::new(),
         expert_ranges: Vec::new(),
-        precision: &[],
+        precision: Vec::new(),
     };
 
     bind_dense_as(&parsed, &file_bytes, &name, name.clone(), &mut state)

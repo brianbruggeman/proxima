@@ -1287,7 +1287,7 @@ fn bind_dense_decoder_weights<'file>(
         packed: Vec::new(),
         packed_owned: Vec::new(),
         expert_ranges: Vec::new(),
-        precision: &[],
+        precision: Vec::new(),
     };
 
     let embedding = architecture.embedding as usize;
@@ -1940,7 +1940,7 @@ mod tests {
             packed: Vec::new(),
             packed_owned: Vec::new(),
             expert_ranges: Vec::new(),
-            precision: &[],
+            precision: Vec::new(),
         };
         hf_bind_dense(
             &manifest,
@@ -2115,7 +2115,7 @@ mod tests {
                     packed: Vec::new(),
                     packed_owned: Vec::new(),
                     expert_ranges: Vec::new(),
-                    precision: &[],
+                    precision: Vec::new(),
                 },
             );
 
@@ -2212,7 +2212,7 @@ mod tests {
             packed: Vec::new(),
             packed_owned: Vec::new(),
             expert_ranges: Vec::new(),
-            precision: &[],
+            precision: Vec::new(),
         };
         hf_bind_matmul_weight(
             &manifest,

@@ -382,8 +382,35 @@ pub fn bind_checkpoint_with_kv_layout<'file>(
     file_bytes: &'file [u8],
     layout: KvLayout,
 ) -> Result<BoundProgram<'file>, InteropError> {
+    bind_checkpoint_with_kv_layout_and_precision(parsed, file_bytes, layout, &[])
+}
+
+/// [`bind_checkpoint_with_kv_layout`] with the configured per-tensor recode
+/// rules ([`crate::serving::ServingConfig::weight_precision`]) reaching the
+/// bind: a matched tensor binds at the rule's target under
+/// `<name>@<codec>` and the lowered program's `Op::Input` leaf is retargeted
+/// to that name, so the forward pass reads the recoded bytes.
+///
+/// # Errors
+///
+/// Whatever [`bind_checkpoint_with_kv_layout`] can fail with, plus
+/// [`InteropError::UnsupportedWeightPrecisionTarget`] when a rule's target
+/// has no encoder.
+pub fn bind_checkpoint_with_kv_layout_and_precision<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+    layout: KvLayout,
+    weight_precision: &[crate::serving::WeightPrecisionRule<'_>],
+) -> Result<BoundProgram<'file>, InteropError> {
     let (descriptor, architecture) = header(parsed, layout)?;
-    bind_descriptor(parsed, file_bytes, architecture, &descriptor, false)
+    bind_descriptor(
+        parsed,
+        file_bytes,
+        architecture,
+        &descriptor,
+        false,
+        weight_precision,
+    )
 }
 
 /// Lowers `descriptor` and binds the weights its `Input` leaves name: the one
@@ -397,11 +424,19 @@ fn bind_descriptor<'file>(
     architecture: ModelHparams,
     descriptor: &ModelDescriptor,
     row_cut: bool,
+    weight_precision: &[crate::serving::WeightPrecisionRule<'_>],
 ) -> Result<BoundProgram<'file>, InteropError> {
-    let forward = build_forward_with_row_cut(descriptor, row_cut)?;
+    let mut forward = build_forward_with_row_cut(descriptor, row_cut)?;
     let binding = binding_profile(&architecture.family)?;
-    let weights = bind_program_leaves(parsed, file_bytes, &forward.program, &binding, &[])?;
+    let weights = bind_program_leaves(
+        parsed,
+        file_bytes,
+        &forward.program,
+        &binding,
+        weight_precision,
+    )?;
     refuse_incomplete_bind(parsed, &forward.program, &binding, descriptor)?;
+    crate::bind::retarget_recoded_leaves(&mut forward.program, &weights);
     Ok(bound_program(weights, architecture, forward, descriptor))
 }
 
@@ -580,11 +615,36 @@ pub fn bind_speculative_verify<'file>(
     layout: KvLayout,
     config: Option<&ModelDescriptor>,
 ) -> Result<Option<BoundProgram<'file>>, InteropError> {
+    bind_speculative_verify_with_precision(parsed, file_bytes, layout, config, &[])
+}
+
+/// [`bind_speculative_verify`] with the configured recode rules reaching the
+/// verify program's own bind, so both programs read the same recoded bytes.
+///
+/// # Errors
+///
+/// Same as [`bind_speculative_verify`].
+pub fn bind_speculative_verify_with_precision<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+    layout: KvLayout,
+    config: Option<&ModelDescriptor>,
+    weight_precision: &[crate::serving::WeightPrecisionRule<'_>],
+) -> Result<Option<BoundProgram<'file>>, InteropError> {
     let (header_descriptor, architecture) = header(parsed, layout)?;
     config
         .unwrap_or(&header_descriptor)
         .verify()
-        .map(|verify| bind_descriptor(parsed, file_bytes, architecture, &verify, false))
+        .map(|verify| {
+            bind_descriptor(
+                parsed,
+                file_bytes,
+                architecture,
+                &verify,
+                false,
+                weight_precision,
+            )
+        })
         .transpose()
 }
 
@@ -606,11 +666,36 @@ pub fn bind_prefill_row_cut<'file>(
     layout: KvLayout,
     config: Option<&ModelDescriptor>,
 ) -> Result<Option<BoundProgram<'file>>, InteropError> {
+    bind_prefill_row_cut_with_precision(parsed, file_bytes, layout, config, &[])
+}
+
+/// [`bind_prefill_row_cut`] with the configured recode rules reaching the
+/// prefill program's own bind, so both programs read the same recoded bytes.
+///
+/// # Errors
+///
+/// Same as [`bind_prefill_row_cut`].
+pub fn bind_prefill_row_cut_with_precision<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+    layout: KvLayout,
+    config: Option<&ModelDescriptor>,
+    weight_precision: &[crate::serving::WeightPrecisionRule<'_>],
+) -> Result<Option<BoundProgram<'file>>, InteropError> {
     let (header_descriptor, architecture) = header(parsed, layout)?;
     let descriptor = config.unwrap_or(&header_descriptor);
     descriptor
         .has_prefill_row_cut()
-        .then(|| bind_descriptor(parsed, file_bytes, architecture, descriptor, true))
+        .then(|| {
+            bind_descriptor(
+                parsed,
+                file_bytes,
+                architecture,
+                descriptor,
+                true,
+                weight_precision,
+            )
+        })
         .transpose()
 }
 
@@ -763,7 +848,7 @@ impl<'file> BoundProgram<'file> {
         file_bytes: &'file [u8],
     ) -> Result<Self, InteropError> {
         let ForwardProgram {
-            program,
+            mut program,
             logits,
             layer_roots,
             moe_sites,
@@ -776,6 +861,7 @@ impl<'file> BoundProgram<'file> {
         let binding = binding_profile(&self.architecture.family)?;
         bind_missing_leaves(parsed, file_bytes, &program, &binding, &mut self.weights)?;
         refuse_incomplete_bind(parsed, &program, &binding, descriptor)?;
+        crate::bind::retarget_recoded_leaves(&mut program, &self.weights);
         Ok(Self {
             architecture: self
                 .architecture
