@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use proxima_numeric::DType;
+use proxima_numeric::decode_blocks;
 use proxima_safetensors::SafetensorsParser;
 use proxima_tensor::cpu::evaluate_named;
 use proxima_tensor::op::{NodeId, Op};
@@ -103,13 +104,14 @@ impl Tensors {
         for entry in &manifest.tensors {
             let (start, end) = entry.data_offsets;
             let raw = &data[start as usize..end as usize];
-            let tensor: Vec<f32> = raw
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|word| f32::from_le_bytes(*word))
-                .collect();
             let shape: Vec<usize> = entry.shape.iter().map(|&dim| dim as usize).collect();
+            let elements: usize = shape.iter().product();
+            let format = entry.dtype.format().with_context(|| {
+                format!("{} has no numeric format ({:?})", entry.name, entry.dtype)
+            })?;
+            let mut tensor = vec![0.0_f32; elements];
+            decode_blocks(&format, raw, &mut tensor)
+                .with_context(|| format!("decoding {} as {format:?}", entry.name))?;
             values.insert(entry.name.clone(), (tensor, shape));
         }
         Ok(Self { values })
@@ -618,14 +620,24 @@ fn front_end(dir: &Path) -> Result<FrontEnd> {
             .map(|v| v as u32)
             .with_context(|| format!("preprocessor_config.json lacks {key}"))
     };
-    let rows = value["mel_filters"]
-        .as_array()
-        .context("preprocessor_config.json has mel_filters")?;
     let mut filters = Vec::new();
-    for row in rows {
-        for cell in row.as_array().context("filter row")? {
-            filters.push(cell.as_f64().context("filter cell")? as f32);
+    if let Some(rows) = value["mel_filters"].as_array() {
+        for row in rows {
+            for cell in row.as_array().context("filter row")? {
+                filters.push(cell.as_f64().context("filter cell")? as f32);
+            }
         }
+    } else {
+        // Some published checkpoints omit the filterbank from
+        // preprocessor_config.json; the checkpoint's own ggml file carries it.
+        let bytes = std::fs::read(dir.join("mel_filters.f32"))
+            .context("preprocessor_config.json has no mel_filters and mel_filters.f32 is absent")?;
+        filters = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| f32::from_le_bytes(*word))
+            .collect();
     }
     Ok(FrontEnd {
         filters,
