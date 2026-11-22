@@ -1,5 +1,13 @@
 # SCOREBOARD: FLUX.2 klein 4B (PROXNUM-588)
 
+## Verdict
+
+End-to-end is proven. Image parity is met (32.58 dB ours, 49.16 dB reference text). Performance
+parity is **not** met: wall 1.42x the incumbent, VAE decode 5.94x. The DiT is **faster** than the
+incumbent (0.71x). Backend coverage: cpu and metal parity proven on this host; cuda blocked on
+versailles' NVML driver mismatch; wgpu unexercised. No red is hidden in a paragraph: the VAE row is
+the red, and it is the whole gap.
+
 Reference: `stable-diffusion.cpp` tag `master-1052-f5df5f8`, M1 Max 64 GB, Metal, seed 42,
 1024x1024, 4 Euler steps, wall from `/usr/bin/time -l`. Image oracle: `$K/ref.png`.
 Acceptance: image PSNR >= 22.0 dB and omega wall < 84.58 s.
