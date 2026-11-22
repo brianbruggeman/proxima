@@ -4,6 +4,7 @@
 //! fixture fails the test, it never skips.
 
 #![cfg(all(feature = "toml", feature = "proxima-autograd"))]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs::File;
 use std::io::Read;
@@ -894,14 +895,13 @@ mod golden {
         )
     }
 
-    pub fn mel_program(
-        wav: &[f32],
-        mel_filters: &[f32],
-    ) -> (
+    pub type MelProgram = (
         Vec<proxima_tensor::op::Op>,
         NodeId,
         Vec<(&'static str, Vec<f32>)>,
-    ) {
+    );
+
+    pub fn mel_program(wav: &[f32], mel_filters: &[f32]) -> MelProgram {
         let config = StftLogMelConfig::default();
         let mut program = Vec::new();
         let signal = encoder_decoder::leaf(&mut program, &[wav.len() as u32], "signal");
