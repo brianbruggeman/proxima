@@ -2865,6 +2865,8 @@ pub(super) mod memory_fit_gate_tests {
             checkpoint_mapping: &[],
             vocab: tiny_vocab(),
             program_hash: 0,
+            moe_high_decisions: core::sync::atomic::AtomicU64::new(0),
+            moe_low_decisions: core::sync::atomic::AtomicU64::new(0),
             program: Vec::new(),
             logits_root: proxima_tensor::op::NodeId(0),
             hidden_root: None,
