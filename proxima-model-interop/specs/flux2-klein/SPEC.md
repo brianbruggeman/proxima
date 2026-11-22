@@ -165,6 +165,7 @@ proxima (principle 14), never a reason to raise a gate.
 - No GPU leaks upward. `omega` is named only at the execution boundary; model and lowering code emit `proxima_tensor::op::Op` graphs and know nothing about Metal or any other driver.
 - Sans-IO / FSM composition: the graph is built as data (`Vec<Op>` plus named inputs), the existing lowering/fusion compiles it, then one plan executes it. Model code never drives per-op GPU calls, never branches on a backend, and never fuses by hand in Rust control flow.
 - If the pipe/op algebra cannot express a piece, that is a finding to report, not a reason to add a bespoke type or a model branch.
+- Backend portability is proved, not asserted. The same program, symbols and named inputs run on the CPU evaluator and on every configured GPU driver, and the numbers are identical within the stage gate; the engine and driver are `RuntimeConfig` values, never a code path. This host proves `cpu` and `metal`; `cuda` and `wgpu` are exercised by the same test wherever a device exists, and a missing device is a skip with its reason, never a green with no run. No model, lowering, bind or scheduler module names a backend (grep gate).
 
 ## Architecture: reuse first
 
