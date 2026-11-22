@@ -8,7 +8,7 @@ status: draft, 2026-10-06
 > `ServingSettings` config surface. `PROXIMA_KV_CACHE_TYPE` and
 > `PROXIMA_KV_CACHE_KEY_TYPE` are now
 > `PROXIMA_SERVING_KV_CACHE_VALUE_QUANT` and `PROXIMA_SERVING_KV_CACHE_KEY_QUANT` (or
-> `PROXIMA_SERVING_CONFIG=proxima-model-interop/examples/granite_llama.toml`), and
+> `PROXIMA_SERVING_CONFIG=proxima-model-interop/examples/llama_matched.toml`), and
 > `-b`/`-ub` come from that file. Do not run the old commands as current; their numbers
 > are the record of the tree they ran on.
 
