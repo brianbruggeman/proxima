@@ -94,6 +94,15 @@ impl PreType {
     }
 }
 
+/// `LLAMA_VOCAB_PRE_TYPE_QWEN2`'s split regex (`llama-vocab.cpp`), which a
+/// Qwen2/Qwen3 `tokenizer.json` states as `pre_tokenizer.pretokenizers[0]`
+/// (`Split`, `Isolated`) ahead of its `ByteLevel`. Matching the string exactly
+/// is how a `Sequence` names [`PreType::SingleDigit`]: the scanner already
+/// implements this alternation, and a near-miss regex must be refused rather
+/// than silently routed to a different rule.
+pub(crate) const SINGLE_DIGIT_SPLIT_REGEX: &str =
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
 pub(crate) fn class_bits(character: char) -> u8 {
     let codepoint = u32::from(character);
     let index = CLASS_RANGES.partition_point(|&(start, _)| start <= codepoint);

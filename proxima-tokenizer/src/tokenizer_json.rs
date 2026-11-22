@@ -199,6 +199,14 @@ fn byte_level_pre_type(node: &Value) -> Option<PreType> {
     (use_regex && !prefix_space).then_some(PreType::Gpt2)
 }
 
+fn plain_byte_level(node: &Value) -> bool {
+    node.get("type").and_then(Value::as_str) == Some("ByteLevel")
+        && !node
+            .get("add_prefix_space")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
 fn sequence_pre_type(node: &Value) -> Option<PreType> {
     let steps = node.get("pretokenizers").and_then(Value::as_array)?;
     match steps.as_slice() {
@@ -208,6 +216,19 @@ fn sequence_pre_type(node: &Value) -> Option<PreType> {
                 && byte_level.get("type").and_then(Value::as_str) == Some("ByteLevel") =>
         {
             byte_level_pre_type(byte_level).map(|_| PreType::DigitIsolatedGpt2)
+        }
+        [split, byte_level]
+            if split.get("type").and_then(Value::as_str) == Some("Split")
+                && split.get("behavior").and_then(Value::as_str) == Some("Isolated")
+                && !split.get("invert").and_then(Value::as_bool).unwrap_or(false)
+                && split
+                    .get("pattern")
+                    .and_then(|pattern| pattern.get("Regex"))
+                    .and_then(Value::as_str)
+                    == Some(crate::pretokenize::SINGLE_DIGIT_SPLIT_REGEX)
+                && plain_byte_level(byte_level) =>
+        {
+            Some(PreType::SingleDigit)
         }
         _ => None,
     }
@@ -276,5 +297,37 @@ mod tests {
         let ids = encode("<|tool_call|>Hello", &vocab).expect("encode");
         assert_eq!(ids, [49154, 8279]);
         assert_eq!(vocab.token_str(49154), Some("<|tool_call|>"));
+    }
+
+    fn qwen_sequence(regex: &str) -> Value {
+        serde_json::json!({
+            "type": "Sequence",
+            "pretokenizers": [
+                {
+                    "type": "Split",
+                    "pattern": { "Regex": regex },
+                    "behavior": "Isolated",
+                    "invert": false
+                },
+                {
+                    "type": "ByteLevel",
+                    "add_prefix_space": false,
+                    "trim_offsets": false,
+                    "use_regex": false
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn qwen_split_then_byte_level_is_the_single_digit_pretokenizer() {
+        let sequence = qwen_sequence(crate::pretokenize::SINGLE_DIGIT_SPLIT_REGEX);
+        assert_eq!(sequence_pre_type(&sequence), Some(PreType::SingleDigit));
+    }
+
+    #[test]
+    fn a_split_with_another_regex_is_refused_not_approximated() {
+        let sequence = qwen_sequence(r"\p{L}+|\p{N}{1,3}");
+        assert_eq!(sequence_pre_type(&sequence), None);
     }
 }
