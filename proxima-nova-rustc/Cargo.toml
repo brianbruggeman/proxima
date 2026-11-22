@@ -1,0 +1,20 @@
+[package]
+name = "proxima-nova-rustc"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "rustc codegen-backend dylib that feeds MIR to proxima-nova through rustc_public (nightly only, excluded from the workspace)"
+
+[lib]
+crate-type = ["dylib"]
+
+# own workspace: the root workspace is stable, rustc_private needs the pinned nightly
+[workspace]
+
+[dependencies]
+conflaguration = { version = "2.1.0", features = ["derive"] }
+futures = { version = "0.3.34", features = ["executor"] }
+prime = { version = "0.1.0", path = "../prime", package = "proxima-prime", features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "runtime-prime-bgpool-async"] }
+proxima-nova = { version = "0.1.0", path = "../proxima-nova" }
+proxima-primitives = { version = "0.1.0", path = "../proxima-primitives" }
+thiserror = "2.0.21"

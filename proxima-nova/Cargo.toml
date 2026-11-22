@@ -1,0 +1,51 @@
+[package]
+name = "proxima-nova"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "rustc MIR to native code through nova IR, stages as proxima pipes on prime"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { version = "1.0.104", optional = true }
+bytes = { workspace = true, optional = true }
+conflaguration = { workspace = true, features = ["derive"], optional = true }
+futures = { workspace = true, optional = true }
+object = { version = "0.40", default-features = false, features = ["write_core", "macho"] }
+prime = { workspace = true, optional = true }
+proxima-primitives = { workspace = true, default-features = false }
+proxima-process = { workspace = true, optional = true }
+thiserror.workspace = true
+toml = { workspace = true, optional = true }
+
+[dev-dependencies]
+object = "0.40"
+prime = { workspace = true, features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool"] }
+tempfile.workspace = true
+
+[features]
+default = []
+cli = [
+    "dep:anyhow",
+    "dep:toml",
+    "dep:bytes",
+    "dep:futures",
+    "dep:conflaguration",
+    "dep:proxima-process",
+    "dep:prime",
+    "prime/runtime-prime-executor",
+    "prime/runtime-prime-inbox-alloc",
+    "prime/runtime-prime-reactor",
+    "prime/runtime-prime-bgpool",
+    "proxima-primitives/std",
+    "proxima-process/std",
+]
+
+[[bin]]
+name = "cargo-nova"
+path = "src/bin/cargo-nova.rs"
+required-features = ["cli"]

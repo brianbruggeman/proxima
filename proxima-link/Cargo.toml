@@ -1,0 +1,13 @@
+[package]
+name = "proxima-link"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+description = "the linker for proxima-nova's arm64 Mach-O objects"
+
+[dependencies]
+sha2 = "0.10"
+
+[lints]
+workspace = true
