@@ -204,10 +204,11 @@ Messages are lowercase, terse, causal — they say *why*; the fields carry *what
 
 - A push outlives the tool call that started it: the pre-push hook runs
   `scripts/feature-target-gate.sh`, which compiles the four crates a changed tree selects
-  (about 34 feature rows) and prints each row only when it finishes, so `git push | tail`
-  shows nothing for the whole gate and reads as a hung transport. Start it as
-  `scripts/guard-run.sh 3600 -- git push origin main`, write its output to a log, and read
-  the log instead of retrying; a retry leaves the first push's child alive.
+  (36 checks, 35 minutes on 2026-11-21) and prints each row only when it finishes, so
+  `git push | tail` shows nothing for the whole gate and reads as a hung transport. The ssh
+  session is held open across the gate and the server closed it mid-run. Run the gate itself
+  first, so the hook's re-run is warm, then push; write the output to a log and read the log
+  instead of retrying, because a retry leaves the first push's child alive.
 - Every GPU/model run goes through `scripts/guard-run.sh <seconds> -- <command>`. It starts
   the command in its own process group and kills the group on timeout; a killed parent
   must not leave a child holding the Metal lane. On 2026-11-21 a tool timeout killed a
