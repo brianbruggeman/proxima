@@ -1,3 +1,4 @@
+use core::sync::atomic::AtomicU64;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use super::device_kv::KvBufferSource;
 use super::residency_caches::BlockSummarizer;
@@ -934,6 +935,10 @@ pub struct LoadedModel<'file> {
     pub(super) vocab: Vocab,
     pub(super) program: Vec<Op>,
     pub(super) program_hash: u64,
+    /// HOBBIT high-precision route decisions observed by the last decode.
+    pub(super) moe_high_decisions: AtomicU64,
+    /// HOBBIT low-precision route decisions observed by the last decode.
+    pub(super) moe_low_decisions: AtomicU64,
     pub(super) logits_root: NodeId,
     /// `proxima_tensor::spec::ForwardRoots::hidden` off the dense load path
     /// (`Self::load`/`Self::load_from_safetensors`, both wrapping

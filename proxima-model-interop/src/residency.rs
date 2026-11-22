@@ -9,7 +9,7 @@ use crate::bind::Codec;
 use crate::{ExpertSlab, InteropError};
 
 /// A layer/expert coordinate in a model's routed-expert matrix.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ExpertAddress {
     pub layer: usize,
     pub expert: usize,
@@ -23,15 +23,16 @@ pub struct RoutedExpert {
 }
 
 /// The precision that can serve a routed expert in the current decode step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ServePrecision {
+    #[default]
     Low,
     High,
 }
 
 /// Per-route HOBBIT decision. A miss serves its low-precision fallback for
 /// this step; promotions only take effect at the following step boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ServeDecision {
     pub address: ExpertAddress,
     pub precision: ServePrecision,
@@ -128,6 +129,11 @@ pub struct ResidencyConfig {
     pub hysteresis_margin: f64,
     /// A resident remains in place for at least this many routed-token positions.
     pub min_dwell_tokens: u64,
+    /// HOBBIT's `T1` in `0.0..=1.0`. `Some(t)` serves a non-resident routed
+    /// expert from the high source when its cumulative normalized gate score
+    /// is `<= t`, and from the low source otherwise. `None` keeps the
+    /// pre-existing high-if-resident / low-otherwise rule.
+    pub high_threshold: Option<f32>,
 }
 
 impl Default for ResidencyConfig {
@@ -138,6 +144,7 @@ impl Default for ResidencyConfig {
             ema_rate: 0.1,
             hysteresis_margin: 0.0,
             min_dwell_tokens: 0,
+            high_threshold: None,
         }
     }
 }
@@ -149,6 +156,8 @@ pub enum ResidencyError {
     PrefetchCapacityExceeded { capacity: usize },
     #[error("expert address ({layer}, {expert}) is outside the fixed policy matrix")]
     AddressOutOfRange { layer: usize, expert: usize },
+    #[error("decision buffer holds {found} entries, the route has {needed}")]
+    DecisionBufferTooSmall { needed: usize, found: usize },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -187,6 +196,9 @@ pub struct ExpertResidency {
     target: Vec<bool>,
     actions: ResidencyActions,
     last_token: u64,
+    high_decisions: u64,
+    low_decisions: u64,
+    observed_routes: u64,
 }
 
 impl ExpertResidency {
@@ -203,6 +215,9 @@ impl ExpertResidency {
                 entries: Vec::with_capacity(slots.saturating_mul(2)),
             },
             last_token: 0,
+            high_decisions: 0,
+            low_decisions: 0,
+            observed_routes: 0,
         }
     }
 
@@ -213,23 +228,61 @@ impl ExpertResidency {
 
     /// Records one decode step's routes and returns the precision available
     /// for those routes before any next-boundary page action is applied.
+    ///
+    /// `routed` must be in descending router-gate order (the order
+    /// `visit_moe_router_selections` hands the boundary). With
+    /// [`ResidencyConfig::high_threshold`] set, the paper's cumulative score
+    /// `s_i = sum_{j<i} w_j` over the softmax-normalized gate logits decides
+    /// a non-resident expert's source; the first expert always has `s_0 = 0`
+    /// and is high. With `None`, the pre-existing high-if-resident /
+    /// low-otherwise rule is unchanged.
     pub fn observe<const ROUTED: usize>(
         &mut self,
         token: u64,
         layer: usize,
         routed: [RoutedExpert; ROUTED],
     ) -> Result<[ServeDecision; ROUTED], ResidencyError> {
-        self.last_token = self.last_token.max(token);
-        let mut decisions = [ServeDecision {
-            address: ExpertAddress {
-                layer: 0,
-                expert: 0,
-            },
-            precision: ServePrecision::Low,
-        }; ROUTED];
+        let mut decisions = [ServeDecision::default(); ROUTED];
+        self.observe_routes_into(token, layer, &routed, &mut decisions)?;
+        Ok(decisions)
+    }
 
+    /// Allocation-free [`Self::observe`] for a caller-owned decision buffer.
+    ///
+    /// # Errors
+    ///
+    /// [`ResidencyError::DecisionBufferTooSmall`] when `decisions` cannot hold
+    /// every route; [`ResidencyError::AddressOutOfRange`] when a route names
+    /// an expert outside this policy's fixed matrix.
+    pub fn observe_routes_into(
+        &mut self,
+        token: u64,
+        layer: usize,
+        routed: &[RoutedExpert],
+        decisions: &mut [ServeDecision],
+    ) -> Result<(), ResidencyError> {
+        if decisions.len() < routed.len() {
+            return Err(ResidencyError::DecisionBufferTooSmall {
+                needed: routed.len(),
+                found: decisions.len(),
+            });
+        }
+        if routed.is_empty() {
+            return Ok(());
+        }
+        self.last_token = self.last_token.max(token);
         let ema_rate = self.config.ema_rate;
-        for (index, route) in routed.into_iter().enumerate() {
+        let max_gate = routed
+            .iter()
+            .map(|route| route.importance)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let weight_sum = routed
+            .iter()
+            .map(|route| f64::from(route.importance - max_gate).exp())
+            .sum::<f64>();
+        let threshold = self.config.high_threshold.map(f64::from);
+        let mut cumulative = 0.0f64;
+        for (index, route) in routed.iter().enumerate() {
             let state = self.state_mut(ExpertAddress {
                 layer,
                 expert: route.expert,
@@ -239,19 +292,39 @@ impl ExpertResidency {
             state.ema = state.ema * decay * (1.0 - ema_rate) + ema_rate;
             state.last_observed = token;
             state.seen = true;
+            let weight = if weight_sum > 0.0 {
+                f64::from(route.importance - max_gate).exp() / weight_sum
+            } else {
+                0.0
+            };
+            let score = cumulative;
+            cumulative += weight;
+            let important = threshold.is_some_and(|limit| score <= limit);
+            let precision = if state.resident || important {
+                ServePrecision::High
+            } else {
+                ServePrecision::Low
+            };
+            match precision {
+                ServePrecision::High => self.high_decisions += 1,
+                ServePrecision::Low => self.low_decisions += 1,
+            }
+            self.observed_routes += 1;
             decisions[index] = ServeDecision {
                 address: ExpertAddress {
                     layer,
                     expert: route.expert,
                 },
-                precision: if state.resident {
-                    ServePrecision::High
-                } else {
-                    ServePrecision::Low
-                },
+                precision,
             };
         }
-        Ok(decisions)
+        Ok(())
+    }
+
+    /// High/low decisions this policy has made across every observed route.
+    #[must_use]
+    pub const fn precision_counts(&self) -> (u64, u64, u64) {
+        (self.high_decisions, self.low_decisions, self.observed_routes)
     }
 
     /// Converts predictor output into bounded warming candidates without
@@ -500,6 +573,7 @@ mod tests {
         ema_rate: 0.5,
         hysteresis_margin: 0.1,
         min_dwell_tokens: 2,
+        high_threshold: None,
     };
 
     fn stack() -> Vec<u8> {
@@ -834,4 +908,100 @@ mod tests {
         }
         assert!(staged_total > 0, "the trace must stage real actions");
     }
+    fn gate_routes() -> [RoutedExpert; 4] {
+        [
+            RoutedExpert { expert: 0, importance: 10.0 },
+            RoutedExpert { expert: 1, importance: 0.0 },
+            RoutedExpert { expert: 2, importance: 0.0 },
+            RoutedExpert { expert: 3, importance: 0.0 },
+        ]
+    }
+
+    #[test]
+    fn hobbit_expert_gate_keeps_the_cumulative_head_high_and_the_tail_low() {
+        let mut policy = ExpertResidency::new(
+            ResidencyConfig {
+                high_threshold: Some(0.6),
+                ..CONFIG
+            },
+            1,
+            4,
+        );
+        let decisions = policy
+            .observe(1, 0, gate_routes())
+            .expect("four experts are inside the matrix");
+        assert_eq!(
+            decisions.map(|decision| decision.precision),
+            [
+                ServePrecision::High,
+                ServePrecision::Low,
+                ServePrecision::Low,
+                ServePrecision::Low,
+            ],
+            "the first expert has score 0 and the rest are past T1=0.6"
+        );
+        assert_eq!(policy.precision_counts(), (1, 3, 4));
+    }
+
+    #[test]
+    fn hobbit_expert_gate_threshold_zero_keeps_only_the_score_zero_expert_high() {
+        let mut policy = ExpertResidency::new(
+            ResidencyConfig {
+                high_threshold: Some(0.0),
+                ..CONFIG
+            },
+            1,
+            4,
+        );
+        let decisions = policy.observe(1, 0, gate_routes()).expect("inside");
+        assert_eq!(decisions[0].precision, ServePrecision::High);
+        assert!(decisions[1..]
+            .iter()
+            .all(|decision| decision.precision == ServePrecision::Low));
+    }
+
+    #[test]
+    fn hobbit_expert_gate_threshold_one_serves_every_route_high() {
+        let mut policy = ExpertResidency::new(
+            ResidencyConfig {
+                high_threshold: Some(1.0),
+                ..CONFIG
+            },
+            1,
+            4,
+        );
+        let decisions = policy.observe(1, 0, gate_routes()).expect("inside");
+        assert!(decisions
+            .iter()
+            .all(|decision| decision.precision == ServePrecision::High));
+    }
+
+    /// The control: the same gate check that passes T1=0.6 must flip the
+    /// tail to high when the threshold is mutated to 1.0. A gate that cannot
+    /// reject is not a gate.
+    #[test]
+    fn control_hobbit_expert_gate_mutation_flips_the_tail() {
+        let mut strict = ExpertResidency::new(
+            ResidencyConfig {
+                high_threshold: Some(0.6),
+                ..CONFIG
+            },
+            1,
+            4,
+        );
+        let mut permissive = ExpertResidency::new(
+            ResidencyConfig {
+                high_threshold: Some(1.0),
+                ..CONFIG
+            },
+            1,
+            4,
+        );
+        let strict = strict.observe(1, 0, gate_routes()).expect("inside");
+        let permissive = permissive.observe(1, 0, gate_routes()).expect("inside");
+        assert_eq!(strict[1].precision, ServePrecision::Low);
+        assert_eq!(permissive[1].precision, ServePrecision::High);
+        assert_ne!(strict, permissive);
+    }
+
 }

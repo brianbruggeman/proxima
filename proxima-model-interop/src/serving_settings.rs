@@ -19,6 +19,7 @@ use crate::bind::codec_to_ggml_type;
 use crate::error::InteropError;
 use crate::codec_policy_settings::CodecPolicySettings;
 use crate::hobbit_settings::HobbitSettings;
+use crate::moe_expert_precision_settings::MoeExpertPrecisionSettings;
 use crate::memory_reclaim::ReclaimSettings;
 use crate::prompt_cache_settings::PromptCacheSettings;
 use crate::serving::{
@@ -422,6 +423,14 @@ pub struct ServingSettings {
     #[setting(nested, override_prefix = "PROXIMA_HOBBIT")]
     #[builder(default)]
     pub hobbit: HobbitSettings,
+    /// `ServingConfig::moe_residency_budget_bytes`: the DynaExq high-precision
+    /// expert pool. `0` keeps the pre-existing path.
+    #[setting(default = 0)]
+    #[builder(default = 0)]
+    pub moe_residency_budget_bytes: u64,
+    #[setting(nested, override_prefix = "PROXIMA_MOE_EXPERT_PRECISION")]
+    #[builder(default)]
+    pub moe_expert_precision: MoeExpertPrecisionSettings,
 }
 
 impl Default for ServingSettings {
@@ -530,6 +539,8 @@ impl ServingSettings {
             },
             cached_attention_fusion: self.cached_attention_fusion,
             gated_delta_net_fusion: self.gated_delta_net_fusion,
+            moe_residency_budget_bytes: self.moe_residency_budget_bytes,
+            moe_high_precision_threshold: self.moe_expert_precision.threshold(),
             moe_topk_fusion: self.moe_topk_fusion,
             plan_time_constants: self.plan_time_constants,
             plan_refit: self.plan_refit,

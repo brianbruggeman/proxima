@@ -4311,6 +4311,7 @@ impl<'file> LoadedModel<'file> {
                         0,
                         crate::expert_sidecar::MappedExpertSidecar::high_bytes_per_expert,
                     ),
+                    high_threshold: serving_config.moe_high_precision_threshold,
                     ..crate::residency::ResidencyConfig::default()
                 },
                 self.architecture.block_count as usize,
@@ -6201,15 +6202,27 @@ not read this cache format; only the single-row decode kernel reads it from the 
                                     // gather. Retained-set reconciliation happens
                                     // once after the whole token, never between
                                     // layers of this token.
-                                    for route in routes {
-                                        let [decision] =
-                                            policy.observe(position, layer, [*route]).map_err(
-                                                |error| InteropError::PreGatherExecutionUnsupported {
-                                                    architecture: String::from(self.family()),
-                                                    reason: error.to_string(),
-                                                },
-                                            )?;
-                                        current_sources.borrow_mut().push(self.family(), decision)?;
+                                    let mut decisions = [
+                                        crate::residency::ServeDecision::default();
+                                        16
+                                    ];
+                                    policy
+                                        .observe_routes_into(
+                                            position,
+                                            layer,
+                                            routes,
+                                            &mut decisions,
+                                        )
+                                        .map_err(|error| {
+                                            InteropError::PreGatherExecutionUnsupported {
+                                                architecture: String::from(self.family()),
+                                                reason: error.to_string(),
+                                            }
+                                        })?;
+                                    for decision in &decisions[..routes.len()] {
+                                        current_sources
+                                            .borrow_mut()
+                                            .push(self.family(), *decision)?;
                                     }
                                 }
                                 Ok(())
@@ -6751,16 +6764,24 @@ not read this cache format; only the single-row decode kernel reads it from the 
                                 &mut router_scratch,
                                 &mut |layer, position, routes| {
                                     if let Some(policy) = moe_residency.as_mut() {
-                                        for route in routes {
-                                            policy.observe(position, layer, [*route]).map_err(
-                                                |error| {
-                                                    InteropError::PreGatherExecutionUnsupported {
-                                                        architecture: String::from(self.family()),
-                                                        reason: error.to_string(),
-                                                    }
-                                                },
-                                            )?;
-                                        }
+                                        let mut decisions = [
+                                            crate::residency::ServeDecision::default();
+                                            16
+                                        ];
+                                        policy
+                                            .observe_routes_into(
+                                                position,
+                                                layer,
+                                                routes,
+                                                &mut decisions,
+                                            )
+                                            .map_err(|error| {
+                                                InteropError::PreGatherExecutionUnsupported {
+                                                    architecture: String::from(self.family()),
+                                                    reason: error.to_string(),
+                                                }
+                                            })?;
+                                        let _ = &decisions[..routes.len()];
                                     }
                                     Ok(())
                                 },
@@ -7762,6 +7783,17 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     // of the same token.
                     self.reconcile_attached_moe_residency(policy)?;
                     debug!(position = cached_len as u64, "moe_residency_boundary");
+                }
+                if let Some(policy) = moe_residency.as_ref() {
+                    let (high, low, _) = policy.precision_counts();
+                    self.moe_high_decisions.store(
+                        high,
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
+                    self.moe_low_decisions.store(
+                        low,
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
                 }
 
                 // a cacheless architecture carries no KV between steps, so each

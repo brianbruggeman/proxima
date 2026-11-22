@@ -2409,6 +2409,19 @@ impl<'file> LoadedModel<'file> {
         self.program_hash
     }
 
+    /// `(high, low)` HOBBIT route decisions the last decode observed. Both
+    /// zero when `moe_expert_precision.enabled` is false or the model has no
+    /// attached low-codec sidecar.
+    #[must_use]
+    pub fn moe_precision_counts(&self) -> (u64, u64) {
+        (
+            self.moe_high_decisions
+                .load(core::sync::atomic::Ordering::Relaxed),
+            self.moe_low_decisions
+                .load(core::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
     /// Every bound tensor a configured
     /// [`crate::ServingConfig::weight_precision`] rule recoded, as
     /// `(<name>@<codec>, byte length)`. Empty when every rule was absent,
@@ -3022,6 +3035,8 @@ impl<'file> LoadedModel<'file> {
             mapping_residency_rung,
             vocab,
             program_hash: program_hash(&bound.program),
+            moe_high_decisions: core::sync::atomic::AtomicU64::new(0),
+            moe_low_decisions: core::sync::atomic::AtomicU64::new(0),
             program: bound.program,
             logits_root: bound.logits_root,
             hidden_root: bound.hidden_root,
@@ -3278,6 +3293,8 @@ impl<'file> LoadedModel<'file> {
             mapping_residency_rung: crate::mapping_residency::ResidencyRung::Prefault,
             vocab,
             program_hash: program_hash(&program),
+            moe_high_decisions: core::sync::atomic::AtomicU64::new(0),
+            moe_low_decisions: core::sync::atomic::AtomicU64::new(0),
             program,
             logits_root,
             hidden_root,

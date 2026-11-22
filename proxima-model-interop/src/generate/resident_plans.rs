@@ -238,6 +238,7 @@ impl PlanIdentity {
             gpu_memory_limit_bytes: _,
             dense_weights_budget_bytes: _,
             expert_weights_budget_bytes: _,
+            moe_high_precision_threshold: _,
             activations_budget_bytes: _,
             kv_cache_budget_bytes: _,
             kv_offload: _,

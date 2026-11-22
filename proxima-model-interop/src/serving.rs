@@ -974,6 +974,12 @@ pub struct ServingConfig<'model> {
     pub gdn_prefill_backend: GdnPrefillBackend,
     /// Byte budget for the DynaExq high-precision expert residency pool.
     pub moe_residency_budget_bytes: u64,
+    /// HOBBIT's `T1`: when `Some(t)`, a non-resident routed expert whose
+    /// normalized cumulative gate score is `<= t` is served from the
+    /// checkpoint's high bytes; the tail is served from the low-codec
+    /// sidecar. `None` (this field's default) keeps the pre-existing
+    /// high-if-resident / low-otherwise path byte-identical.
+    pub moe_high_precision_threshold: Option<f32>,
     /// Load-time refusal cap for `crate::memory_fit::WeightClassBytes::dense_bytes`
     /// (`crate::generate::LoadedModel::apply_memory_fit_gate`'s per-class
     /// gate; ROW 501/I2 -- "separate budgets and placement owners for
@@ -1311,6 +1317,7 @@ impl Default for ServingConfig<'static> {
             moe_persistent_cuts: false,
             gdn_prefill_backend: GdnPrefillBackend::Cpu,
             moe_residency_budget_bytes: 0,
+            moe_high_precision_threshold: None,
             dense_weights_budget_bytes: 0,
             expert_weights_budget_bytes: 0,
             activations_budget_bytes: 0,
@@ -1908,6 +1915,7 @@ mod tests {
             moe_pre_gather: false,
             moe_persistent_cuts: false,
             moe_residency_budget_bytes: 0,
+            moe_high_precision_threshold: None,
             dense_weights_budget_bytes: 0,
             expert_weights_budget_bytes: 0,
             activations_budget_bytes: 0,
@@ -2102,6 +2110,7 @@ mod tests {
             moe_pre_gather: false,
             moe_persistent_cuts: false,
             moe_residency_budget_bytes: 0,
+            moe_high_precision_threshold: None,
             dense_weights_budget_bytes: 0,
             expert_weights_budget_bytes: 0,
             activations_budget_bytes: 0,
@@ -2241,6 +2250,7 @@ mod tests {
             moe_pre_gather: false,
             moe_persistent_cuts: false,
             moe_residency_budget_bytes: 0,
+            moe_high_precision_threshold: None,
             dense_weights_budget_bytes: 0,
             expert_weights_budget_bytes: 0,
             activations_budget_bytes: 0,
@@ -2353,6 +2363,7 @@ mod tests {
             moe_persistent_cuts: false,
             gdn_prefill_backend: GdnPrefillBackend::Cpu,
             moe_residency_budget_bytes: 0,
+            moe_high_precision_threshold: None,
             dense_weights_budget_bytes: 0,
             expert_weights_budget_bytes: 0,
             activations_budget_bytes: 0,
@@ -2455,6 +2466,7 @@ mod tests {
             moe_persistent_cuts: false,
             gdn_prefill_backend: GdnPrefillBackend::Cpu,
             moe_residency_budget_bytes: 0,
+            moe_high_precision_threshold: None,
             dense_weights_budget_bytes: 0,
             expert_weights_budget_bytes: 0,
             activations_budget_bytes: 0,

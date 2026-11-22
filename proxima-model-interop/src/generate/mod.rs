@@ -316,6 +316,8 @@ mod prompt_cache_key;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod prompt_cache_real_model_tests;
 #[cfg(test)]
+mod hobbit_expert_tests;
+#[cfg(test)]
 mod recurrent_checkpoint_fixture;
 #[cfg(test)]
 mod recurrent_header_profile_tests;

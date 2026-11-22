@@ -237,6 +237,7 @@ impl CacheKey {
             // stages choose where rows come from; a stage that changes what a row means adds its identity to the key
             prefill: _,
             attention: AttentionConfig { read },
+            moe_high_precision_threshold: _,
         } = *config;
         Self {
             rope_scaling,
