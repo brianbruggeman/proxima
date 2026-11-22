@@ -140,6 +140,13 @@ PSNR ceilings, re-derived from the MEASURED image RMS 0.732612 (not an assumed 1
 
 These are a-priori CEILINGS from precision, not targets. Effective gate = `min(ceiling, 2 x measured floor)`; a stage with no measured floor keeps its ceiling. The conditioner floor 0.0035 doubles to 0.0071 and is the effective text gate for all three taps; every other stage keeps its ceiling. A result outside its gate is a defect in proxima (principle 14), never a reason to raise a gate.
 
+## Composition rules (binding, owner 2026-11-21)
+
+- No dtype is named by hand inside a function. `f16`/`f32`/`bf16`/`FLOAT32`/`BFloat16`/`Float16` never appear as a hardcoded choice in model, lowering, bind or scheduler code; the dtype comes from `proxima-numeric` (`DType`, `NumericFormat`, `NumericPolicy`) as a parameter or config value. A concrete dtype may appear only in the outermost harness that reads or writes a real file.
+- No GPU leaks upward. `omega` is named only at the execution boundary; model and lowering code emit `proxima_tensor::op::Op` graphs and know nothing about Metal or any other driver.
+- Sans-IO / FSM composition: the graph is built as data (`Vec<Op>` plus named inputs), the existing lowering/fusion compiles it, then one plan executes it. Model code never drives per-op GPU calls, never branches on a backend, and never fuses by hand in Rust control flow.
+- If the pipe/op algebra cannot express a piece, that is a finding to report, not a reason to add a bespoke type or a model branch.
+
 ## Architecture: reuse first
 
 No new top-level abstraction. The pipeline is the existing Pipe composition (noise source, text pipe, scheduler loop, DiT pipe, VAE pipe); each component maps to existing pieces plus generic lowerings selected by config.
