@@ -77,6 +77,8 @@ the defect is the trait that needed one. Report it; do not compensate for it.
 Name the paths. `git commit --only <paths>` commits exactly those paths and ignores the index;
 `git add <paths>` stages exactly those paths. This working tree routinely carries hundreds of
 unrelated dirty files, and that is not an attribution problem — the paths are the attribution.
+Format the paths the card changed (`rustfmt --edition 2024 --config skip_children=true <paths>`);
+`cargo fmt -p <crate>` reflows untouched files and turns a one-slice card into a 155-file diff.
 Never rebuild the tree in a scratch worktree, and never classify hunks, to separate authorship:
 if you catch yourself generating a tree, you have skipped the primitive. See
 `~/.agents/skills/coherent-commit/SKILL.md` and
