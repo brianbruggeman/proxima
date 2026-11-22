@@ -1,0 +1,26 @@
+context_length = 512
+batch_size = 32
+ubatch_size = 32
+temperature = 0.0
+top_k = 0
+top_p = 1.0
+min_p = 0.0
+seed = 1
+ignore_eos = true
+moe_residency_budget_bytes = 2147483648
+
+[hobbit]
+calibration_prompts = [
+  "The quick brown fox jumps over the lazy dog.",
+  "Precision is chosen per layer by measuring what each layer changes.",
+]
+max_calibration_tokens = 16
+
+[moe_expert_precision]
+enabled = true
+high_threshold = 0.6
+low_codec = "q3_k"
+
+[moe_expert_precision.quality]
+max_mean_kl = 0.15
+min_top1_agreement = 0.80
