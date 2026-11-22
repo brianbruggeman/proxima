@@ -509,6 +509,8 @@ pub fn encoder_layer(
 /// # Errors
 ///
 /// [`TensorError`] when a map or node is malformed.
+// a graph builder takes its node ids and attention dims; a struct here would only rename the call
+#[allow(clippy::too_many_arguments)]
 pub fn decoder_layer(
     program: &mut Vec<Op>,
     x: NodeId,
@@ -705,6 +707,8 @@ fn conv(
 /// # Errors
 ///
 /// [`TensorError`] when a map or node is malformed.
+// a graph builder takes its node ids and attention dims; a struct here would only rename the call
+#[allow(clippy::too_many_arguments)]
 pub fn decoder(
     program: &mut Vec<Op>,
     tokens: NodeId,
