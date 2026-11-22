@@ -100,6 +100,7 @@ impl PreType {
 /// is how a `Sequence` names [`PreType::SingleDigit`]: the scanner already
 /// implements this alternation, and a near-miss regex must be refused rather
 /// than silently routed to a different rule.
+#[cfg(feature = "hf")]
 pub(crate) const SINGLE_DIGIT_SPLIT_REGEX: &str =
     r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
