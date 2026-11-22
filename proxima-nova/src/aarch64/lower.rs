@@ -1465,9 +1465,9 @@ mod tests {
             add_imm(rds[2], rds[2], 1, false),
         ];
         let single = same_words(&body[0..1], &at_4095) + same_words(&body[1..2], &at_4096);
-        let double = usize::from(same_words(&body[2..4], &at_4097) == 2);
-        std::println!("offsets single={single} of=2 double={double} of=1");
-        assert_eq!((single, double), (2, 1));
+        let wide = usize::from(same_words(&body[2..4], &at_4097) == 2);
+        std::println!("offsets single={single} of=2 wide={wide} of=1");
+        assert_eq!((single, wide), (2, 1));
     }
 
     fn probe_count(insts: &[MachInst]) -> usize {

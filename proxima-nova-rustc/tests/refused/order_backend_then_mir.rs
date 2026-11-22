@@ -13,8 +13,8 @@ pub extern "C" fn filler_clean(argc: i32) -> i32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn later_mir(argc: i32) -> i32 {
-    let x = argc as f64;
-    x as i32
+    let x = 1.0;
+    x as i32 + argc - 1
 }
 
 #[unsafe(no_mangle)]

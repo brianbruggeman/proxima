@@ -347,8 +347,9 @@ fn stream_crate<'tcx>(
         }
         if timed {
             println!(
-                "nova_time lower_mir_s={:.3} functions={lowered}",
-                lowering.as_secs_f64()
+                "nova_time lower_mir_s={}.{:03} functions={lowered}",
+                lowering.as_secs(),
+                lowering.subsec_millis()
             );
         }
         drive.drain(tcx).await
