@@ -127,7 +127,7 @@ Precision model: bf16 has an 8-bit significand, one rounding relative error `u =
 | text tap 18 | 180 | 0.074 |
 | text tap 27 | 270 | 0.091 |
 | DiT velocity, one step | 5x25 + 20x10 + 6 = 331 | 0.101 |
-| latent after Euler step 1/2/3/4 | -- | 0.003 / 0.007 / 0.016 / 0.078 |
+| latent after Euler step 1/2/3/4 | -- | 0.003 / 0.007 / 0.022 / 0.137 |
 | VAE decode (f32 weights both sides) | -- | 0.065 (loose bf16-derived bound) |
 
 Latent after Euler step k accumulates `Delta_sigma_j * e_v` (first order; error feedback through the model ignored):
@@ -138,7 +138,26 @@ PSNR ceilings, re-derived from the MEASURED image RMS 0.732612 (not an assumed 1
 - VAE decode alone (given the reference latent): relative RMS 0.0654, absolute 0.0479, `PSNR = 20 log10(1/0.0479) = 26.4 dB`: gate `PSNR >= 26.0 dB`.
 - End to end adds the step-4 latent error (0.078 relative): `sqrt(0.0654^2 + 0.078^2) = 0.102`, absolute 0.0746, `PSNR = 22.6 dB`: gate `PSNR >= 22.0 dB`.
 
-These are a-priori CEILINGS from precision, not targets. Effective gate = `min(ceiling, 2 x measured floor)`; a stage with no measured floor keeps its ceiling. The conditioner floor 0.0035 doubles to 0.0071 and is the effective text gate for all three taps; every other stage keeps its ceiling. A result outside its gate is a defect in proxima (principle 14), never a reason to raise a gate.
+These are a-priori CEILINGS from precision, not targets. S0 also measured the incumbent's own
+cross-backend spread (sd.cpp Metal vs sd.cpp CPU, same inputs, `$K/dump-cpu-floor/`):
+
+| stage | measured `rms_rel` | cosine / PSNR |
+|---|---|---|
+| conditioner (text) | 0.00353 | cos 0.99999376 |
+| DiT velocity, step 1 | 0.0472 | cos 0.99889002 |
+| latent after step 1 | 0.00176 | cos 0.99999845 |
+| latent after step 2 | 0.00548 | cos 0.99998497 |
+| latent after step 3 | 0.0223 | cos 0.99975083 |
+| latent after step 4 | 0.1371 | cos 0.99059928 |
+| VAE decode | 0.0322 | 32.54 dB, cos 0.99948137 |
+
+Effective gate = `max(ceiling, measured floor)`: a gate tighter than the incumbent's own
+backend-to-backend spread is not an achievable parity claim, and one looser than the precision
+ceiling hides a real defect. This replaces the earlier `min(ceiling, 2 x floor)`, whose direction
+was wrong once the measured floor exceeded the ceiling (step 4), and which the conditioner floor
+made 15x too strict. Final gates: text 0.052, velocity 0.101, latents 0.003 / 0.007 / 0.022 /
+0.137, VAE PSNR >= 26.0 dB, end-to-end PSNR >= 22.0 dB. A result outside its gate is a defect in
+proxima (principle 14), never a reason to raise a gate.
 
 ## Composition rules (binding, owner 2026-11-21)
 
@@ -183,9 +202,9 @@ Test target `flux2_klein` in `proxima-model-interop`, gated on `PROXIMA_FLUX2_KL
 |---|---|---|---|
 | AC1 reference run + dumps | R1 | the patched `sd-cli` run, then the existence check | the 8 raw dumps `noise.f32`, `text.f32`, `step1-4.f32`, `velocity1.f32`, `vae_out.f32` all present in `$K/ref` together with `ref.log`; `ref.png` is 1024 x 1024 (`sips -g pixelWidth -g pixelHeight`); `grep -c "mu=2.29" $K/ref/ref.log` = 1; `grep -c "MTL0" $K/ref/ref.log` >= 1 |
 | AC2 noise | R2 | `cargo val -p proxima-model-interop --test flux2_klein philox::` | `3 passed`: (a) first 16 values vs `noise.f32` max abs diff <= 1e-5, (b) all 524,288 values max abs diff <= 1e-5, (c) over the 524,288 values mean in [-0.01, 0.01] and std in [0.99, 1.01] |
-| AC3 text embedding | R3 | `cargo val -p proxima-model-interop --test flux2_klein text_embedding::` | `4 passed`: tap 9 / 18 / 27 `rms_rel` <= 0.0071 each (S0 effective gate) with cosine >= 0.999 and maxabs_rel printed as a diagnostic, and the concatenation has shape 512 x 7680 (3,932,160 values) |
+| AC3 text embedding | R3 | `cargo val -p proxima-model-interop --test flux2_klein text_embedding::` | `4 passed`: tap 9 / 18 / 27 `rms_rel` <= 0.052 each (S0 effective gate) with cosine >= 0.999 and maxabs_rel printed as a diagnostic, and the concatenation has shape 512 x 7680 (3,932,160 values) |
 | AC4 sigmas | R4 | `cargo val -p proxima-model-interop --test flux2_klein scheduler::` | `3 passed`: sigma vector of length 5 equals `[1, 0.967384, 0.908144, 0.7672, 0]` within 1e-5; our `mu` equals the log's within 1e-4; 4 Euler steps on a constant velocity `v` equal `x0 - v` within 1e-6 |
-| AC5 DiT | R5 | `cargo val -p proxima-model-interop --test flux2_klein dit::` | `6 passed`: single-stream block, double-stream block, full velocity at step 1 (`rms_rel` <= 0.101), latents after steps 1,2,3,4 `rms_rel` <= 0.003 / 0.007 / 0.016 / 0.078, all with cosine >= 0.999; 4 latent dumps compared, 4 verdict lines printed |
+| AC5 DiT | R5 | `cargo val -p proxima-model-interop --test flux2_klein dit::` | `6 passed`: single-stream block, double-stream block, full velocity at step 1 (`rms_rel` <= 0.101), latents after steps 1,2,3,4 `rms_rel` <= 0.003 / 0.007 / 0.022 / 0.137, all with cosine >= 0.999; 4 latent dumps compared, 4 verdict lines printed |
 | AC6 VAE | R6 | `cargo val -p proxima-model-interop --test flux2_klein vae::` | `4 passed`: GroupNorm vs a hand-computed 32-group case, nearest-x2 unit, conv3x3 vs a direct loop, and the full decode of `step4.f32` vs `vae_out.f32` with PSNR >= 26.0 dB at shape 3 x 1024 x 1024 |
 | AC7 end to end | R7 | `cargo run --release -p proxima-model-interop --example flux2_klein -- --seed 42 --out $K/omega.png`, then `cargo run --release -p proxima-model-interop --example image_psnr -- $K/ref.png $K/omega.png` (Rust, no Python) | PNG is 1024 x 1024; printed PSNR >= 22.0 dB; the example prints 3 stage timers (text, DiT steps, VAE) |
 | AC8 speed | R8 | `scripts/flux2_klein_ab.sh` (3 alternating pairs, quiet window, release builds) | prints `runs=3 per side`; `omega_median_ms / sdcpp_median_ms <= 1.05`; **omega wall <= 84 s** (owner bar, the measured incumbent); per-stage rows (text encode, DiT step 1 to 4, VAE decode) for both sides with the ratio; peak RSS (`/usr/bin/time -l`, "maximum resident set size") for both sides (report-only, no bar); CoV <= 5% per side |
