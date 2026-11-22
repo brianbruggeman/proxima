@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use proxima_numeric::decode_blocks;
 use proxima_safetensors::SafetensorsParser;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use proxima_tensor::QuantizedBlock;
 use proxima_tensor::cpu::evaluate_named;
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{
@@ -368,19 +370,53 @@ impl Bound {
         }
     }
 
-    fn run(&self, outputs: &[NodeId]) -> Vec<Vec<f32>> {
+    fn run(&self, outputs: &[NodeId], device: Device) -> Vec<Vec<f32>> {
         let named: Vec<(&str, &[f32])> = self
             .named
             .iter()
             .map(|(name, data)| (name.as_str(), data.as_slice()))
             .collect();
-        let evaluated =
-            evaluate_named(&self.program, &[], &named, outputs).expect("program evaluates");
-        outputs
-            .iter()
-            .map(|node| evaluated.get(*node).expect("output").0.to_vec())
-            .collect()
+        match device {
+            Device::Cpu => {
+                let evaluated = evaluate_named(&self.program, &[], &named, outputs)
+                    .expect("program evaluates");
+                outputs
+                    .iter()
+                    .map(|node| evaluated.get(*node).expect("output").0.to_vec())
+                    .collect()
+            }
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Device::Metal => {
+                let blocks: Vec<(&str, QuantizedBlock<'_>)> = named
+                    .iter()
+                    .map(|(name, data)| (*name, QuantizedBlock::Float32(data)))
+                    .collect();
+                let plan = omega::plan_named(
+                    &self.program,
+                    &[],
+                    &blocks,
+                    outputs,
+                    proxima_numeric::NumericPolicy::default(),
+                )
+                .expect("metal plan");
+                let evaluated =
+                    omega::execute_plan_named(&plan, &blocks).expect("metal executes");
+                outputs
+                    .iter()
+                    .map(|node| evaluated.get(*node).expect("output").0.to_vec())
+                    .collect()
+            }
+            #[cfg(not(all(feature = "metal", target_os = "macos")))]
+            Device::Metal => panic!("the metal backend needs --features metal on macOS"),
+        }
     }
+}
+
+/// Which backend executes a stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Device {
+    Cpu,
+    Metal,
 }
 
 /// One transcription and the values the caller can check.
@@ -388,6 +424,9 @@ pub struct Transcript {
     pub tokens: Vec<u32>,
     pub text: String,
     pub ended_on_eot: bool,
+    pub mel_ms: f64,
+    pub encode_ms: f64,
+    pub decode_ms: f64,
 }
 
 /// A loaded checkpoint ready to transcribe.
@@ -424,6 +463,15 @@ impl Model {
     }
 
     pub fn transcribe(&self, wav: &[f32], language: &str) -> Result<Transcript> {
+        self.transcribe_with(wav, language, Device::Cpu)
+    }
+
+    pub fn transcribe_with(
+        &self,
+        wav: &[f32],
+        language: &str,
+        device: Device,
+    ) -> Result<Transcript> {
         let policy = DecodePolicy::from_checkpoint(
             &self.generation,
             &self.config,
@@ -475,7 +523,9 @@ impl Model {
         mel_bound
             .named
             .insert(STFT_SIN_INPUT.into(), decode(&tables.sin));
-        let mel_values = mel_bound.run(&[mel]).remove(0);
+        let mel_start = std::time::Instant::now();
+        let mel_values = mel_bound.run(&[mel], device).remove(0);
+        let mel_ms = mel_start.elapsed().as_secs_f64() * 1000.0;
         // The encoder consumes the first 2*source_positions frames.
         let needed = (self.shape.source_positions * 2) as usize;
         let mut mel_input = vec![0.0_f32; (self.shape.mels as usize) * needed];
@@ -522,13 +572,16 @@ impl Model {
             outputs.push(*k);
             outputs.push(*v);
         }
-        let values = bound.run(&outputs);
+        let encode_start = std::time::Instant::now();
+        let values = bound.run(&outputs, device);
+        let encode_ms = encode_start.elapsed().as_secs_f64() * 1000.0;
         let cross_values: Vec<(Vec<f32>, Vec<f32>)> = (0..self.shape.decoder_layers)
             .map(|layer| (values[1 + layer * 2].clone(), values[2 + layer * 2].clone()))
             .collect();
 
         let mut tokens: Vec<u32> = policy.prompt().to_vec();
         let mut ended = false;
+        let decode_start = std::time::Instant::now();
         for step in 0..policy.step_cap() as usize {
             let mut decoder = Bound::new(self.shape.clone());
             let n = tokens.len() as u32;
@@ -581,7 +634,7 @@ impl Model {
             decoder
                 .named
                 .insert("positions".into(), (0..n).map(|i| i as f32).collect());
-            let flat = decoder.run(&[logits]).remove(0);
+            let flat = decoder.run(&[logits], device).remove(0);
             let vocab = self.shape.vocab as usize;
             let last = &flat[(n as usize - 1) * vocab..n as usize * vocab];
             let mut row = last.to_vec();
@@ -592,12 +645,16 @@ impl Model {
                 break;
             }
         }
+        let decode_ms = decode_start.elapsed().as_secs_f64() * 1000.0;
         let generated = &tokens[policy.prompt().len()..];
         let text = tokenizer_text(&self.dir, generated)?;
         Ok(Transcript {
             tokens: generated.to_vec(),
             text,
             ended_on_eot: ended,
+            mel_ms,
+            encode_ms,
+            decode_ms,
         })
     }
 }

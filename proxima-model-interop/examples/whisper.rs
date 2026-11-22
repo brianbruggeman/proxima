@@ -9,19 +9,27 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use proxima_model_interop::audio::wav;
-use proxima_model_interop::families::encoder_decoder_host::Model;
+use proxima_model_interop::families::encoder_decoder_host::{Device, Model};
 
 fn main() -> Result<()> {
     let mut wav_path: Option<PathBuf> = None;
     let mut model_path: Option<PathBuf> = None;
     let mut language = String::from("en");
     let mut noise = 0.0_f32;
+    let mut device = Device::Cpu;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--wav" => wav_path = Some(args.next().context("--wav wants a path")?.into()),
             "--model" => model_path = Some(args.next().context("--model wants a path")?.into()),
             "--lang" => language = args.next().context("--lang wants a name")?,
+            "--device" => {
+                device = match args.next().context("--device wants cpu|metal")?.as_str() {
+                    "cpu" => Device::Cpu,
+                    "metal" => Device::Metal,
+                    other => bail!("unknown device {other}"),
+                }
+            }
             "--noise" => {
                 noise = args
                     .next()
@@ -53,12 +61,21 @@ fn main() -> Result<()> {
         }
     }
 
+    let load_start = std::time::Instant::now();
     let model = Model::load(&model_path)?;
-    let transcript = model.transcribe(&samples, &language)?;
+    let load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
+    let transcript = model.transcribe_with(&samples, &language, device)?;
     let ids: Vec<String> = transcript.tokens.iter().map(ToString::to_string).collect();
-    println!("models=1 ids={} noise={noise}", ids.len());
+    println!("models=1 ids={} noise={noise} device={device:?}", ids.len());
     println!("ids={}", ids.join(","));
     println!("eot={}", transcript.ended_on_eot);
+    println!(
+        "load_ms={load_ms:.3} mel_ms={:.3} encode_ms={:.3} decode_ms={:.3} decode_ms_per_token={:.3}",
+        transcript.mel_ms,
+        transcript.encode_ms,
+        transcript.decode_ms,
+        transcript.decode_ms / transcript.tokens.len() as f64,
+    );
     println!("text={}", transcript.text);
     Ok(())
 }
