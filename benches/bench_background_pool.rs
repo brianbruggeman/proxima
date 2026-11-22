@@ -1029,7 +1029,8 @@ fn bench_fork_join(criterion: &mut Criterion) {
                             |left, right| left.wrapping_add(right),
                             chunk_threshold,
                         )
-                        .await;
+                        .await
+                        .expect("bench:par_reduce");
                         std::hint::black_box(sum);
                         total += started.elapsed();
                     }
@@ -1063,7 +1064,8 @@ fn bench_fork_join(criterion: &mut Criterion) {
                             .par_iter(&pool)
                             .map(|&value| fork_join_compute(value))
                             .sum()
-                            .await;
+                            .await
+                            .expect("bench:par_iter_sum");
                         std::hint::black_box(sum);
                         total += started.elapsed();
                     }
@@ -1096,7 +1098,8 @@ fn bench_fork_join(criterion: &mut Criterion) {
                             .par_iter(&pool)
                             .map(|&value| fork_join_compute(value))
                             .collect()
-                            .await;
+                            .await
+                            .expect("bench:par_iter_map_collect");
                         std::hint::black_box(collected);
                         total += started.elapsed();
                     }
@@ -1133,7 +1136,8 @@ fn bench_fork_join(criterion: &mut Criterion) {
                             .par_iter(&pool)
                             .map_async(|value| async move { fork_join_compute(value) })
                             .sum()
-                            .await;
+                            .await
+                            .expect("bench:par_iter_map_async_sum");
                         std::hint::black_box(sum);
                         total += started.elapsed();
                     }
@@ -1154,7 +1158,7 @@ fn bench_fork_join(criterion: &mut Criterion) {
         let arm_name = format!("proxima_par_stream_then_{concurrency}");
         let data_for_arm = data.clone();
         group.bench_function(&arm_name, move |bencher| {
-            use futures::StreamExt;
+            use futures::TryStreamExt;
             use proxima::runtime::prime::os::par::ProximaParStreamExt;
             let pool = Arc::new(ProximaBackgroundPool::with_threads(4).expect("build pool"));
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1169,8 +1173,9 @@ fn bench_fork_join(criterion: &mut Criterion) {
                             .clone()
                             .par_stream(&pool, concurrency)
                             .then(|value| async move { fork_join_compute(value) })
-                            .collect()
-                            .await;
+                            .try_collect()
+                            .await
+                            .expect("bench:par_stream_then");
                         std::hint::black_box(collected);
                         total += started.elapsed();
                     }
@@ -1188,7 +1193,7 @@ fn bench_fork_join(criterion: &mut Criterion) {
     {
         let data_for_arm = data.clone();
         group.bench_function("proxima_par_stream_then_ordered_64", move |bencher| {
-            use futures::StreamExt;
+            use futures::TryStreamExt;
             use proxima::runtime::prime::os::par::ProximaParStreamExt;
             let pool = Arc::new(ProximaBackgroundPool::with_threads(4).expect("build pool"));
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1203,8 +1208,9 @@ fn bench_fork_join(criterion: &mut Criterion) {
                             .clone()
                             .par_stream(&pool, 64)
                             .then_ordered(|value| async move { fork_join_compute(value) })
-                            .collect()
-                            .await;
+                            .try_collect()
+                            .await
+                            .expect("bench:par_stream_then_ordered");
                         std::hint::black_box(collected);
                         total += started.elapsed();
                     }
@@ -1236,7 +1242,8 @@ fn bench_fork_join(criterion: &mut Criterion) {
                             |&value| value % 2 == 0,
                             1024,
                         )
-                        .await;
+                        .await
+                        .expect("bench:par_filter");
                         std::hint::black_box(result);
                         total += started.elapsed();
                     }
@@ -1281,7 +1288,9 @@ fn bench_fork_join(criterion: &mut Criterion) {
                 runtime.block_on(async {
                     for _ in 0..iters {
                         let started = Instant::now();
-                        let result = par_sort_by(&pool, sort_data.clone(), |a, b| a.cmp(b)).await;
+                        let result = par_sort_by(&pool, sort_data.clone(), |a, b| a.cmp(b))
+                            .await
+                            .expect("bench:par_sort_by");
                         std::hint::black_box(result);
                         total += started.elapsed();
                     }
@@ -1328,7 +1337,8 @@ fn bench_fork_join(criterion: &mut Criterion) {
                                 *item = item.wrapping_add(1);
                             }
                         })
-                        .await;
+                        .await
+                        .expect("bench:par_chunks_mut");
                         std::hint::black_box(&chunks_data);
                         total += started.elapsed();
                     }
@@ -1378,7 +1388,8 @@ fn bench_fork_join(criterion: &mut Criterion) {
                         par_bridge(&pool, 0u32..FORK_JOIN_ELEMENTS as u32, 4, move |value| {
                             acc_for_work.fetch_add(fork_join_compute(value), Ordering::Relaxed);
                         })
-                        .await;
+                        .await
+                        .expect("bench:par_bridge");
                         std::hint::black_box(acc.load(Ordering::Relaxed));
                         total += started.elapsed();
                     }

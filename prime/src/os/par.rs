@@ -76,17 +76,15 @@ pub fn default_threshold_for(pool: &ProximaBackgroundPool, slice_len: usize) -> 
 /// cheap — closures over `Copy` state or `Arc` of state). they must be
 /// `Send + Sync + 'static` to satisfy the spawn signature.
 ///
-/// errors from individual leaves are not propagated — a dropped sender
-/// causes that leaf to contribute a fresh `identity()` instead of
-/// crashing the reduce. callers that need explicit error propagation
-/// should use `try_par_reduce` (not yet implemented).
+/// a lost leaf (a panic inside `work` or `reduce`, which drops the job's
+/// sender) is returned as the pool's `ProximaError`, never as a partial result.
 pub async fn par_reduce<Item, Acc, Work, Reduce, Identity>(
     pool: &Arc<ProximaBackgroundPool>,
     slice: Arc<[Item]>,
     identity: Identity,
     work: Work,
     reduce: Reduce,
-) -> Acc
+) -> Result<Acc, ProximaError>
 where
     Item: Sync + Send + 'static,
     Acc: Send + 'static,
@@ -108,7 +106,7 @@ pub async fn par_reduce_with_threshold<Item, Acc, Work, Reduce, Identity>(
     work: Work,
     reduce: Reduce,
     chunk_threshold: usize,
-) -> Acc
+) -> Result<Acc, ProximaError>
 where
     Item: Sync + Send + 'static,
     Acc: Send + 'static,
@@ -117,7 +115,7 @@ where
     Identity: Fn() -> Acc + Send + Sync + 'static + Clone,
 {
     if slice.is_empty() {
-        return identity();
+        return Ok(identity());
     }
     let len = slice.len();
     par_reduce_range(
@@ -151,7 +149,7 @@ fn par_reduce_range<Item, Acc, Work, Reduce, Identity>(
     work: Work,
     reduce: Reduce,
     chunk_threshold: usize,
-) -> Pin<Box<dyn Future<Output = Acc> + Send + 'static>>
+) -> Pin<Box<dyn Future<Output = Result<Acc, ProximaError>> + Send + 'static>>
 where
     Item: Sync + Send + 'static,
     Acc: Send + 'static,
@@ -177,7 +175,7 @@ where
                 }
                 Ok::<Acc, ProximaError>(accumulator)
             });
-            return leaf_handle.await.unwrap_or_else(|_| identity());
+            return leaf_handle.await;
         }
         // split: recurse on both halves concurrently. join via futures::join.
         let mid = start + len / 2;
@@ -202,7 +200,7 @@ where
             chunk_threshold,
         );
         let (left, right) = futures::join!(left_future, right_future);
-        reduce(left, right)
+        Ok(reduce(left?, right?))
     })
 }
 
@@ -210,16 +208,19 @@ where
 /// [`par_reduce`] but leaves only run `work(&item)` for its side effects.
 ///
 /// `work` must be `Send + Sync + 'static + Clone` so it can be passed to
-/// each branch independently. errors from individual leaf spawns are
-/// dropped — a failed leaf simply doesn't run, parallel siblings are
-/// unaffected.
-pub async fn par_each<Item, Work>(pool: &Arc<ProximaBackgroundPool>, slice: Arc<[Item]>, work: Work)
+/// each branch independently. a lost leaf is returned as the pool's
+/// `ProximaError`.
+pub async fn par_each<Item, Work>(
+    pool: &Arc<ProximaBackgroundPool>,
+    slice: Arc<[Item]>,
+    work: Work,
+) -> Result<(), ProximaError>
 where
     Item: Sync + Send + 'static,
     Work: Fn(&Item) + Send + Sync + 'static + Clone,
 {
     let threshold = default_threshold_for(pool, slice.len());
-    par_each_with_threshold(pool, slice, work, threshold).await;
+    par_each_with_threshold(pool, slice, work, threshold).await
 }
 
 /// explicit-threshold variant of [`par_each`].
@@ -228,15 +229,16 @@ pub async fn par_each_with_threshold<Item, Work>(
     slice: Arc<[Item]>,
     work: Work,
     chunk_threshold: usize,
-) where
+) -> Result<(), ProximaError>
+where
     Item: Sync + Send + 'static,
     Work: Fn(&Item) + Send + Sync + 'static + Clone,
 {
     if slice.is_empty() {
-        return;
+        return Ok(());
     }
     let len = slice.len();
-    par_each_range(pool.clone(), slice, 0, len, work, chunk_threshold).await;
+    par_each_range(pool.clone(), slice, 0, len, work, chunk_threshold).await
 }
 
 fn par_each_range<Item, Work>(
@@ -246,7 +248,7 @@ fn par_each_range<Item, Work>(
     end: usize,
     work: Work,
     chunk_threshold: usize,
-) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + 'static>>
 where
     Item: Sync + Send + 'static,
     Work: Fn(&Item) + Send + Sync + 'static + Clone,
@@ -262,8 +264,7 @@ where
                 }
                 Ok::<(), ProximaError>(())
             });
-            let _ = leaf_handle.await;
-            return;
+            return leaf_handle.await;
         }
         let mid = start + len / 2;
         let left_future = par_each_range(
@@ -275,7 +276,8 @@ where
             chunk_threshold,
         );
         let right_future = par_each_range(pool, slice, mid, end, work, chunk_threshold);
-        let (_left, _right) = futures::join!(left_future, right_future);
+        let (left, right) = futures::join!(left_future, right_future);
+        left.and(right)
     })
 }
 
@@ -299,7 +301,7 @@ pub async fn par_reduce_async<Item, Acc, Work, Fut, Reduce, Identity>(
     identity: Identity,
     work: Work,
     reduce: Reduce,
-) -> Acc
+) -> Result<Acc, ProximaError>
 where
     Item: Sync + Send + Clone + 'static,
     Acc: Send + 'static,
@@ -321,7 +323,7 @@ pub async fn par_reduce_async_with_threshold<Item, Acc, Work, Fut, Reduce, Ident
     work: Work,
     reduce: Reduce,
     chunk_threshold: usize,
-) -> Acc
+) -> Result<Acc, ProximaError>
 where
     Item: Sync + Send + Clone + 'static,
     Acc: Send + 'static,
@@ -331,7 +333,7 @@ where
     Identity: Fn() -> Acc + Send + Sync + 'static + Clone,
 {
     if slice.is_empty() {
-        return identity();
+        return Ok(identity());
     }
     let len = slice.len();
     par_reduce_async_range(
@@ -355,7 +357,7 @@ fn par_reduce_async_range<Item, Acc, Work, Fut, Reduce, Identity>(
     work: Work,
     reduce: Reduce,
     chunk_threshold: usize,
-) -> Pin<Box<dyn Future<Output = Acc> + Send + 'static>>
+) -> Pin<Box<dyn Future<Output = Result<Acc, ProximaError>> + Send + 'static>>
 where
     Item: Sync + Send + Clone + 'static,
     Acc: Send + 'static,
@@ -381,7 +383,7 @@ where
                 }
                 Ok::<Acc, ProximaError>(accumulator)
             });
-            return leaf_handle.await.unwrap_or_else(|_| identity());
+            return leaf_handle.await;
         }
         let mid = start + len / 2;
         let left_future = par_reduce_async_range(
@@ -403,7 +405,7 @@ where
             chunk_threshold,
         );
         let (left, right) = futures::join!(left_future, right_future);
-        reduce(left, right)
+        Ok(reduce(left?, right?))
     })
 }
 
@@ -415,13 +417,14 @@ pub async fn par_each_async<Item, Work, Fut>(
     pool: &Arc<ProximaBackgroundPool>,
     slice: Arc<[Item]>,
     work: Work,
-) where
+) -> Result<(), ProximaError>
+where
     Item: Sync + Send + Clone + 'static,
     Work: Fn(Item) -> Fut + Send + Sync + 'static + Clone,
     Fut: Future<Output = ()> + Send + 'static,
 {
     let threshold = default_threshold_for(pool, slice.len());
-    par_each_async_with_threshold(pool, slice, work, threshold).await;
+    par_each_async_with_threshold(pool, slice, work, threshold).await
 }
 
 /// explicit-threshold variant of [`par_each_async`].
@@ -431,16 +434,17 @@ pub async fn par_each_async_with_threshold<Item, Work, Fut>(
     slice: Arc<[Item]>,
     work: Work,
     chunk_threshold: usize,
-) where
+) -> Result<(), ProximaError>
+where
     Item: Sync + Send + Clone + 'static,
     Work: Fn(Item) -> Fut + Send + Sync + 'static + Clone,
     Fut: Future<Output = ()> + Send + 'static,
 {
     if slice.is_empty() {
-        return;
+        return Ok(());
     }
     let len = slice.len();
-    par_each_async_range(pool.clone(), slice, 0, len, work, chunk_threshold).await;
+    par_each_async_range(pool.clone(), slice, 0, len, work, chunk_threshold).await
 }
 
 #[cfg(feature = "runtime-prime-bgpool-async")]
@@ -451,7 +455,7 @@ fn par_each_async_range<Item, Work, Fut>(
     end: usize,
     work: Work,
     chunk_threshold: usize,
-) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>
+) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + 'static>>
 where
     Item: Sync + Send + Clone + 'static,
     Work: Fn(Item) -> Fut + Send + Sync + 'static + Clone,
@@ -469,8 +473,7 @@ where
                 }
                 Ok::<(), ProximaError>(())
             });
-            let _ = leaf_handle.await;
-            return;
+            return leaf_handle.await;
         }
         let mid = start + len / 2;
         let left_future = par_each_async_range(
@@ -482,7 +485,8 @@ where
             chunk_threshold,
         );
         let right_future = par_each_async_range(pool, slice, mid, end, work, chunk_threshold);
-        let (_left, _right) = futures::join!(left_future, right_future);
+        let (left, right) = futures::join!(left_future, right_future);
+        left.and(right)
     })
 }
 
@@ -495,7 +499,7 @@ pub async fn par_map_collect<Item, Output, F>(
     pool: &Arc<ProximaBackgroundPool>,
     slice: Arc<[Item]>,
     map_fn: F,
-) -> Vec<Output>
+) -> Result<Vec<Output>, ProximaError>
 where
     Item: Sync + Send + 'static,
     Output: Send + 'static,
@@ -511,14 +515,14 @@ pub async fn par_map_collect_with_threshold<Item, Output, F>(
     slice: Arc<[Item]>,
     map_fn: F,
     chunk_threshold: usize,
-) -> Vec<Output>
+) -> Result<Vec<Output>, ProximaError>
 where
     Item: Sync + Send + 'static,
     Output: Send + 'static,
     F: Fn(&Item) -> Output + Send + Sync + 'static + Clone,
 {
     if slice.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let len = slice.len();
     par_map_collect_range(pool.clone(), slice, 0, len, map_fn, chunk_threshold).await
@@ -531,7 +535,7 @@ fn par_map_collect_range<Item, Output, F>(
     end: usize,
     map_fn: F,
     chunk_threshold: usize,
-) -> Pin<Box<dyn Future<Output = Vec<Output>> + Send + 'static>>
+) -> Pin<Box<dyn Future<Output = Result<Vec<Output>, ProximaError>> + Send + 'static>>
 where
     Item: Sync + Send + 'static,
     Output: Send + 'static,
@@ -549,7 +553,7 @@ where
                 }
                 Ok::<Vec<Output>, ProximaError>(output_vec)
             });
-            return leaf_handle.await.unwrap_or_default();
+            return leaf_handle.await;
         }
         let mid = start + len / 2;
         let left_future = par_map_collect_range(
@@ -561,9 +565,10 @@ where
             chunk_threshold,
         );
         let right_future = par_map_collect_range(pool, slice, mid, end, map_fn, chunk_threshold);
-        let (mut left, right) = futures::join!(left_future, right_future);
-        left.extend(right);
-        left
+        let (left, right) = futures::join!(left_future, right_future);
+        let mut merged = left?;
+        merged.extend(right?);
+        Ok(merged)
     })
 }
 
@@ -575,7 +580,7 @@ pub async fn par_map_collect_async<Item, Output, F, Fut>(
     pool: &Arc<ProximaBackgroundPool>,
     slice: Arc<[Item]>,
     map_fn: F,
-) -> Vec<Output>
+) -> Result<Vec<Output>, ProximaError>
 where
     Item: Sync + Send + Clone + 'static,
     Output: Send + 'static,
@@ -592,7 +597,7 @@ pub async fn par_map_collect_async_with_threshold<Item, Output, F, Fut>(
     slice: Arc<[Item]>,
     map_fn: F,
     chunk_threshold: usize,
-) -> Vec<Output>
+) -> Result<Vec<Output>, ProximaError>
 where
     Item: Sync + Send + Clone + 'static,
     Output: Send + 'static,
@@ -600,7 +605,7 @@ where
     Fut: Future<Output = Output> + Send + 'static,
 {
     if slice.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let len = slice.len();
     par_map_collect_async_range(pool.clone(), slice, 0, len, map_fn, chunk_threshold).await
@@ -614,7 +619,7 @@ fn par_map_collect_async_range<Item, Output, F, Fut>(
     end: usize,
     map_fn: F,
     chunk_threshold: usize,
-) -> Pin<Box<dyn Future<Output = Vec<Output>> + Send + 'static>>
+) -> Pin<Box<dyn Future<Output = Result<Vec<Output>, ProximaError>> + Send + 'static>>
 where
     Item: Sync + Send + Clone + 'static,
     Output: Send + 'static,
@@ -634,7 +639,7 @@ where
                 }
                 Ok::<Vec<Output>, ProximaError>(output_vec)
             });
-            return leaf_handle.await.unwrap_or_default();
+            return leaf_handle.await;
         }
         let mid = start + len / 2;
         let left_future = par_map_collect_async_range(
@@ -647,9 +652,10 @@ where
         );
         let right_future =
             par_map_collect_async_range(pool, slice, mid, end, map_fn, chunk_threshold);
-        let (mut left, right) = futures::join!(left_future, right_future);
-        left.extend(right);
-        left
+        let (left, right) = futures::join!(left_future, right_future);
+        let mut merged = left?;
+        merged.extend(right?);
+        Ok(merged)
     })
 }
 
@@ -715,14 +721,18 @@ impl<Item: Sync + Send + 'static> ProximaParBuilder<Item> {
         }
     }
 
-    pub async fn for_each<Work>(self, work: Work)
+    pub async fn for_each<Work>(self, work: Work) -> Result<(), ProximaError>
     where
         Work: Fn(&Item) + Send + Sync + 'static + Clone,
     {
-        par_each_with_threshold(&self.pool, self.slice, work, self.threshold).await;
+        par_each_with_threshold(&self.pool, self.slice, work, self.threshold).await
     }
 
-    pub async fn reduce<Identity, R>(self, identity: Identity, reduce: R) -> Item
+    pub async fn reduce<Identity, R>(
+        self,
+        identity: Identity,
+        reduce: R,
+    ) -> Result<Item, ProximaError>
     where
         Item: Clone,
         Identity: Fn() -> Item + Send + Sync + 'static + Clone,
@@ -739,7 +749,7 @@ impl<Item: Sync + Send + 'static> ProximaParBuilder<Item> {
         .await
     }
 
-    pub async fn sum(self) -> Item
+    pub async fn sum(self) -> Result<Item, ProximaError>
     where
         Item: Clone + Default + std::ops::Add<Output = Item> + Send + Sync + 'static,
     {
@@ -774,7 +784,11 @@ where
     Output: Send + 'static,
     F: Fn(&Item) -> Output + Send + Sync + 'static + Clone,
 {
-    pub async fn reduce<Identity, R>(self, identity: Identity, reduce: R) -> Output
+    pub async fn reduce<Identity, R>(
+        self,
+        identity: Identity,
+        reduce: R,
+    ) -> Result<Output, ProximaError>
     where
         Identity: Fn() -> Output + Send + Sync + 'static + Clone,
         R: Fn(Output, Output) -> Output + Send + Sync + 'static + Clone,
@@ -790,7 +804,7 @@ where
         .await
     }
 
-    pub async fn sum(self) -> Output
+    pub async fn sum(self) -> Result<Output, ProximaError>
     where
         Output: Default + std::ops::Add<Output = Output>,
     {
@@ -805,7 +819,7 @@ where
         .await
     }
 
-    pub async fn for_each<Sink>(self, sink: Sink)
+    pub async fn for_each<Sink>(self, sink: Sink) -> Result<(), ProximaError>
     where
         Sink: Fn(Output) + Send + Sync + 'static + Clone,
     {
@@ -816,13 +830,13 @@ where
             move |item: &Item| sink(map_fn(item)),
             self.threshold,
         )
-        .await;
+        .await
     }
 
     /// gather every mapped output into a `Vec<Output>` in input order.
     /// each leaf builds its own Vec sized for its chunk; merges
     /// concatenate left into right preserving order across the tree.
-    pub async fn collect(self) -> Vec<Output> {
+    pub async fn collect(self) -> Result<Vec<Output>, ProximaError> {
         par_map_collect_with_threshold(&self.pool, self.slice, self.map_fn, self.threshold).await
     }
 }
@@ -859,12 +873,12 @@ impl<Item: Sync + Send + Clone + 'static> ProximaParBuilder<Item> {
 
     /// fire-and-forget async variant of [`for_each`]. closure receives
     /// `Item` by value and returns a future.
-    pub async fn for_each_async<Work, Fut>(self, work: Work)
+    pub async fn for_each_async<Work, Fut>(self, work: Work) -> Result<(), ProximaError>
     where
         Work: Fn(Item) -> Fut + Send + Sync + 'static + Clone,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        par_each_async_with_threshold(&self.pool, self.slice, work, self.threshold).await;
+        par_each_async_with_threshold(&self.pool, self.slice, work, self.threshold).await
     }
 }
 
@@ -889,7 +903,11 @@ where
     F: Fn(Item) -> Fut + Send + Sync + 'static + Clone,
     Fut: Future<Output = Output> + Send + 'static,
 {
-    pub async fn reduce<Identity, R>(self, identity: Identity, reduce: R) -> Output
+    pub async fn reduce<Identity, R>(
+        self,
+        identity: Identity,
+        reduce: R,
+    ) -> Result<Output, ProximaError>
     where
         Identity: Fn() -> Output + Send + Sync + 'static + Clone,
         R: Fn(Output, Output) -> Output + Send + Sync + 'static + Clone,
@@ -905,7 +923,7 @@ where
         .await
     }
 
-    pub async fn sum(self) -> Output
+    pub async fn sum(self) -> Result<Output, ProximaError>
     where
         Output: Default + std::ops::Add<Output = Output>,
     {
@@ -920,7 +938,7 @@ where
         .await
     }
 
-    pub async fn for_each<Sink>(self, sink: Sink)
+    pub async fn for_each<Sink>(self, sink: Sink) -> Result<(), ProximaError>
     where
         Sink: Fn(Output) + Send + Sync + 'static + Clone,
     {
@@ -942,14 +960,14 @@ where
             },
             self.threshold,
         )
-        .await;
+        .await
     }
 
     /// gather every mapped output into a `Vec<Output>` in input order.
     /// async sibling of [`ProximaParMap::collect`]; the parked worker
     /// thread drives each per-item future before appending to the leaf's
     /// local Vec.
-    pub async fn collect(self) -> Vec<Output> {
+    pub async fn collect(self) -> Result<Vec<Output>, ProximaError> {
         par_map_collect_async_with_threshold(&self.pool, self.slice, self.map_fn, self.threshold)
             .await
     }
@@ -1004,8 +1022,10 @@ impl<Item: Sync + Send + Clone + 'static> ProximaParStreamExt<Item> for &Arc<[It
 }
 
 /// builder returned by `.par_stream()`. terminal: `.then(F)` returns a
-/// `Stream<Item = Output>` driven by the BackgroundPool's polling
-/// workers — N futures in flight at a time, output in completion order.
+/// `Stream<Item = Result<Output, ProximaError>>` driven by the
+/// BackgroundPool's polling workers — N futures in flight at a time,
+/// output in completion order. a lost leaf yields one `Err`, then the
+/// stream ends.
 #[cfg(feature = "runtime-prime-bgpool-async")]
 pub struct ProximaParStream<Item> {
     slice: Arc<[Item]>,
@@ -1015,7 +1035,8 @@ pub struct ProximaParStream<Item> {
 
 #[cfg(feature = "runtime-prime-bgpool-async")]
 impl<Item: Sync + Send + Clone + 'static> ProximaParStream<Item> {
-    /// run an async closure over each item, returning a `Stream<Item = Output>`.
+    /// run an async closure over each item, returning a
+    /// `Stream<Item = Result<Output, ProximaError>>`.
     /// output is emitted in completion order — not input order. for
     /// ordered output, callers can collect into a `Vec<(usize, Output)>`
     /// and sort, or wait for an `ordered = true` mode (not yet shipped).
@@ -1034,12 +1055,15 @@ impl<Item: Sync + Send + Clone + 'static> ProximaParStream<Item> {
             work,
             concurrency: self.concurrency,
             next_index: 0,
+            failed: false,
             in_flight: futures::stream::FuturesUnordered::new(),
             _output_marker: PhantomData,
         }
     }
 
-    /// ordered variant of [`then`]. output is emitted in input order,
+    /// ordered variant of [`then`]; the stream yields
+    /// `Result<Output, ProximaError>` the same way (one `Err`, then end).
+    /// output is emitted in input order,
     /// not completion order — an out-of-order completion goes into a
     /// reorder buffer and waits for its turn. costs O(concurrency) of
     /// buffer space and one HashMap lookup per emission.
@@ -1064,6 +1088,7 @@ impl<Item: Sync + Send + Clone + 'static> ProximaParStream<Item> {
             concurrency: self.concurrency,
             next_dispatch_index: 0,
             next_emit_index: 0,
+            failed: false,
             in_flight: futures::stream::FuturesUnordered::new(),
             reorder: std::collections::HashMap::new(),
             _output_marker: PhantomData,
@@ -1093,6 +1118,7 @@ where
     work: Work,
     concurrency: usize,
     next_index: usize,
+    failed: bool,
     in_flight: futures::stream::FuturesUnordered<StreamSpawnFuture<Output>>,
     _output_marker: PhantomData<fn() -> Work>,
 }
@@ -1105,7 +1131,7 @@ where
     Fut: Future<Output = Output> + Send + 'static,
     Output: Send + 'static,
 {
-    type Item = Output;
+    type Item = Result<Output, ProximaError>;
 
     fn poll_next(
         self: Pin<&mut Self>,
@@ -1115,6 +1141,9 @@ where
         // structurally. FuturesUnordered, Arc, and primitive fields all
         // implement Unpin.
         let this = unsafe { self.get_unchecked_mut() };
+        if this.failed {
+            return std::task::Poll::Ready(None);
+        }
         // refill: top up in_flight to `concurrency`, pulling items by
         // index from the slice. each push spawns one future on the
         // BackgroundPool via spawn_async; the worker thread
@@ -1127,11 +1156,13 @@ where
             this.in_flight.push(Box::pin(handle));
         }
         // drive: poll FuturesUnordered for the next ready completion.
-        // map Err (worker dropped sender) to end-of-stream — extremely
-        // rare; would only happen on a panic during spawn_async wiring.
+        // a lost leaf yields its error once, then the stream ends.
         match Pin::new(&mut this.in_flight).poll_next(context) {
-            std::task::Poll::Ready(Some(Ok(output))) => std::task::Poll::Ready(Some(output)),
-            std::task::Poll::Ready(Some(Err(_))) => std::task::Poll::Ready(None),
+            std::task::Poll::Ready(Some(Ok(output))) => std::task::Poll::Ready(Some(Ok(output))),
+            std::task::Poll::Ready(Some(Err(error))) => {
+                this.failed = true;
+                std::task::Poll::Ready(Some(Err(error)))
+            }
             std::task::Poll::Ready(None) => {
                 // in_flight empty AND iterator exhausted → stream done.
                 // otherwise the refill above would have pushed something.
@@ -1177,6 +1208,7 @@ where
     concurrency: usize,
     next_dispatch_index: usize,
     next_emit_index: usize,
+    failed: bool,
     in_flight: futures::stream::FuturesUnordered<StreamOrderedSpawnFuture<Output>>,
     reorder: std::collections::HashMap<usize, Output>,
     _output_marker: PhantomData<fn() -> Work>,
@@ -1190,7 +1222,7 @@ where
     Fut: Future<Output = Output> + Send + 'static,
     Output: Send + 'static,
 {
-    type Item = Output;
+    type Item = Result<Output, ProximaError>;
 
     fn poll_next(
         self: Pin<&mut Self>,
@@ -1199,6 +1231,9 @@ where
         // SAFETY: project mutably — FuturesUnordered, HashMap, Arc, and
         // primitive fields are all Unpin.
         let this = unsafe { self.get_unchecked_mut() };
+        if this.failed {
+            return std::task::Poll::Ready(None);
+        }
 
         // emit fast path: if the next-expected index is already in the
         // reorder buffer, return it without polling in_flight.
@@ -1206,7 +1241,7 @@ where
             this.next_emit_index += 1;
             // refill in_flight before returning so producers stay primed.
             refill_ordered(this);
-            return std::task::Poll::Ready(Some(output));
+            return std::task::Poll::Ready(Some(Ok(output)));
         }
 
         // refill in_flight to keep concurrency primed.
@@ -1221,13 +1256,16 @@ where
                     if index == this.next_emit_index {
                         this.next_emit_index += 1;
                         refill_ordered(this);
-                        return std::task::Poll::Ready(Some(output));
+                        return std::task::Poll::Ready(Some(Ok(output)));
                     }
                     this.reorder.insert(index, output);
                     // keep polling — another completion might be the one we need.
                 }
-                std::task::Poll::Ready(Some(Err(_))) => {
-                    return std::task::Poll::Ready(None);
+                std::task::Poll::Ready(Some(Err(error))) => {
+                    // ending after the error: the reorder buffer would wait
+                    // forever for the failed leaf's index.
+                    this.failed = true;
+                    return std::task::Poll::Ready(Some(Err(error)));
                 }
                 std::task::Poll::Ready(None) => {
                     // in_flight is empty. if dispatch is also done and
@@ -1292,7 +1330,7 @@ pub async fn par_filter<Item, Pred>(
     pool: &Arc<ProximaBackgroundPool>,
     slice: Arc<[Item]>,
     pred: Pred,
-) -> Vec<Item>
+) -> Result<Vec<Item>, ProximaError>
 where
     Item: Sync + Send + Clone + 'static,
     Pred: Fn(&Item) -> bool + Send + Sync + 'static + Clone,
@@ -1307,13 +1345,13 @@ pub async fn par_filter_with_threshold<Item, Pred>(
     slice: Arc<[Item]>,
     pred: Pred,
     chunk_threshold: usize,
-) -> Vec<Item>
+) -> Result<Vec<Item>, ProximaError>
 where
     Item: Sync + Send + Clone + 'static,
     Pred: Fn(&Item) -> bool + Send + Sync + 'static + Clone,
 {
     if slice.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let len = slice.len();
     par_filter_range(pool.clone(), slice, 0, len, pred, chunk_threshold).await
@@ -1326,7 +1364,7 @@ fn par_filter_range<Item, Pred>(
     end: usize,
     pred: Pred,
     chunk_threshold: usize,
-) -> Pin<Box<dyn Future<Output = Vec<Item>> + Send + 'static>>
+) -> Pin<Box<dyn Future<Output = Result<Vec<Item>, ProximaError>> + Send + 'static>>
 where
     Item: Sync + Send + Clone + 'static,
     Pred: Fn(&Item) -> bool + Send + Sync + 'static + Clone,
@@ -1344,7 +1382,7 @@ where
                     .collect();
                 Ok::<Vec<Item>, ProximaError>(accepted)
             });
-            return leaf_handle.await.unwrap_or_default();
+            return leaf_handle.await;
         }
         let mid = start + len / 2;
         let left_future = par_filter_range(
@@ -1356,9 +1394,10 @@ where
             chunk_threshold,
         );
         let right_future = par_filter_range(pool, slice, mid, end, pred, chunk_threshold);
-        let (mut left, right) = futures::join!(left_future, right_future);
-        left.extend(right);
-        left
+        let (left, right) = futures::join!(left_future, right_future);
+        let mut merged = left?;
+        merged.extend(right?);
+        Ok(merged)
     })
 }
 
@@ -1376,7 +1415,10 @@ where
 /// parallel merge sort. output is a sorted `Vec<Item>`. recursive split
 /// via `pool.spawn`; base case sorts a local sub-vec; merges combine two
 /// sorted halves via a serial merge walk.
-pub async fn par_sort<Item>(pool: &Arc<ProximaBackgroundPool>, data: Vec<Item>) -> Vec<Item>
+pub async fn par_sort<Item>(
+    pool: &Arc<ProximaBackgroundPool>,
+    data: Vec<Item>,
+) -> Result<Vec<Item>, ProximaError>
 where
     Item: Send + Ord + 'static,
 {
@@ -1389,7 +1431,7 @@ pub async fn par_sort_with_threshold<Item>(
     pool: &Arc<ProximaBackgroundPool>,
     data: Vec<Item>,
     chunk_threshold: usize,
-) -> Vec<Item>
+) -> Result<Vec<Item>, ProximaError>
 where
     Item: Send + Ord + 'static,
 {
@@ -1401,7 +1443,7 @@ pub async fn par_sort_by<Item, Compare>(
     pool: &Arc<ProximaBackgroundPool>,
     data: Vec<Item>,
     compare: Compare,
-) -> Vec<Item>
+) -> Result<Vec<Item>, ProximaError>
 where
     Item: Send + 'static,
     Compare: Fn(&Item, &Item) -> std::cmp::Ordering + Send + Sync + 'static + Clone,
@@ -1415,7 +1457,7 @@ where
 pub async fn par_sort_unstable<Item>(
     pool: &Arc<ProximaBackgroundPool>,
     data: Vec<Item>,
-) -> Vec<Item>
+) -> Result<Vec<Item>, ProximaError>
 where
     Item: Send + Ord + 'static,
 {
@@ -1506,7 +1548,7 @@ fn par_sort_ord_range<Item>(
     data: Vec<Item>,
     chunk_threshold: usize,
     unstable: bool,
-) -> Pin<Box<dyn Future<Output = Vec<Item>> + Send + 'static>>
+) -> Pin<Box<dyn Future<Output = Result<Vec<Item>, ProximaError>> + Send + 'static>>
 where
     Item: Send + Ord + 'static,
 {
@@ -1521,7 +1563,7 @@ where
                 }
                 Ok::<Vec<Item>, ProximaError>(chunk)
             });
-            return sorted_handle.await.unwrap_or_default();
+            return sorted_handle.await;
         }
         let mid = data.len() / 2;
         let mut data_iter = data.into_iter();
@@ -1530,7 +1572,7 @@ where
         let left_future = par_sort_ord_range(pool.clone(), left_half, chunk_threshold, unstable);
         let right_future = par_sort_ord_range(pool, right_half, chunk_threshold, unstable);
         let (sorted_left, sorted_right) = futures::join!(left_future, right_future);
-        sorted_merge(sorted_left, sorted_right)
+        Ok(sorted_merge(sorted_left?, sorted_right?))
     })
 }
 
@@ -1539,7 +1581,7 @@ fn par_sort_by_range<Item, Compare>(
     data: Vec<Item>,
     compare: Compare,
     chunk_threshold: usize,
-) -> Pin<Box<dyn Future<Output = Vec<Item>> + Send + 'static>>
+) -> Pin<Box<dyn Future<Output = Result<Vec<Item>, ProximaError>> + Send + 'static>>
 where
     Item: Send + 'static,
     Compare: Fn(&Item, &Item) -> std::cmp::Ordering + Send + Sync + 'static + Clone,
@@ -1552,7 +1594,7 @@ where
                 chunk.sort_by(|a, b| compare_for_leaf(a, b));
                 Ok::<Vec<Item>, ProximaError>(chunk)
             });
-            return sorted_handle.await.unwrap_or_default();
+            return sorted_handle.await;
         }
         let mid = data.len() / 2;
         let mut data_iter = data.into_iter();
@@ -1562,7 +1604,7 @@ where
             par_sort_by_range(pool.clone(), left_half, compare.clone(), chunk_threshold);
         let right_future = par_sort_by_range(pool, right_half, compare.clone(), chunk_threshold);
         let (sorted_left, sorted_right) = futures::join!(left_future, right_future);
-        sorted_merge_by(sorted_left, sorted_right, &compare)
+        Ok(sorted_merge_by(sorted_left?, sorted_right?, &compare))
     })
 }
 
@@ -1583,18 +1625,20 @@ where
 ///
 /// `work` receives `&mut [T]` and must not alias or outlive the slice.
 /// `T: Send` is sufficient because each chunk is exclusively owned by
-/// its spawned closure for the duration of that spawn.
+/// its spawned closure for the duration of that spawn. every handle is
+/// awaited before a pool error is returned, so no worker outlives the call.
 pub async fn par_chunks_mut<Item, Work>(
     pool: &Arc<ProximaBackgroundPool>,
     slice: &mut [Item],
     chunk_size: usize,
     work: Work,
-) where
+) -> Result<(), ProximaError>
+where
     Item: Send + 'static,
     Work: Fn(&mut [Item]) + Send + Sync + 'static + Clone,
 {
     if slice.is_empty() || chunk_size == 0 {
-        return;
+        return Ok(());
     }
 
     let ptr = slice.as_mut_ptr();
@@ -1624,9 +1668,11 @@ pub async fn par_chunks_mut<Item, Work>(
             Ok::<(), ProximaError>(())
         }));
     }
+    let mut outcome = Ok(());
     for handle in handles {
-        let _ = handle.await;
+        outcome = outcome.and(handle.await);
     }
+    outcome
 }
 
 // ---- scope ----
@@ -1649,9 +1695,9 @@ pub async fn par_chunks_mut<Item, Work>(
 /// caller stack) due to the pool's `'static` spawn bound. for borrowing
 /// use cases, wrap shared state in an `Arc` or capture owned clones.
 ///
-/// all spawned tasks are awaited even if some panic — drop order matches
-/// spawn order.
-pub async fn scope<F>(pool: &Arc<ProximaBackgroundPool>, scope_fn: F)
+/// all spawned tasks are awaited even if some panic, then a lost task is
+/// returned as the pool's `ProximaError`.
+pub async fn scope<F>(pool: &Arc<ProximaBackgroundPool>, scope_fn: F) -> Result<(), ProximaError>
 where
     F: FnOnce(&ProximaScope),
 {
@@ -1661,9 +1707,11 @@ where
     };
     scope_fn(&proxima_scope);
     let handles = proxima_scope.handles.into_inner();
+    let mut outcome = Ok(());
     for handle in handles {
-        let _ = handle.await;
+        outcome = outcome.and(handle.await);
     }
+    outcome
 }
 
 /// one `ProximaScope::spawn` handle: type-erased so `ProximaScope::handles`
@@ -1748,7 +1796,8 @@ pub async fn par_bridge<Item, Iter, Work>(
     iter: Iter,
     num_workers: usize,
     work: Work,
-) where
+) -> Result<(), ProximaError>
+where
     Item: Send + 'static,
     Iter: Iterator<Item = Item> + Send + 'static,
     Work: Fn(Item) + Send + Sync + 'static + Clone,
@@ -1771,9 +1820,11 @@ pub async fn par_bridge<Item, Iter, Work>(
             Ok::<(), ProximaError>(())
         }));
     }
+    let mut outcome = Ok(());
     for handle in handles {
-        let _ = handle.await;
+        outcome = outcome.and(handle.await);
     }
+    outcome
 }
 
 #[cfg(test)]
@@ -1798,7 +1849,8 @@ mod tests {
             |&item| u64::from(item),
             |left, right| left.wrapping_add(right),
         )
-        .await;
+        .await
+        .expect("par_reduce small slice");
         assert_eq!(sum, (0..16u32).map(u64::from).sum::<u64>());
     }
 
@@ -1815,7 +1867,8 @@ mod tests {
             |left, right| left.wrapping_add(right),
             1024,
         )
-        .await;
+        .await
+        .expect("par_reduce large slice");
         let expected: u64 = (0..100_000u32).map(u64::from).sum();
         assert_eq!(sum, expected);
     }
@@ -1832,7 +1885,8 @@ mod tests {
             |&item| u64::from(item),
             |left, right| left.wrapping_add(right),
         )
-        .await;
+        .await
+        .expect("par_reduce empty slice");
         assert_eq!(sum, 42);
     }
 
@@ -1848,7 +1902,8 @@ mod tests {
             |&item| u64::from(item),
             |left, right| left.wrapping_add(right),
         )
-        .await;
+        .await
+        .expect("par_reduce single element");
         assert_eq!(sum, 7);
     }
 
@@ -1872,7 +1927,8 @@ mod tests {
             |left, right| left.wrapping_add(right),
             8,
         )
-        .await;
+        .await
+        .expect("par_reduce single leaf");
         assert_eq!(sum, (0..8u32).map(u64::from).sum::<u64>());
         assert_eq!(counter.load(Ordering::Relaxed), 8);
     }
@@ -1882,7 +1938,9 @@ mod tests {
     async fn par_reduce_max_op() {
         let pool = build_pool(4);
         let data: Arc<[u32]> = vec![3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3].into();
-        let max = par_reduce_with_threshold(&pool, data, || 0u32, |&item| item, u32::max, 4).await;
+        let max = par_reduce_with_threshold(&pool, data, || 0u32, |&item| item, u32::max, 4)
+            .await
+            .expect("par_reduce max");
         assert_eq!(max, 9);
     }
 
@@ -1907,7 +1965,8 @@ mod tests {
             |left, right| left + right,
             512,
         )
-        .await;
+        .await
+        .expect("par_reduce split");
         assert_eq!(counter.load(Ordering::Relaxed), LEN);
     }
 
@@ -1928,7 +1987,8 @@ mod tests {
             },
             512,
         )
-        .await;
+        .await
+        .expect("par_each visits");
         assert_eq!(counter.load(Ordering::Relaxed), LEN);
     }
 
@@ -1942,7 +2002,8 @@ mod tests {
         par_each(&pool, data, move |&_item| {
             counter_for_work.fetch_add(1, Ordering::Relaxed);
         })
-        .await;
+        .await
+        .expect("par_each empty");
         assert_eq!(counter.load(Ordering::Relaxed), 0);
     }
 
@@ -1958,7 +2019,8 @@ mod tests {
             .par_iter(&pool)
             .map(|&item| u64::from(item))
             .sum()
-            .await;
+            .await
+            .expect("par_iter map sum");
         let expected: u64 = (0..LEN).map(u64::from).sum();
         assert_eq!(parallel_sum, expected);
     }
@@ -1974,7 +2036,8 @@ mod tests {
             .with_threshold(4)
             .map(|&item| item)
             .reduce(|| 0u32, u32::max)
-            .await;
+            .await
+            .expect("par_iter map reduce");
         assert_eq!(max, 9);
     }
 
@@ -1990,7 +2053,8 @@ mod tests {
             .for_each(move |&_item| {
                 counter_for_work.fetch_add(1, Ordering::Relaxed);
             })
-            .await;
+            .await
+            .expect("par_iter for_each");
         assert_eq!(counter.load(Ordering::Relaxed), LEN);
     }
 
@@ -2009,7 +2073,8 @@ mod tests {
             .for_each(move |doubled| {
                 total_for_sink.fetch_add(doubled, Ordering::Relaxed);
             })
-            .await;
+            .await
+            .expect("par_iter map for_each");
         let expected: usize = (0..LEN as usize).map(|item| item * 2).sum();
         assert_eq!(total.load(Ordering::Relaxed), expected);
     }
@@ -2021,7 +2086,11 @@ mod tests {
         let pool = build_pool(4);
         const LEN: u64 = 10_000;
         let data: Arc<[u64]> = (0..LEN).collect::<Vec<_>>().into();
-        let parallel_sum: u64 = data.par_iter(&pool).sum().await;
+        let parallel_sum: u64 = data
+            .par_iter(&pool)
+            .sum()
+            .await
+            .expect("par_iter sum without map");
         let expected: u64 = (0..LEN).sum();
         assert_eq!(parallel_sum, expected);
     }
@@ -2036,12 +2105,14 @@ mod tests {
             .par_iter(&pool)
             .map(|&item| u64::from(item))
             .sum()
-            .await;
+            .await
+            .expect("first sum");
         let second: u64 = (&data)
             .par_iter(&pool)
             .map(|&item| u64::from(item))
             .sum()
-            .await;
+            .await
+            .expect("second sum");
         assert_eq!(first, second);
         assert_eq!(first, (0..100u32).map(u64::from).sum::<u64>());
     }
@@ -2065,7 +2136,8 @@ mod tests {
             },
             |left, right| left + right,
         )
-        .await;
+        .await
+        .expect("par_reduce_async yielding");
         assert_eq!(sum, (0..1_000_u32).map(u64::from).sum::<u64>());
     }
 
@@ -2082,7 +2154,8 @@ mod tests {
             |item| async move { u64::from(item) },
             |left, right| left + right,
         )
-        .await;
+        .await
+        .expect("par_reduce_async empty");
         assert_eq!(sum, 99);
     }
 
@@ -2107,7 +2180,8 @@ mod tests {
             },
             128,
         )
-        .await;
+        .await
+        .expect("par_each_async visits");
         assert_eq!(counter.load(Ordering::Relaxed), LEN);
     }
 
@@ -2127,7 +2201,8 @@ mod tests {
                 u64::from(item) * 2
             })
             .sum()
-            .await;
+            .await
+            .expect("map_async sum");
         let expected: u64 = (0..LEN).map(|item| u64::from(item) * 2).sum();
         assert_eq!(sum, expected);
     }
@@ -2146,7 +2221,8 @@ mod tests {
                 item
             })
             .reduce(|| 0u32, u32::max)
-            .await;
+            .await
+            .expect("map_async reduce");
         assert_eq!(max, 9);
     }
 
@@ -2169,7 +2245,8 @@ mod tests {
             .for_each(move |tripled| {
                 total_for_sink.fetch_add(tripled, Ordering::Relaxed);
             })
-            .await;
+            .await
+            .expect("map_async for_each");
         let expected: usize = (0..LEN as usize).map(|item| item * 3).sum();
         assert_eq!(total.load(Ordering::Relaxed), expected);
     }
@@ -2192,7 +2269,8 @@ mod tests {
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
             })
-            .await;
+            .await
+            .expect("for_each_async");
         assert_eq!(counter.load(Ordering::Relaxed), LEN);
     }
 
@@ -2203,7 +2281,7 @@ mod tests {
     #[cfg(feature = "runtime-prime-bgpool-async")]
     #[proxima::test]
     async fn par_stream_then_collect_all_items() {
-        use futures::StreamExt;
+        use futures::TryStreamExt;
         let pool = build_pool(4);
         const LEN: u32 = 100;
         let data: Arc<[u32]> = (0..LEN).collect::<Vec<_>>().into();
@@ -2213,8 +2291,9 @@ mod tests {
                 proxima_primitives::sync::task::yield_now().await;
                 u64::from(item) * 2
             })
-            .collect()
-            .await;
+            .try_collect()
+            .await
+            .expect("par_stream then");
         assert_eq!(outputs.len(), LEN as usize);
         // outputs are unordered; sort then compare against expected sorted set.
         let mut sorted = outputs;
@@ -2227,14 +2306,15 @@ mod tests {
     #[cfg(feature = "runtime-prime-bgpool-async")]
     #[proxima::test]
     async fn par_stream_empty_slice_emits_nothing() {
-        use futures::StreamExt;
+        use futures::TryStreamExt;
         let pool = build_pool(2);
         let data: Arc<[u32]> = Vec::<u32>::new().into();
         let outputs: Vec<u64> = data
             .par_stream(&pool, 4)
             .then(|item| async move { u64::from(item) })
-            .collect()
-            .await;
+            .try_collect()
+            .await
+            .expect("par_stream empty");
         assert!(outputs.is_empty());
     }
 
@@ -2243,7 +2323,7 @@ mod tests {
     #[cfg(feature = "runtime-prime-bgpool-async")]
     #[proxima::test]
     async fn par_stream_concurrency_one_serial_path() {
-        use futures::StreamExt;
+        use futures::TryStreamExt;
         let pool = build_pool(2);
         const LEN: u32 = 20;
         let data: Arc<[u32]> = (0..LEN).collect::<Vec<_>>().into();
@@ -2253,8 +2333,9 @@ mod tests {
                 proxima_primitives::sync::task::yield_now().await;
                 item
             })
-            .collect()
-            .await;
+            .try_collect()
+            .await
+            .expect("par_stream serial");
         assert_eq!(outputs.len(), LEN as usize);
     }
 
@@ -2314,7 +2395,8 @@ mod tests {
             .par_iter(&pool)
             .map(|&item| u64::from(item))
             .sum()
-            .await;
+            .await
+            .expect("auto threshold sum");
         let expected: u64 = (0..LEN).map(u64::from).sum();
         assert_eq!(sum, expected);
     }
@@ -2331,7 +2413,8 @@ mod tests {
             .par_iter(&pool)
             .map(|&item| u64::from(item) * 2)
             .collect()
-            .await;
+            .await
+            .expect("par_iter map collect");
         let expected: Vec<u64> = (0..LEN).map(|item| u64::from(item) * 2).collect();
         assert_eq!(result, expected);
     }
@@ -2341,7 +2424,9 @@ mod tests {
     async fn par_map_collect_empty_slice() {
         let pool = build_pool(2);
         let data: Arc<[u32]> = Vec::<u32>::new().into();
-        let result: Vec<u64> = par_map_collect(&pool, data, |&item| u64::from(item)).await;
+        let result: Vec<u64> = par_map_collect(&pool, data, |&item| u64::from(item))
+            .await
+            .expect("par_map_collect empty");
         assert!(result.is_empty());
     }
 
@@ -2351,8 +2436,9 @@ mod tests {
         let pool = build_pool(4);
         const LEN: u32 = 50_000;
         let data: Arc<[u32]> = (0..LEN).collect::<Vec<_>>().into();
-        let result: Vec<u32> =
-            par_map_collect_with_threshold(&pool, data, |&item| item + 1, 1024).await;
+        let result: Vec<u32> = par_map_collect_with_threshold(&pool, data, |&item| item + 1, 1024)
+            .await
+            .expect("par_map_collect large");
         // verify monotonic increase (proves ordering, not just count)
         for window in result.windows(2) {
             assert!(window[0] < window[1]);
@@ -2376,7 +2462,8 @@ mod tests {
                 u64::from(item) * 3
             })
             .collect()
-            .await;
+            .await
+            .expect("map_async collect");
         let expected: Vec<u64> = (0..LEN).map(|item| u64::from(item) * 3).collect();
         assert_eq!(result, expected);
     }
@@ -2388,7 +2475,9 @@ mod tests {
         let pool = build_pool(2);
         let data: Arc<[u32]> = Vec::<u32>::new().into();
         let result: Vec<u64> =
-            par_map_collect_async(&pool, data, |item| async move { u64::from(item) }).await;
+            par_map_collect_async(&pool, data, |item| async move { u64::from(item) })
+                .await
+                .expect("par_map_collect_async empty");
         assert!(result.is_empty());
     }
 
@@ -2401,7 +2490,7 @@ mod tests {
     #[cfg(feature = "runtime-prime-bgpool-async")]
     #[proxima::test]
     async fn par_stream_then_ordered_preserves_input_order() {
-        use futures::StreamExt;
+        use futures::TryStreamExt;
         let pool = build_pool(4);
         const LEN: u32 = 50;
         let data: Arc<[u32]> = (0..LEN).collect::<Vec<_>>().into();
@@ -2416,8 +2505,9 @@ mod tests {
                 }
                 item
             })
-            .collect()
-            .await;
+            .try_collect()
+            .await
+            .expect("then_ordered");
         let expected: Vec<u32> = (0..LEN).collect();
         assert_eq!(outputs, expected);
     }
@@ -2426,14 +2516,15 @@ mod tests {
     #[cfg(feature = "runtime-prime-bgpool-async")]
     #[proxima::test]
     async fn par_stream_then_ordered_empty() {
-        use futures::StreamExt;
+        use futures::TryStreamExt;
         let pool = build_pool(2);
         let data: Arc<[u32]> = Vec::<u32>::new().into();
         let outputs: Vec<u32> = data
             .par_stream(&pool, 4)
             .then_ordered(|item| async move { item })
-            .collect()
-            .await;
+            .try_collect()
+            .await
+            .expect("then_ordered empty");
         assert!(outputs.is_empty());
     }
 
@@ -2445,7 +2536,9 @@ mod tests {
         let pool = build_pool(4);
         const LEN: u32 = 10_000;
         let data: Arc<[u32]> = (0..LEN).collect::<Vec<_>>().into();
-        let evens = par_filter(&pool, data, |&item| item % 2 == 0).await;
+        let evens = par_filter(&pool, data, |&item| item % 2 == 0)
+            .await
+            .expect("par_filter evens");
         assert_eq!(evens.len(), LEN as usize / 2);
         assert!(evens.iter().all(|&item| item % 2 == 0));
     }
@@ -2455,7 +2548,9 @@ mod tests {
     async fn par_filter_empty_slice() {
         let pool = build_pool(2);
         let data: Arc<[u32]> = Vec::<u32>::new().into();
-        let result = par_filter(&pool, data, |&item| item > 5).await;
+        let result = par_filter(&pool, data, |&item| item > 5)
+            .await
+            .expect("par_filter empty");
         assert!(result.is_empty());
     }
 
@@ -2465,7 +2560,9 @@ mod tests {
         let pool = build_pool(4);
         const LEN: u32 = 1_000;
         let data: Arc<[u32]> = (0..LEN).collect::<Vec<_>>().into();
-        let result = par_filter_with_threshold(&pool, data, |&item| item % 3 == 0, 64).await;
+        let result = par_filter_with_threshold(&pool, data, |&item| item % 3 == 0, 64)
+            .await
+            .expect("par_filter order");
         for window in result.windows(2) {
             assert!(window[0] < window[1]);
         }
@@ -2480,7 +2577,7 @@ mod tests {
         let data: Vec<u32> = vec![9, 3, 7, 1, 5, 2, 8, 4, 6, 0];
         let mut expected = data.clone();
         expected.sort();
-        let sorted = par_sort(&pool, data).await;
+        let sorted = par_sort(&pool, data).await.expect("par_sort");
         assert_eq!(sorted, expected);
     }
 
@@ -2491,7 +2588,9 @@ mod tests {
         let data: Vec<u32> = (0..1_000_u32).rev().collect();
         let mut expected = data.clone();
         expected.sort_by(|a, b| b.cmp(a));
-        let sorted = par_sort_by(&pool, data, |a, b| b.cmp(a)).await;
+        let sorted = par_sort_by(&pool, data, |a, b| b.cmp(a))
+            .await
+            .expect("par_sort_by descending");
         assert_eq!(sorted, expected);
     }
 
@@ -2502,7 +2601,9 @@ mod tests {
         let data: Vec<u32> = (0..10_000_u32).rev().collect();
         let mut expected = data.clone();
         expected.sort();
-        let sorted = par_sort_by(&pool, data, |a, b| a.cmp(b)).await;
+        let sorted = par_sort_by(&pool, data, |a, b| a.cmp(b))
+            .await
+            .expect("par_sort_by large");
         assert_eq!(sorted, expected);
     }
 
@@ -2511,7 +2612,9 @@ mod tests {
     async fn par_sort_unstable_produces_sorted_output() {
         let pool = build_pool(4);
         let data: Vec<u32> = vec![5, 3, 8, 1, 9, 2, 7, 4, 6, 0];
-        let sorted = par_sort_unstable(&pool, data).await;
+        let sorted = par_sort_unstable(&pool, data)
+            .await
+            .expect("par_sort_unstable");
         for window in sorted.windows(2) {
             assert!(window[0] <= window[1]);
         }
@@ -2529,7 +2632,8 @@ mod tests {
                 *item *= 2;
             }
         })
-        .await;
+        .await
+        .expect("par_chunks_mut mutation");
         let expected: Vec<u32> = (0..1_000_u32).map(|item| item * 2).collect();
         assert_eq!(data, expected);
     }
@@ -2544,7 +2648,8 @@ mod tests {
                 *item = 99;
             }
         })
-        .await;
+        .await
+        .expect("par_chunks_mut empty");
         assert!(data.is_empty());
     }
 
@@ -2564,7 +2669,8 @@ mod tests {
                 });
             }
         })
-        .await;
+        .await
+        .expect("scope tasks");
         assert_eq!(counter.load(Ordering::Relaxed), 8);
     }
 
@@ -2572,7 +2678,9 @@ mod tests {
     #[proxima::test]
     async fn scope_no_spawns_completes() {
         let pool = build_pool(2);
-        scope(&pool, |_proxima_scope| {}).await;
+        scope(&pool, |_proxima_scope| {})
+            .await
+            .expect("scope no spawns");
     }
 
     // ---- install ----
@@ -2606,7 +2714,8 @@ mod tests {
         par_bridge(&pool, 0..LEN, 4, move |_item| {
             counter_for_work.fetch_add(1, Ordering::Relaxed);
         })
-        .await;
+        .await
+        .expect("par_bridge all items");
         assert_eq!(counter.load(Ordering::Relaxed), LEN);
     }
 
@@ -2619,7 +2728,395 @@ mod tests {
         par_bridge(&pool, std::iter::empty::<u32>(), 4, move |_item| {
             counter_for_work.fetch_add(1, Ordering::Relaxed);
         })
-        .await;
+        .await
+        .expect("par_bridge empty");
         assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    // ---- failed leaf: a lost leaf is an error, never a short result ----
+
+    /// 64 items on a 2-worker pool: `default_threshold_for` gives leaves of 8.
+    fn failed_leaf_data() -> Arc<[u32]> {
+        (0..64_u32).collect::<Vec<_>>().into()
+    }
+
+    /// values 1 to 64, so the leaf holding 33 to 40 is the one that fails.
+    fn failed_leaf_values() -> Arc<[u64]> {
+        (1..=64_u64).collect::<Vec<_>>().into()
+    }
+
+    /// the result must be the pool's error naming the lost sender.
+    fn assert_lost_leaf<Out: std::fmt::Debug>(
+        result: Result<Out, ProximaError>,
+        needle: &str,
+        site: &str,
+    ) {
+        match result {
+            Err(ProximaError::Body(message)) => {
+                assert!(
+                    message.contains(needle),
+                    "{site}: error text should name the lost sender, got {message:?}"
+                );
+                println!("failed_leaf site={site} error=1");
+            }
+            other => panic!("{site}: a panicking leaf must be an Err(Body), got {other:?}"),
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct FailingOrd(u32);
+
+    impl PartialOrd for FailingOrd {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for FailingOrd {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            if self.0 == 40 || other.0 == 40 {
+                panic!("comparing item 40");
+            }
+            self.0.cmp(&other.0)
+        }
+    }
+
+    fn failing_ord_data() -> Vec<FailingOrd> {
+        (0..64_u32).map(FailingOrd).collect()
+    }
+
+    #[proxima::test]
+    async fn failed_leaf_is_an_error_map_collect() {
+        let pool = build_pool(2);
+        let result = par_map_collect_with_threshold(
+            &pool,
+            failed_leaf_data(),
+            |item| {
+                if *item == 40 {
+                    panic!("map item 40");
+                }
+                *item
+            },
+            8,
+        )
+        .await;
+        assert_lost_leaf(result, "dropped sender", "par_map_collect");
+    }
+
+    #[cfg(feature = "runtime-prime-bgpool-async")]
+    #[proxima::test]
+    async fn failed_leaf_is_an_error_map_collect_async() {
+        let pool = build_pool(2);
+        let result = par_map_collect_async_with_threshold(
+            &pool,
+            failed_leaf_data(),
+            |item| async move {
+                if item == 40 {
+                    panic!("map item 40");
+                }
+                item
+            },
+            8,
+        )
+        .await;
+        assert_lost_leaf(result, "dropped sender", "par_map_collect_async");
+    }
+
+    #[proxima::test]
+    async fn failed_leaf_is_an_error_filter() {
+        let pool = build_pool(2);
+        let result = par_filter_with_threshold(
+            &pool,
+            failed_leaf_data(),
+            |item| {
+                if *item == 40 {
+                    panic!("predicate item 40");
+                }
+                true
+            },
+            8,
+        )
+        .await;
+        assert_lost_leaf(result, "dropped sender", "par_filter");
+    }
+
+    #[proxima::test]
+    async fn failed_leaf_is_an_error_sort() {
+        let pool = build_pool(2);
+        let result = par_sort_with_threshold(&pool, failing_ord_data(), 8).await;
+        assert_lost_leaf(result, "dropped sender", "par_sort");
+    }
+
+    #[proxima::test]
+    async fn failed_leaf_is_an_error_sort_unstable() {
+        let pool = build_pool(2);
+        let result = par_sort_unstable(&pool, failing_ord_data()).await;
+        assert_lost_leaf(result, "dropped sender", "par_sort_unstable");
+    }
+
+    #[proxima::test]
+    async fn failed_leaf_is_an_error_sort_by() {
+        let pool = build_pool(2);
+        let data: Vec<u32> = (0..64_u32).collect();
+        let result = par_sort_by(&pool, data, |left, right| {
+            if *left == 40 || *right == 40 {
+                panic!("comparing item 40");
+            }
+            left.cmp(right)
+        })
+        .await;
+        assert_lost_leaf(result, "dropped sender", "par_sort_by");
+    }
+
+    #[proxima::test]
+    async fn failed_leaf_is_an_error_reduce() {
+        let pool = build_pool(2);
+        let result = par_reduce_with_threshold(
+            &pool,
+            failed_leaf_values(),
+            || 0u64,
+            |&value| {
+                if value == 40 {
+                    panic!("work on value 40");
+                }
+                value
+            },
+            |left, right| left + right,
+            8,
+        )
+        .await;
+        assert_lost_leaf(result, "dropped sender", "par_reduce");
+    }
+
+    #[cfg(feature = "runtime-prime-bgpool-async")]
+    #[proxima::test]
+    async fn failed_leaf_is_an_error_reduce_async() {
+        let pool = build_pool(2);
+        let result = par_reduce_async_with_threshold(
+            &pool,
+            failed_leaf_values(),
+            || 0u64,
+            |value| async move {
+                if value == 40 {
+                    panic!("work on value 40");
+                }
+                value
+            },
+            |left, right| left + right,
+            8,
+        )
+        .await;
+        assert_lost_leaf(result, "async task dropped sender", "par_reduce_async");
+    }
+
+    #[proxima::test]
+    async fn failed_leaf_is_an_error_each() {
+        let pool = build_pool(2);
+        let result = par_each_with_threshold(
+            &pool,
+            failed_leaf_data(),
+            |item| {
+                if *item == 40 {
+                    panic!("each item 40");
+                }
+            },
+            8,
+        )
+        .await;
+        assert_lost_leaf(result, "dropped sender", "par_each");
+    }
+
+    #[cfg(feature = "runtime-prime-bgpool-async")]
+    #[proxima::test]
+    async fn failed_leaf_is_an_error_each_async() {
+        let pool = build_pool(2);
+        let result = par_each_async_with_threshold(
+            &pool,
+            failed_leaf_data(),
+            |item| async move {
+                if item == 40 {
+                    panic!("each item 40");
+                }
+            },
+            8,
+        )
+        .await;
+        assert_lost_leaf(result, "dropped sender", "par_each_async");
+    }
+
+    #[proxima::test]
+    async fn failed_leaf_is_an_error_chunks_mut() {
+        let pool = build_pool(2);
+        let mut data: Vec<u32> = (0..64_u32).collect();
+        let result = par_chunks_mut(&pool, &mut data, 8, |chunk| {
+            if chunk.contains(&40) {
+                panic!("chunk holds item 40");
+            }
+        })
+        .await;
+        assert_lost_leaf(result, "dropped sender", "par_chunks_mut");
+    }
+
+    #[proxima::test]
+    async fn failed_leaf_is_an_error_scope() {
+        let pool = build_pool(2);
+        let result = scope(&pool, |pool_scope| {
+            for index in 0..8_u32 {
+                pool_scope.spawn(move || {
+                    if index == 4 {
+                        panic!("fifth spawn");
+                    }
+                });
+            }
+        })
+        .await;
+        assert_lost_leaf(result, "dropped sender", "scope");
+    }
+
+    #[proxima::test]
+    async fn failed_leaf_is_an_error_bridge() {
+        let pool = build_pool(2);
+        let result = par_bridge(&pool, 0..64_u32, 4, |item| {
+            if item == 40 {
+                panic!("bridge item 40");
+            }
+        })
+        .await;
+        assert_lost_leaf(result, "dropped sender", "par_bridge");
+    }
+
+    /// one `Err`, last, then the stream is over.
+    #[cfg(feature = "runtime-prime-bgpool-async")]
+    async fn assert_stream_fails_once<S>(mut stream: S, site: &str, ordered: bool)
+    where
+        S: futures::Stream<Item = Result<u32, ProximaError>> + Unpin,
+    {
+        use futures::StreamExt;
+        let collected: Vec<Result<u32, ProximaError>> = (&mut stream).collect().await;
+        let errors = collected.iter().filter(|entry| entry.is_err()).count();
+        assert_eq!(errors, 1, "{site}: exactly one Err expected");
+        let Some(Err(ProximaError::Body(message))) = collected.last() else {
+            panic!("{site}: the Err must be the last element");
+        };
+        assert!(
+            message.contains("dropped sender"),
+            "{site}: got {message:?}"
+        );
+        if ordered {
+            let prefix: Vec<u32> = collected
+                .iter()
+                .filter_map(|entry| entry.as_ref().ok().copied())
+                .collect();
+            let expected: Vec<u32> = (0..prefix.len() as u32).collect();
+            assert_eq!(
+                prefix, expected,
+                "{site}: items before the Err are the input-order prefix"
+            );
+        }
+        let after = stream.next().await;
+        assert!(after.is_none(), "{site}: stream must end after the Err");
+        println!("failed_leaf site={site} error=1 ended=1");
+    }
+
+    #[cfg(feature = "runtime-prime-bgpool-async")]
+    #[proxima::test]
+    async fn failed_leaf_is_an_error_stream() {
+        let pool = build_pool(2);
+        let ordered = failed_leaf_data()
+            .par_stream(&pool, 8)
+            .then_ordered(|item| async move {
+                if item == 40 {
+                    panic!("stream item 40");
+                }
+                item
+            });
+        assert_stream_fails_once(ordered, "par_stream_then_ordered", true).await;
+        let unordered = failed_leaf_data()
+            .par_stream(&pool, 8)
+            .then(|item| async move {
+                if item == 40 {
+                    panic!("stream item 40");
+                }
+                item
+            });
+        assert_stream_fails_once(unordered, "par_stream_then", false).await;
+    }
+
+    // controls: the old shapes, written on plain results, lose the leaf.
+
+    #[proxima::test]
+    async fn failed_leaf_control_unwrap_or_default_loses_the_leaf() {
+        let pool = build_pool(2);
+        let failing = pool.spawn(|| -> Result<Vec<u32>, ProximaError> {
+            let leaf: Vec<u32> = (40..48_u32).collect();
+            if leaf.contains(&40) {
+                panic!("leaf holds item 40");
+            }
+            Ok(leaf)
+        });
+        let old_leaf_len = failing.await.unwrap_or_default().len();
+        let healthy = pool.spawn(|| Ok::<Vec<u32>, ProximaError>((0..8_u32).collect()));
+        let healthy_leaf_len = healthy.await.unwrap_or_default().len();
+        assert_eq!(old_leaf_len, 0);
+        assert_eq!(healthy_leaf_len, 8);
+        println!("old_leaf_len={old_leaf_len} healthy_leaf_len={healthy_leaf_len}");
+    }
+
+    #[proxima::test]
+    async fn failed_leaf_control_identity_replaces_the_leaf() {
+        let pool = build_pool(2);
+        let failing = pool.spawn(|| -> Result<u64, ProximaError> {
+            let leaf: Vec<u64> = (33..=40_u64).collect();
+            if leaf.contains(&40) {
+                panic!("leaf holds value 40");
+            }
+            Ok(leaf.iter().sum())
+        });
+        let old_leaf_acc = failing.await.unwrap_or(0);
+        let healthy = pool.spawn(|| Ok::<u64, ProximaError>((1..=8_u64).sum()));
+        let healthy_leaf_acc = healthy.await.unwrap_or(0);
+        assert_eq!(old_leaf_acc, 0);
+        assert_eq!(healthy_leaf_acc, 36);
+        println!("old_leaf_acc={old_leaf_acc} healthy_leaf_acc={healthy_leaf_acc}");
+    }
+
+    #[proxima::test]
+    async fn failed_leaf_control_discard_hides_the_leaf() {
+        let pool = build_pool(2);
+        let failing = pool.spawn(|| -> Result<(), ProximaError> {
+            panic!("leaf panics");
+        });
+        let _discarded = failing.await;
+        assert!(_discarded.is_err(), "the pool did record the failure");
+        let reported = 0;
+        println!(
+            "old_discard error_present={} reported={reported}",
+            u8::from(_discarded.is_err())
+        );
+    }
+
+    #[cfg(feature = "runtime-prime-bgpool-async")]
+    #[proxima::test]
+    async fn failed_leaf_control_stream_ends_early() {
+        let pool = build_pool(2);
+        let failing = pool.spawn_async(async {
+            let item = std::hint::black_box(40_u32);
+            if item == 40 {
+                panic!("stream item 40");
+            }
+            Ok::<u32, ProximaError>(item)
+        });
+        let discarded = failing.await;
+        let mapped: Option<u32> = match &discarded {
+            Ok(value) => Some(*value),
+            Err(_) => None,
+        };
+        assert!(mapped.is_none());
+        assert!(discarded.is_err());
+        println!(
+            "old_stream ended={} error_reported={}",
+            u8::from(mapped.is_none()),
+            u8::from(mapped.is_some())
+        );
     }
 }
