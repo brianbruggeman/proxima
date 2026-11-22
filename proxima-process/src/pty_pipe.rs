@@ -56,7 +56,6 @@ use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::sync::Arc;
 use std::thread;
 
-use futures::stream::{self, StreamExt};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::unistd::pipe;
 use proxima_primitives::pipe::SendPipe;
@@ -64,6 +63,7 @@ use proxima_primitives::pipe::{ProximaError, Request, Response, ResponseStream};
 
 use super::descriptor::{CommandDescriptor, Stdio};
 use super::dispatched::DispatchedChild;
+use super::exit_trailer::body_with_exit_trailers;
 use super::fd_pipe::FdPairPipe;
 use super::protocol::{ChildRequest, ChildResponse};
 use super::pty::{PtySize, current_terminal_size, open_pty, set_pty_size};
@@ -357,34 +357,20 @@ fn run_size_follower(master: Arc<OwnedFd>, cancel_read: OwnedFd) {
     drop(master);
 }
 
-// Combined body wrapper: when the stream finishes, drop the
-// size-follower cancel handle (signals the follower to exit) and
-// spawn a thread to `wait` the dispatched child (joins the
-// dispatch thread + waitpids the pid). Done in a thread because
-// `libc::waitpid` is blocking and can't run inside the executor.
+// Body wrapper: once the stream finishes, `body_with_exit_trailers` runs the
+// reap on its own thread (blocking `waitpid` never runs on the executor):
+// drop the size-follower cancel handle (signals the follower to exit), then
+// `wait` the dispatched child (joins the dispatch thread + waitpids the pid)
+// and publish its exit into the response trailers.
 fn wrap_body(
     response: Response<Bytes>,
     cancel: Option<SizeFollowerHandle>,
     dispatched: DispatchedChild,
 ) -> ResponseStream {
-    let stream = response.into_chunk_stream();
-    ResponseStream::new(stream::unfold(
-        (stream, cancel, Some(dispatched)),
-        |(mut stream, cancel, mut handle)| async move {
-            match stream.next().await {
-                Some(item) => Some((item, (stream, cancel, handle))),
-                None => {
-                    drop(cancel);
-                    if let Some(dispatched) = handle.take() {
-                        thread::spawn(move || {
-                            let _ = dispatched.wait();
-                        });
-                    }
-                    None
-                }
-            }
-        },
-    ))
+    body_with_exit_trailers(response.into_chunk_stream(), move || {
+        drop(cancel);
+        dispatched.wait().ok()
+    })
 }
 
 #[cfg(test)]
@@ -400,8 +386,12 @@ mod tests {
     )]
 
     use super::*;
+    use crate::exit_trailer::test_support::{
+        assert_exit, assert_signal, drain_then_trailers, empty_request,
+    };
     use crate::grounds::Empty;
     use bytes::Bytes;
+    use futures::StreamExt;
     use futures::executor::block_on;
     use std::ffi::CString;
 
@@ -476,5 +466,33 @@ mod tests {
             text.contains("hello pty"),
             "expected 'hello pty' in PTY cat output, got: {text:?}"
         );
+    }
+
+    fn sh_pty_pipe(script: &str) -> PtyCommandPipe<Empty> {
+        let mut command = CommandDescriptor::new(cstr("/bin/sh"));
+        command
+            .arg(cstr("-c"))
+            .arg(cstr(script))
+            .inherit_current_env();
+        PtyCommandPipe::builder()
+            .command(command)
+            .expect("lower descriptor")
+            .size(PtySize::default())
+            .dispatch(Empty)
+            .build()
+    }
+
+    #[test]
+    fn child_exit_trailer_pty_exit() {
+        let response =
+            block_on(SendPipe::call(&sh_pty_pipe("exit 6"), empty_request())).expect("pty sh runs");
+        assert_exit(&drain_then_trailers(response), "6");
+    }
+
+    #[test]
+    fn child_exit_trailer_pty_signal() {
+        let response = block_on(SendPipe::call(&sh_pty_pipe("kill -9 $$"), empty_request()))
+            .expect("pty sh runs");
+        assert_signal(&drain_then_trailers(response), "9");
     }
 }

@@ -60,6 +60,10 @@ use futures::channel::mpsc;
 use futures::future::{AbortHandle, Abortable};
 #[cfg(windows)]
 use futures::{SinkExt, StreamExt};
+#[cfg(windows)]
+use proxima_primitives::pipe::HeaderList;
+#[cfg(windows)]
+use proxima_primitives::sync::blocking::Mutex;
 use std::ffi::{OsStr, OsString};
 use std::future::Future;
 #[cfg(windows)]
@@ -81,6 +85,7 @@ use std::process::Command as NativeCommand;
 use std::sync::Arc;
 #[cfg(windows)]
 use std::task::{Context, Poll};
+#[cfg(windows)]
 use std::thread;
 #[cfg(windows)]
 use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
@@ -89,8 +94,6 @@ use windows_sys::Win32::System::Threading::TerminateProcess;
 
 use alloc::ffi::CString;
 use bon::Builder;
-#[cfg(unix)]
-use futures::stream::{self, StreamExt};
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::alloc_tier;
 use proxima_primitives::pipe::{ProximaError, Request, Response, ResponseStream};
@@ -99,6 +102,8 @@ use super::descriptor::{CommandDescriptor, Stdio};
 #[cfg(unix)]
 use super::dispatched::{DispatchedChild, spawn_and_dispatch_with_options};
 use super::env::Env;
+#[cfg(unix)]
+use super::exit_trailer::{body_with_exit_trailers, wait_status};
 #[cfg(unix)]
 use super::fd_pipe::FdPairPipe;
 #[cfg(unix)]
@@ -109,26 +114,37 @@ use super::spawn::{Child, SpawnOptions, spawn, spawn_external};
 
 /// Drop-in mirror of [`std::process::Command`].
 ///
-/// ```ignore
+/// ```
 /// use proxima_process::{Command, Stdio};
+/// # use std::io::Read;
 ///
-/// let mut cmd = Command::new("/bin/ls");
-/// cmd.arg("-la")
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut cmd = Command::new("/bin/echo");
+/// cmd.arg("hello")
 ///    .current_dir("/tmp")
 ///    .stdout(Stdio::piped());
-/// let child = cmd.spawn()?;
+/// let mut child = cmd.spawn()?;
+/// # let mut text = String::new();
+/// # let stdout = child.stdout.take().ok_or("stdout was piped")?;
+/// # std::fs::File::from(stdout).read_to_string(&mut text)?;
+/// # assert_eq!(child.wait()?, 0);
+/// # assert_eq!(text, "hello\n");
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// Additive proxima-specific methods compose on the same builder:
 ///
-/// ```ignore
+/// ```
 /// use proxima_process::{Command, grounds::Deny};
 ///
 /// let mut cmd = Command::new("/usr/bin/agent");
 /// cmd.arg("--non-interactive")
 ///    .dispatch(Deny::new(libc::EACCES))
 ///    .libc_shim();
-/// // Command impls Pipe; use it directly through proxima_primitives::pipe.
+/// # assert!(cmd.has_dispatch_chain());
+/// # assert!(cmd.is_libc_shim());
+/// // Command impls SendPipe; use it directly through proxima_primitives::pipe.
 /// ```
 #[derive(Builder)]
 #[builder(builder_type = CommandBuilder, finish_fn = build)]
@@ -861,37 +877,10 @@ enum AfterPipe {
 
 #[cfg(unix)]
 fn wrap_body(response: Response<Bytes>, after: AfterPipe, pid: libc::pid_t) -> ResponseStream {
-    let stream = response.into_chunk_stream();
-    ResponseStream::new(stream::unfold(
-        (stream, Some(after), pid),
-        move |(mut stream, mut after, pid)| async move {
-            match stream.next().await {
-                Some(item) => Some((item, (stream, after, pid))),
-                None => {
-                    finish(after.take(), pid);
-                    None
-                }
-            }
-        },
-    ))
-}
-
-#[cfg(unix)]
-fn finish(after: Option<AfterPipe>, pid: libc::pid_t) {
-    match after {
-        Some(AfterPipe::Vanilla) => {
-            thread::spawn(move || {
-                let mut status: libc::c_int = 0;
-                unsafe { libc::waitpid(pid, &mut status, 0) };
-            });
-        }
-        Some(AfterPipe::Dispatched(dispatched)) => {
-            thread::spawn(move || {
-                let _ = dispatched.wait();
-            });
-        }
-        None => {}
-    }
+    body_with_exit_trailers(response.into_chunk_stream(), move || match after {
+        AfterPipe::Vanilla => wait_status(pid),
+        AfterPipe::Dispatched(dispatched) => dispatched.wait().ok(),
+    })
 }
 
 #[cfg(unix)]
@@ -919,8 +908,55 @@ mod tests {
     )]
 
     use super::*;
+    use crate::exit_trailer::test_support::{
+        assert_exit, assert_signal, drain_then_trailers, empty_request,
+    };
+    use crate::grounds::Empty;
     use bytes::Bytes;
+    use futures::StreamExt;
     use futures::executor::block_on;
+
+    fn sh_command(script: &str) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg(script);
+        command
+    }
+
+    fn run_sh(command: &Command) -> Response<Bytes> {
+        block_on(<Command as SendPipe>::call(command, empty_request())).expect("sh runs")
+    }
+
+    #[test]
+    fn exit_status_trailer_reports_zero() {
+        let response = run_sh(&sh_command("exit 0"));
+        assert_exit(&drain_then_trailers(response), "0");
+    }
+
+    #[test]
+    fn exit_status_trailer_reports_three() {
+        let response = run_sh(&sh_command("exit 3"));
+        assert_exit(&drain_then_trailers(response), "3");
+    }
+
+    #[test]
+    fn exit_status_trailer_reports_signal_nine() {
+        let response = run_sh(&sh_command("kill -9 $$"));
+        assert_signal(&drain_then_trailers(response), "9");
+    }
+
+    #[test]
+    fn exit_status_trailer_through_dispatch_chain() {
+        let mut command = sh_command("exit 4");
+        command.dispatch(Empty);
+        assert_exit(&drain_then_trailers(run_sh(&command)), "4");
+    }
+
+    #[test]
+    fn exit_status_trailer_signal_through_dispatch_chain() {
+        let mut command = sh_command("kill -1 $$");
+        command.dispatch(Empty);
+        assert_signal(&drain_then_trailers(run_sh(&command)), "1");
+    }
 
     #[test]
     fn drop_in_compat_compiles_against_std_shape_call_sites() {
@@ -1460,6 +1496,8 @@ impl SendPipe for Command {
                     result
                 })
                 .map_err(process_error)?;
+            let trailers_slot = Arc::new(Mutex::new(None));
+            let exit_slot = Arc::clone(&trailers_slot);
             let mut wait_guard = PipeProcessGuard::new(&process);
             thread::Builder::new()
                 .name("proxima-process-wait".into())
@@ -1484,13 +1522,20 @@ impl SendPipe for Command {
                             let _ = futures::executor::block_on(sender.send(Err(error)));
                         }
                     }
+                    if let Ok(code) = &wait_result {
+                        let mut trailers = HeaderList::new();
+                        trailers.insert("exit-status", code.to_string());
+                        *exit_slot.lock() = Some(trailers);
+                    }
                     if let Err(error) = wait_result {
                         let _ = futures::executor::block_on(sender.send(Err(error)));
                     }
                     wait_guard.finish();
                 })
                 .map_err(process_error)?;
-            Ok(Response::streamed(ResponseStream::new(response)))
+            Ok(Response::streamed(
+                ResponseStream::new(response).with_trailers_slot(trailers_slot),
+            ))
         }
     }
 }

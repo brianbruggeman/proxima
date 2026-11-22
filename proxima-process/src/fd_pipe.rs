@@ -28,6 +28,7 @@ use std::future::Future;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::sync::Mutex;
+use std::sync::mpsc as std_mpsc;
 use std::thread;
 
 use bytes::Bytes;
@@ -38,6 +39,8 @@ use proxima_primitives::pipe::{
     ChunkStream, ProximaError, Request, RequestStream, Response, ResponseStream,
 };
 use proxima_primitives::sync::mpsc;
+
+use super::exit_trailer::{body_with_exit_trailers, wait_status};
 
 /// Allocate a close-on-exec `pipe(2)` and return `(read_end, write_end)`.
 ///
@@ -95,8 +98,10 @@ fn set_close_on_exec(fd: &OwnedFd) -> Result<(), ProximaError> {
 /// - The returned `Response`'s body is backed by a channel fed by a
 ///   reader thread that reads `read_fd` until EOF.
 /// - If `child_pid > 0`, the reader thread `waitpid`s the child once
-///   read EOF arrives. Pass `0` for no reaping (e.g., when the
-///   fork-server's `SIGCHLD` handler will reap auto).
+///   read EOF arrives, and the response stream publishes `exit-status` or
+///   `exit-signal` into its trailers (as [`CommandPipe`] does) before it ends;
+///   with `child_pid == 0` no exit trailer is published. Pass `0` for no reaping
+///   (e.g., when the fork-server's `SIGCHLD` handler will reap auto).
 pub struct FdPairPipe {
     state: Mutex<Option<FdPairState>>,
 }
@@ -179,19 +184,28 @@ fn spawn_request_pump(write_end: OwnedFd, request: Request<Bytes>) {
 /// to become the inner Pipe's request body. Exposed at `pub(super)`
 /// so the grandchild runner can compose the same primitive.
 pub(super) fn body_from_read_fd(read_end: OwnedFd) -> RequestStream {
-    RequestStream::from_chunk_stream(byte_stream_from_read_fd(read_end, 0))
+    RequestStream::from_chunk_stream(byte_stream_from_read_fd(read_end, None))
 }
 
 /// Wrap `read_end` as a [`ResponseStream`] backed by an unbounded
 /// channel that a worker thread feeds in 4 KiB chunks.
 fn build_response_body(read_end: OwnedFd, child_pid: libc::pid_t) -> ResponseStream {
-    ResponseStream::from_chunk_stream(byte_stream_from_read_fd(read_end, child_pid))
+    if child_pid <= 0 {
+        return ResponseStream::from_chunk_stream(byte_stream_from_read_fd(read_end, None));
+    }
+    let (status_sender, status_receiver) = std_mpsc::channel();
+    let body = byte_stream_from_read_fd(read_end, Some((child_pid, status_sender)));
+    body_with_exit_trailers(body, move || status_receiver.recv().ok())
 }
 
 /// Build a [`ChunkStream`] from `read_end`, fed by a worker thread in
-/// 4 KiB chunks. After read EOF the worker reaps `child_pid` if
-/// non-zero, then drops the sender so the stream ends.
-fn byte_stream_from_read_fd(read_end: OwnedFd, child_pid: libc::pid_t) -> ChunkStream {
+/// 4 KiB chunks. After read EOF the worker reaps the child if one is given
+/// and hands its raw wait status to the paired receiver (which the exit-trailer
+/// wrapper awaits), then drops the sender so the stream ends.
+fn byte_stream_from_read_fd(
+    read_end: OwnedFd,
+    child: Option<(libc::pid_t, std_mpsc::Sender<libc::c_int>)>,
+) -> ChunkStream {
     let raw_fd = read_end.into_raw_fd();
     let (sender, receiver) = mpsc::unbounded_channel::<Vec<u8>>();
 
@@ -209,11 +223,10 @@ fn byte_stream_from_read_fd(read_end: OwnedFd, child_pid: libc::pid_t) -> ChunkS
                 Err(_) => break,
             }
         }
-        if child_pid > 0 {
-            let mut status: libc::c_int = 0;
-            unsafe {
-                libc::waitpid(child_pid, &mut status, 0);
-            }
+        if let Some((child_pid, status_sender)) = child
+            && let Some(status) = wait_status(child_pid)
+        {
+            let _ = status_sender.send(status);
         }
     });
 
@@ -237,6 +250,10 @@ mod tests {
     )]
 
     use super::*;
+    use crate::descriptor::{CommandDescriptor, Stdio};
+    use crate::exit_trailer::test_support::{assert_exit, assert_signal, drain_then_trailers};
+    use crate::spawn::{SpawnOptions, spawn};
+    use std::ffi::CString;
 
     fn drain(response: Response<Bytes>) -> Vec<u8> {
         let mut stream = response.into_chunk_stream();
@@ -293,5 +310,47 @@ mod tests {
         let _ = block_on(pipe.call(empty_request())).expect("first call");
         let second = block_on(pipe.call(empty_request()));
         assert!(second.is_err(), "second call should error");
+    }
+
+    fn spawn_sh(script: &str) -> FdPairPipe {
+        let mut command = CommandDescriptor::new(CString::new("/bin/sh").expect("no NUL"));
+        command
+            .arg(CString::new("-c").expect("no NUL"))
+            .arg(CString::new(script).expect("no NUL"))
+            .stdin(Stdio::Piped)
+            .stdout(Stdio::Piped);
+        let mut child = spawn(&command, SpawnOptions::default()).expect("sh spawns");
+        let write_fd = child.stdin.take().expect("piped stdin");
+        let read_fd = child.stdout.take().expect("piped stdout");
+        FdPairPipe::with_child(write_fd, read_fd, child.pid())
+    }
+
+    #[test]
+    fn child_exit_trailer_fd_pair_exit() {
+        let response = block_on(spawn_sh("exit 7").call(empty_request())).expect("call");
+        assert_exit(&drain_then_trailers(response), "7");
+    }
+
+    #[test]
+    fn child_exit_trailer_fd_pair_signal() {
+        let response = block_on(spawn_sh("kill -15 $$").call(empty_request())).expect("call");
+        assert_signal(&drain_then_trailers(response), "15");
+    }
+
+    #[test]
+    fn child_exit_trailer_fd_pair_without_child() {
+        let (read_fd, write_fd) = make_pipe().expect("pipe");
+        let pipe = FdPairPipe::new(write_fd, read_fd);
+        let response = block_on(pipe.call(empty_request())).expect("call");
+        let mut stream = response.stream.expect("response is streamed");
+        block_on(async {
+            while let Some(chunk) = stream.chunk_stream_mut().next().await {
+                chunk.expect("body chunk ok");
+            }
+        });
+        let trailers = stream.trailers();
+        assert!(trailers.is_none_or(
+            |list| !list.contains_key("exit-status") && !list.contains_key("exit-signal")
+        ));
     }
 }

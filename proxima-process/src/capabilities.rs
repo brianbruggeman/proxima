@@ -11,20 +11,25 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```
+//! use proxima_process::capabilities::{CapFilesystem, CapNetwork};
+//! use proxima_process::host_grounds::HostRead;
+//!
 //! // At the trust boundary (e.g. the binary's main):
 //! let fs_cap = CapFilesystem::grant();
 //! let net_cap = CapNetwork::grant();
 //!
 //! // Privileged grounds borrow the cap at construction:
-//! let real_read = host_read("/etc/passwd".into(), &fs_cap);
+//! let real_read = HostRead::new("/etc/passwd", &fs_cap);
+//! # assert_eq!(real_read.host_path().to_str(), Some("/etc/passwd"));
+//! # let _ = net_cap;
 //!
 //! // Untrusted code that never gets a CapFilesystem reference
-//! // physically cannot call host_read.
+//! // physically cannot construct HostRead.
 //! ```
 
 /// Permission to construct filesystem-touching grounds
-/// ([`host_read`](super::grounds), `host_write`, etc.).
+/// ([`HostRead::new`](super::host_grounds::HostRead::new), [`HostWrite::new`](super::host_grounds::HostWrite::new), etc.).
 #[derive(Debug)]
 pub struct CapFilesystem(());
 

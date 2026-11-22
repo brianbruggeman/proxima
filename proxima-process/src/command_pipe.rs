@@ -29,14 +29,13 @@ use bytes::Bytes;
 use std::ffi::CString;
 use std::future::Future;
 use std::marker::PhantomData;
-use std::thread;
 
-use futures::stream::{self, StreamExt};
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::pipe::{ProximaError, Request, Response, ResponseStream};
 
 use super::descriptor::{CommandDescriptor, Stdio};
 use super::dispatched::{DispatchedChild, spawn_and_dispatch};
+use super::exit_trailer::body_with_exit_trailers;
 use super::fd_pipe::FdPairPipe;
 use super::libc_shim;
 use super::protocol::{ChildRequest, ChildResponse};
@@ -213,32 +212,14 @@ fn attach_libc_shim_env(command: &mut CommandDescriptor) -> Result<(), ProximaEr
     Ok(())
 }
 
-// Wrap the response body so that when it fully drains, the
-// DispatchedChild is `wait`ed on a background thread. The wait
-// joins the dispatch thread and reaps the child pid; doing it
-// from inside the async stream would block the executor since
-// `libc::waitpid` is synchronous.
+// When the body drains, the DispatchedChild is `wait`ed on a background thread
+// (joins the dispatch thread, reaps the pid; `waitpid` is synchronous so it
+// stays off the executor) and its status is published as response trailers.
 fn wrap_body_with_dispatched(
     response: Response<Bytes>,
     dispatched: DispatchedChild,
 ) -> ResponseStream {
-    let stream = response.into_chunk_stream();
-    ResponseStream::new(stream::unfold(
-        (stream, Some(dispatched)),
-        |(mut stream, mut handle)| async move {
-            match stream.next().await {
-                Some(item) => Some((item, (stream, handle))),
-                None => {
-                    if let Some(dispatched) = handle.take() {
-                        thread::spawn(move || {
-                            let _ = dispatched.wait();
-                        });
-                    }
-                    None
-                }
-            }
-        },
-    ))
+    body_with_exit_trailers(response.into_chunk_stream(), move || dispatched.wait().ok())
 }
 
 #[cfg(test)]
@@ -254,8 +235,12 @@ mod tests {
     )]
 
     use super::*;
+    use crate::exit_trailer::test_support::{
+        assert_exit, assert_signal, drain_then_trailers, empty_request,
+    };
     use crate::grounds::Empty;
     use bytes::Bytes;
+    use futures::StreamExt;
     use futures::executor::block_on;
     use std::ffi::CString;
 
@@ -319,5 +304,28 @@ mod tests {
         });
 
         assert_eq!(output, b"hello proxima");
+    }
+
+    fn sh_pipe(script: &str) -> CommandPipe<Empty> {
+        let mut command = CommandDescriptor::new(cstr("/bin/sh"));
+        command.arg(cstr("-c")).arg(cstr(script));
+        CommandPipe::builder()
+            .command(command)
+            .dispatch(Empty)
+            .build()
+    }
+
+    #[test]
+    fn exit_status_trailer_through_command_pipe() {
+        let response =
+            block_on(SendPipe::call(&sh_pipe("exit 5"), empty_request())).expect("sh runs");
+        assert_exit(&drain_then_trailers(response), "5");
+    }
+
+    #[test]
+    fn exit_status_trailer_signal_through_command_pipe() {
+        let response =
+            block_on(SendPipe::call(&sh_pipe("kill -15 $$"), empty_request())).expect("sh runs");
+        assert_signal(&drain_then_trailers(response), "15");
     }
 }

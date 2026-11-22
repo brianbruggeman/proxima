@@ -17,11 +17,25 @@
 //!
 //! The dispatcher loop is small enough to inline:
 //!
-//! ```ignore
-//! while let Some(request) = read_frame::<ChildRequest>(reader)? {
+//! ```
+//! # use std::io::Cursor;
+//! # use proxima_process::ipc::{read_frame, write_frame};
+//! # use proxima_process::protocol::{ChildRequest, ChildResponse};
+//! # fn main() -> std::io::Result<()> {
+//! # let mut wire = Vec::new();
+//! # write_frame(&mut wire, &ChildRequest::Stat { handle: 3 })?;
+//! # let reader = &mut Cursor::new(wire);
+//! # let mut sink = Vec::new();
+//! # let writer = &mut sink;
+//! # let dispatch_fn = |_request: ChildRequest| ChildResponse::Error { errno: libc::ENOENT };
+//! while let Some(request) = read_frame::<_, ChildRequest>(reader)? {
 //!     let response = dispatch_fn(request);
 //!     write_frame(writer, &response)?;
 //! }
+//! # let echoed = read_frame::<_, ChildResponse>(&mut Cursor::new(sink))?;
+//! # assert_eq!(echoed, Some(ChildResponse::Error { errno: libc::ENOENT }));
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! [`run_dispatch_loop`] wraps this with a `FnMut(ChildRequest) ->

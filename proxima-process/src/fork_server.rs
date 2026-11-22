@@ -26,20 +26,40 @@
 //!
 //! # API
 //!
-//! ```ignore
-//! use std::sync::Arc;
-//! use proxima_primitives::pipe::Pipe;
-//! use pty_tester::proxima_process::ForkServer;
+//! ```no_run
+//! # use bytes::Bytes;
+//! # use futures::executor::block_on;
+//! # use proxima_primitives::pipe::{ProximaError, Request, Response, SendPipe};
+//! use proxima_process::fork_server::ForkServer;
 //!
+//! # #[derive(Clone)]
+//! # struct EchoPipe;
+//! # impl SendPipe for EchoPipe {
+//! #     type In = Request<Bytes>;
+//! #     type Out = Response<Bytes>;
+//! #     type Err = ProximaError;
+//! #     async fn call(&self, request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+//! #         let (_, bytes) = request.body_bytes().await?;
+//! #         Ok(Response::ok(bytes))
+//! #     }
+//! # }
+//! # fn main() -> Result<(), ProximaError> {
 //! // At process startup (before other threads):
 //! let server = ForkServer::builder()
 //!     .register("echo", || EchoPipe)
-//!     .register("uppercase", || UppercasePipe)
 //!     .start()?;
 //!
 //! // Later, from any thread:
-//! let echo: impl Pipe = server.pipe("echo");
-//! let response = echo.call(request).await?;
+//! let echo = server.pipe("echo");
+//! let request = Request::builder()
+//!     .method("POST")
+//!     .path("/")
+//!     .body(Bytes::from_static(b"hello"))
+//!     .build()?;
+//! let response = block_on(echo.call(request))?;
+//! # drop(response);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! Each `pipe.call(...)` invocation forks a fresh grandchild. The

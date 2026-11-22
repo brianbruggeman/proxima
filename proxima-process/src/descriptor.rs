@@ -154,8 +154,8 @@ pub struct EnvVar {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use alloc::ffi::CString;
+/// ```
+/// use std::ffi::CString;
 /// use proxima_process::{CommandDescriptor, Stdio};
 ///
 /// let mut cmd = CommandDescriptor::new(CString::new("/bin/ls").unwrap());
@@ -164,6 +164,11 @@ pub struct EnvVar {
 ///    .env(CString::new("LANG").unwrap(), CString::new("C").unwrap())
 ///    .current_dir(CString::new("/tmp").unwrap())
 ///    .stderr(Stdio::null());
+/// # assert_eq!(cmd.args, vec![CString::new("-la").unwrap()]);
+/// # assert_eq!(cmd.current_dir, Some(CString::new("/tmp").unwrap()));
+/// # assert_eq!(cmd.stderr, Stdio::Null);
+/// # let lang = cmd.env.iter().find(|var| var.key.as_bytes() == b"LANG").unwrap();
+/// # assert_eq!(lang.value.as_bytes(), b"C");
 /// ```
 ///
 /// # Fields

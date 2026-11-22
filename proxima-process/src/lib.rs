@@ -21,6 +21,8 @@ pub mod command_pipe;
 #[cfg(all(feature = "std", unix))]
 pub mod dispatched;
 #[cfg(all(feature = "std", unix))]
+mod exit_trailer;
+#[cfg(all(feature = "std", unix))]
 pub mod fd_pipe;
 #[cfg(all(feature = "std", unix))]
 pub mod fork_server;
