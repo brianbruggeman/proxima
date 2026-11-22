@@ -814,7 +814,7 @@ name = "descriptor_census"
 required-features = ["std"]
 
 [[example]]
-name = "ggml_f32"
+name = "ggml_rewrite"
 required-features = ["std"]
 
 [[example]]

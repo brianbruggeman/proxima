@@ -10,12 +10,17 @@
 
 use alloc::vec::Vec;
 
-use proxima_numeric::DType;
+use proxima_numeric::{DType, FloatLayout};
 use proxima_tensor::error::TensorError;
 use proxima_tensor::op::{Extent, NodeId, Op, ReduceInit, ScalarOp};
 use proxima_tensor::spec::{
     elementwise, embedding_lookup, input_leaf, layer_norm, reduce, scalar_constant,
 };
+
+/// The graph's activation format, named by `proxima-numeric`'s canonical
+/// layout rather than a literal dtype. A settings-driven format replaces this
+/// one constant in PROXIMAINTEROP-11.
+pub const ACTIVATION: DType = DType::Layout(FloatLayout::BF32);
 
 /// A weight matrix `[in, out]` and an optional `[out]` bias.
 #[derive(Debug, Clone, Copy)]
@@ -87,7 +92,7 @@ fn same(
     axes: &str,
 ) -> Result<NodeId, TensorError> {
     let map = alloc::format!("{axes}->{axes}");
-    elementwise(program, DType::FLOAT32, body, &[(a, map.as_str())])
+    elementwise(program, ACTIVATION, body, &[(a, map.as_str())])
 }
 
 fn scale(
@@ -100,7 +105,7 @@ fn scale(
     let broadcast = alloc::format!("->{axes}");
     elementwise(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Multiply,
         &[(x, map.as_str()), (scalar, broadcast.as_str())],
     )
@@ -116,7 +121,7 @@ fn binary(
     let map = alloc::format!("{axes}->{axes}");
     elementwise(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         body,
         &[(a, map.as_str()), (b, map.as_str())],
     )
@@ -130,13 +135,13 @@ fn binary(
 pub fn linear(program: &mut Vec<Op>, x: NodeId, w: Linear) -> Result<NodeId, TensorError> {
     let product = elementwise(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Multiply,
         &[(x, "si->sio"), (w.weight, "io->sio")],
     )?;
     let out = reduce(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Add,
         ReduceInit::Zero,
         product,
@@ -146,7 +151,7 @@ pub fn linear(program: &mut Vec<Op>, x: NodeId, w: Linear) -> Result<NodeId, Ten
     match w.bias {
         Some(bias) => elementwise(
             program,
-            DType::FLOAT32,
+            ACTIVATION,
             ScalarOp::Add,
             &[(out, "so->so"), (bias, "o->so")],
         ),
@@ -167,13 +172,13 @@ pub fn linear_heads(
 ) -> Result<NodeId, TensorError> {
     let product = elementwise(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Multiply,
         &[(x, "s,i->shji"), (w.weight, "ihj->shji")],
     )?;
     let out = reduce(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Add,
         ReduceInit::Zero,
         product,
@@ -183,7 +188,7 @@ pub fn linear_heads(
     match w.bias {
         Some(bias) => elementwise(
             program,
-            DType::FLOAT32,
+            ACTIVATION,
             ScalarOp::Add,
             &[(out, "shj->shj"), (bias, "hj->shj")],
         ),
@@ -208,7 +213,7 @@ pub fn flatten_heads(
         proxima_tensor::op::append(
             program,
             Op::Iota {
-                dtype: DType::FLOAT32,
+                dtype: ACTIVATION,
                 extent: Extent::Static(extent),
             },
         )
@@ -219,31 +224,31 @@ pub fn flatten_heads(
     let stride = scalar_constant(program, head_dim as f32);
     let start = elementwise(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Multiply,
         &[(head, "h->hd"), (stride, "->hd")],
     )?;
     let flat = elementwise(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Add,
         &[(start, "hd->hd"), (channel, "d->hd")],
     )?;
     let select = elementwise(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Equal,
         &[(target, "t->thd"), (flat, "hd->thd")],
     )?;
     let product = elementwise(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Multiply,
         &[(x, "shd->sthd"), (select, "thd->sthd")],
     )?;
     reduce(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Add,
         ReduceInit::Zero,
         product,
@@ -262,13 +267,13 @@ pub fn flatten_heads(
 pub fn project_heads(program: &mut Vec<Op>, x: NodeId, w: Linear) -> Result<NodeId, TensorError> {
     let product = elementwise(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Multiply,
         &[(x, "shd->shdo"), (w.weight, "hdo->shdo")],
     )?;
     let out = reduce(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Add,
         ReduceInit::Zero,
         product,
@@ -278,7 +283,7 @@ pub fn project_heads(program: &mut Vec<Op>, x: NodeId, w: Linear) -> Result<Node
     match w.bias {
         Some(bias) => elementwise(
             program,
-            DType::FLOAT32,
+            ACTIVATION,
             ScalarOp::Add,
             &[(out, "so->so"), (bias, "o->so")],
         ),
@@ -294,7 +299,7 @@ pub fn project_heads(program: &mut Vec<Op>, x: NodeId, w: Linear) -> Result<Node
 pub fn transpose(program: &mut Vec<Op>, x: NodeId) -> Result<NodeId, TensorError> {
     elementwise(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Identity,
         &[(x, "ab->ba")],
     )
@@ -320,7 +325,7 @@ pub fn gelu_tanh(program: &mut Vec<Op>, x: NodeId, axes: &str) -> Result<NodeId,
     let broadcast = alloc::format!("->{axes}");
     let raised = elementwise(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Add,
         &[(squashed, map.as_str()), (one, broadcast.as_str())],
     )?;
@@ -340,7 +345,7 @@ pub fn causal_mask(program: &mut Vec<Op>, n: u32) -> Result<(NodeId, NodeId), Te
         proxima_tensor::op::append(
             program,
             Op::Iota {
-                dtype: DType::FLOAT32,
+                dtype: ACTIVATION,
                 extent: Extent::Static(n),
             },
         )
@@ -349,7 +354,7 @@ pub fn causal_mask(program: &mut Vec<Op>, n: u32) -> Result<(NodeId, NodeId), Te
     let key = iota(program);
     let future = elementwise(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Greater,
         &[(key, "t->st"), (query, "s->st")],
     )?;
@@ -374,13 +379,13 @@ pub fn attention(
 ) -> Result<NodeId, TensorError> {
     let product = elementwise(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Multiply,
         &[(q, "sui->stui"), (k, "tui->stui")],
     )?;
     let scores = reduce(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Add,
         ReduceInit::Zero,
         product,
@@ -391,7 +396,7 @@ pub fn attention(
     let masked = match mask {
         Some((future, neg_infinity)) => elementwise(
             program,
-            DType::FLOAT32,
+            ACTIVATION,
             ScalarOp::Select,
             &[
                 (future, "st->stu"),
@@ -403,7 +408,7 @@ pub fn attention(
     };
     let peak = reduce(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
         masked,
@@ -412,14 +417,14 @@ pub fn attention(
     )?;
     let shifted = elementwise(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Subtract,
         &[(masked, "stu->stu"), (peak, "su->stu")],
     )?;
     let exponent = same(program, ScalarOp::Exponential, shifted, "stu")?;
     let total = reduce(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Add,
         ReduceInit::Zero,
         exponent,
@@ -428,19 +433,19 @@ pub fn attention(
     )?;
     let weights = elementwise(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Divide,
         &[(exponent, "stu->stu"), (total, "su->stu")],
     )?;
     let mixed = elementwise(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Multiply,
         &[(weights, "stu->stud"), (v, "tud->stud")],
     )?;
     reduce(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Add,
         ReduceInit::Zero,
         mixed,
@@ -593,7 +598,7 @@ pub fn encoder_conv(
     let activated2 = gelu_tanh(program, conv2, "ncl")?;
     elementwise(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Identity,
         &[(activated2, "0,d,l->ld")],
     )
@@ -640,7 +645,7 @@ pub fn encoder_after_conv(
     let width = heads * head_dim;
     let positioned = elementwise(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Add,
         &[(time_major, "l,d->ld"), (stem.position, "l,d->ld")],
     )?;
@@ -681,7 +686,7 @@ fn conv(
     let weight_shape = (u64::from(out_channels), u64::from(in_channels), 3_u64);
     proxima_autograd::conv::conv1d(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         signal,
         signal_shape,
         weights.weight,
@@ -715,7 +720,7 @@ pub fn decoder(
     let position_rows = embedding_lookup(program, stem.position, positions);
     let mut x = elementwise(
         program,
-        DType::FLOAT32,
+        ACTIVATION,
         ScalarOp::Add,
         &[(token_rows, "sd->sd"), (position_rows, "sd->sd")],
     )?;
@@ -795,5 +800,5 @@ fn token_count(program: &[Op], tokens: NodeId) -> Result<u32, TensorError> {
 /// Declare an F32 input leaf, the shape the host binds weights or ids to.
 #[must_use]
 pub fn leaf(program: &mut Vec<Op>, shape: &[u32], name: &str) -> NodeId {
-    input_leaf(program, DType::FLOAT32, f32_shape(shape), name)
+    input_leaf(program, ACTIVATION, f32_shape(shape), name)
 }

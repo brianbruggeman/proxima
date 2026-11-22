@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use proxima_numeric::DType;
 use proxima_numeric::decode_blocks;
 use proxima_safetensors::SafetensorsParser;
 use proxima_tensor::cpu::evaluate_named;
@@ -456,7 +455,7 @@ impl Model {
             padded.len() as u32,
             bank,
         )?;
-        let tables = stft_tables(&config, DType::FLOAT32)?;
+        let tables = stft_tables(&config, crate::families::encoder_decoder::ACTIVATION)?;
         let decode = |bytes: &[u8]| -> Vec<f32> {
             bytes
                 .as_chunks::<4>()

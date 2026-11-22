@@ -50,7 +50,7 @@ dumps and the for-the-oracle-only F32 im2col/GELU path. Build the patched copy
 out of tree:
 
 ```sh
-cargo run --release -p proxima-model-interop --features std --example ggml_f32 -- ggml-tiny.bin ggml-tiny-f32.bin
+cargo run --release -p proxima-model-interop --features std --example ggml_rewrite -- ggml-tiny.bin ggml-tiny-widened.bin
 git -C ~/repos/others/whisper.cpp worktree add /tmp/whisper-dump v1.9.5
 git -C /tmp/whisper-dump apply \
   "$OLDPWD/proxima-model-interop/specs/whisper/oracle/whisper-dump.patch"
@@ -58,7 +58,7 @@ cmake -B /tmp/whisper-dump/build -S /tmp/whisper-dump \
   -DCMAKE_BUILD_TYPE=Release -DGGML_METAL=ON -DWHISPER_BUILD_TESTS=OFF
 cmake --build /tmp/whisper-dump/build --config Release -j
 WHISPER_DUMP_DIR=$HOME/.cache/kvgate/proxnum610/ref-f32 WHISPER_DUMP_F32=1 \
-  /tmp/whisper-dump/build/bin/whisper-cli -ng -m ggml-tiny-f32.bin \
+  /tmp/whisper-dump/build/bin/whisper-cli -ng -m ggml-tiny-widened.bin \
   -f ~/repos/others/whisper.cpp/samples/jfk.wav -l en -nt -bo 1 -bs 1 \
   -tp 0 -tpi 0 -nf -ojf -of $HOME/.cache/kvgate/proxnum610/ref-f32/tiny
 ```

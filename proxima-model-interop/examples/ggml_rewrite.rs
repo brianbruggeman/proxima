@@ -5,23 +5,22 @@
 //! ceiling, so this tool widens the published file without changing a value.
 //! The F16 decode is `proxima_numeric`'s codec, not a local half implementation.
 //!
-//! usage: ggml_f32 <in.ggml> <out.ggml>
+//! usage: ggml_rewrite <in.ggml> <out.ggml>
 
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use proxima_gguf::GgmlType;
 use proxima_numeric::{NumericFormat, decode_blocks};
 
 const MAGIC: u32 = 0x6767_6D6C;
-const F32: i32 = 0;
-const F16: i32 = 1;
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
-    let source = args.next().context("usage: ggml_f32 <in> <out>")?;
-    let target = args.next().context("usage: ggml_f32 <in> <out>")?;
+    let source = args.next().context("usage: ggml_rewrite <in> <out>")?;
+    let target = args.next().context("usage: ggml_rewrite <in> <out>")?;
     convert(Path::new(&source), Path::new(&target))
 }
 
@@ -39,7 +38,7 @@ fn convert(source: &Path, target: &Path) -> Result<()> {
     for slot in &mut hparams {
         *slot = read_i32(&mut input)?;
     }
-    hparams[10] = F32;
+    hparams[10] = GgmlType::F32.to_wire();
     for value in hparams {
         write_i32(&mut output, value)?;
     }
@@ -82,31 +81,31 @@ fn convert(source: &Path, target: &Path) -> Result<()> {
         input.read_exact(&mut name)?;
         let elements: usize = dims.iter().map(|&dim| dim as usize).product();
 
-        let payload: Vec<u8> = match ttype {
-            F16 => {
-                let mut raw = vec![0_u8; elements * 2];
-                input.read_exact(&mut raw)?;
-                let mut decoded = vec![0.0_f32; elements];
-                decode_blocks(&NumericFormat::Float16, &raw, &mut decoded)
-                    .context("decoding Float16")?;
-                let mut bytes = Vec::with_capacity(elements * 4);
-                for value in decoded {
-                    bytes.extend_from_slice(&value.to_le_bytes());
-                }
-                converted += 1;
-                bytes
+        let source = GgmlType::from_wire(ttype)
+            .with_context(|| format!("tensor {:?} has unknown ggml type {ttype}", String::from_utf8_lossy(&name)))?;
+        let format = source
+            .numeric_format()
+            .with_context(|| format!("tensor {:?} has no numeric format", String::from_utf8_lossy(&name)))?;
+        let bytes_per_element = format.bytes_per_block() as usize / format.elements_per_block() as usize;
+        let mut raw = vec![0_u8; elements * bytes_per_element];
+        input.read_exact(&mut raw)?;
+        let payload: Vec<u8> = if format == NumericFormat::Float32 {
+            raw
+        } else {
+            let mut decoded = vec![0.0_f32; elements];
+            decode_blocks(&format, &raw, &mut decoded)
+                .with_context(|| format!("decoding {format:?}"))?;
+            let mut bytes = Vec::with_capacity(elements * 4);
+            for value in decoded {
+                bytes.extend_from_slice(&value.to_le_bytes());
             }
-            F32 => {
-                let mut raw = vec![0_u8; elements * 4];
-                input.read_exact(&mut raw)?;
-                raw
-            }
-            other => bail!("tensor {:?} has unsupported type {other}", String::from_utf8_lossy(&name)),
+            converted += 1;
+            bytes
         };
 
         write_i32(&mut output, n_dims)?;
         write_i32(&mut output, length)?;
-        write_i32(&mut output, F32)?;
+        write_i32(&mut output, GgmlType::F32.to_wire())?;
         for dim in dims {
             write_i32(&mut output, dim)?;
         }

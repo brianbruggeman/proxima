@@ -878,7 +878,7 @@ mod golden {
 
     pub fn stft() -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let config = StftLogMelConfig::default();
-        let tables = stft_tables(&config, proxima_numeric::DType::FLOAT32).expect("tables");
+        let tables = stft_tables(&config, proxima_model_interop::families::encoder_decoder::ACTIVATION).expect("tables");
         let decode = |bytes: &[u8]| -> Vec<f32> {
             bytes
                 .as_chunks::<4>()
@@ -1152,7 +1152,7 @@ mod encoder {
             encoder_decoder::project_heads(&mut bound.program, attended, layer.attn.out)?;
         let residual = proxima_tensor::spec::elementwise(
             &mut bound.program,
-            proxima_numeric::DType::FLOAT32,
+            proxima_model_interop::families::encoder_decoder::ACTIVATION,
             proxima_tensor::op::ScalarOp::Add,
             &[(input, "sd->sd"), (projected, "sd->sd")],
         )?;
@@ -1176,7 +1176,7 @@ mod encoder {
         let ffn = encoder_decoder::linear(&mut bound.program, hidden, layer.fc2)?;
         let output = proxima_tensor::spec::elementwise(
             &mut bound.program,
-            proxima_numeric::DType::FLOAT32,
+            proxima_model_interop::families::encoder_decoder::ACTIVATION,
             proxima_tensor::op::ScalarOp::Add,
             &[(residual, "sd->sd"), (ffn, "sd->sd")],
         )?;
