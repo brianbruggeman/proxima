@@ -51,6 +51,7 @@ std = [
     "proxima-tokenizer/hf",
     "dep:fastrand",
     "dep:xxhash-rust",
+    "dep:anyhow",
     "conflaguration",
     "bon",
     "toml",
@@ -316,6 +317,7 @@ qat = ["std", "metal", "proxima-autograd"]
 rustix = ["dep:rustix"]
 
 [dependencies]
+anyhow = { version = "1.0.104", optional = true }
 proxima-numeric = { version = "0.1.0", path = "../proxima-numeric", features = ["config"] }
 arrayvec.workspace = true
 bon = { workspace = true, optional = true }
@@ -810,6 +812,10 @@ required-features = ["std"]
 [[example]]
 name = "descriptor_census"
 required-features = ["std"]
+
+[[example]]
+name = "whisper"
+required-features = ["std", "proxima-autograd"]
 
 [[example]]
 name = "decode_loop_wall_clock"

@@ -50,6 +50,8 @@ mod ffn_inference;
 mod key_inference;
 mod dtype;
 pub mod decode_policy;
+#[cfg(feature = "std")]
+pub mod audio;
 pub mod families;
 mod error;
 #[cfg(feature = "std")]

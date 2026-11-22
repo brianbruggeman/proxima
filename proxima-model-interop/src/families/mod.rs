@@ -8,6 +8,10 @@
 
 mod accept;
 mod decoder;
+#[cfg(feature = "proxima-autograd")]
+pub mod encoder_decoder;
+#[cfg(all(feature = "std", feature = "proxima-autograd"))]
+pub mod encoder_decoder_host;
 mod facts;
 mod infer;
 mod pattern;

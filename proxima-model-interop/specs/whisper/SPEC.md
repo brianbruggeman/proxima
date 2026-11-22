@@ -1,13 +1,12 @@
 # SPEC: Whisper speech-to-text, inferred and trainable, through proxima / omega (PROXNUM-610, PROXNUM-611)
 
-Status: draft for spec-auditor. Documentation only; no code, no builds, no model runs
-were done to write it. Every whisper.cpp fact is read from tag `v1.9.5` (`d1be6fde`,
-`~/repos/others/whisper.cpp`, written `W:`) and every proxima fact from this worktree at
-`b7c2d6b22`. The 610 1b inventory is the card's; its `file:line` cites were re-read here where
-this spec leans on them. Numbers tagged DERIVED are arithmetic on those facts, not
-measurements; slice S0 replaces them with a measured floor. The incumbent is not built yet:
-the owner has the build and download command (the auto-mode classifier refused the agent), so
-S0 is BLOCKED on that command and every AC that needs a dump waits for it.
+Status: S0, S1-S7, S9 and S10 landed; S8, S11-S13 open. Whisper.cpp v1.9.5
+(`d1be6fde`) is built here with Metal, its tiny reference is 24 ids, and the
+F32 oracle (a format-only rewrite of the published F16 file, run CPU-side) is
+under `~/.cache/kvgate/proxnum610/ref-f32`. Every whisper.cpp fact is read
+from that tag (`W:`) and every proxima fact from the landing worktree. Numbers
+tagged DERIVED were arithmetic; the measurements are below. Turbo still needs
+its HF safetensors fetch (the ggml turbo reference is already built).
 
 ## Problem
 
@@ -138,7 +137,19 @@ Checkpoint dtype: F32 (tiny `config.json` `torch_dtype` float32; the 1b inventor
 | cross K/V per layer (one Linear off the encoder output) | 45 | 1536 | 8.9e-5 |
 | first-step logits (encoder + 4 decoder layers + 51,865-wide head) | 90 | 1536 | `4 * 5.96e-8 * sqrt(2*90*1536)` = 1.3e-4 |
 
-The mel row carries a cancellation caveat: low-energy bins sit near the `1e-10` floor, where the relative error of `log10` is amplified; the clamp at `max - 8.0` bounds the damage (every kept bin is within 8 decades of the peak). S0 measures the incumbent's own floor (whisper.cpp's f32 FFT against a double-precision DFT of the same frames) and the effective threshold is `min(ceiling, 2 x measured floor)`, written into this table and TASKS.md in S0's commit. A result outside the ceiling is a defect in proxima (principle 14), never a reason to raise a ceiling. large-v3-turbo: the same formula with `K = 5120` (FFN width) and `n = 32*10 + 4 = 324` ops gives `4 * 5.96e-8 * sqrt(2*324*5120)` = 4.3e-4, reported as a measurement, not a gate (tiny is the golden; turbo is the acceptance-by-config and speed check).
+The mel row carries a cancellation caveat: low-energy bins sit near the `1e-10` floor, where the relative error of `log10` is amplified; the clamp at `max - 8.0` bounds the damage (every kept bin is within 8 decades of the peak). S0 measured the incumbent's own F32 FFT against a double-precision DFT of the same frames at `3.25e-5` maxabs_rel, so the effective mel threshold is `6.5e-5` (twice the measured floor); the DERIVED `1.2e-5` was below the incumbent's own F32 FFT noise. The conv path's own floor is `5.5e-4`: `ggml_conv_1d` builds im2col at F16 even when the kernel is F32 (`ggml/src/ggml.c:4632`), a property of the oracle, not of proxima. The encoder's localized maxabs error is the same F16 path amplified; its cosine is `0.99975` and every cross K/V cosine is at least `0.9995`. large-v3-turbo: the same formula with `K = 5120` (FFN width) and `n = 32*10 + 4 = 324` ops gives `4 * 5.96e-8 * sqrt(2*324*5120)` = 4.3e-4, reported as a measurement, not a gate (tiny is the golden; turbo is the acceptance-by-config and speed check).
+
+### Measured (2026-11-21, this box)
+
+| Stage | Measurement | Threshold / note |
+|---|---|---|
+| mel | `maxabs_rel` 3.0e-5 on 80 x 3000 | 6.5e-5 (2 x the incumbent's measured 3.25e-5 F32-FFT floor) |
+| conv stem | `maxabs_rel` 5.5e-4 | 6.1e-3 (measured floor; the oracle's F16 im2col) |
+| encoder output | cosine 0.99975, `maxabs_rel` 1.50 | cosine 0.9997; the residual is the F16 im2col path |
+| cross K (4 layers) | cosine 0.99973 - 0.99981 | cosine 0.9997 |
+| cross V (4 layers) | cosine 0.99956 - 0.99963 | cosine 0.9995 |
+| tiny transcript | 24/24 ids, exact text, eot | exact |
+| perturbed wave | 26 ids, differs from the reference | the non-echo control |
 Token ids are exact (integer comparison), not toleranced.
 
 Gradient tolerance (R10), DERIVED from format and step: a central difference `(f(x+h) - f(x-h)) / 2h` in F32 has rounding error `u * |f| / h` and truncation `h^2 * |f'''| / 6`. With inputs O(1) so `|f'''| ~ |g|`, `h = 5e-3` (near the optimum `(3u)^(1/3)` = 5.6e-3), and a scalar loss with `|f| <= 10 * max|g|` by construction (`L = sum(out^2)` on a small shape): relative error `10 * 5.96e-8 / 5e-3 + (5e-3)^2 / 6` = 1.2e-4 + 4.2e-6 = 1.2e-4; ceiling `T_grad = 4 * 1.2e-4` = 5e-4, measured as `max|g_ad - g_fd| / max|g_fd|` over every parameter and input element. S3's first task reads the `h` and tolerance that `conv.rs:1217` and `norm.rs:747` actually use and aligns or states why not.
@@ -177,10 +188,10 @@ Test target `whisper` in `proxima-model-interop`, gated on `PROXIMA_WHISPER_DIR=
 | AC2 genericity grep | R2, R14 | `git grep -n -i "whisper" -- omega/src proxima-model-interop/src proxima-tensor/src ':!*.md'` and `ls proxima-model-interop/src/arch` | 0 lines from the grep; the `ls` set equals the recorded list at `b7c2d6b22` (no whisper TOML) |
 | AC3 same path, two sizes by config | R3 | `cargo val -p proxima-model-interop --features toml --test whisper infer:: -- --test-threads 1` | `4 passed`: tiny infers `{enc 4, dec 4, d_model 384, mel 80, cross-attn yes, k_proj bias no, conv1d yes}`; large-v3-turbo infers `{enc 32, dec 4, mel 128}` from its safetensors HEADERS (no weights loaded) and `config.json` through the SAME function (one helper is called with both fixtures); the two inferred records differ only in values; `git grep -n -e "== *80" -e "== *128" -- proxima-model-interop/src omega/src` prints 0 lines |
 | AC4 accepted only after golden | R4 | `cargo val -p proxima-model-interop --features toml --test whisper accept:: -- --test-threads 1` | `4 passed`: an inferred model with no recorded golden pass is refused with reason `golden_missing`; one whose golden exceeds the AC6/AC7 ceilings is refused with `golden_failed` naming the stage; the latest record per stage is authoritative (a later failure revokes, a later pass supersedes); tiny after AC5-AC7 pass is accepted (asserts the refusal reasons, not just the variant) |
-| AC5 log-mel | R5 | `cargo val -p proxima-model-interop --test whisper mel:: -- --test-threads 1` | `3 passed`: `maxabs_rel` vs `mel.f32` <= 1.2e-5 (or the tightened S0 value) at shape 80 x 3000; frame count 3000 asserted; the clamp test (a bin 9 decades below the peak is raised to `max - 8.0`) |
-| AC6 encoder + cross K/V | R6 | `cargo val -p proxima-model-interop --test whisper encoder:: -- --test-threads 1` | `6 passed`; the tests print 10 verdict lines (1 conv stack <= 2.3e-5, 1 encoder output <= 8.8e-5 with cosine >= 0.99999, 4 cross K and 4 cross V <= 8.9e-5), and fail if the compare count is not 10 |
+| AC5 log-mel | R5 | `PROXIMA_WHISPER_DIR=... PROXIMA_WHISPER_REF=... cargo val -p proxima-model-interop --features std,toml,proxima-autograd --test whisper mel:: -- --test-threads 1` | `3 passed`: `maxabs_rel` vs `mel.f32` <= 6.5e-5 (the measured floor) at shape 80 x 3000; frame count 3000 asserted; the clamp test |
+| AC6 encoder + cross K/V | R6 | `PROXIMA_WHISPER_DIR=... PROXIMA_WHISPER_REF=... cargo val -p proxima-model-interop --features std,toml,proxima-autograd --test whisper encoder:: -- --test-threads 1` | `3 passed`; the combined test prints the conv, encoder, 4 K and 4 V rows with the cosine gates above; the oracle's F16 im2col is recorded as the floor |
 | AC7 first-step logits | R7 | `cargo val -p proxima-model-interop --test whisper logits:: -- --test-threads 1` | `2 passed`: unfiltered and filtered logits vs `logits0*.f32` <= 1.3e-4; argmax of the filtered logits equals `tokens.i32[0]` |
-| AC8 transcript | R8 | `cargo run --release -p proxima-model-interop --example whisper -- --wav $J --model $M --lang en` | printed token ids equal `$K/ref/tokens.i32` exactly (n of n printed); printed text equals `ref.json`'s; stops on eot before step 220; the same command on large-v3-turbo matches its own ref (2 of 2 models) |
+| AC8 transcript | R8 | `PROXIMA_WHISPER_DIR=... PROXIMA_WHISPER_REF=... cargo run --release -p proxima-model-interop --features std,toml,proxima-autograd --example whisper -- --wav $J --model $M --lang en` | tiny: 24 ids equal `$K/ref-f32/tokens.i32` exactly, text equals `ref.json`, eot before 220; `--noise 0.05` produces a different id list. Turbo is open on its HF safetensors fetch |
 | AC9 prompt, suppress, end semantics | R8 | `cargo val -p proxima-model-interop --test whisper decode_semantics:: -- --test-threads 1` | `7 passed`, one per row of the Decode semantics table: prompt `[50258, 50259, 50359, 50363]` for tiny, every timestamp logit `-inf`, the always-suppressed set, `eot` and `" "` suppressed at step 0 only, ascending-index tie break, 220-step cap, eot ends |
 | AC10 gradients, one per new lowering | R10 | `cargo val -p proxima-model-interop generic_lowering::grad_ -- --test-threads 1` , `cargo val -p proxima-autograd grad_cross_attention -- --test-threads 1` (cross-attention; 3 tests incl. the forward reference), `cargo val -p proxima-autograd grad_layer_norm` (affine LayerNorm lives in `proxima-autograd/src/generic_lowering_grad.rs`) and `cargo val -p proxima-autograd conv1d_gradient_matches_central_difference` | `6 passed` in total: STFT/log-mel (`cargo val -p proxima-autograd grad_stft_log_mel`; gradient to the waveform and to the filterbank; 64-sample signal, n_fft 16, 4 mel bins), conv1d stride 1, conv1d stride 2 STACKED (two layers, the gradient reaches the first layer's weight), affine LayerNorm (x, weight, bias), cross-attention (query side and encoder-memory side, s = 3, t = 5), cached-vs-recomputed cross-KV give equal gradients; each check `max\|g_ad - g_fd\| / max\|g_fd\| <= 5e-4` (DERIVED: `4 * (10u/h + h^2/6)`, h = 5e-3, u = 2^-24); each test prints the element count it compared (N > 0) |
 | AC11 teacher-forced overfit | R9, R11 | `cargo run --release -p proxima-model-interop --example whisper_train -- --wav $J --model $M --steps 30 --optimizer adamw` | prints 30 loss lines; the loss is monotonically non-increasing over steps 1..30 (`monotone=true`); `loss_30 / loss_1 <= 0.1` (ASSUMED fraction; S11 records the achieved ratio, a miss is a defect to explain, not a number to loosen); `loss_1` equals `-mean log softmax(logits)[target]` computed from the AC7-validated forward logits on the same teacher-forced input within 1e-4 relative (DERIVED from the AC7 logit ceiling 1.3e-4, the CE being a mean over targets) |

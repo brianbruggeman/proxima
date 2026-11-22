@@ -1,0 +1,256 @@
+diff --git a/ggml/src/ggml-cpu/vec.h b/ggml/src/ggml-cpu/vec.h
+index 59fa88f2..3e7d66b8 100644
+--- a/ggml/src/ggml-cpu/vec.h
++++ b/ggml/src/ggml-cpu/vec.h
+@@ -43,7 +43,7 @@ inline static ggml_float ggml_sve_sum_f32x2(svfloat32_t sum_lo, svfloat32_t sum_
+ }
+ #endif
+ 
+-#define GGML_GELU_FP16
++// #define GGML_GELU_FP16 disabled for the PROXNUM-610 f32 oracle
+ #define GGML_GELU_QUICK_FP16
+ 
+ #define GGML_SOFT_MAX_UNROLL 4
+diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
+index 9bcabdbd..ccc38a67 100644
+--- a/ggml/src/ggml.c
++++ b/ggml/src/ggml.c
+@@ -4629,7 +4629,7 @@ struct ggml_tensor * ggml_conv_1d(
+         int                   s0,
+         int                   p0,
+         int                   d0) {
+-    struct ggml_tensor * im2col = ggml_im2col(ctx, a, b, s0, 0, p0, 0, d0, 0, false, a->type == GGML_TYPE_BF16 ? GGML_TYPE_F32 : GGML_TYPE_F16); // [N, OL, IC * K]
++    struct ggml_tensor * im2col = ggml_im2col(ctx, a, b, s0, 0, p0, 0, d0, 0, false, GGML_TYPE_F32); // [N, OL, IC * K]
+ 
+     struct ggml_tensor * result =
+         ggml_mul_mat(ctx,
+diff --git a/src/whisper.cpp b/src/whisper.cpp
+index 1675f33a..d2255880 100644
+--- a/src/whisper.cpp
++++ b/src/whisper.cpp
+@@ -29,6 +29,7 @@
+ #include <climits>
+ #include <cstdarg>
+ #include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+ #include <fstream>
+ #include <functional>
+@@ -44,6 +45,23 @@
+ #include <codecvt>
+ #endif
+ 
++// PROXNUM-610 S0 oracle dump hook: when WHISPER_DUMP_DIR is set, write the
++// named tensor as raw little-endian f32. Out-of-tree build only; never used
++// by the reference timings.
++static void whisper_dump_raw(const char * name, const void * data, size_t nbytes) {
++    const char * dir = getenv("WHISPER_DUMP_DIR");
++    if (dir == nullptr || dir[0] == '\0' || data == nullptr) {
++        return;
++    }
++    const std::string path = std::string(dir) + "/" + name;
++    FILE * file = fopen(path.c_str(), "wb");
++    if (file == nullptr) {
++        return;
++    }
++    fwrite(data, 1, nbytes, file);
++    fclose(file);
++}
++
+ #if defined(WHISPER_BIG_ENDIAN)
+ template<typename T>
+ static T byteswap(T value) {
+@@ -2049,9 +2067,11 @@ static struct ggml_cgraph * whisper_build_graph_conv(
+             cur = ggml_add(ctx0, cur, model.e_conv_1_b);
+ 
+             cur = ggml_gelu(ctx0, cur);
++            ggml_set_name(cur, "conv1_act");
+ 
+             cur = ggml_conv_1d_ph(ctx0, model.e_conv_2_w, cur, 2, 1);
+             cur = ggml_add(ctx0, cur, model.e_conv_2_b);
++            ggml_set_name(cur, "conv2_raw");
+ 
+             cur = ggml_gelu(ctx0, cur);
+         }
+@@ -2136,6 +2156,8 @@ static struct ggml_cgraph * whisper_build_graph_encoder(
+     //cur = ggml_add(ctx0, model.e_pe, ggml_transpose(ctx0, cur));
+ 
+     struct ggml_tensor * inpL = cur;
++    ggml_set_name(inpL, "enc_input");
++    ggml_set_output(inpL);
+ 
+     for (int il = 0; il < n_layer; ++il) {
+         const auto & layer = model.layers_encoder[il];
+@@ -2242,6 +2264,10 @@ static struct ggml_cgraph * whisper_build_graph_encoder(
+ 
+         // add the input
+         cur = ggml_add(ctx0, cur, inpL);
++        if (il == 0) {
++            ggml_set_name(cur, "enc_attn_0");
++            ggml_set_output(cur);
++        }
+ 
+         struct ggml_tensor * inpFF = cur;
+ 
+@@ -2273,9 +2299,17 @@ static struct ggml_cgraph * whisper_build_graph_encoder(
+                     cur);
+ 
+             cur = ggml_add(ctx0, cur, layer.mlp_1_b);
++            if (il == 0) {
++                ggml_set_name(cur, "enc_ffn_0");
++                ggml_set_output(cur);
++            }
+         }
+ 
+         inpL = ggml_add(ctx0, cur, inpFF);
++        if (il == 0) {
++            ggml_set_name(inpL, "enc_layer_0");
++            ggml_set_output(inpL);
++        }
+     }
+ 
+     cur = inpL;
+@@ -2408,6 +2442,11 @@ static bool whisper_encode_internal(
+                    void * abort_callback_data) {
+     const int64_t t_start_us = ggml_time_us();
+ 
++    // PROXNUM-610 S0: the normalised log-mel as whisper.cpp computed it,
++    // [n_mel, n_len] row-major.
++    whisper_dump_raw("mel.f32", wstate.mel.data.data(),
++            wstate.mel.data.size()*sizeof(float));
++
+     // conv
+     {
+         auto & sched = wstate.sched_conv.sched;
+@@ -2450,6 +2489,20 @@ static bool whisper_encode_internal(
+             if (!ggml_graph_compute_helper(sched, gf, n_threads)) {
+                 return false;
+             }
++
++            // PROXNUM-610 S0: conv stack output, [n_audio_ctx, n_state]
++            // row-major (ggml ne0 = n_state is contiguous).
++            whisper_dump_raw("conv.f32", wstate.embd_conv->data,
++                    ggml_nbytes(wstate.embd_conv));
++            if (ggml_tensor * conv1 = ggml_graph_get_tensor(gf, "conv1_act")) {
++                whisper_dump_raw("conv1.f32", conv1->data, ggml_nbytes(conv1));
++            }
++            if (ggml_tensor * conv2 = ggml_graph_get_tensor(gf, "conv2_raw")) {
++                whisper_dump_raw("conv2.f32", conv2->data, ggml_nbytes(conv2));
++            }
++            if (ggml_tensor * layer0 = ggml_graph_get_tensor(gf, "enc_layer_0")) {
++                whisper_dump_raw("enc_layer_0.f32", layer0->data, ggml_nbytes(layer0));
++            }
+         } else {
+             ggml_backend_sched_reset(sched);
+ 
+@@ -2494,6 +2547,22 @@ static bool whisper_encode_internal(
+         if (!ggml_graph_compute_helper(sched, gf, n_threads)) {
+             return false;
+         }
++
++        // PROXNUM-610 S0: encoder output, [n_audio_ctx, n_state] row-major
++        // (ggml ne0 = n_state is the contiguous axis).
++        whisper_dump_raw("enc.f32", wstate.embd_enc->data, ggml_nbytes(wstate.embd_enc));
++        if (ggml_tensor * layer0 = ggml_graph_get_tensor(gf, "enc_layer_0")) {
++            whisper_dump_raw("enc_layer_0.f32", layer0->data, ggml_nbytes(layer0));
++        }
++        if (ggml_tensor * input = ggml_graph_get_tensor(gf, "enc_input")) {
++            whisper_dump_raw("enc_input.f32", input->data, ggml_nbytes(input));
++        }
++        if (ggml_tensor * attn = ggml_graph_get_tensor(gf, "enc_attn_0")) {
++            whisper_dump_raw("enc_attn_0.f32", attn->data, ggml_nbytes(attn));
++        }
++        if (ggml_tensor * ffn = ggml_graph_get_tensor(gf, "enc_ffn_0")) {
++            whisper_dump_raw("enc_ffn_0.f32", ffn->data, ggml_nbytes(ffn));
++        }
+     }
+ 
+     // cross
+@@ -2510,6 +2579,39 @@ static bool whisper_encode_internal(
+         if (!ggml_graph_compute_helper(sched, gf, n_threads)) {
+             return false;
+         }
++
++        // PROXNUM-610 S0: cross-attention K and V once per utterance. K is
++        // [n_audio_ctx, n_state] (time-major); V is stored [n_state, n_audio_ctx]
++        // (state-major; the non-flash transpose view), one contiguous
++        // n_audio_ctx*n_state slice per decoder layer.
++        const int n_cross = wstate.exp_n_audio_ctx > 0
++            ? wstate.exp_n_audio_ctx : wctx.model.hparams.n_audio_ctx;
++        const int n_cross_state = wctx.model.hparams.n_text_state;
++        const int n_cross_layer = wctx.model.hparams.n_text_layer;
++        const size_t n_cross_bytes = size_t(n_cross)*n_cross_state*sizeof(float);
++        const size_t n_cross_values = size_t(n_cross)*n_cross_state;
++        const size_t n_cross_stride = size_t(GGML_PAD(n_cross, 256))*n_cross_state;
++        std::vector<float> cross_f32(n_cross_values);
++        const bool cross_is_f16 = wstate.kv_cross.k->type == GGML_TYPE_F16;
++        for (int il = 0; il < n_cross_layer; ++il) {
++            char name[64];
++            for (int which = 0; which < 2; ++which) {
++                const ggml_tensor * src = which == 0 ? wstate.kv_cross.k : wstate.kv_cross.v;
++                const char * base = static_cast<const char *>(src->data);
++                if (cross_is_f16) {
++                    const ggml_fp16_t * half = reinterpret_cast<const ggml_fp16_t *>(base)
++                        + n_cross_stride*il;
++                    for (size_t i = 0; i < n_cross_values; ++i) {
++                        cross_f32[i] = ggml_fp16_to_fp32(half[i]);
++                    }
++                    snprintf(name, sizeof(name), which == 0 ? "cross_k_%d.f32" : "cross_v_%d.f32", il);
++                    whisper_dump_raw(name, cross_f32.data(), n_cross_values*sizeof(float));
++                } else {
++                    snprintf(name, sizeof(name), which == 0 ? "cross_k_%d.f32" : "cross_v_%d.f32", il);
++                    whisper_dump_raw(name, base + n_cross_stride*sizeof(float)*il, n_cross_bytes);
++                }
++            }
++        }
+     }
+ 
+     wstate.t_encode_us += ggml_time_us() - t_start_us;
+@@ -2859,6 +2961,10 @@ static struct ggml_cgraph * whisper_build_graph_decoder(
+         }
+ 
+         inpL = ggml_add(ctx0, cur, inpFF);
++        if (il == 0) {
++            ggml_set_name(inpL, "enc_layer_0");
++            ggml_set_output(inpL);
++        }
+     }
+ 
+     cur = inpL;
+@@ -3454,6 +3560,12 @@ static std::string whisper_openvino_get_path_cache(std::string path_bin) {
+ struct whisper_state * whisper_init_state(whisper_context * ctx) {
+     whisper_state * state = new whisper_state;
+ 
++    // PROXNUM-610 S0: the golden dump's ceilings are derived from an F32
++    // checkpoint, so the dump build can hold the intermediate K/V at F32 too.
++    if (getenv("WHISPER_DUMP_F32") != nullptr) {
++        ctx->itype = GGML_TYPE_F32;
++    }
++
+     state->backends = whisper_backend_init(ctx->params);
+     if (state->backends.empty()) {
+         WHISPER_LOG_ERROR("%s: whisper_backend_init() failed\n", __func__);
+@@ -6369,6 +6481,11 @@ static void whisper_process_logits(
+         logprobs.resize(n_logits);
+     }
+ 
++    // PROXNUM-610 S0: first decode step's logits, before the filter.
++    if (tokens_cur.empty()) {
++        whisper_dump_raw("logits0.f32", logits.data(), size_t(n_logits)*sizeof(float));
++    }
++
+     // apply logit filters here
+     // ref: https://github.com/openai/whisper/blob/0b1ba3d46ebf7fe6f953acfd8cad62a4f851b49f/whisper/decoding.py#L480-L493
+     {
+@@ -6555,6 +6672,11 @@ static void whisper_process_logits(
+         }
+     }
+ 
++    // PROXNUM-610 S0: first decode step's logits, after every filter.
++    if (tokens_cur.empty()) {
++        whisper_dump_raw("logits0_filtered.f32", logits.data(), size_t(n_logits)*sizeof(float));
++    }
++
+     // compute probs
+     whisper_compute_probs(logits, n_logits, logprobs, probs);
+ 

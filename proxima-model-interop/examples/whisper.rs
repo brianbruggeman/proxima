@@ -1,0 +1,64 @@
+//! End-to-end speech transcription through the generic encoder-decoder path.
+//!
+//! Reads a PCM WAV, builds the mel/encoder/cross-KV/decoder graphs from the
+//! checkpoint's own tensors and config, runs the greedy prompt from
+//! `decode_policy`, and prints the generated token ids and text. It never reads
+//! the oracle: the reference ids are the caller's comparison, not an input.
+
+use std::path::PathBuf;
+
+use anyhow::{Context, Result, bail};
+use proxima_model_interop::audio::wav;
+use proxima_model_interop::families::encoder_decoder_host::Model;
+
+fn main() -> Result<()> {
+    let mut wav_path: Option<PathBuf> = None;
+    let mut model_path: Option<PathBuf> = None;
+    let mut language = String::from("en");
+    let mut noise = 0.0_f32;
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--wav" => wav_path = Some(args.next().context("--wav wants a path")?.into()),
+            "--model" => model_path = Some(args.next().context("--model wants a path")?.into()),
+            "--lang" => language = args.next().context("--lang wants a name")?,
+            "--noise" => {
+                noise = args
+                    .next()
+                    .context("--noise wants an amplitude")?
+                    .parse()
+                    .context("--noise is an f32")?
+            }
+            other => bail!("unknown argument {other}"),
+        }
+    }
+    let wav_path = wav_path.context("--wav is required")?;
+    let model_path = model_path.context("--model is required")?;
+
+    let audio = wav::read(&wav_path)?;
+    if audio.sample_rate != 16_000 {
+        bail!("expected 16 kHz audio, got {} Hz", audio.sample_rate);
+    }
+    let mut samples = audio.samples;
+    if noise != 0.0 {
+        // A deterministic perturbation: it must change the transcript, so a
+        // run that merely echoes a stored answer cannot pass this control.
+        let mut state = 0x2545_f491_u32;
+        for sample in &mut samples {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let value = (state as f32 / u32::MAX as f32) * 2.0 - 1.0;
+            *sample = (*sample + value * noise).clamp(-1.0, 1.0);
+        }
+    }
+
+    let model = Model::load(&model_path)?;
+    let transcript = model.transcribe(&samples, &language)?;
+    let ids: Vec<String> = transcript.tokens.iter().map(ToString::to_string).collect();
+    println!("models=1 ids={} noise={noise}", ids.len());
+    println!("ids={}", ids.join(","));
+    println!("eot={}", transcript.ended_on_eot);
+    println!("text={}", transcript.text);
+    Ok(())
+}
