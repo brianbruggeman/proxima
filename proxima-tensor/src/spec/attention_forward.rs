@@ -627,21 +627,22 @@ pub(super) fn append_attention_sink_addend(
     group: u32,
 ) -> Result<(NodeId, NodeId), TensorError> {
     let sink_map = alloc::format!("{group}*u+g->sug");
+    let dtype = program[score_max.0 as usize].dtype();
     let max_with_sink = elementwise(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Maximum,
         &[(score_max, "sug->sug"), (sink, sink_map.as_str())],
     )?;
     let sink_shifted = elementwise(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Subtract,
         &[(sink, sink_map.as_str()), (max_with_sink, "sug->sug")],
     )?;
     let sink_weight = elementwise(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Exponential,
         &[(sink_shifted, "sug->sug")],
     )?;
@@ -656,10 +657,11 @@ pub(super) fn add_attention_sink_weight(
     weight_sum: NodeId,
     sink_weight: Option<NodeId>,
 ) -> Result<NodeId, TensorError> {
+    let dtype = program[weight_sum.0 as usize].dtype();
     match sink_weight {
         Some(sink_weight) => elementwise(
             program,
-            DType::FLOAT32,
+            dtype,
             ScalarOp::Add,
             &[(weight_sum, "sug->sug"), (sink_weight, "sug->sug")],
         ),

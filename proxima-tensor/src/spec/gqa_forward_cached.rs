@@ -731,31 +731,25 @@ pub fn append_gqa_cached_layer(
         }
     };
 
-    let (q_even_grouped, q_odd_grouped) =
-        group_queries(program, rotated_q_even, rotated_q_odd, group, group_ones)?;
-    let score_cached_scaled = append_cached_block_scores(
+    let activation = program[rotated_q_even.0 as usize].dtype();
+    let (attended, score_max_cached) = two_range_attention(
         program,
-        q_even_grouped,
-        q_odd_grouped,
-        k_even_cache,
-        k_odd_cache,
-        inv_sqrt_head_dim,
-        cached_window_mask,
-    )?;
-    let (attended, score_max_cached) = append_local_block_and_combine(
-        program,
-        q_even_grouped,
-        q_odd_grouped,
-        rotated_k_new_even,
-        rotated_k_new_odd,
+        activation,
+        (rotated_q_even, rotated_q_odd),
+        (rotated_k_new_even, rotated_k_new_odd),
         v_new,
+        (k_even_cache, k_odd_cache),
         v_cache,
         inv_sqrt_head_dim,
-        score_cached_scaled,
+        cached_window_mask,
         is_future,
         None,
+        false,
         None,
         group,
+        group_ones,
+        PLANE_CACHE_READS,
+        PLANE_NEW_READS,
     )?;
 
     #[cfg(feature = "instrument")]
@@ -980,7 +974,8 @@ pub fn append_hyper_connection_mix(
     w_up: NodeId,
     w_inject: Option<NodeId>,
 ) -> Result<(NodeId, Option<NodeId>), TensorError> {
-    let mean_square = mean_of_squares(program, x, inv_dim, "shi->shi", "sh->shi", "sh->sh", "->sh")?;
+    let mean_square =
+        mean_of_squares(program, x, inv_dim, "shi->shi", "sh->shi", "sh->sh", "->sh")?;
     let mean_square_eps = elementwise(
         program,
         DType::FLOAT32,

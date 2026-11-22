@@ -114,8 +114,10 @@ pub fn sink_combine_program(attention_sink: bool) -> Result<(Vec<Op>, NodeId), T
     let sink = attention_sink.then(|| sink_leaf(&mut program));
     let inv_sqrt_head_dim = scalar_constant(&mut program, INV_SQRT_HEAD_DIM);
     let neg_infinity = scalar_constant(&mut program, f32::NEG_INFINITY);
-    let (attended, _) = super::two_block_attention::append_local_block_and_combine(
+    let activation = program[q_even.0 as usize].dtype();
+    let (attended, _) = super::two_block_attention::append_local_block_and_combine_with_reads(
         &mut program,
+        activation,
         q_even,
         q_odd,
         k_even,
@@ -126,8 +128,10 @@ pub fn sink_combine_program(attention_sink: bool) -> Result<(Vec<Op>, NodeId), T
         cached_scores,
         is_future,
         Some(neg_infinity),
+        false,
         sink,
         SINK_GROUP,
+        super::two_block_attention::PLANE_NEW_READS,
     )?;
     Ok((program, attended))
 }

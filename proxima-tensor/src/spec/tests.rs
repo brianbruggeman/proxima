@@ -24080,34 +24080,27 @@ mod flash_attention_worked_example {
         let _ = cached_len;
         let inv_sqrt = scalar_constant(&mut program, 0.125);
         let (is_future, neg_infinity) = causal_mask(&mut program).expect("causal mask builds");
-        let (q_even_grouped, q_odd_grouped) =
-            group_queries(&mut program, q_even, q_odd, 1, group_ones).expect("queries group");
-        let cached = append_cached_block_scores(
+        let activation = program[q_even.0 as usize].dtype();
+        let (attended, _) = two_range_attention(
             &mut program,
-            q_even_grouped,
-            q_odd_grouped,
-            k_cache_even,
-            k_cache_odd,
-            inv_sqrt,
-            None,
-        )
-        .expect("cached block scores");
-        let (attended, _) = append_local_block_and_combine(
-            &mut program,
-            q_even_grouped,
-            q_odd_grouped,
-            k_even,
-            k_odd,
+            activation,
+            (q_even, q_odd),
+            (k_even, k_odd),
             v_new,
+            (k_cache_even, k_cache_odd),
             v_cache,
             inv_sqrt,
-            cached,
+            None,
             is_future,
             Some(neg_infinity),
+            false,
             None,
             1,
+            group_ones,
+            PLANE_CACHE_READS,
+            PLANE_NEW_READS,
         )
-        .expect("local block combines");
+        .expect("two-range attention builds");
         (program, attended)
     }
 

@@ -54,8 +54,9 @@ pub(super) fn group_queries(
     clippy::too_many_arguments,
     reason = "the two key reads are the layout; folding them into a struct would be a type that only carries arguments"
 )]
-pub(super) fn append_cached_block_scores_with_reads(
+fn append_cached_block_scores_with_reads(
     program: &mut Vec<Op>,
+    dtype: DType,
     q_even_grouped: NodeId,
     q_odd_grouped: NodeId,
     k_even_cache: NodeId,
@@ -72,7 +73,7 @@ pub(super) fn append_cached_block_scores_with_reads(
     )?;
     let score_cached_even = reduce(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_cached_even_product,
@@ -87,7 +88,7 @@ pub(super) fn append_cached_block_scores_with_reads(
     )?;
     let score_cached_odd = reduce(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_cached_odd_product,
@@ -96,7 +97,7 @@ pub(super) fn append_cached_block_scores_with_reads(
     )?;
     let score_cached = elementwise(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Add,
         &[
             (score_cached_even, "stug->stug"),
@@ -105,14 +106,14 @@ pub(super) fn append_cached_block_scores_with_reads(
     )?;
     let score_cached_scaled = elementwise(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Multiply,
         &[(score_cached, "stug->stug"), (inv_sqrt_head_dim, "->stug")],
     )?;
     match cache_mask {
         Some((is_masked, neg_infinity_cached)) => elementwise(
             program,
-            DType::FLOAT32,
+            dtype,
             ScalarOp::Select,
             &[
                 (is_masked, "st->stug"),
@@ -143,6 +144,7 @@ pub(super) fn append_cached_block_scores_with_reads(
 )]
 pub(super) fn append_local_block_and_combine_with_reads(
     program: &mut Vec<Op>,
+    dtype: DType,
     q_even_grouped: NodeId,
     q_odd_grouped: NodeId,
     rotated_k_new_even: NodeId,
@@ -153,10 +155,16 @@ pub(super) fn append_local_block_and_combine_with_reads(
     score_cached_scaled: NodeId,
     is_future_local: NodeId,
     neg_infinity_local: Option<NodeId>,
+    neg_infinity_first: bool,
     attention_sink: Option<NodeId>,
     group: u32,
     key_reads: (&str, &str),
 ) -> Result<(NodeId, NodeId), TensorError> {
+    let negative_infinity = |program: &mut Vec<Op>| scalar_constant(program, f32::NEG_INFINITY);
+    let neg_infinity_local = match neg_infinity_local {
+        None if neg_infinity_first => Some(negative_infinity(program)),
+        given => given,
+    };
     let score_new_even_product = elementwise_like(
         program,
         q_even_grouped,
@@ -168,7 +176,7 @@ pub(super) fn append_local_block_and_combine_with_reads(
     )?;
     let score_new_even = reduce(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_new_even_product,
@@ -186,7 +194,7 @@ pub(super) fn append_local_block_and_combine_with_reads(
     )?;
     let score_new_odd = reduce(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Add,
         ReduceInit::Zero,
         score_new_odd_product,
@@ -195,7 +203,7 @@ pub(super) fn append_local_block_and_combine_with_reads(
     )?;
     let score_new = elementwise(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Add,
         &[
             (score_new_even, "swug->swug"),
@@ -204,17 +212,17 @@ pub(super) fn append_local_block_and_combine_with_reads(
     )?;
     let score_new_scaled = elementwise(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Multiply,
         &[(score_new, "swug->swug"), (inv_sqrt_head_dim, "->swug")],
     )?;
     let neg_infinity = match neg_infinity_local {
         Some(node) => node,
-        None => scalar_constant(program, f32::NEG_INFINITY),
+        None => negative_infinity(program),
     };
     let score_new_masked = elementwise(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Select,
         &[
             (is_future_local, "sw->swug"),
@@ -225,7 +233,7 @@ pub(super) fn append_local_block_and_combine_with_reads(
 
     let score_max_cached = reduce(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
         score_cached_scaled,
@@ -234,7 +242,7 @@ pub(super) fn append_local_block_and_combine_with_reads(
     )?;
     let score_max_new = reduce(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Maximum,
         ReduceInit::NegativeInfinity,
         score_new_masked,
@@ -243,7 +251,7 @@ pub(super) fn append_local_block_and_combine_with_reads(
     )?;
     let global_max = elementwise(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Maximum,
         &[(score_max_cached, "sug->sug"), (score_max_new, "sug->sug")],
     )?;
@@ -258,7 +266,7 @@ pub(super) fn append_local_block_and_combine_with_reads(
 
     let shifted_cached = elementwise(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Subtract,
         &[
             (score_cached_scaled, "stug->stug"),
@@ -267,26 +275,26 @@ pub(super) fn append_local_block_and_combine_with_reads(
     )?;
     let weights_cached = elementwise(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Exponential,
         &[(shifted_cached, "stug->stug")],
     )?;
     let shifted_new = elementwise(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Subtract,
         &[(score_new_masked, "swug->swug"), (global_max, "sug->swug")],
     )?;
     let weights_new = elementwise(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Exponential,
         &[(shifted_new, "swug->swug")],
     )?;
 
     let sum_cached = reduce(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Add,
         ReduceInit::Zero,
         weights_cached,
@@ -295,7 +303,7 @@ pub(super) fn append_local_block_and_combine_with_reads(
     )?;
     let sum_new = reduce(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Add,
         ReduceInit::Zero,
         weights_new,
@@ -304,27 +312,27 @@ pub(super) fn append_local_block_and_combine_with_reads(
     )?;
     let weight_sum = elementwise(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Add,
         &[(sum_cached, "sug->sug"), (sum_new, "sug->sug")],
     )?;
     let weight_sum = add_attention_sink_weight(program, weight_sum, sink_weight)?;
     let inv_weight_sum = elementwise(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Reciprocal,
         &[(weight_sum, "sug->sug")],
     )?;
 
     let attended_cached_product = elementwise(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Multiply,
         &[(weights_cached, "stug->stugd"), (v_cache, "tud->stugd")],
     )?;
     let attended_cached = reduce(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Add,
         ReduceInit::Zero,
         attended_cached_product,
@@ -333,13 +341,13 @@ pub(super) fn append_local_block_and_combine_with_reads(
     )?;
     let attended_new_product = elementwise(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Multiply,
         &[(weights_new, "swug->swugd"), (v_new, "wud->swugd")],
     )?;
     let attended_new = reduce(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Add,
         ReduceInit::Zero,
         attended_new_product,
@@ -348,7 +356,7 @@ pub(super) fn append_local_block_and_combine_with_reads(
     )?;
     let attended_sum = elementwise(
         program,
-        DType::FLOAT32,
+        dtype,
         ScalarOp::Add,
         &[
             (attended_cached, "sugd->sugd"),
@@ -367,62 +375,69 @@ pub(super) fn append_local_block_and_combine_with_reads(
 pub(super) const PLANE_CACHE_READS: (&str, &str) = ("tui->stugi", "tui->stugi");
 pub(super) const PLANE_NEW_READS: (&str, &str) = ("wui->swugi", "wui->swugi");
 
-/// [`append_cached_block_scores_with_reads`] over two separate key planes.
-pub(super) fn append_cached_block_scores(
-    program: &mut Vec<Op>,
-    q_even_grouped: NodeId,
-    q_odd_grouped: NodeId,
-    k_even_cache: NodeId,
-    k_odd_cache: NodeId,
-    inv_sqrt_head_dim: NodeId,
-    cache_mask: Option<(NodeId, NodeId)>,
-) -> Result<NodeId, TensorError> {
-    append_cached_block_scores_with_reads(
-        program,
-        q_even_grouped,
-        q_odd_grouped,
-        k_even_cache,
-        k_odd_cache,
-        inv_sqrt_head_dim,
-        cache_mask,
-        PLANE_CACHE_READS,
-    )
-}
-
-/// [`append_local_block_and_combine_with_reads`] over two separate key planes.
+/// Attends a query range over the cache and its own new keys with one online
+/// softmax: groups the rotated query halves, scores the cached block, then the
+/// local block, and returns `(attended, score_max_cached)`.
+///
+/// `q`, `k_new` and `k_cache` are the rotated (even, odd) halves; `cache_mask`
+/// masks the cached block in the graph (`None` leaves it to the executor's
+/// `cached_len`); `neg_infinity_local` and `attention_sink` are as in
+/// [`append_local_block_and_combine_with_reads`]; `cache_reads` and `new_reads`
+/// are the key operand maps over the cache and the new block.
+/// `neg_infinity_first` emits a missing `-inf` before the local block's scores
+/// instead of between them and their select, the order the single-range MoE
+/// graph's digest pins.
 #[expect(
     clippy::too_many_arguments,
-    reason = "mirrors append_local_block_and_combine_with_reads minus the layout"
+    reason = "the two blocks read separate planes, masks and layouts; a struct would only carry arguments"
 )]
-pub(super) fn append_local_block_and_combine(
+pub fn two_range_attention(
     program: &mut Vec<Op>,
-    q_even_grouped: NodeId,
-    q_odd_grouped: NodeId,
-    rotated_k_new_even: NodeId,
-    rotated_k_new_odd: NodeId,
+    dtype: DType,
+    q: (NodeId, NodeId),
+    k_new: (NodeId, NodeId),
     v_new: NodeId,
+    k_cache: (NodeId, NodeId),
     v_cache: NodeId,
     inv_sqrt_head_dim: NodeId,
-    score_cached_scaled: NodeId,
+    cache_mask: Option<(NodeId, NodeId)>,
     is_future_local: NodeId,
     neg_infinity_local: Option<NodeId>,
+    neg_infinity_first: bool,
     attention_sink: Option<NodeId>,
     group: u32,
+    group_ones: NodeId,
+    cache_reads: (&str, &str),
+    new_reads: (&str, &str),
 ) -> Result<(NodeId, NodeId), TensorError> {
-    append_local_block_and_combine_with_reads(
+    let (q_even_grouped, q_odd_grouped) = group_queries(program, q.0, q.1, group, group_ones)?;
+    let score_cached_scaled = append_cached_block_scores_with_reads(
         program,
+        dtype,
         q_even_grouped,
         q_odd_grouped,
-        rotated_k_new_even,
-        rotated_k_new_odd,
+        k_cache.0,
+        k_cache.1,
+        inv_sqrt_head_dim,
+        cache_mask,
+        cache_reads,
+    )?;
+    append_local_block_and_combine_with_reads(
+        program,
+        dtype,
+        q_even_grouped,
+        q_odd_grouped,
+        k_new.0,
+        k_new.1,
         v_new,
         v_cache,
         inv_sqrt_head_dim,
         score_cached_scaled,
         is_future_local,
         neg_infinity_local,
+        neg_infinity_first,
         attention_sink,
         group,
-        PLANE_NEW_READS,
+        new_reads,
     )
 }

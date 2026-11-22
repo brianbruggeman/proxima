@@ -637,33 +637,25 @@ pub fn append_two_range_cached_attention(
         None => unrotated_head_pair(program, q, 'h', rope_pairing, pairs)?,
     };
 
-    let (q_even_grouped, q_odd_grouped) =
-        group_queries(program, rotated_q_even, rotated_q_odd, group, group_ones)?;
     let (cache_reads, new_reads) = key_reads(key_layout, pairs);
-    let score_cached_scaled = append_cached_block_scores_with_reads(
+    let activation = program[rotated_q_even.0 as usize].dtype();
+    let (attended, _) = two_range_attention(
         program,
-        q_even_grouped,
-        q_odd_grouped,
-        k_even_cache,
-        k_odd_cache,
-        inv_sqrt_head_dim,
-        Some((is_future_cached, neg_infinity_cached)),
-        (cache_reads.0.as_str(), cache_reads.1.as_str()),
-    )?;
-    let (attended, _) = append_local_block_and_combine_with_reads(
-        program,
-        q_even_grouped,
-        q_odd_grouped,
-        rotated_k_new_even,
-        rotated_k_new_odd,
+        activation,
+        (rotated_q_even, rotated_q_odd),
+        (rotated_k_new_even, rotated_k_new_odd),
         v_new,
+        (k_even_cache, k_odd_cache),
         v_cache,
         inv_sqrt_head_dim,
-        score_cached_scaled,
+        Some((is_future_cached, neg_infinity_cached)),
         is_future_local,
         Some(neg_infinity_local),
+        false,
         attention_sink,
         group,
+        group_ones,
+        (cache_reads.0.as_str(), cache_reads.1.as_str()),
         (new_reads.0.as_str(), new_reads.1.as_str()),
     )?;
 

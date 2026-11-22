@@ -119,11 +119,8 @@ use recurrent_readout::{
 pub use scheduled_cached::*;
 pub use short_conv_delta_net::*;
 pub use single_range_moe_cached::*;
-use two_block_attention::{
-    PLANE_CACHE_READS, PLANE_NEW_READS, append_cached_block_scores,
-    append_cached_block_scores_with_reads, append_local_block_and_combine,
-    append_local_block_and_combine_with_reads, group_queries,
-};
+pub use two_block_attention::two_range_attention;
+use two_block_attention::{PLANE_CACHE_READS, PLANE_NEW_READS};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
