@@ -270,11 +270,14 @@ pub fn calibration_ids(
 ) -> Result<Vec<Vec<u32>>, HobbitError> {
     let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)
         .map_err(|source| HobbitError::Tokenize { index: 0, source })?;
+    let add_bos = vocab
+        .add_bos_token()
+        .unwrap_or_else(|| vocab.bos_token_id().is_some());
     prompts
         .iter()
         .enumerate()
         .map(|(index, prompt)| {
-            let mut ids = proxima_tokenizer::encode_with_bos_eos(prompt, &vocab, true, false)
+            let mut ids = proxima_tokenizer::encode_with_bos_eos(prompt, &vocab, add_bos, false)
                 .map_err(|source| HobbitError::Tokenize { index, source })?;
             if max_tokens > 0 && ids.len() > max_tokens {
                 ids.truncate(max_tokens.max(2));
