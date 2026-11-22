@@ -5,23 +5,24 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 use proxima_numeric::decode_blocks;
-use proxima_safetensors::SafetensorsParser;
-#[cfg(all(feature = "metal", target_os = "macos"))]
-use proxima_tensor::QuantizedBlock;
-use proxima_tensor::cpu::evaluate_named;
+use proxima_safetensors::{Manifest, SafetensorsParser, TensorEntry};
+use proxima_tensor::cpu::{Evaluated, QuantizedBlock, evaluate_quantized_named};
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{
     STFT_COS_INPUT, STFT_SIN_INPUT, STFT_WINDOW_INPUT, StftLogMelConfig, stft_log_mel, stft_tables,
 };
 use serde_json::Value;
 
+use crate::bind::transpose_out_in_to_in_out;
 use crate::decode_policy::{DecodeConfig, DecodePolicy};
 use crate::families::encoder_decoder::{
     DecoderLayer, DecoderStem, EncoderLayer, EncoderStem, Linear, encoder,
 };
+use crate::hf_bind::safetensors_tensor_as_packed_block;
 
 /// The dimensions a checkpoint states, read from its `config.json`.
 #[derive(Debug, Clone)]
@@ -84,83 +85,102 @@ impl Shape {
     }
 }
 
+/// suffix of the cache key holding a stored `[out, in]` matrix as `[in, out]`
+const FLIPPED: &str = "#flipped";
+
 /// The checkpoint's tensors, in the layout the builders read.
 pub struct Tensors {
-    values: BTreeMap<String, (Vec<f32>, Vec<usize>)>,
+    bytes: Vec<u8>,
+    manifest: Manifest,
+    data_start: u64,
+    /// stored half-width leaves a builder reads decoded, filled on first use and kept across decode steps
+    decoded: BTreeMap<String, OnceLock<Vec<f32>>>,
 }
 
 impl Tensors {
     pub fn load(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path).with_context(|| path.display().to_string())?;
-        let header_len =
-            u64::from_le_bytes(bytes[..8].try_into().expect("eight byte header length")) as usize;
+        let prefix: [u8; 8] = bytes
+            .get(..8)
+            .and_then(|head| head.try_into().ok())
+            .context("safetensors file is shorter than its length prefix")?;
+        let header_len = u64::from_le_bytes(prefix) as usize;
+        let header = bytes
+            .get(..8 + header_len)
+            .context("safetensors header runs past the end of the file")?;
         let mut parser = SafetensorsParser::new();
-        parser.feed(&bytes[..8 + header_len]);
-        parser.poll().expect("safetensors header parses");
+        parser.feed(header);
+        parser
+            .poll()
+            .map_err(|error| anyhow::anyhow!("safetensors header does not parse: {error:?}"))?;
         let SafetensorsParser::TensorData { manifest, .. } = parser else {
             return Err(anyhow::anyhow!("safetensors header did not complete"));
         };
-        let data = &bytes[8 + header_len..];
-        let mut values = BTreeMap::new();
-        for entry in &manifest.tensors {
-            let (start, end) = entry.data_offsets;
-            let raw = &data[start as usize..end as usize];
-            let shape: Vec<usize> = entry.shape.iter().map(|&dim| dim as usize).collect();
-            let elements: usize = shape.iter().product();
-            let format = entry.dtype.format().with_context(|| {
-                format!("{} has no numeric format ({:?})", entry.name, entry.dtype)
-            })?;
-            let mut tensor = vec![0.0_f32; elements];
-            decode_blocks(&format, raw, &mut tensor)
-                .with_context(|| format!("decoding {} as {format:?}", entry.name))?;
-            values.insert(entry.name.clone(), (tensor, shape));
-        }
-        Ok(Self { values })
+        let decoded = manifest
+            .tensors
+            .iter()
+            .flat_map(|entry| [entry.name.clone(), format!("{}{FLIPPED}", entry.name)])
+            .map(|key| (key, OnceLock::new()))
+            .collect();
+        Ok(Self {
+            bytes,
+            manifest,
+            data_start: (8 + header_len) as u64,
+            decoded,
+        })
     }
 
-    fn data(&self, name: &str) -> &[f32] {
-        &self
-            .values
+    fn block(&self, name: &str) -> QuantizedBlock<'_> {
+        safetensors_tensor_as_packed_block(&self.manifest, &self.bytes, self.data_start, name)
+            .unwrap_or_else(|error| panic!("{name} binds in its stored format: {error}"))
+    }
+
+    fn entry(&self, name: &str) -> &TensorEntry {
+        self.manifest
+            .tensors
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("no tensor {name}"))
+    }
+
+    fn decoded(&self, name: &str) -> &[f32] {
+        self.decoded
             .get(name)
             .unwrap_or_else(|| panic!("no tensor {name}"))
-            .0
+            .get_or_init(|| {
+                let entry = self.entry(name);
+                let (start, end) = entry.data_offsets;
+                let raw = &self.bytes
+                    [(self.data_start + start) as usize..(self.data_start + end) as usize];
+                let format = entry
+                    .dtype
+                    .format()
+                    .unwrap_or_else(|| panic!("{name} has no numeric format ({:?})", entry.dtype));
+                let mut tensor = vec![0.0; entry.shape.iter().product::<u64>() as usize];
+                decode_blocks(&format, raw, &mut tensor)
+                    .unwrap_or_else(|error| panic!("decoding {name} as {format:?}: {error}"));
+                tensor
+            })
     }
 
-    fn shape(&self, name: &str) -> &[usize] {
-        &self
-            .values
-            .get(name)
-            .unwrap_or_else(|| panic!("no tensor {name}"))
-            .1
-    }
-
-    fn transposed(&self, name: &str) -> Vec<f32> {
-        let shape = self.shape(name);
-        assert_eq!(shape.len(), 2, "{name} is a matrix");
-        let (rows, columns) = (shape[0], shape[1]);
-        let source = self.data(name);
-        let mut out = vec![0.0_f32; source.len()];
-        for row in 0..rows {
-            for column in 0..columns {
-                out[column * rows + row] = source[row * columns + column];
-            }
-        }
-        out
+    fn dims(&self, name: &str) -> Vec<usize> {
+        self.entry(name).shape.iter().map(|&dim| dim as usize).collect()
     }
 }
 
-
-struct Bound {
+struct Bound<'a> {
     program: Vec<Op>,
     named: BTreeMap<String, Vec<f32>>,
+    blocks: Vec<(String, QuantizedBlock<'a>)>,
     shape: Shape,
 }
 
-impl Bound {
+impl<'a> Bound<'a> {
     fn new(shape: Shape) -> Self {
         Self {
             program: Vec::new(),
             named: BTreeMap::new(),
+            blocks: Vec::new(),
             shape,
         }
     }
@@ -169,83 +189,92 @@ impl Bound {
         super::encoder_decoder::leaf(&mut self.program, shape, name)
     }
 
-    fn matrix(&mut self, name: &str, input: u32, output: u32, tensors: &Tensors) -> Linear {
+    fn weight(&mut self, name: &str, shape: &[u32], stored: &str, tensors: &'a Tensors) -> NodeId {
+        let node = self.leaf(name, shape);
+        let block = tensors.block(stored);
+        if block.packed_bytes().is_some() {
+            self.blocks.push((name.into(), block));
+        } else {
+            let flipped = tensors
+                .decoded
+                .get(&format!("{stored}{FLIPPED}"))
+                .unwrap_or_else(|| panic!("no tensor {stored}"))
+                .get_or_init(|| {
+                    let dims = tensors.dims(stored);
+                    transpose_out_in_to_in_out(tensors.decoded(stored), stored, dims[0], dims[1])
+                        .unwrap_or_else(|error| panic!("{stored} transposes: {error}"))
+                });
+            self.blocks
+                .push((name.into(), QuantizedBlock::from(flipped.as_slice())));
+        }
+        node
+    }
+
+    fn plain(&mut self, name: &str, shape: &[u32], tensors: &'a Tensors) -> NodeId {
+        let node = self.leaf(name, shape);
+        let block = tensors.block(name);
+        let block = if block.packed_bytes().is_some() {
+            QuantizedBlock::from(tensors.decoded(name))
+        } else {
+            block
+        };
+        self.blocks.push((name.into(), block));
+        node
+    }
+
+    fn matrix(&mut self, name: &str, input: u32, output: u32, tensors: &'a Tensors) -> Linear {
         let weight_name = format!("{name}.weight");
-        let weight = self.leaf(&weight_name, &[input, output]);
-        self.named
-            .insert(weight_name, tensors.transposed(&format!("{name}.weight")));
-        let bias_name = format!("{name}.bias");
-        let bias = self.leaf(&bias_name, &[output]);
-        self.named.insert(
-            bias_name.clone(),
-            tensors.data(&format!("{name}.bias")).to_vec(),
-        );
+        let weight = self.weight(&weight_name, &[input, output], &weight_name, tensors);
+        let bias = self.plain(&format!("{name}.bias"), &[output], tensors);
         Linear {
             weight,
             bias: Some(bias),
         }
     }
 
-    fn heads(&mut self, name: &str, tensors: &Tensors, bias: bool) -> Linear {
+    fn heads(&mut self, name: &str, tensors: &'a Tensors, bias: bool) -> Linear {
         let weight_name = format!("{name}.weight");
-        let weight = self.leaf(
+        let weight = self.weight(
             &weight_name,
             &[self.shape.width, self.shape.encoder_heads, self.shape.encoder_head_dim],
+            &weight_name,
+            tensors,
         );
-        self.named
-            .insert(weight_name, tensors.transposed(&format!("{name}.weight")));
         let bias = bias.then(|| {
-            let bias_name = format!("{name}.bias");
-            let node = self.leaf(&bias_name, &[self.shape.encoder_heads, self.shape.encoder_head_dim]);
-            self.named.insert(
-                bias_name.clone(),
-                tensors.data(&format!("{name}.bias")).to_vec(),
-            );
-            node
+            self.plain(
+                &format!("{name}.bias"),
+                &[self.shape.encoder_heads, self.shape.encoder_head_dim],
+                tensors,
+            )
         });
         Linear { weight, bias }
     }
 
-    fn heads_out(&mut self, name: &str, tensors: &Tensors) -> Linear {
+    fn heads_out(&mut self, name: &str, tensors: &'a Tensors) -> Linear {
         let weight_name = format!("{name}.weight");
-        let weight = self.leaf(
+        let weight = self.weight(
             &weight_name,
             &[self.shape.encoder_heads, self.shape.encoder_head_dim, self.shape.width],
+            &weight_name,
+            tensors,
         );
-        self.named
-            .insert(weight_name, tensors.transposed(&format!("{name}.weight")));
-        let bias_name = format!("{name}.bias");
-        let bias = self.leaf(&bias_name, &[self.shape.width]);
-        self.named.insert(
-            bias_name.clone(),
-            tensors.data(&format!("{name}.bias")).to_vec(),
-        );
+        let bias = self.plain(&format!("{name}.bias"), &[self.shape.width], tensors);
         Linear {
             weight,
             bias: Some(bias),
         }
     }
 
-    fn norm(&mut self, name: &str, tensors: &Tensors) -> Linear {
-        let weight_name = format!("{name}.weight");
-        let weight = self.leaf(&weight_name, &[self.shape.width]);
-        self.named.insert(
-            weight_name,
-            tensors.data(&format!("{name}.weight")).to_vec(),
-        );
-        let bias_name = format!("{name}.bias");
-        let bias = self.leaf(&bias_name, &[self.shape.width]);
-        self.named.insert(
-            bias_name.clone(),
-            tensors.data(&format!("{name}.bias")).to_vec(),
-        );
+    fn norm(&mut self, name: &str, tensors: &'a Tensors) -> Linear {
+        let weight = self.plain(&format!("{name}.weight"), &[self.shape.width], tensors);
+        let bias = self.plain(&format!("{name}.bias"), &[self.shape.width], tensors);
         Linear {
             weight,
             bias: Some(bias),
         }
     }
 
-    fn encoder_layer(&mut self, layer: usize, tensors: &Tensors) -> EncoderLayer {
+    fn encoder_layer(&mut self, layer: usize, tensors: &'a Tensors) -> EncoderLayer {
         let prefix = format!("model.encoder.layers.{layer}");
         EncoderLayer {
             attn_ln: self.norm(&format!("{prefix}.self_attn_layer_norm"), tensors),
@@ -271,7 +300,7 @@ impl Bound {
         }
     }
 
-    fn decoder_layer(&mut self, layer: usize, tensors: &Tensors) -> DecoderLayer {
+    fn decoder_layer(&mut self, layer: usize, tensors: &'a Tensors) -> DecoderLayer {
         let prefix = format!("model.decoder.layers.{layer}");
         DecoderLayer {
             self_ln: self.norm(&format!("{prefix}.self_attn_layer_norm"), tensors),
@@ -300,33 +329,18 @@ impl Bound {
         }
     }
 
-    fn encoder_stem(&mut self, tensors: &Tensors) -> EncoderStem {
+    fn encoder_stem(&mut self, tensors: &'a Tensors) -> EncoderStem {
         let width = self.shape.width;
         let mels = self.shape.mels;
-        let conv1_name = "model.encoder.conv1.weight";
-        let conv1 = self.leaf(conv1_name, &[width, mels, 3]);
-        self.named
-            .insert(conv1_name.into(), tensors.data(conv1_name).to_vec());
-        let conv1_bias_name = "model.encoder.conv1.bias";
-        let conv1_bias = self.leaf(conv1_bias_name, &[width]);
-        self.named.insert(
-            conv1_bias_name.into(),
-            tensors.data(conv1_bias_name).to_vec(),
+        let conv1 = self.plain("model.encoder.conv1.weight", &[width, mels, 3], tensors);
+        let conv1_bias = self.plain("model.encoder.conv1.bias", &[width], tensors);
+        let conv2 = self.plain("model.encoder.conv2.weight", &[width, width, 3], tensors);
+        let conv2_bias = self.plain("model.encoder.conv2.bias", &[width], tensors);
+        let position = self.plain(
+            "model.encoder.embed_positions.weight",
+            &[self.shape.source_positions, width],
+            tensors,
         );
-        let conv2_name = "model.encoder.conv2.weight";
-        let conv2 = self.leaf(conv2_name, &[width, width, 3]);
-        self.named
-            .insert(conv2_name.into(), tensors.data(conv2_name).to_vec());
-        let conv2_bias_name = "model.encoder.conv2.bias";
-        let conv2_bias = self.leaf(conv2_bias_name, &[width]);
-        self.named.insert(
-            conv2_bias_name.into(),
-            tensors.data(conv2_bias_name).to_vec(),
-        );
-        let position_name = "model.encoder.embed_positions.weight";
-        let position = self.leaf(position_name, &[self.shape.source_positions, width]);
-        self.named
-            .insert(position_name.into(), tensors.data(position_name).to_vec());
         EncoderStem {
             conv1: Linear {
                 weight: conv1,
@@ -341,23 +355,19 @@ impl Bound {
         }
     }
 
-    fn decoder_stem(&mut self, tensors: &Tensors) -> DecoderStem {
+    fn decoder_stem(&mut self, tensors: &'a Tensors) -> DecoderStem {
         let tokens_name = "model.decoder.embed_tokens.weight";
-        let tokens = self.leaf(tokens_name, &[self.shape.vocab, self.shape.width]);
-        self.named
-            .insert(tokens_name.into(), tensors.data(tokens_name).to_vec());
-        let position_name = "model.decoder.embed_positions.weight";
-        let position = self.leaf(
-            position_name,
+        let tokens = self.plain(tokens_name, &[self.shape.vocab, self.shape.width], tensors);
+        let position = self.plain(
+            "model.decoder.embed_positions.weight",
             &[self.shape.target_positions, self.shape.width],
+            tensors,
         );
-        self.named
-            .insert(position_name.into(), tensors.data(position_name).to_vec());
-        let head_name = "lm_head";
-        let head = self.leaf(head_name, &[self.shape.width, self.shape.vocab]);
-        self.named.insert(
-            head_name.into(),
-            tensors.transposed("model.decoder.embed_tokens.weight"),
+        let head = self.weight(
+            "lm_head",
+            &[self.shape.width, self.shape.vocab],
+            tokens_name,
+            tensors,
         );
         DecoderStem {
             tokens,
@@ -370,46 +380,49 @@ impl Bound {
         }
     }
 
-    fn run(&self, outputs: &[NodeId], device: Device) -> Vec<Vec<f32>> {
-        let named: Vec<(&str, &[f32])> = self
+    fn run(&self, outputs: &[NodeId], device: Device) -> Result<Vec<Vec<f32>>> {
+        let named: Vec<(&str, QuantizedBlock<'_>)> = self
             .named
             .iter()
-            .map(|(name, data)| (name.as_str(), data.as_slice()))
+            .map(|(name, data)| (name.as_str(), QuantizedBlock::from(data.as_slice())))
+            .chain(self.blocks.iter().map(|(name, block)| (name.as_str(), *block)))
             .collect();
         match device {
             Device::Cpu => {
-                let evaluated = evaluate_named(&self.program, &[], &named, outputs)
-                    .expect("program evaluates");
-                outputs
-                    .iter()
-                    .map(|node| evaluated.get(*node).expect("output").0.to_vec())
-                    .collect()
+                let evaluated = evaluate_quantized_named(&self.program, &[], &named, outputs)
+                    .map_err(|error| anyhow::anyhow!("program does not evaluate: {error:?}"))?;
+                collect_outputs(&evaluated, outputs)
             }
             #[cfg(all(feature = "metal", target_os = "macos"))]
             Device::Metal(policy) => {
-                let blocks: Vec<(&str, QuantizedBlock<'_>)> = named
-                    .iter()
-                    .map(|(name, data)| (*name, QuantizedBlock::from(*data)))
-                    .collect();
                 let plan = omega::plan_named(
                     &self.program,
                     &[],
-                    &blocks,
+                    &named,
                     outputs,
                     policy,
                 )
-                .expect("metal plan");
-                let evaluated =
-                    omega::execute_plan_named(&plan, &blocks).expect("metal executes");
-                outputs
-                    .iter()
-                    .map(|node| evaluated.get(*node).expect("output").0.to_vec())
-                    .collect()
+                .map_err(|error| anyhow::anyhow!("metal plan: {error:?}"))?;
+                let evaluated = omega::execute_plan_named(&plan, &named)
+                    .map_err(|error| anyhow::anyhow!("metal executes: {error:?}"))?;
+                collect_outputs(&evaluated, outputs)
             }
             #[cfg(not(all(feature = "metal", target_os = "macos")))]
-            Device::Metal(_) => panic!("the metal backend needs --features metal on macOS"),
+            Device::Metal(_) => bail!("the metal backend needs --features metal on macOS"),
         }
     }
+}
+
+fn collect_outputs(evaluated: &Evaluated, outputs: &[NodeId]) -> Result<Vec<Vec<f32>>> {
+    outputs
+        .iter()
+        .map(|node| {
+            evaluated
+                .get(*node)
+                .map(|(values, _)| values.to_vec())
+                .with_context(|| format!("evaluated program has no output for node {node:?}"))
+        })
+        .collect()
 }
 
 /// Which backend executes a stage.
@@ -505,7 +518,7 @@ impl Model {
             bank,
         )?;
         let tables = stft_tables(&config, crate::families::encoder_decoder::ACTIVATION)?;
-        let decode = |bytes: &[u8]| -> Vec<f32> {
+        let decode = |bytes: &[u8]| {
             bytes
                 .as_chunks::<4>()
                 .0
@@ -525,11 +538,11 @@ impl Model {
             .named
             .insert(STFT_SIN_INPUT.into(), decode(&tables.sin));
         let mel_start = std::time::Instant::now();
-        let mel_values = mel_bound.run(&[mel], device).remove(0);
+        let mel_values = mel_bound.run(&[mel], device)?.remove(0);
         let mel = mel_start.elapsed();
         // The encoder consumes the first 2*source_positions frames.
         let needed = (self.shape.source_positions * 2) as usize;
-        let mut mel_input = vec![0.0_f32; (self.shape.mels as usize) * needed];
+        let mut mel_input = vec![0.0; (self.shape.mels as usize) * needed];
         for row in 0..self.shape.mels as usize {
             for frame in 0..needed {
                 mel_input[row * needed + frame] = mel_values[row * frames as usize + frame];
@@ -574,7 +587,7 @@ impl Model {
             outputs.push(*v);
         }
         let encode_start = std::time::Instant::now();
-        let values = bound.run(&outputs, device);
+        let values = bound.run(&outputs, device)?;
         let encode = encode_start.elapsed();
         let cross_values: Vec<(Vec<f32>, Vec<f32>)> = (0..self.shape.decoder_layers)
             .map(|layer| (values[1 + layer * 2].clone(), values[2 + layer * 2].clone()))
@@ -635,7 +648,7 @@ impl Model {
             decoder
                 .named
                 .insert("positions".into(), (0..n).map(|i| i as f32).collect());
-            let flat = decoder.run(&[logits], device).remove(0);
+            let flat = decoder.run(&[logits], device)?.remove(0);
             let vocab = self.shape.vocab as usize;
             let last = &flat[(n as usize - 1) * vocab..n as usize * vocab];
             let mut row = last.to_vec();
@@ -721,7 +734,7 @@ fn pad(wav: &[f32]) -> Result<Vec<f32>> {
     if wav.len() < 200 || wav.len() > 480_040 {
         bail!("one 30 s window is 200..=480040 samples; got {}", wav.len());
     }
-    let mut out = vec![0.0_f32; 480_240];
+    let mut out = vec![0.0; 480_240];
     for index in 0..200 {
         out[199 - index] = wav[index + 1];
     }
