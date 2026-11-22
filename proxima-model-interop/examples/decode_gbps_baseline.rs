@@ -108,6 +108,8 @@ fn config_diff_count(config: &ServingConfig<'_>) -> u32 {
     mismatches
 }
 
+// only the non-instrument start line reports it; under `instrument` the event carries the structured fields
+#[cfg(not(feature = "instrument"))]
 fn attention_label(config: &ServingConfig<'_>) -> String {
     #[cfg(all(
         feature = "metal",
