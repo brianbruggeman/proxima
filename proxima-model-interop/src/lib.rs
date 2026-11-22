@@ -103,6 +103,10 @@ pub mod convert;
 pub mod inferred_profile;
 #[cfg(feature = "std")]
 mod hf_descriptor;
+#[cfg(feature = "std")]
+pub mod hobbit;
+#[cfg(feature = "std")]
+mod hobbit_settings;
 #[cfg(any(test, all(feature = "std", feature = "metal", target_os = "macos")))]
 mod memory_fit;
 #[cfg(feature = "std")]
@@ -154,6 +158,8 @@ pub use bind_leaves::bind_program_leaves;
 #[cfg(feature = "std")]
 pub use codec_policy_settings::{CodecPolicySettings, CodecPolicyWeights};
 #[cfg(feature = "std")]
+pub use hobbit_settings::{HobbitQualitySettings, HobbitSettings};
+#[cfg(feature = "std")]
 pub use convert::{convert_codec, policy_selects};
 #[cfg(feature = "std")]
 pub use dense::descriptor_from_gguf as dense_descriptor_from_gguf;
@@ -200,10 +206,11 @@ pub mod checkpoint_resolver;
 #[cfg(feature = "std")]
 pub use lowering::{
     BoundProgram, KvCacheShape, KvLayout, StepInput, StepState, bind_checkpoint,
-    bind_checkpoint_with_kv_layout, bind_hf_checkpoint, bind_prefill_row_cut,
-    bind_speculative_verify, bind_symbols,
-    header_descriptor, kv_layers, recurrent_descriptor, recurrent_speculative_verify,
-    rope_freq_factors, sliding_rope_inputs, step_state, symbols, trained_context_length,
+    bind_checkpoint_with_kv_layout, bind_checkpoint_with_kv_layout_and_precision, bind_hf_checkpoint,
+    bind_prefill_row_cut, bind_prefill_row_cut_with_precision, bind_speculative_verify,
+    bind_speculative_verify_with_precision, bind_symbols, header_descriptor, kv_layers,
+    recurrent_descriptor, recurrent_speculative_verify, rope_freq_factors, sliding_rope_inputs,
+    step_state, symbols, trained_context_length,
 };
 #[cfg(feature = "std")]
 pub use prompt_cache_settings::PromptCacheSettings;

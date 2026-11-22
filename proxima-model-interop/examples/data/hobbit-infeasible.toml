@@ -1,0 +1,11 @@
+context_length = 512
+
+[hobbit]
+budget_bytes = 1
+candidate_codecs = ["q3_k"]
+calibration_prompts = ["The quick brown fox jumps over the lazy dog."]
+min_layers = 1
+max_calibration_tokens = 8
+
+[hobbit.quality]
+max_mean_kl = 0.05

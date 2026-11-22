@@ -18,6 +18,7 @@ use crate::RopeScaling;
 use crate::bind::codec_to_ggml_type;
 use crate::error::InteropError;
 use crate::codec_policy_settings::CodecPolicySettings;
+use crate::hobbit_settings::HobbitSettings;
 use crate::memory_reclaim::ReclaimSettings;
 use crate::prompt_cache_settings::PromptCacheSettings;
 use crate::serving::{
@@ -418,6 +419,9 @@ pub struct ServingSettings {
     #[setting(nested, override_prefix = "PROXIMA_CODEC_POLICY")]
     #[builder(default)]
     pub codec_policy: CodecPolicySettings,
+    #[setting(nested, override_prefix = "PROXIMA_HOBBIT")]
+    #[builder(default)]
+    pub hobbit: HobbitSettings,
 }
 
 impl Default for ServingSettings {

@@ -1,0 +1,23 @@
+context_length = 512
+batch_size = 32
+ubatch_size = 32
+temperature = 0.0
+top_k = 0
+top_p = 1.0
+min_p = 0.0
+seed = 1
+ignore_eos = true
+
+[hobbit]
+budget_bytes = 1390000000
+candidate_codecs = ["q4_k"]
+calibration_prompts = [
+  "The quick brown fox jumps over the lazy dog.",
+  "Precision is chosen per layer by measuring what each layer changes.",
+]
+min_layers = 4
+max_calibration_tokens = 16
+
+[hobbit.quality]
+max_mean_kl = 0.10
+min_top1_agreement = 0.80
