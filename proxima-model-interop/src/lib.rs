@@ -108,6 +108,8 @@ mod hf_descriptor;
 #[cfg(feature = "std")]
 pub mod hobbit;
 #[cfg(feature = "std")]
+pub mod hobbit_plan;
+#[cfg(feature = "std")]
 mod hobbit_settings;
 #[cfg(feature = "std")]
 mod moe_expert_precision_settings;
@@ -161,6 +163,10 @@ pub use bind::{ModelHparams, SlidingRope, architecture_from_metadata, gguf_tenso
 pub use bind_leaves::bind_program_leaves;
 #[cfg(feature = "std")]
 pub use codec_policy_settings::{CodecPolicySettings, CodecPolicyWeights};
+#[cfg(feature = "std")]
+pub use hobbit_plan::{
+    HobbitExpertAddress, HobbitExpertPlan, HobbitLayerPlan, HobbitLayerScore,
+};
 #[cfg(feature = "std")]
 pub use hobbit_settings::{HobbitQualitySettings, HobbitSettings};
 #[cfg(feature = "std")]

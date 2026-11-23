@@ -1,4 +1,4 @@
-use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicBool, AtomicU64};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use super::device_kv::KvBufferSource;
 use super::residency_caches::BlockSummarizer;
@@ -939,6 +939,14 @@ pub struct LoadedModel<'file> {
     pub(super) moe_high_decisions: AtomicU64,
     /// HOBBIT low-precision route decisions observed by the last decode.
     pub(super) moe_low_decisions: AtomicU64,
+    /// Whether the universal per-expert plan installed a mixed slab table.
+    pub(super) hobbit_plan_active: AtomicBool,
+    /// Per-layer contiguous low expert stacks, keyed by the tensor name the
+    /// program binds. Empty unless [`Self::apply_hobbit_layer_plan`] ran.
+    pub(super) hobbit_low_stacks: alloc::collections::BTreeMap<
+        alloc::string::String,
+        (alloc::vec::Vec<u8>, crate::bind::Codec),
+    >,
     pub(super) logits_root: NodeId,
     /// `proxima_tensor::spec::ForwardRoots::hidden` off the dense load path
     /// (`Self::load`/`Self::load_from_safetensors`, both wrapping

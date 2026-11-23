@@ -1875,9 +1875,27 @@ impl<'file> LoadedModel<'file> {
             named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
         }
         for (name, block) in self.weights.packed.iter().filter(|(name, _)| kept(name)) {
+            if let Some((low_bytes, low_kind)) = self.hobbit_low_stacks.get(name.as_str()) {
+                let block = crate::bind::as_block(*low_kind, low_bytes).ok_or(
+                    InteropError::UnsupportedCodec {
+                        codec: crate::error::codec_name(*low_kind),
+                    },
+                )?;
+                named_blocks.push((name.as_str(), block));
+                continue;
+            }
             named_blocks.push((name.as_str(), *block));
         }
         for (name, bytes, kind) in self.weights.packed_owned.iter().filter(|(name, _, _)| kept(name)) {
+            if let Some((low_bytes, low_kind)) = self.hobbit_low_stacks.get(name.as_str()) {
+                let block = crate::bind::as_block(*low_kind, low_bytes).ok_or(
+                    InteropError::UnsupportedCodec {
+                        codec: crate::error::codec_name(*low_kind),
+                    },
+                )?;
+                named_blocks.push((name.as_str(), block));
+                continue;
+            }
             let block = crate::bind::as_block(*kind, bytes)
                 .ok_or(InteropError::UnsupportedCodec { codec: crate::error::codec_name(*kind) })?;
             named_blocks.push((name.as_str(), block));
@@ -6002,7 +6020,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         )> = Vec::new();
                         // a GPU engine never substitutes these sources (see the
                         // `expert_source_substitutions` arm below), so skip the build
-                        let expert_sources = if runtime.uses_gpu() {
+                        let expert_sources = if runtime.uses_gpu() && !self.hobbit_plan_active() {
                             None
                         } else {
                             let expert_sources =

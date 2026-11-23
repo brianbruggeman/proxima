@@ -876,6 +876,17 @@ impl<'file> ExpertSlab<'file> {
     /// An evicted slot is rejected rather than omitted: omission would
     /// renumber every following expert and let a gather read the wrong bytes.
     /// The residency policy must page a replacement before the next snapshot.
+    /// The model-layer index whose routed weight node is `node`, or `None`
+    /// for a node this slab does not own. Used by the universal plan builder
+    /// to turn a selection-counter node into a model-layer address.
+    #[must_use]
+    pub(crate) fn model_layer_for_weight_node(&self, node: NodeId) -> Option<usize> {
+        self.layers
+            .iter()
+            .find(|layer| layer.weight_node == Some(node))
+            .and_then(|layer| layer.model_layer)
+    }
+
     pub fn sources_for_step<'scratch>(
         &'scratch self,
         entries: &'scratch mut Vec<(NodeId, Vec<ExpertEntry<'scratch>>)>,

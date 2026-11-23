@@ -19,6 +19,16 @@ fn from_name<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, serde_json:
     serde_json::from_value(serde_json::Value::String(raw.to_owned()))
 }
 
+fn from_json<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, serde_json::Error> {
+    serde_json::from_str(raw)
+}
+
+fn default_held_out_prompts() -> Vec<String> {
+    vec![String::from(
+        "A held-out sentence the plan was not ranked on, used only for quality.",
+    )]
+}
+
 /// The `[moe_expert_precision]` section: whether the gate magnitude chooses
 /// high/low precision, the cumulative-mass threshold, and the sidecar codec.
 #[derive(Debug, Clone, PartialEq, Builder, Deserialize, Serialize, Settings, Validate)]
@@ -39,6 +49,24 @@ pub struct MoeExpertPrecisionSettings {
     #[setting(resolve_with = "from_name", default_str = "q4_k")]
     #[builder(default = NumericFormat::Q4K)]
     pub low_codec: NumericFormat,
+    /// The fraction of each layer's experts the per-expert plan assigns the
+    /// low codec, ranked by the model's own selection counter.
+    #[setting(default = 0.25)]
+    #[builder(default = 0.25)]
+    pub low_expert_fraction: f32,
+    /// The fraction of layers the contiguous-stack universal plan assigns
+    /// the low codec, ranked by the summed selection counter.
+    #[setting(default = 0.25)]
+    #[builder(default = 0.25)]
+    pub low_layer_fraction: f32,
+    /// Prompts the universal plan's quality gate uses; they must not be the
+    /// calibration prompts the plan was ranked on.
+    #[setting(
+        resolve_with = "from_json",
+        default_str = r#"["A held-out sentence the plan was not ranked on, used only for quality."]"#
+    )]
+    #[builder(default = default_held_out_prompts())]
+    pub held_out_prompts: Vec<String>,
     /// The quality bound the HOBBIT arm must hold before its numbers count.
     #[setting(nested)]
     #[builder(default)]
@@ -76,6 +104,34 @@ impl MoeExpertPrecisionSettings {
     #[must_use]
     pub const fn quality_bound(&self) -> Option<(Option<f64>, Option<f64>)> {
         self.quality.bound()
+    }
+
+    /// The universal plan's fraction after the range check.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the field when the value is not a finite number in
+    /// `0.0..=1.0`.
+    pub fn checked_low_layer_fraction(&self) -> Result<f32, String> {
+        if !(0.0..=1.0).contains(&self.low_layer_fraction)
+            || !self.low_layer_fraction.is_finite()
+        {
+            return Err(String::from(
+                "moe_expert_precision.low_layer_fraction must be a finite number in 0.0..=1.0",
+            ));
+        }
+        Ok(self.low_layer_fraction)
+    }
+
+    pub fn checked_low_expert_fraction(&self) -> Result<f32, String> {
+        if !(0.0..=1.0).contains(&self.low_expert_fraction)
+            || !self.low_expert_fraction.is_finite()
+        {
+            return Err(String::from(
+                "moe_expert_precision.low_expert_fraction must be a finite number in 0.0..=1.0",
+            ));
+        }
+        Ok(self.low_expert_fraction)
     }
 
     pub fn checked_threshold(&self) -> Result<Option<f32>, String> {

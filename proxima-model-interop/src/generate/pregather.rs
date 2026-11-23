@@ -2422,6 +2422,170 @@ impl<'file> LoadedModel<'file> {
         )
     }
 
+    /// Builds the universal per-expert plan from one selection snapshot.
+    /// The calibration run must have populated
+    /// `proxima_tensor::cpu`'s routed-expert counter; the snapshot drains it.
+    #[must_use]
+    pub fn hobbit_plan_from_selection(
+        &self,
+        low_expert_fraction: f32,
+    ) -> crate::hobbit_plan::HobbitExpertPlan {
+        let counts = self.hobbit_selection_snapshot();
+        self.hobbit_plan_from_counts(&counts, low_expert_fraction)
+    }
+
+    /// Drains the routed-expert selection counter into a local snapshot. A
+    /// calibration run must have populated it; an empty snapshot means the
+    /// calibration used a path that does not record selections.
+    #[must_use]
+    pub fn hobbit_selection_snapshot(&self) -> alloc::vec::Vec<(proxima_tensor::NodeId, u32, u64, f64)> {
+        let layers = self.architecture.block_count as usize;
+        let experts = self.architecture.expert_count as usize;
+        proxima_tensor::cpu::snapshot_expert_selection_top_n(layers.saturating_mul(experts).max(1))
+    }
+
+    /// Builds the per-layer universal plan from an explicit snapshot.
+    #[must_use]
+    pub fn hobbit_layer_plan_from_counts(
+        &self,
+        counts: &[(proxima_tensor::NodeId, u32, u64, f64)],
+        low_layer_fraction: f32,
+    ) -> crate::hobbit_plan::HobbitLayerPlan {
+        let slab = self.expert_slab.lock();
+        crate::hobbit_plan::HobbitLayerPlan::from_selection(
+            counts,
+            |node| slab.model_layer_for_weight_node(node),
+            self.architecture.block_count,
+            low_layer_fraction,
+        )
+    }
+
+    /// Builds the plan from an explicit snapshot.
+    #[must_use]
+    pub fn hobbit_plan_from_counts(
+        &self,
+        counts: &[(proxima_tensor::NodeId, u32, u64, f64)],
+        low_expert_fraction: f32,
+    ) -> crate::hobbit_plan::HobbitExpertPlan {
+        let slab = self.expert_slab.lock();
+        crate::hobbit_plan::HobbitExpertPlan::from_selection(
+            counts,
+            |node| slab.model_layer_for_weight_node(node),
+            self.architecture.block_count,
+            self.architecture.expert_count,
+            low_expert_fraction,
+        )
+    }
+
+    /// Installs the plan's low experts into the attached sidecar view. Every
+    /// expert outside the set keeps the checkpoint copy; the slab's own
+    /// `sources_for_step` then returns the mixed table on both CPU and GPU.
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::UnsupportedServingConfig`] when no sidecar is attached;
+    /// the sidecar's typed address/range errors when a plan entry is outside
+    /// the checkpoint.
+    pub fn apply_hobbit_expert_plan(
+        &self,
+        plan: &crate::hobbit_plan::HobbitExpertPlan,
+    ) -> Result<(), InteropError> {
+        let sidecar = self.expert_sidecar.as_ref().ok_or_else(|| {
+            InteropError::UnsupportedServingConfig(String::from(
+                "the universal HOBBIT plan needs an attached low-codec sidecar",
+            ))
+        })?;
+        let low: std::collections::BTreeSet<(usize, usize)> = plan.addresses().collect();
+        let mut slab = self.expert_slab.lock();
+        sidecar.install_low_copies_for(
+            &mut slab,
+            &low,
+            self.architecture.block_count as usize,
+            self.architecture.expert_count as usize,
+        )?;
+        self.hobbit_plan_active
+            .store(true, core::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Installs a per-layer plan as contiguous low expert stacks. Every
+    /// expert of a low layer is concatenated from the sidecar into one
+    /// uniform packed stack, and the decode's weight table substitutes it
+    /// under the same tensor name; the grouped GEMM then reads a uniform
+    /// codec on every backend.
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::UnsupportedServingConfig`] without a sidecar, or the
+    /// sidecar's typed range/address errors.
+    pub fn apply_hobbit_layer_plan(
+        &mut self,
+        plan: &crate::hobbit_plan::HobbitLayerPlan,
+    ) -> Result<(), InteropError> {
+        let sidecar = self.expert_sidecar.clone().ok_or_else(|| {
+            InteropError::UnsupportedServingConfig(String::from(
+                "the per-layer HOBBIT plan needs an attached low-codec sidecar",
+            ))
+        })?;
+        self.hobbit_low_stacks.clear();
+        let expert_count = self.architecture.expert_count as usize;
+        for &layer in &plan.low_layers {
+            for projection in crate::expert_slab::ExpertProjection::ALL {
+                let (bytes, codec) =
+                    sidecar.stack_for_layer(layer, projection, expert_count)?;
+                let name = alloc::format!(
+                    "blk.{layer}.{projection}_exps.weight",
+                    projection = projection.name()
+                );
+                self.hobbit_low_stacks.insert(name, (bytes, codec));
+            }
+        }
+        self.hobbit_plan_active
+            .store(true, core::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Clears the installed per-layer low stacks.
+    pub fn clear_hobbit_layer_plan(&mut self) {
+        self.hobbit_low_stacks.clear();
+        self.hobbit_plan_active
+            .store(false, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Number of installed contiguous low stacks.
+    #[must_use]
+    pub fn hobbit_low_stack_count(&self) -> usize {
+        self.hobbit_low_stacks.len()
+    }
+
+    /// Number of installed low expert projections, for the driver and a
+    /// real-model assertion that the plan reached the slab.
+    #[must_use]
+    pub fn hobbit_low_copy_count(&self) -> usize {
+        let slab = self.expert_slab.lock();
+        let mut count = 0;
+        for layer in 0..self.architecture.block_count as usize {
+            for expert in 0..self.architecture.expert_count as usize {
+                for projection in crate::expert_slab::ExpertProjection::ALL {
+                    if slab
+                        .uses_mapped_low(layer, expert, projection)
+                        .unwrap_or(false)
+                    {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    /// Whether [`Self::apply_hobbit_expert_plan`] installed a mixed table.
+    #[must_use]
+    pub fn hobbit_plan_active(&self) -> bool {
+        self.hobbit_plan_active
+            .load(core::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Every bound tensor a configured
     /// [`crate::ServingConfig::weight_precision`] rule recoded, as
     /// `(<name>@<codec>, byte length)`. Empty when every rule was absent,
@@ -3037,6 +3201,8 @@ impl<'file> LoadedModel<'file> {
             program_hash: program_hash(&bound.program),
             moe_high_decisions: core::sync::atomic::AtomicU64::new(0),
             moe_low_decisions: core::sync::atomic::AtomicU64::new(0),
+            hobbit_plan_active: core::sync::atomic::AtomicBool::new(false),
+            hobbit_low_stacks: alloc::collections::BTreeMap::new(),
             program: bound.program,
             logits_root: bound.logits_root,
             hidden_root: bound.hidden_root,
@@ -3295,6 +3461,8 @@ impl<'file> LoadedModel<'file> {
             program_hash: program_hash(&program),
             moe_high_decisions: core::sync::atomic::AtomicU64::new(0),
             moe_low_decisions: core::sync::atomic::AtomicU64::new(0),
+            hobbit_plan_active: core::sync::atomic::AtomicBool::new(false),
+            hobbit_low_stacks: alloc::collections::BTreeMap::new(),
             program,
             logits_root,
             hidden_root,
