@@ -1,7 +1,4 @@
 use super::*;
-use crate::bind::{Layout, Lookup};
-use crate::sized::MAX_INLINE_RANK;
-use smallvec::SmallVec;
 
 /// One run of adjacent iteration axes that address memory as a single axis,
 /// plus the stride each layout (operands first, output layout last) sees on
@@ -46,7 +43,8 @@ enum AxisClass {
 /// the pre-merge output-axis space). Only the executor's copy is rewritten:
 /// the caller's `BoundOp` is untouched, so bind-level consumers and the
 /// post-fold epilogue keep their original axes.
-pub(super) fn coalesce_dims(resolved: &BoundOp) -> Option<BoundOp> {
+#[must_use]
+pub fn coalesce_dims(resolved: &BoundOp) -> Option<BoundOp> {
     if resolved.extents.len() < 2 {
         return None;
     }

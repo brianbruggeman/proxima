@@ -65,7 +65,6 @@ use proxima_numeric::block_layout::BlockLayout;
 use proxima_primitives::pipe::Pipe;
 use smallvec::SmallVec;
 
-use proxima_numeric::DType;
 use crate::error::TensorError;
 #[cfg(feature = "instrument")]
 use crate::instrument;
@@ -73,9 +72,10 @@ use crate::live;
 #[cfg(feature = "cached-attention-streaming")]
 use crate::map;
 use crate::map::{AxisIndex, AxisTerm, IndexMap, IndexPattern};
-use proxima_numeric::{NumericPolicy, NumericRewrite, admit};
 use crate::op::{Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 use crate::shape::{self, Shapes};
+use proxima_numeric::DType;
+use proxima_numeric::{NumericPolicy, NumericRewrite, admit};
 #[cfg(feature = "instrument")]
 use proxima_telemetry::debug;
 
@@ -99,29 +99,36 @@ mod dead_code_cached_attention;
 mod gdn_moe_fusion_apply;
 #[macro_use]
 mod cached_attention_epilogue_liveness;
+mod activation_layout;
+mod activation_quantize;
+mod coalesce;
+mod executes;
 #[cfg(feature = "identity-copy-alias")]
 mod identity_copy_alias;
 mod refit_cached_attention;
 mod refresh;
-mod rows_template;
 #[cfg(feature = "instrument")]
 mod repeat_nodes;
+mod rows_template;
 #[cfg(feature = "top-fraction-fusion")]
 mod top_fraction_fusion;
 mod twin_elementwise;
-mod executes;
-mod activation_layout;
-mod activation_quantize;
 mod product_contraction;
-pub use activation_layout::{ACTIVATION_GROUP_ELEMENTS, Missing, is_int8_run_layout, quantize_rule_is_served};
+pub use activation_layout::{
+    ACTIVATION_GROUP_ELEMENTS, Missing, is_int8_run_layout, quantize_rule_is_served,
+};
 pub use activation_quantize::{
-    activation_is_flat, collapsed_extent, derive_activation_quantize, is_derived, quantize_op, repoint,
-    underive_block_quantize,
+    activation_is_flat, collapsed_extent, derive_activation_quantize, is_derived, quantize_op,
+    repoint, underive_block_quantize,
 };
 pub use builder_compose_window::*;
-pub use executes::{ActivationLimits, ContractionLimits, DeviceLimits, DeviceMemory, Executes, Form, FormSet, Refusal};
 pub use cached_attention_epilogue_liveness::*;
+pub use coalesce::coalesce_dims;
 pub use dead_code_cached_attention::*;
+pub use executes::{
+    ActivationLimits, ContractionLimits, DeviceLimits, DeviceMemory, Executes, Form, FormSet,
+    Refusal,
+};
 pub use gdn_moe_fusion_apply::*;
 #[cfg(feature = "identity-copy-alias")]
 use identity_copy_alias::apply_identity_copy_alias;
@@ -131,12 +138,12 @@ pub use refit_cached_attention::{
     touches_changed,
 };
 pub use refresh::{RefreshRefusal, refresh_bound_ops};
-pub use rows_template::{
-    RowTemplate, SymbolsTemplate, apply_row_template, apply_symbols_template, refresh_cached_attention, row_template,
-    rows_enumerable, symbols_shapes_template,
-};
 #[cfg(feature = "instrument")]
 pub use repeat_nodes::{RepeatNodeRefusal, apply_repeat_nodes};
+pub use rows_template::{
+    RowTemplate, SymbolsTemplate, apply_row_template, apply_symbols_template,
+    refresh_cached_attention, row_template, rows_enumerable, symbols_shapes_template,
+};
 #[cfg(feature = "top-fraction-fusion")]
 pub use top_fraction_fusion::{
     bind_with_top_fraction, bind_with_top_fraction_and_packed_leaves, top_fraction_candidates,

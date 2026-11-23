@@ -186,8 +186,9 @@ use proxima_gguf::quant::{
 };
 
 use crate::bind::{
-    self, BoundOp, BoundOpKind, ComposedBody, Executes, MoeWeighting, ReadyBatch, StepArg, block_node_ids,
-    dead_resolved_nodes, index_node_ids, node_retirement, push_indices_node, read_nodes,
+    self, BoundOp, BoundOpKind, ComposedBody, Executes, MoeWeighting, ReadyBatch, StepArg,
+    block_node_ids, dead_resolved_nodes, index_node_ids, node_retirement, push_indices_node,
+    read_nodes,
 };
 #[cfg(feature = "config")]
 use crate::config::TensorExecutionConfig;
@@ -221,8 +222,6 @@ mod elementwise_matmul;
 #[macro_use]
 mod run_reduce_scan;
 #[macro_use]
-mod coalesce;
-#[macro_use]
 mod gemm_tile;
 #[macro_use]
 mod gemm_dot_quant;
@@ -246,8 +245,8 @@ mod width_kernels;
 #[macro_use]
 mod typed_eval;
 mod float64_island;
+use crate::bind::coalesce_dims;
 pub use arena::*;
-use coalesce::*;
 use elementwise_matmul::*;
 pub use epilogue::*;
 pub use gemm_dot_quant::*;
