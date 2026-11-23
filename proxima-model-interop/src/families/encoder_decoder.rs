@@ -750,7 +750,6 @@ mod tests {
     const POSITIONS: u32 = 8;
     const PROMPT: [u8; 3] = [1, 2, 3];
     const STEPS: usize = 6;
-    const ROUNDOFF_UNITS: u8 = 200;
 
     struct Graph {
         program: Vec<Op>,
@@ -788,15 +787,23 @@ mod tests {
         }
     }
 
-    // the unit roundoff of the activation layout, 2^-mantissa_bits, scaled by an accumulation
-    // depth
+    // the longest sum in the decoder graph under test: the model width, the feed-forward width,
+    // the cross source positions or the attended rows
+    fn longest_reduction() -> u8 {
+        let rows = u32::try_from(STEPS).expect("a short run");
+        let longest = [WIDTH, FFN, SOURCE, rows].into_iter().max();
+        u8::try_from(longest.expect("four extents")).expect("a small config")
+    }
+
+    // Higham's forward-error bound for a sum of n terms is gamma_n, about n * u, with u the unit
+    // roundoff 2^-mantissa_bits of the activation layout
     fn tolerance_unit<T>() -> T
     where
         T: From<u8> + Div<Output = T> + Mul<Output = T>,
     {
         let roundoff =
             (0..activation_mantissa_bits()).fold(T::from(1), |scale, _| scale / T::from(2));
-        roundoff * T::from(ROUNDOFF_UNITS)
+        roundoff * T::from(longest_reduction())
     }
 
     impl Graph {
