@@ -469,13 +469,13 @@ pub fn conv3x3_same_three(
     let staged = gather_leading_axis(program, padded, taps_index, 2, dtype);
     // `9 * r + t @ 9`: the outer coefficient equals `t`'s declared length, the
     // split rule's own reshape form, so `r` and `t` separate again here.
-    let image_map = alloc::format!("9*r+t@9,i,j->rgctij");
+    let image_map = "9*r+t@9,i,j->rgctij";
     let product = elementwise_like(
         program,
         staged,
         ScalarOp::Multiply,
         &[
-            (staged, image_map.as_str()),
+            (staged, image_map),
             (weight, "g,c,t,i,j->rgctij"),
         ],
     )?;
