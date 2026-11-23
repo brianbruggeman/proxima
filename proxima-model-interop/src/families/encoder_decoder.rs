@@ -732,6 +732,7 @@ mod tests {
     use alloc::{format, vec};
     use core::ops::{Div, Mul};
 
+    use proxima_autograd::adjoint::differentiate_bound;
     use proxima_numeric::NumericPolicy;
     use proxima_tensor::config::TensorExecutionConfig;
     use proxima_tensor::cpu::{
@@ -940,6 +941,19 @@ mod tests {
             extras: &[(&str, QuantizedBlock<'_>)],
             outputs: &[NodeId],
         ) -> Evaluated {
+            self.evaluate_in(&self.program, symbols, ids, first_position, extras, outputs)
+        }
+
+        // `extras` come first so a bound value there replaces the seeded weight of that name
+        fn evaluate_in(
+            &self,
+            program: &[Op],
+            symbols: &[u64],
+            ids: &[u8],
+            first_position: u8,
+            extras: &[(&str, QuantizedBlock<'_>)],
+            outputs: &[NodeId],
+        ) -> Evaluated {
             let weights: Vec<(&str, Vec<_>)> = self
                 .declared
                 .iter()
@@ -949,13 +963,14 @@ mod tests {
             let positions: Vec<_> = (0..ids.len())
                 .map(|offset| sample(first_position + u8::try_from(offset).expect("a short run")))
                 .collect();
-            let mut named: Vec<(&str, QuantizedBlock<'_>)> = weights
-                .iter()
-                .map(|(name, values)| (*name, QuantizedBlock::from(values.as_slice())))
-                .collect();
+            let mut named: Vec<(&str, QuantizedBlock<'_>)> = extras.to_vec();
+            named.extend(
+                weights
+                    .iter()
+                    .map(|(name, values)| (*name, QuantizedBlock::from(values.as_slice()))),
+            );
             named.push(("tokens", QuantizedBlock::from(tokens.as_slice())));
             named.push(("positions", QuantizedBlock::from(positions.as_slice())));
-            named.extend(extras.iter().copied());
             // the default policy fuses a cached range into llama's f16 flash arithmetic, which
             // the unfused full recompute cannot state; the f32 online kernel can
             let config = TensorExecutionConfig::builder()
@@ -964,7 +979,7 @@ mod tests {
             let mut pools = BufferPools::default();
             let mut validated = None;
             evaluate_quantized_named_with_config(
-                &self.program,
+                program,
                 symbols,
                 &named,
                 outputs,
@@ -1096,6 +1111,96 @@ mod tests {
         assert!(
             widest > unit,
             "dropping two cached positions must move the logits, widest gap {widest}"
+        );
+    }
+
+    #[test]
+    fn autograd_matches_central_differences_on_the_teacher_forced_decoder() {
+        let mut graph = Graph::new();
+        let (logits, _) = graph.decode(false);
+        let squared = elementwise(
+            &mut graph.program,
+            ACTIVATION,
+            ScalarOp::Multiply,
+            &[(logits, "sv->sv"), (logits, "sv->sv")],
+        )
+        .expect("the squared logits build");
+        let loss = reduce(
+            &mut graph.program,
+            ACTIVATION,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            squared,
+            "sv->sv",
+            "->sv",
+        )
+        .expect("the loss builds");
+        let symbols = [PROMPT.len() as u64, 0];
+        let differentiated = differentiate_bound(&graph.program, loss, &symbols)
+            .expect("the teacher-forced decoder differentiates");
+        let watched = ["layer0.self_q.weight", "layer0.cross_q.weight"];
+        let gradients: Vec<NodeId> = watched
+            .iter()
+            .map(|name| {
+                differentiated
+                    .gradient_of_named(name)
+                    .expect("the weight feeds the loss")
+            })
+            .collect();
+        let analytic = graph.evaluate_in(
+            &differentiated.program,
+            &symbols,
+            &PROMPT,
+            0,
+            &[],
+            &gradients,
+        );
+        let base = graph.evaluate(&symbols, &PROMPT, 0, &[], &[loss]);
+        let (loss_row, _) = base.get(loss).expect("loss");
+        let loss_value = loss_row[0];
+        let unit = tolerance_unit();
+        assert!(
+            loss_value.abs() > unit,
+            "the loss {loss_value} is within roundoff of zero"
+        );
+        // the step balances the truncation term step^2 against the roundoff term unit / step
+        let step = unit.cbrt();
+
+        let mut checked = 0;
+        let mut informative = 0;
+        for (name, gradient) in watched.iter().zip(&gradients) {
+            let (derived, _) = analytic.get(*gradient).expect("gradient");
+            let original = noise(name, derived.len());
+            let loss_with = |index: usize, delta| {
+                let mut weights = original.clone();
+                weights[index] += delta;
+                let swapped = [(*name, QuantizedBlock::from(weights.as_slice()))];
+                let moved = graph.evaluate(&symbols, &PROMPT, 0, &swapped, &[loss]);
+                moved.get(loss).expect("loss").0[0]
+            };
+            let stride = (derived.len() / 10).max(1);
+            for index in (0..derived.len()).step_by(stride) {
+                let numeric = (loss_with(index, step) - loss_with(index, -step)) / (step + step);
+                let tolerance =
+                    unit * (1.0 + loss_value.abs()) / step + step * step * (1.0 + numeric.abs());
+                assert!(
+                    (derived[index] - numeric).abs() <= tolerance,
+                    "{name}[{index}]: autograd {} against central difference {numeric} (tolerance {tolerance})",
+                    derived[index]
+                );
+                checked += 1;
+                if numeric.abs() > tolerance {
+                    informative += 1;
+                }
+            }
+        }
+        assert!(
+            checked >= watched.len(),
+            "at least one index per weight is checked"
+        );
+        assert!(
+            informative > 0,
+            "some checked gradient must exceed the tolerance, or the check proves nothing"
         );
     }
 
