@@ -124,7 +124,7 @@ check_eq "render leaves p95 unmarked at n=20" "0" "$(grep '^| metal | ttft_us_co
 check_eq "render has every backend" "5" "$(cut -d'|' -f2 "$SCRATCH/render1.md" | tr -d ' ' | sort -u | grep -cxE 'cpu|metal|cuda|hip|wgpu')"
 
 # census over the fixture scoreboard: 3 uncited rows (hand typed, wrong sha, mismatched) + 2 uncited prose lines
-out="$("$TOOL" census "$FIX/census/SCOREBOARD.md" 2>&1)"; code=$?
+out="$("$TOOL" census "$FIX/census/uncited-board.md" 2>&1)"; code=$?
 check_eq "census count" "uncited=5" "$(tail -1 <<<"$out")"
 check_eq "census exits nonzero while uncited" "1" "$code"
 if grep -q 'defect: line 13: 4 cells, header at line 11 has 3' <<<"$out"; then ok; else fail "census cell mismatch" "no defect line in: $out"; fi
