@@ -23,20 +23,21 @@
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod bench {
     use std::cell::RefCell;
+    use std::hint::black_box;
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
-    use std::hint::black_box;
     use std::time::{Duration, Instant};
 
     use criterion::{BenchmarkGroup, Criterion, measurement::WallTime};
+    use omega::config::DenseMmaInputLayout;
     use proxima_model_interop::diffusion::{
-        Checkpoint, ConvTaps, DitConfig, DitInputs, Graph as ModelGraph, VaeConfig,
+        Checkpoint, ConvTaps, DitConfig, DitInputs, Graph as ModelGraph, VaeConfig, Weights,
         build_conv3x3, build_dit, build_double_block, build_single_block, build_vae_decode,
         load_weights, timestep_sinusoid,
     };
     use proxima_model_interop::{
-        ContextLength, GPU_LAYERS_ALL, LoadedModel, ServingConfig,
-        architecture_from_hf_config, parse_hf_config,
+        ContextLength, GPU_LAYERS_ALL, LoadedModel, ServingConfig, architecture_from_hf_config,
+        parse_hf_config,
     };
     use proxima_numeric::DType;
     use proxima_numeric::codec::Codec;
@@ -77,6 +78,10 @@ mod bench {
     }
 
     fn runtime() -> omega::config::RuntimeConfig {
+        runtime_with(DenseMmaInputLayout::default())
+    }
+
+    fn runtime_with(tiles: DenseMmaInputLayout) -> omega::config::RuntimeConfig {
         let serving = ServingConfig::default();
         omega::config::RuntimeConfig::builder()
             .with_engine("gpu")
@@ -84,6 +89,7 @@ mod bench {
             .with_allow_fusion(true)
             .with_numeric(serving.numeric_policy)
             .with_exact_activations(serving.exact_activations)
+            .with_dense_mma_input_layout(tiles)
             .build()
             .expect("metal runtime")
     }
@@ -228,14 +234,9 @@ mod bench {
         named: &[(&str, QuantizedBlock<'_>)],
         output: NodeId,
     ) -> omega::backend::Plan {
-        let (plan, _) = omega::backend::plan_named_with_config(
-            &runtime(),
-            program,
-            symbols,
-            named,
-            &[output],
-        )
-        .expect("metal plan");
+        let (plan, _) =
+            omega::backend::plan_named_with_config(&runtime(), program, symbols, named, &[output])
+                .expect("metal plan");
         plan
     }
 
@@ -247,7 +248,8 @@ mod bench {
     // ---------------------------------------------------------------- text --
     fn read_vocab(dir: &Path) -> Vocab {
         let tokenizer = std::fs::read(dir.join("tokenizer/tokenizer.json")).expect("tokenizer");
-        let config_bytes = std::fs::read(dir.join("text_encoder/config.json")).expect("text config");
+        let config_bytes =
+            std::fs::read(dir.join("text_encoder/config.json")).expect("text config");
         let config: serde_json::Value = serde_json::from_slice(&config_bytes).expect("text json");
         let number = |key: &str| {
             config
@@ -295,10 +297,14 @@ mod bench {
             // The text encoder is one shot per image; the bench process owns it
             // for the whole text group and leaks the mapping deliberately so
             // the model can hold a 'static borrow. The image path frees it.
-            let bytes: &'static [u8] =
-                Box::leak(std::fs::read(&path).expect("qwen checkpoint").into_boxed_slice());
-            let manifest: &'static proxima_safetensors::Manifest =
-                Box::leak(Box::new(proxima_safetensors::parse_complete(bytes).expect("manifest")));
+            let bytes: &'static [u8] = Box::leak(
+                std::fs::read(&path)
+                    .expect("qwen checkpoint")
+                    .into_boxed_slice(),
+            );
+            let manifest: &'static proxima_safetensors::Manifest = Box::leak(Box::new(
+                proxima_safetensors::parse_complete(bytes).expect("manifest"),
+            ));
             let data_start = {
                 let mut prefix = [0u8; 8];
                 prefix.copy_from_slice(&bytes[..8]);
@@ -316,9 +322,7 @@ mod bench {
             let mut serving = ServingConfig::default();
             serving.gpu_layers = GPU_LAYERS_ALL;
             serving.context_length = ContextLength::Within(MIN_LENGTH as u32);
-            serving.model_path = Box::leak(
-                dir.to_string_lossy().into_owned().into_boxed_str(),
-            );
+            serving.model_path = Box::leak(dir.to_string_lossy().into_owned().into_boxed_str());
             Self {
                 model,
                 _bytes: bytes,
@@ -350,8 +354,7 @@ mod bench {
         let attention = 2560.0 * 4096.0 + 2.0 * 2560.0 * 1024.0 + 4096.0 * 2560.0;
         let mlp = 3.0 * 2560.0 * 9728.0;
         let full_macs = 27.0 * (attention + mlp) * tokens;
-        let full_bytes =
-            (3.0 * tokens * f64::from(JOINT_ATTENTION) + tokens * 2560.0 * 3.0) * 4.0;
+        let full_bytes = (3.0 * tokens * f64::from(JOINT_ATTENTION) + tokens * 2560.0 * 3.0) * 4.0;
         rows.push(case(
             &mut group,
             "text",
@@ -487,8 +490,8 @@ mod bench {
                 text_mod,
             )
             .expect("double block");
-            let weights =
-                load_weights(checkpoint, &graph.weights, Codec::Float16, false).expect("dit weights");
+            let weights = load_weights(checkpoint, &graph.weights, Codec::Float16, false)
+                .expect("dit weights");
             let integers = graph.int_buffers();
             let mut named = weights.blocks();
             named.extend(graph.host_blocks(&[], &integers));
@@ -500,9 +503,16 @@ mod bench {
             group.sample_size(10);
             group.warm_up_time(Duration::from_millis(100));
             group.measurement_time(Duration::from_secs(1));
-            rows.push(case(&mut group, "dit", "one_double_block", macs, bytes, || {
-                run_plan(&mut plan, &named);
-            }));
+            rows.push(case(
+                &mut group,
+                "dit",
+                "one_double_block",
+                macs,
+                bytes,
+                || {
+                    run_plan(&mut plan, &named);
+                },
+            ));
             group.finish();
             let _ = text_out;
         }
@@ -532,8 +542,8 @@ mod bench {
                 modulation,
             )
             .expect("single block");
-            let weights =
-                load_weights(checkpoint, &graph.weights, Codec::Float16, false).expect("dit weights");
+            let weights = load_weights(checkpoint, &graph.weights, Codec::Float16, false)
+                .expect("dit weights");
             let integers = graph.int_buffers();
             let mut named = weights.blocks();
             named.extend(graph.host_blocks(&[], &integers));
@@ -545,9 +555,16 @@ mod bench {
             group.sample_size(10);
             group.warm_up_time(Duration::from_millis(100));
             group.measurement_time(Duration::from_secs(1));
-            rows.push(case(&mut group, "dit", "one_single_block", macs, bytes, || {
-                run_plan(&mut plan, &named);
-            }));
+            rows.push(case(
+                &mut group,
+                "dit",
+                "one_single_block",
+                macs,
+                bytes,
+                || {
+                    run_plan(&mut plan, &named);
+                },
+            ));
             group.finish();
         }
     }
@@ -564,10 +581,7 @@ mod bench {
         let mut bytes = 0.0;
         for (index, op) in program.iter().enumerate() {
             if let Op::Input { name, .. } = op {
-                let element = if name
-                    .as_deref()
-                    .is_some_and(|name| name.contains(".weight"))
-                {
+                let element = if name.as_deref().is_some_and(|name| name.contains(".weight")) {
                     2.0
                 } else {
                     4.0
@@ -598,9 +612,16 @@ mod bench {
         group.sample_size(10);
         group.warm_up_time(Duration::from_millis(200));
         group.measurement_time(Duration::from_secs(2));
-        rows.push(case(&mut group, "dit", "full_velocity_step", macs, bytes, || {
-            run_plan(&mut plan, &named);
-        }));
+        rows.push(case(
+            &mut group,
+            "dit",
+            "full_velocity_step",
+            macs,
+            bytes,
+            || {
+                run_plan(&mut plan, &named);
+            },
+        ));
         group.finish();
     }
 
@@ -614,11 +635,7 @@ mod bench {
         let half = head_dim / 2;
         let mut host = |name: &str, shape: &[u32], salt: u32| {
             let count: u32 = shape.iter().product();
-            graph.host(
-                name,
-                shape,
-                pseudo_random(count as usize, seed + salt),
-            )
+            graph.host(name, shape, pseudo_random(count as usize, seed + salt))
         };
         let q_even = host("q_even", &[tokens, heads, half], 1);
         let q_odd = host("q_odd", &[tokens, heads, half], 2);
@@ -733,43 +750,48 @@ mod bench {
 
     fn case_metrics(case: &ConvCase) -> (f64, f64) {
         let rows = f64::from(case.side) * f64::from(case.side);
-        let macs = f64::from(case.out_channels)
-            * rows
-            * 9.0
-            * f64::from(case.in_channels);
+        let macs = f64::from(case.out_channels) * rows * 9.0 * f64::from(case.in_channels);
         let bytes = f64::from(case.out_channels) * f64::from(case.in_channels) * 9.0 * 2.0
             + rows * f64::from(case.in_channels) * 4.0
             + rows * f64::from(case.out_channels) * 4.0;
         (macs, bytes)
     }
 
+    /// The VAE's own factored 3x3 conv for `case`, exactly as the decoder
+    /// builds it, over a pseudo-random activation leaf.
+    fn conv_graph(case: &ConvCase) -> (ModelGraph, NodeId) {
+        let rows_n = case.side * case.side;
+        let mut graph = ModelGraph::new(DType::FLOAT32);
+        let input = graph.host(
+            "activation",
+            &[rows_n, case.groups, case.in_channels / case.groups],
+            pseudo_random((rows_n * case.in_channels) as usize, 101 + case.side),
+        );
+        let output = build_conv3x3(
+            &mut graph,
+            input,
+            case.tensor,
+            case.side,
+            case.side,
+            case.in_channels,
+            case.out_channels,
+            case.groups,
+            case.groups,
+            ConvTaps::Three,
+        )
+        .expect("conv");
+        (graph, output)
+    }
+
+    fn conv_weights(checkpoint: &Checkpoint, graph: &ModelGraph) -> Weights {
+        load_weights(checkpoint, &graph.weights, Codec::Float16, true).expect("conv weights")
+    }
+
     fn bench_vae_conv(c: &mut Criterion, rows: &mut Vec<Row>, checkpoint: &Checkpoint) {
         for case in &CONV_CASES {
             let rows_n = case.side * case.side;
-            let mut graph = ModelGraph::new(DType::FLOAT32);
-            let input = graph.host(
-                "activation",
-                &[rows_n, case.groups, case.in_channels / case.groups],
-                pseudo_random(
-                    (rows_n * case.in_channels) as usize,
-                    101 + case.side,
-                ),
-            );
-            let output = build_conv3x3(
-                &mut graph,
-                input,
-                case.tensor,
-                case.side,
-                case.side,
-                case.in_channels,
-                case.out_channels,
-                case.groups,
-                case.groups,
-                ConvTaps::Three,
-            )
-            .expect("conv");
-            let weights =
-                load_weights(checkpoint, &graph.weights, Codec::Float16, true).expect("conv weights");
+            let (graph, output) = conv_graph(case);
+            let weights = conv_weights(checkpoint, &graph);
             let integers = graph.int_buffers();
             let mut named = weights.blocks();
             named.extend(graph.host_blocks(&[], &integers));
@@ -781,13 +803,7 @@ mod bench {
             group.warm_up_time(Duration::from_millis(100));
             group.measurement_time(Duration::from_secs(1));
             rows.push(case_for(
-                &mut group,
-                "vae_conv",
-                case.label,
-                macs,
-                bytes,
-                &mut plan,
-                &named,
+                &mut group, "vae_conv", case.label, macs, bytes, &mut plan, &named,
             ));
             group.finish();
         }
@@ -802,7 +818,9 @@ mod bench {
         plan: &mut omega::backend::Plan,
         named: &[(&str, QuantizedBlock<'_>)],
     ) -> Row {
-        case(group, group_label, label, macs, bytes, || run_plan(plan, named))
+        case(group, group_label, label, macs, bytes, || {
+            run_plan(plan, named)
+        })
     }
 
     fn bench_vae_norm_upsample(c: &mut Criterion, rows: &mut Vec<Row>, checkpoint: &Checkpoint) {
@@ -817,12 +835,27 @@ mod bench {
                 &[rows_n, groups, channels / groups],
                 pseudo_random((rows_n * channels) as usize, 201),
             );
-            let weight = graph.weight("decoder.mid.block_1.norm1.weight", &[groups, channels / groups], None);
-            let bias = graph.weight("decoder.mid.block_1.norm1.bias", &[groups, channels / groups], None);
-            let output = group_norm(&mut graph.program, x, weight, bias, rows_n * (channels / groups), 1e-6)
-                .expect("group norm");
-            let weights =
-                load_weights(checkpoint, &graph.weights, Codec::Float16, true).expect("norm weights");
+            let weight = graph.weight(
+                "decoder.mid.block_1.norm1.weight",
+                &[groups, channels / groups],
+                None,
+            );
+            let bias = graph.weight(
+                "decoder.mid.block_1.norm1.bias",
+                &[groups, channels / groups],
+                None,
+            );
+            let output = group_norm(
+                &mut graph.program,
+                x,
+                weight,
+                bias,
+                rows_n * (channels / groups),
+                1e-6,
+            )
+            .expect("group norm");
+            let weights = load_weights(checkpoint, &graph.weights, Codec::Float16, true)
+                .expect("norm weights");
             let integers = graph.int_buffers();
             let mut named = weights.blocks();
             named.extend(graph.host_blocks(&[], &integers));
@@ -833,7 +866,15 @@ mod bench {
             group.sample_size(10);
             group.warm_up_time(Duration::from_millis(100));
             group.measurement_time(Duration::from_secs(1));
-            rows.push(case_for(&mut group, "vae", "group_norm_128sq", 0.0, bytes, &mut plan, &named));
+            rows.push(case_for(
+                &mut group,
+                "vae",
+                "group_norm_128sq",
+                0.0,
+                bytes,
+                &mut plan,
+                &named,
+            ));
             group.finish();
         }
         // nearest_x2: the 128x128 -> 256x256 upsample that precedes a conv.
@@ -859,7 +900,15 @@ mod bench {
             group.sample_size(10);
             group.warm_up_time(Duration::from_millis(100));
             group.measurement_time(Duration::from_secs(1));
-            rows.push(case_for(&mut group, "vae", "nearest_x2_128sq", 0.0, bytes, &mut plan, &named));
+            rows.push(case_for(
+                &mut group,
+                "vae",
+                "nearest_x2_128sq",
+                0.0,
+                bytes,
+                &mut plan,
+                &named,
+            ));
             group.finish();
         }
     }
@@ -927,10 +976,290 @@ mod bench {
         group.finish();
     }
 
+    /// PROXNUM-687 S0b: the VAE's 3x3 conv at one shape (256x256, 512 to 512
+    /// channels, 157 GMAC), isolated three ways. (a) is the VAE's own factored
+    /// form, (b) the same MACs as a plain 2-axis `linear` over a staged
+    /// `[M, 9 * 512]` activation, (d) a DiT-shaped `linear` of equal MACs.
+    /// The tile layout is read from `OMEGA_DENSE_MMA_INPUT_LAYOUT` through
+    /// `RuntimeConfig::from_env`, so one invocation measures the derived
+    /// default and a second, with the variable set, measures the explicit
+    /// narrower tile. Every arm reports the GEMM op's own GPU span from the
+    /// op timer (one command buffer per op), its kernel kind, the plan's
+    /// kernel identities, and the untimed plan wall.
+    #[cfg(feature = "instrument")]
+    mod isolate {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        use omega::config::{DenseMmaInputLayout, RuntimeConfig};
+        use omega::metal::OpGpuTiming;
+        use proxima_model_interop::diffusion::{Checkpoint, Graph as ModelGraph, encode};
+        use proxima_numeric::DType;
+        use proxima_numeric::codec::Codec;
+        use proxima_tensor::QuantizedBlock;
+        use proxima_tensor::op::{NodeId, Op};
+        use proxima_tensor::spec::linear;
+
+        use super::{
+            CONV_CASES, ConvCase, conv_graph, conv_weights, pseudo_random, run_plan, runtime_with,
+        };
+
+        const TAPS: u32 = 9;
+        const CONTROL_ROWS: u32 = 4096;
+        const CONTROL_DEPTH: u32 = 3072;
+        // 4096 * 3072 * 12480 = 157.04 GMAC, the conv's 66564 * 4608 * 512.
+        const CONTROL_COLUMNS: u32 = 12480;
+        const WARMUP: usize = 2;
+        const ITERATIONS: usize = 10;
+
+        struct Arm<'a> {
+            label: &'static str,
+            program: &'a [Op],
+            symbols: &'a [u64],
+            named: &'a [(&'a str, QuantizedBlock<'a>)],
+            output: NodeId,
+            macs: u64,
+        }
+
+        fn padded_rows(case: &ConvCase) -> u32 {
+            (case.side + 2) * (case.side + 2)
+        }
+
+        fn conv_macs(case: &ConvCase) -> u64 {
+            u64::from(padded_rows(case))
+                * u64::from(TAPS * case.in_channels)
+                * u64::from(case.out_channels)
+        }
+
+        fn milliseconds(nanos: u64) -> String {
+            format!("{}.{:03}", nanos / 1_000_000, (nanos / 1_000) % 1_000)
+        }
+
+        fn median(sorted: &[u64]) -> u64 {
+            let middle = sorted.len() / 2;
+            if sorted.len().is_multiple_of(2) {
+                (sorted[middle - 1] + sorted[middle]) / 2
+            } else {
+                sorted[middle]
+            }
+        }
+
+        fn nearest_rank_p90(sorted: &[u64]) -> u64 {
+            sorted[(sorted.len() * 9).div_ceil(10) - 1]
+        }
+
+        fn cov_permille(samples: &[u64]) -> u64 {
+            let count = samples.len() as u64;
+            let mean = samples.iter().sum::<u64>() / count;
+            let squares: u128 = samples
+                .iter()
+                .map(|&sample| {
+                    let delta = i128::from(sample) - i128::from(mean);
+                    (delta * delta) as u128
+                })
+                .sum();
+            let stdev = (squares / u128::from(count)).isqrt() as u64;
+            stdev * 1000 / mean
+        }
+
+        fn heaviest_reduce(timings: &[OpGpuTiming]) -> &OpGpuTiming {
+            timings
+                .iter()
+                .filter(|timing| timing.kind.starts_with("reduce"))
+                .max_by_key(|timing| timing.gpu_ns)
+                .expect("the op timer reported no reduce op")
+        }
+
+        fn report_ops(label: &str, timings: &[OpGpuTiming]) {
+            for timing in timings {
+                eprintln!(
+                    "s0b_op label={label} node={} kind={} variant={} extents={:?} out_axes={:?} operands={} gpu_ms={}",
+                    timing.node.0,
+                    timing.kind,
+                    timing.packed_kernel_variant,
+                    timing.extents,
+                    timing.output_axes,
+                    timing.operand_count,
+                    milliseconds(timing.gpu_ns),
+                );
+            }
+        }
+
+        fn measure(arm: &Arm<'_>, tiles: DenseMmaInputLayout) {
+            let tile_label = if tiles.derive_from_operands {
+                "derived"
+            } else {
+                "explicit"
+            };
+            let label = format!("{}__{tile_label}", arm.label);
+            let (mut plan, measurements) = omega::backend::plan_named_with_config(
+                &runtime_with(tiles),
+                arm.program,
+                arm.symbols,
+                arm.named,
+                &[arm.output],
+            )
+            .expect("metal plan");
+            for measurement in &measurements {
+                for (index, identity) in measurement.kernel_identities.iter().enumerate() {
+                    eprintln!("s0b_identity label={label} index={index} {identity}");
+                }
+            }
+            let mut gemm_ns = Vec::new();
+            let mut wall_ns = Vec::new();
+            let mut timed_wall_ns = Vec::new();
+            let mut gemm_kind = "";
+            for pass in 0..WARMUP + ITERATIONS {
+                let started = Instant::now();
+                run_plan(&mut plan, arm.named);
+                let wall = started.elapsed().as_nanos() as u64;
+                let timed_started = Instant::now();
+                let (evaluated, timings) =
+                    omega::backend::execute_plan_named_metal_op_timed(&plan, arm.named, None)
+                        .expect("metal op-timed execute");
+                let timed_wall = timed_started.elapsed().as_nanos() as u64;
+                black_box(evaluated);
+                if pass < WARMUP {
+                    continue;
+                }
+                if pass == WARMUP {
+                    report_ops(&label, &timings);
+                }
+                let heaviest = heaviest_reduce(&timings);
+                gemm_kind = heaviest.kind;
+                gemm_ns.push(heaviest.gpu_ns);
+                wall_ns.push(wall);
+                timed_wall_ns.push(timed_wall);
+            }
+            assert_eq!(gemm_ns.len(), ITERATIONS, "{label}: measured iterations");
+            let cov = cov_permille(&gemm_ns);
+            gemm_ns.sort_unstable();
+            wall_ns.sort_unstable();
+            timed_wall_ns.sort_unstable();
+            let gemm_median = median(&gemm_ns);
+            eprintln!(
+                "s0b_arm label={label} kind={gemm_kind} macs={} n={ITERATIONS} gemm_ms_median={} gemm_ms_p90={} gmac_s_x10_median={} cov_permille={cov} wall_ms_median={} timed_wall_ms_median={}",
+                arm.macs,
+                milliseconds(gemm_median),
+                milliseconds(nearest_rank_p90(&gemm_ns)),
+                arm.macs * 10 / gemm_median,
+                milliseconds(median(&wall_ns)),
+                milliseconds(median(&timed_wall_ns)),
+            );
+        }
+
+        fn form_a(
+            checkpoint: &Checkpoint,
+            case: &ConvCase,
+            tiles: DenseMmaInputLayout,
+        ) -> (DType, Codec) {
+            let (graph, output) = conv_graph(case);
+            let weights = conv_weights(checkpoint, &graph);
+            let integers = graph.int_buffers();
+            let mut named = weights.blocks();
+            named.extend(graph.host_blocks(&[], &integers));
+            measure(
+                &Arm {
+                    label: "a_factored_conv",
+                    program: &graph.program,
+                    symbols: &[u64::from(case.side * case.side)],
+                    named: &named,
+                    output,
+                    macs: conv_macs(case),
+                },
+                tiles,
+            );
+            (graph.activation(), weights.codec)
+        }
+
+        fn form_b(
+            checkpoint: &Checkpoint,
+            case: &ConvCase,
+            activation: DType,
+            tiles: DenseMmaInputLayout,
+        ) {
+            let width = TAPS * case.in_channels;
+            let rows = padded_rows(case);
+            let mut graph = ModelGraph::new(activation);
+            let staged = graph.host(
+                "staged",
+                &[rows, width],
+                pseudo_random((rows * width) as usize, 103),
+            );
+            let weight = graph.weight_taps(
+                &format!("{}.weight", case.tensor),
+                &[case.out_channels, width],
+            );
+            let output = linear(&mut graph.program, staged, weight, None).expect("linear");
+            let weights = conv_weights(checkpoint, &graph);
+            let integers = graph.int_buffers();
+            let mut named = weights.blocks();
+            named.extend(graph.host_blocks(&[], &integers));
+            measure(
+                &Arm {
+                    label: "b_plain_gemm",
+                    program: &graph.program,
+                    symbols: &[],
+                    named: &named,
+                    output,
+                    macs: conv_macs(case),
+                },
+                tiles,
+            );
+        }
+
+        fn form_d(activation: DType, codec: Codec, tiles: DenseMmaInputLayout) {
+            let mut graph = ModelGraph::new(activation);
+            let input = graph.host(
+                "control_activation",
+                &[CONTROL_ROWS, CONTROL_DEPTH],
+                pseudo_random((CONTROL_ROWS * CONTROL_DEPTH) as usize, 107),
+            );
+            let weight = graph.weight("control.weight", &[CONTROL_COLUMNS, CONTROL_DEPTH], None);
+            let output = linear(&mut graph.program, input, weight, None).expect("linear");
+            let bytes = encode(
+                &pseudo_random((CONTROL_COLUMNS * CONTROL_DEPTH) as usize, 109),
+                codec,
+            )
+            .expect("control weight");
+            let integers = graph.int_buffers();
+            let mut named = graph.host_blocks(&[], &integers);
+            named.push((
+                "control.weight",
+                QuantizedBlock::Packed {
+                    codec,
+                    bytes: &bytes,
+                },
+            ));
+            measure(
+                &Arm {
+                    label: "d_dit_shaped_linear",
+                    program: &graph.program,
+                    symbols: &[],
+                    named: &named,
+                    output,
+                    macs: u64::from(CONTROL_ROWS)
+                        * u64::from(CONTROL_DEPTH)
+                        * u64::from(CONTROL_COLUMNS),
+                },
+                tiles,
+            );
+        }
+
+        pub fn run(checkpoint: &Checkpoint) {
+            let tiles = RuntimeConfig::from_env()
+                .expect("omega runtime variables")
+                .dense_mma_input_layout;
+            eprintln!("s0b_tiles layout={tiles:?}");
+            let case = &CONV_CASES[1];
+            let (activation, codec) = form_a(checkpoint, case, tiles);
+            form_b(checkpoint, case, activation, tiles);
+            form_d(activation, codec, tiles);
+        }
+    }
+
     fn print_table(rows: &[Row]) {
-        eprintln!(
-            "flux2_klein_bench_table label,mean_ms,gmac_s,gb_s,iters"
-        );
+        eprintln!("flux2_klein_bench_table label,mean_ms,gmac_s,gb_s,iters");
         for row in rows {
             let seconds = row.millis / 1e3;
             eprintln!(
@@ -983,10 +1312,21 @@ mod bench {
         let filters = filters();
         let quick = std::env::args().any(|argument| argument == "--quick");
         let mut rows = Vec::new();
+        // 1.2 GB staged activation and ~40 s of timed passes: only when named.
+        let isolate_wanted = filters
+            .iter()
+            .any(|filter| "conv_isolate".contains(filter.as_str()));
         let vae_wanted = wants(&filters, "vae_conv", &VAE_CONV_CASES)
-            || wants(&filters, "vae", &VAE_CASES);
+            || wants(&filters, "vae", &VAE_CASES)
+            || isolate_wanted;
         if vae_wanted {
             let vae = Checkpoint::open(&vae_path()).expect("open vae checkpoint");
+            #[cfg(feature = "instrument")]
+            if isolate_wanted {
+                isolate::run(&vae);
+            }
+            #[cfg(not(feature = "instrument"))]
+            assert!(!isolate_wanted, "conv_isolate needs --features instrument");
             if wants(&filters, "vae_conv", &VAE_CONV_CASES) {
                 bench_vae_conv(&mut criterion, &mut rows, &vae);
             }
@@ -997,7 +1337,9 @@ mod bench {
                 // criterion samples are seven minutes. `--quick` skips it
                 // unless the run names it, which is how the full-stage cost
                 // is measured on its own.
-                let explicit_full = filters.iter().any(|filter| "full_decode".contains(filter.as_str()));
+                let explicit_full = filters
+                    .iter()
+                    .any(|filter| "full_decode".contains(filter.as_str()));
                 if !quick || explicit_full {
                     bench_vae_full(&mut criterion, &mut rows, &vae);
                 }
