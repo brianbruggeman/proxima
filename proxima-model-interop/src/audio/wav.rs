@@ -36,21 +36,17 @@ fn parse(bytes: &[u8]) -> Result<Audio> {
     let mut samples = None;
     while position + 8 <= bytes.len() {
         let id = &bytes[position..position + 4];
-        let length = u32::from_le_bytes(
-            bytes[position + 4..position + 8]
-                .try_into()
-                .expect("chunk length"),
-        ) as usize;
+        let length = u32_at(bytes, position + 4)? as usize;
         let body = position + 8;
         if body + length > bytes.len() {
             bail!("truncated chunk");
         }
         match id {
             b"fmt " => {
-                let tag = u16_at(bytes, body);
-                let channels = u16_at(bytes, body + 2) as usize;
-                let sample_rate = u32_at(bytes, body + 4);
-                let bits = u16_at(bytes, body + 14);
+                let tag = u16_at(bytes, body)?;
+                let channels = u16_at(bytes, body + 2)? as usize;
+                let sample_rate = u32_at(bytes, body + 4)?;
+                let bits = u16_at(bytes, body + 14)?;
                 if tag != 1 {
                     bail!("compressed WAV format {tag}; only PCM is read");
                 }
@@ -105,10 +101,12 @@ fn parse(bytes: &[u8]) -> Result<Audio> {
     })
 }
 
-fn u16_at(bytes: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes(bytes[at..at + 2].try_into().expect("two bytes"))
+fn u16_at(bytes: &[u8], at: usize) -> Result<u16> {
+    let field = bytes.get(at..at + 2).context("truncated 16-bit field")?;
+    Ok(u16::from_le_bytes(field.try_into()?))
 }
 
-fn u32_at(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+fn u32_at(bytes: &[u8], at: usize) -> Result<u32> {
+    let field = bytes.get(at..at + 4).context("truncated 32-bit field")?;
+    Ok(u32::from_le_bytes(field.try_into()?))
 }
