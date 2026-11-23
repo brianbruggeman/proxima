@@ -789,8 +789,8 @@ mod tests {
     }
 
     // the unit roundoff of the activation layout, 2^-mantissa_bits, scaled by an accumulation
-    // depth; `_anchor` only fixes the element type to the one the evaluator returns
-    fn tolerance_unit<T>(_anchor: &[T]) -> T
+    // depth
+    fn tolerance_unit<T>() -> T
     where
         T: From<u8> + Div<Output = T> + Mul<Output = T>,
     {
@@ -1022,7 +1022,7 @@ mod tests {
             );
             let (actual, _) = evaluated_step.get(step_logits).expect("step logits");
             assert_eq!(actual.len(), vocab, "a one-token step emits one logits row");
-            let unit = tolerance_unit(actual);
+            let unit = tolerance_unit();
             for (column, (found, wanted)) in actual.iter().zip(expected).enumerate() {
                 let tolerance = unit * (1.0 + wanted.abs());
                 assert!(
@@ -1081,7 +1081,7 @@ mod tests {
             &outputs,
         );
         let (actual, _) = evaluated_step.get(step_logits).expect("step logits");
-        let unit = tolerance_unit(actual);
+        let unit = tolerance_unit();
         let widest = actual
             .iter()
             .zip(expected)
