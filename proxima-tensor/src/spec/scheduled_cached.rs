@@ -1134,6 +1134,7 @@ pub fn scheduled_two_range_cached_forward_program_with_experts(
     // leaves the program node-for-node what it was before the ring existed.
     sliding_kv_ring: bool,
     expert_shared_feed_forward: SharedExpertWidth,
+    key_pad_id: Option<u32>,
 ) -> Result<TwoRangeForwardProgram, TensorError> {
     scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
         vocab,
@@ -1153,6 +1154,7 @@ pub fn scheduled_two_range_cached_forward_program_with_experts(
         sliding_kv_ring,
         1,
         expert_shared_feed_forward,
+        key_pad_id,
     )
 }
 
@@ -1178,6 +1180,7 @@ pub fn scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
     sliding_kv_ring: bool,
     head_repeats: u32,
     expert_shared_feed_forward: SharedExpertWidth,
+    key_pad_id: Option<u32>,
 ) -> Result<TwoRangeForwardProgram, TensorError> {
     let (program, logits, layer_roots, moe_sites, duplicate_head_roots, _) =
         scheduled_two_range_cached_forward_program_with_layer_roots(
@@ -1204,6 +1207,7 @@ pub fn scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
             expert_shared_feed_forward,
             DType::FLOAT32,
             KeyCacheLayout::default(),
+            key_pad_id,
         )?;
     let mut cache_roots = Vec::with_capacity(layer_roots.len());
     for roots in layer_roots {
@@ -1354,6 +1358,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
     expert_shared_feed_forward: SharedExpertWidth,
     activation: DType,
     key_cache_layout: KeyCacheLayout,
+    key_pad_id: Option<u32>,
 ) -> Result<TwoRangeLayerRootForwardProgram, TensorError> {
     if schedule.len() != block_count as usize {
         return Err(TensorError::LayerScheduleCountMismatch {
@@ -1447,7 +1452,20 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
     // same way the single-range builder's own `is_future` was.
     let attention_resources =
         build_attention_layer_resources(&mut program, schedule, query_heads, |program, window| {
-            causal_mask_windowed(program, window)
+            let (is_future, neg_infinity) = causal_mask_windowed(program, window)?;
+            match key_pad_id {
+                None => Ok((is_future, neg_infinity)),
+                Some(pad) => {
+                    let invalid = key_validity_mask(program, ids, pad)?;
+                    let widened = elementwise(
+                        program,
+                        DType::FLOAT32,
+                        ScalarOp::Maximum,
+                        &[(is_future, "st->st"), (invalid, "t->st")],
+                    )?;
+                    Ok((widened, neg_infinity))
+                }
+            }
         })?;
 
     // Cache-side mask (genuine history only) -- a second, separate dedup

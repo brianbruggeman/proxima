@@ -235,3 +235,266 @@ fn tap_layers_stacks_the_chosen_layer_outputs_in_tap_order() {
     }
     assert_close(&actual, &expected);
 }
+
+fn integer_leaf(program: &mut Vec<Op>, name: &str, extent: u32) -> NodeId {
+    input_leaf(
+        program,
+        DType::INT32,
+        alloc::vec![Extent::Static(extent)],
+        name,
+    )
+}
+
+#[test]
+fn linear_matches_the_row_major_outer_product_on_a_non_model_shape() {
+    let (tokens, into, out) = (3usize, 5usize, 4usize);
+    let x: Vec<f32> = (0..tokens * into)
+        .map(|index| (index as f32 * 0.31).sin())
+        .collect();
+    let weight: Vec<f32> = (0..out * into)
+        .map(|index| (index as f32 * 0.17).cos())
+        .collect();
+    let bias: Vec<f32> = (0..out).map(|index| index as f32 * 0.1 - 0.2).collect();
+    let mut program = Vec::new();
+    let x_node = leaf(&mut program, "x", &[tokens as u32, into as u32]);
+    let weight_node = leaf(&mut program, "weight", &[out as u32, into as u32]);
+    let bias_node = leaf(&mut program, "bias", &[out as u32]);
+    let out_node = proxima_tensor::spec::linear(&mut program, x_node, weight_node, Some(bias_node))
+        .expect("linear builds");
+    let actual = run(
+        &program,
+        &[("x", &x), ("weight", &weight), ("bias", &bias)],
+        out_node,
+    );
+    let mut expected = Vec::new();
+    for token in 0..tokens {
+        for column in 0..out {
+            let dot: f32 = (0..into)
+                .map(|inner| x[token * into + inner] * weight[column * into + inner])
+                .sum();
+            expected.push(dot + bias[column]);
+        }
+    }
+    assert_close(&actual, &expected);
+}
+
+#[test]
+fn gelu_tanh_matches_its_closed_form() {
+    let values = [-2.5f32, -0.5, 0.0, 0.25, 1.0, 3.75];
+    let mut program = Vec::new();
+    let x = leaf(&mut program, "x", &[values.len() as u32]);
+    let out = proxima_tensor::spec::gelu_tanh(&mut program, x, "s->s").expect("gelu builds");
+    let actual = run(&program, &[("x", &values)], out);
+    let expected: Vec<f32> = values
+        .iter()
+        .map(|value| {
+            let inner = (2.0f32 / core::f32::consts::PI).sqrt() * (value + 0.044_715 * value.powi(3));
+            0.5 * value * (1.0 + inner.tanh())
+        })
+        .collect();
+    assert_close(&actual, &expected);
+}
+
+#[test]
+fn group_norm_matches_the_naive_per_group_mean_and_variance() {
+    let (rows, groups, group_width) = (4u32, 2u32, 2u32);
+    let channels = groups * group_width;
+    let source: Vec<f32> = (0..(rows * channels))
+        .map(|index| (index as f32 * 0.23).sin() * 2.0)
+        .collect();
+    let weight: Vec<f32> = (0..channels as usize)
+        .map(|index| 0.5 + index as f32 * 0.25)
+        .collect();
+    let bias: Vec<f32> = (0..channels as usize)
+        .map(|index| index as f32 * -0.125)
+        .collect();
+    let mut program = Vec::new();
+    let x = leaf(&mut program, "x", &[rows, groups, group_width]);
+    let w = leaf(&mut program, "weight", &[groups, group_width]);
+    let b = leaf(&mut program, "bias", &[groups, group_width]);
+    let out = proxima_tensor::spec::group_norm(
+        &mut program,
+        x,
+        w,
+        b,
+        rows * group_width,
+        1e-6,
+    )
+    .expect("group norm builds");
+    let actual = run(&program, &[("x", &source), ("weight", &weight), ("bias", &bias)], out);
+    let mut expected = vec![0.0f32; source.len()];
+    for group in 0..groups as usize {
+        let mut values = Vec::new();
+        for row in 0..rows as usize {
+            for within in 0..group_width as usize {
+                values.push(source[row * channels as usize + group * group_width as usize + within]);
+            }
+        }
+        let count = values.len() as f32;
+        let mean = values.iter().sum::<f32>() / count;
+        let variance = values.iter().map(|value| (value - mean).powi(2)).sum::<f32>() / count;
+        let deviation = (variance + 1e-6).sqrt();
+        for (index, value) in values.iter().enumerate() {
+            let row = index / group_width as usize;
+            let within = index % group_width as usize;
+            let channel = group * group_width as usize + within;
+            expected[row * channels as usize + channel] =
+                (value - mean) / deviation * weight[channel] + bias[channel];
+        }
+    }
+    assert_close(&actual, &expected);
+}
+
+#[test]
+fn nearest_upsample_x2_repeats_each_source_cell_into_a_two_by_two_block() {
+    let (rows, columns, group_width) = (2u32, 3u32, 2u32);
+    let source: Vec<f32> = (0..(rows * columns * group_width) as usize)
+        .map(|index| index as f32 + 0.5)
+        .collect();
+    let mut program = Vec::new();
+    let x = leaf(&mut program, "x", &[rows * columns, 1, group_width]);
+    let index = integer_leaf(&mut program, "index", 4 * rows * columns);
+    let out = proxima_tensor::spec::nearest_upsample_x2(&mut program, x, index)
+        .expect("upsample builds");
+    let encoded: Vec<f32> = proxima_tensor::spec::upsample_x2_index(rows, columns)
+        .iter()
+        .map(|value| *value as f32)
+        .collect();
+    let actual = run(&program, &[("x", &source), ("index", &encoded)], out);
+    let mut expected = Vec::new();
+    for row in 0..2 * rows {
+        for column in 0..2 * columns {
+            for within in 0..group_width {
+                let source_cell = ((row / 2) * columns + (column / 2)) * group_width + within;
+                expected.push(source[source_cell as usize]);
+            }
+        }
+    }
+    assert_close(&actual, &expected);
+}
+
+#[test]
+fn conv3x3_same_matches_a_direct_loop_on_a_two_by_two_image() {
+    let (rows, columns, groups, in_width, out_width) = (2u32, 2u32, 2u32, 2u32, 3u32);
+    let source: Vec<f32> = (0..(rows * columns * groups * in_width) as usize)
+        .map(|index| (index as f32 * 0.41).sin())
+        .collect();
+    let weight: Vec<f32> = (0..(groups * out_width * 9 * groups * in_width) as usize)
+        .map(|index| (index as f32 * 0.19).cos())
+        .collect();
+    let mut program = Vec::new();
+    let x = leaf(&mut program, "x", &[rows * columns, groups, in_width]);
+    let mut taps = [proxima_tensor::op::NodeId(0); 9];
+    for tap_row in 0..3u32 {
+        for tap_column in 0..3u32 {
+            taps[(tap_row * 3 + tap_column) as usize] = leaf(
+                &mut program,
+                &format!("tap{tap_row}{tap_column}"),
+                &[groups, out_width, groups, in_width],
+            );
+        }
+    }
+    let pad_rows = proxima_tensor::spec::conv3x3_pad_rows(rows, columns);
+    let pad_index = integer_leaf(&mut program, "pad_index", pad_rows);
+    let pad_mask = leaf(&mut program, "pad_mask", &[pad_rows]);
+    let crop_index = integer_leaf(&mut program, "crop_index", rows * columns);
+    let out = proxima_tensor::spec::conv3x3_same(
+        &mut program,
+        x,
+        &taps,
+        pad_index,
+        pad_mask,
+        crop_index,
+        rows,
+        columns,
+    )
+    .expect("conv builds");
+    let pad: Vec<f32> = proxima_tensor::spec::conv3x3_pad_index(rows, columns)
+        .iter()
+        .map(|value| *value as f32)
+        .collect();
+    let mask: Vec<f32> = proxima_tensor::spec::conv3x3_pad_mask(rows, columns)
+        .iter()
+        .map(|value| *value as f32)
+        .collect();
+    let crop: Vec<f32> = proxima_tensor::spec::conv3x3_crop_index(rows, columns)
+        .iter()
+        .map(|value| *value as f32)
+        .collect();
+    let mut named: Vec<(&str, &[f32])> = vec![
+        ("x", &source),
+        ("pad_index", &pad),
+        ("pad_mask", &mask),
+        ("crop_index", &crop),
+    ];
+    let names: Vec<String> = (0..9).map(|tap| format!("tap{}{}", tap / 3, tap % 3)).collect();
+    for (tap, name) in names.iter().enumerate() {
+        let row = tap / 3;
+        let column = tap % 3;
+        let tap_values: Vec<f32> = (0..(groups * out_width * groups * in_width) as usize)
+            .map(|index| {
+                let out_group = index / (out_width * groups * in_width) as usize;
+                let rest = index % (out_width * groups * in_width) as usize;
+                let out_within = rest / (groups * in_width) as usize;
+                let inner = rest % (groups * in_width) as usize;
+                let in_group = inner / in_width as usize;
+                let in_within = inner % in_width as usize;
+                let kernel = ((((out_group as u32 * out_width + out_within as u32) * 3
+                    + row as u32)
+                    * 3
+                    + column as u32)
+                    * groups
+                    + in_group as u32)
+                    * in_width
+                    + in_within as u32;
+                weight[kernel as usize]
+            })
+            .collect();
+        named.push((name.as_str(), Box::leak(tap_values.into_boxed_slice())));
+    }
+    let actual = run(&program, &named, out);
+    let mut expected = Vec::new();
+    for row in 0..rows {
+        for column in 0..columns {
+            for out_group in 0..groups {
+                for out_within in 0..out_width {
+                    let mut total = 0.0f32;
+                    for tap_row in 0..3i32 {
+                        for tap_column in 0..3i32 {
+                            let source_row = row as i32 + tap_row - 1;
+                            let source_column = column as i32 + tap_column - 1;
+                            if source_row < 0
+                                || source_column < 0
+                                || source_row >= rows as i32
+                                || source_column >= columns as i32
+                            {
+                                continue;
+                            }
+                            for in_group in 0..groups {
+                                for in_within in 0..in_width {
+                                    let pixel = (source_row as u32 * columns
+                                        + source_column as u32)
+                                        * groups
+                                        * in_width
+                                        + in_group * in_width
+                                        + in_within;
+                                    let kernel = ((((out_group * out_width + out_within) * 3
+                                        + tap_row as u32)
+                                        * 3
+                                        + tap_column as u32)
+                                        * groups
+                                        + in_group)
+                                        * in_width
+                                        + in_within;
+                                    total += source[pixel as usize] * weight[kernel as usize];
+                                }
+                            }
+                        }
+                    }
+                    expected.push(total);
+                }
+            }
+        }
+    }
+    assert_close(&actual, &expected);
+}

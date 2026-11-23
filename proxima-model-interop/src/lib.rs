@@ -59,6 +59,8 @@ pub mod expert_sidecar;
 #[cfg(feature = "std")]
 pub mod expert_slab;
 #[cfg(feature = "std")]
+pub mod diffusion;
+#[cfg(feature = "std")]
 mod generate;
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 pub use generate::BackendRuntime;

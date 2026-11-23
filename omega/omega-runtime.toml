@@ -148,6 +148,15 @@ dense_min_threadgroups = 32
 block_m = 64
 # ports `ggml-metal.metal:6488` (`BLOCK_SIZE_N`). Must be a multiple of 16 —
 # see sized::TILED_GEMM_BLOCK_N.
+# 32 stays. a 64-token column tile halves the weight re-read per token tile
+# (the 8 KB store becomes 12 KB: four resident threadgroups per core drop to
+# two), and on the flux2 VAE decode (PROXNUM-588, `--latent-reference` +
+# `--profile vae`, same binary, alternating runs at the same load) that cost
+# the whole decode 1.5x: 41.2/41.9 s at 32 tokens against 62.5/62.7/63.2 s at
+# 64. a 16-deep K step (4 KB per threadgroup) is worse still -- 103.5 s -- and
+# a 128-row tile is 158 s, so this tile is the minimum of every neighbour
+# measured, not an un-tuned default. The conv reduces are limited by how many
+# threadgroups a core keeps resident, not by the bytes they re-read.
 block_n = 32
 # ports `ggml-metal.metal:6489` (`BLOCK_SIZE_K`) — the K-step width one
 # threadgroup barrier pair amortizes over. Must divide 256 (`Q4K_BLOCK_ELEMENTS`)

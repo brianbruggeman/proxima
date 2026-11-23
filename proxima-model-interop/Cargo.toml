@@ -60,6 +60,7 @@ std = [
     "dep:proxima-telemetry",
     "proxima-telemetry/std",
     "proxima-telemetry/emit",
+    "flate2",
 ]
 # split from `std` the same way proxima-tensor splits `tensor-bgpool`
 # (proxima-tensor/Cargo.toml:45): `dep:prime` pulls in OS threads, so it
@@ -315,6 +316,7 @@ toml = ["dep:toml"]
 proxima-autograd = ["dep:proxima-autograd"]
 qat = ["std", "metal", "proxima-autograd"]
 rustix = ["dep:rustix"]
+flate2 = ["dep:flate2"]
 
 [dependencies]
 anyhow = { version = "1.0.104", optional = true }
@@ -354,6 +356,7 @@ xxhash-rust = { workspace = true, features = ["xxh3"], optional = true }
 # alloc tier only: `proxima_tokenizer::greedy_pick` serves the encoder-decoder decode policy;
 # the `gguf`/`hf` readers (each implies std) come in through this crate's `std` feature.
 proxima-tokenizer = { version = "0.1.0", path = "../proxima-tokenizer", default-features = false, features = ["alloc"] }
+flate2 = { version = "1.1.11", optional = true }
 
 [lints]
 workspace = true
@@ -691,6 +694,11 @@ required-features = ["std", "metal", "instrument"]
 name = "gemma4_forward_decomposition"
 harness = false
 required-features = ["metal", "instrument"]
+
+[[bench]]
+name = "flux2_klein"
+harness = false
+required-features = ["std", "metal"]
 
 # SLICE 3 kernel-level new_count sweep (`bench/kernel-newcount-sweep`):
 # unconfounds SLICE 1/2's width-1-vs-width>1 comparison (BOS-inflated real

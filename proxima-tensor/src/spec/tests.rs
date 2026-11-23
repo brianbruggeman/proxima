@@ -943,7 +943,7 @@ fn qwen2_cached_program_uses_split_half_rope_without_qk_norm() {
             &[],
             false,
             DType::FLOAT32,
-        )
+        None,)
         .expect("qwen2-shaped split-half program lowers");
     let (generic_program, _, _, _, _) = gqa_cached_forward_program_with_experts_and_layer_taps(
         32_000, 256, 128, 4, 2, 64, 1, 0, 0, false, false, false, false, false,
@@ -980,7 +980,7 @@ fn qwen2_dims_program_at(activation: DType) -> Vec<Op> {
             &[],
             false,
             activation,
-        )
+        None,)
         .expect("qwen2-dims program lowers at the requested activation format");
     program
 }
@@ -6853,7 +6853,7 @@ fn architecture_matrix_mixed_cached_conv_roots() {
             SharedExpertWidth::NONE,
             DType::FLOAT32,
             KeyCacheLayout::default(),
-        )
+        None,)
         .expect("mixed attention and short-convolution schedule lowers");
 
     let attention_roots = roots
@@ -15762,7 +15762,7 @@ mod gemma4_synthetic_parity {
                 None,
                 false,
                 SharedExpertWidth::NONE,
-            )
+            None,)
             .expect("the two-range cached gemma4-shaped program lowers");
 
         let ids_i32: Vec<i32> = ids.iter().map(|&id| id as i32).collect();
@@ -15999,7 +15999,7 @@ mod gemma4_synthetic_parity {
                 None,
                 false,
                 SharedExpertWidth::NONE,
-            )
+            None,)
             .expect("the gemma4-shaped two-range recognizer fixture lowers");
 
         // Candidate B's integration (`R9/PROGRESS.md`'s own "Candidate B"
@@ -16249,7 +16249,7 @@ mod gemma4_synthetic_parity {
                     None,
                     false,
                     SharedExpertWidth::NONE,
-                )
+                None,)
                 .expect("the gemma4-shaped two-range program lowers at any new_count");
             let embedding_table = wave("token_embd.weight", VOCAB * EMBEDDING);
             let mut tied_lm_head = alloc::vec![0.0f32; EMBEDDING * VOCAB];
@@ -17056,7 +17056,7 @@ mod gemma4_synthetic_parity {
                 None,
                 false,
                 SharedExpertWidth::NONE,
-            )
+            None,)
             .expect("the two-range cached gemma4-shaped shared-kv program lowers");
 
         assert_eq!(
@@ -17482,7 +17482,7 @@ mod gemma4_synthetic_parity {
                 &[],
                 false,
                 DType::FLOAT32,
-            )
+            None,)
             .expect("direct real qwen2-dims build");
 
         let descriptor_b = gqa_descriptor_from_shape(
@@ -17699,7 +17699,7 @@ mod gemma4_synthetic_parity {
                 None,
                 false,
                 SharedExpertWidth::NONE,
-            )
+            None,)
             .expect("the two-range cached gemma4-shaped program lowers");
 
         let ids_i32: Vec<i32> = ids.iter().map(|&id| id as i32).collect();
@@ -18142,7 +18142,7 @@ mod gemma4_synthetic_parity {
                 None,
                 false,
                 SharedExpertWidth::NONE,
-            )
+            None,)
             .expect("the all-positions two-range cached program lowers");
 
         let empty: [f32; 0] = [];
@@ -18201,7 +18201,7 @@ mod gemma4_synthetic_parity {
                 None,
                 false,
                 SharedExpertWidth::NONE,
-            )
+            None,)
             .expect("the last-row-only two-range cached program lowers");
 
         let mut layer0_k_even: Vec<f32> = Vec::new();
@@ -18499,7 +18499,7 @@ mod gemma4_synthetic_parity {
                 None,
                 ring,
                 SharedExpertWidth::NONE,
-            )
+            None,)
             .expect("the five-layer two-range cached program lowers")
         };
         let (program_full, logits_full, roots_full, _sites_full, _repeats_full) = build(false);
@@ -18719,7 +18719,7 @@ mod gemma4_synthetic_parity {
                 None,
                 ring,
                 SharedExpertWidth::NONE,
-            )
+            None,)
             .expect("the two-layer two-range cached program lowers")
             .0
         };
@@ -25021,5 +25021,339 @@ mod per_layer_rope {
                 "{builder}: the refusal must name the missing channel, got {error:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(test)]
+mod conv_direct_loop {
+    //! [`conv3x3_same`] against a direct Rust loop on the same weights.
+    //!
+    //! The direct loop is the specification, written from the definition and not
+    //! from the lowering: zero-pad by one pixel, then for each output pixel and
+    //! channel sum `weight[og, oc, y, x, ig, ic] * image[dy + y, dx + x, ig, ic]`.
+    //! The graph form must reproduce it, which is what proves the padded grid's
+    //! `tap_row * (width + 2) + tap_column` offset and the crop gather land on
+    //! the right element at every position -- the nine-tap lowering is otherwise
+    //! only ever checked end to end, against a whole decoder's dB.
+
+    use alloc::vec::Vec;
+
+    use proxima_numeric::DType;
+
+    use super::*;
+    use crate::QuantizedBlock;
+    use crate::op::{Extent, NodeId, Op};
+
+    const HEIGHT: usize = 4;
+    const WIDTH: usize = 5;
+    const IN_G: usize = 2;
+    const IN_C: usize = 3;
+    const OUT_G: usize = 2;
+    const OUT_C: usize = 2;
+
+    fn image() -> Vec<f32> {
+        (0..HEIGHT * WIDTH * IN_G * IN_C)
+            .map(|index| ((index * 37 % 101) as f32 - 50.0) / 17.0)
+            .collect()
+    }
+
+    /// `[og, oc, y, x, ig, ic]`.
+    fn kernel() -> Vec<f32> {
+        (0..OUT_G * OUT_C * 9 * IN_G * IN_C)
+            .map(|index| ((index * 53 % 97) as f32 - 48.0) / 23.0)
+            .collect()
+    }
+
+    /// The definition, on `[row, g, c]` activations.
+    fn direct(image: &[f32], kernel: &[f32]) -> Vec<f32> {
+        let mut out = alloc::vec![0.0f32; HEIGHT * WIDTH * OUT_G * OUT_C];
+        for row in 0..HEIGHT {
+            for column in 0..WIDTH {
+                for og in 0..OUT_G {
+                    for oc in 0..OUT_C {
+                        let mut sum = 0.0f32;
+                        for y in 0..3usize {
+                            for x in 0..3usize {
+                                let (source_row, source_column) = (row + y, column + x);
+                                // Zero padding: the ring contributes nothing.
+                                if source_row == 0
+                                    || source_column == 0
+                                    || source_row > HEIGHT
+                                    || source_column > WIDTH
+                                {
+                                    continue;
+                                }
+                                let source = (source_row - 1) * WIDTH + (source_column - 1);
+                                for ig in 0..IN_G {
+                                    for ic in 0..IN_C {
+                                        let weight =
+                                            ((((og * OUT_C + oc) * 9 + y * 3 + x) * IN_G + ig)
+                                                * IN_C)
+                                                + ic;
+                                        let activation = (source * IN_G + ig) * IN_C + ic;
+                                        sum += kernel[weight] * image[activation];
+                                    }
+                                }
+                            }
+                        }
+                        out[((row * WIDTH + column) * OUT_G + og) * OUT_C + oc] = sum;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn index_leaf(program: &mut Vec<Op>, name: &str, values: &[i32]) -> NodeId {
+        input_leaf(
+            program,
+            DType::INT32,
+            alloc::vec![Extent::Static(values.len() as u32)],
+            name,
+        )
+    }
+
+    fn f32_leaf(program: &mut Vec<Op>, name: &str, shape: &[u32]) -> NodeId {
+        input_leaf(
+            program,
+            DType::FLOAT32,
+            shape.iter().map(|&size| Extent::Static(size)).collect(),
+            name,
+        )
+    }
+
+    /// Runs one of the two lowerings and returns its `[rows, og, oc]` output.
+    fn run(three: bool) -> Vec<f32> {
+        let rows = (HEIGHT * WIDTH) as u32;
+        let mut program = Vec::new();
+        let activation = f32_leaf(&mut program, "image", &[rows, IN_G as u32, IN_C as u32]);
+        let pad_index = index_leaf(
+            &mut program,
+            "pad.index",
+            &conv3x3_pad_index(HEIGHT as u32, WIDTH as u32),
+        );
+        let pad_mask = f32_leaf(
+            &mut program,
+            "pad.mask",
+            &[conv3x3_pad_rows(HEIGHT as u32, WIDTH as u32)],
+        );
+        let crop_index = index_leaf(
+            &mut program,
+            "crop.index",
+            &conv3x3_crop_index(HEIGHT as u32, WIDTH as u32),
+        );
+        let root = if three {
+            let weight = f32_leaf(
+                &mut program,
+                "kernel",
+                &[OUT_G as u32, OUT_C as u32, 9, IN_G as u32, IN_C as u32],
+            );
+            let columns_index = index_leaf(
+                &mut program,
+                "columns.index",
+                &conv3x3_taps_index(HEIGHT as u32, WIDTH as u32),
+            );
+            conv3x3_same_three(
+                &mut program,
+                activation,
+                weight,
+                pad_index,
+                pad_mask,
+                crop_index,
+                columns_index,
+            )
+            .expect("the three-block convolution builds")
+        } else {
+            let mut taps = [NodeId(0); 9];
+            for tap_row in 0..3u32 {
+                for tap_column in 0..3u32 {
+                    taps[(tap_row * 3 + tap_column) as usize] = f32_leaf(
+                        &mut program,
+                        &alloc::format!("kernel.tap{tap_row}.{tap_column}"),
+                        &[OUT_G as u32, OUT_C as u32, IN_G as u32, IN_C as u32],
+                    );
+                }
+            }
+            conv3x3_same(
+                &mut program,
+                activation,
+                &taps,
+                pad_index,
+                pad_mask,
+                crop_index,
+                HEIGHT as u32,
+                WIDTH as u32,
+            )
+            .expect("the nine-tap convolution builds")
+        };
+
+        let image = image();
+        let kernel = kernel();
+        // Each tap leaf holds one `[og, oc, ig, ic]` kernel position.
+        let tap_values: Vec<Vec<f32>> = (0..9)
+            .map(|tap| {
+                let (y, x) = (tap / 3, tap % 3);
+                let mut values = Vec::with_capacity(OUT_G * OUT_C * IN_G * IN_C);
+                for og in 0..OUT_G {
+                    for oc in 0..OUT_C {
+                        for ig in 0..IN_G {
+                            for ic in 0..IN_C {
+                                let index =
+                                    ((((og * OUT_C + oc) * 9 + y * 3 + x) * IN_G + ig) * IN_C) + ic;
+                                values.push(kernel[index]);
+                            }
+                        }
+                    }
+                }
+                values
+            })
+            .collect();
+        let mask: Vec<f32> = conv3x3_pad_mask(HEIGHT as u32, WIDTH as u32)
+            .into_iter()
+            .map(|value| value as f32)
+            .collect();
+        let pad_index_values: Vec<f32> = conv3x3_pad_index(HEIGHT as u32, WIDTH as u32)
+            .into_iter()
+            .map(|value| value as f32)
+            .collect();
+        let crop_index_values: Vec<f32> = conv3x3_crop_index(HEIGHT as u32, WIDTH as u32)
+            .into_iter()
+            .map(|value| value as f32)
+            .collect();
+        let tap_names: Vec<alloc::string::String> = (0..9)
+            .map(|tap| alloc::format!("kernel.tap{}.{}", tap / 3, tap % 3))
+            .collect();
+        let mut blocks: Vec<(&str, QuantizedBlock)> = alloc::vec![
+            ("image", QuantizedBlock::Float32(&image)),
+            ("pad.index", QuantizedBlock::Float32(&pad_index_values)),
+            ("pad.mask", QuantizedBlock::Float32(&mask)),
+            ("crop.index", QuantizedBlock::Float32(&crop_index_values)),
+        ];
+        let columns: Vec<f32> = conv3x3_taps_index(HEIGHT as u32, WIDTH as u32)
+            .into_iter()
+            .map(|value| value as f32)
+            .collect();
+        if three {
+            blocks.push(("kernel", QuantizedBlock::Float32(&kernel)));
+            blocks.push(("columns.index", QuantizedBlock::Float32(&columns)));
+        } else {
+            for (name, values) in tap_names.iter().zip(&tap_values) {
+                blocks.push((name.as_str(), QuantizedBlock::Float32(values)));
+            }
+        }
+
+        let mut pools = crate::cpu::BufferPools::default();
+        let mut validated = None;
+        let evaluated = crate::cpu::evaluate_quantized_named_with_scratch(
+            &program,
+            &[],
+            &blocks,
+            &[root],
+            &mut pools,
+            &mut validated,
+        )
+        .expect("the convolution evaluates on the CPU");
+        evaluated.get(root).expect("the root is returned").0.to_vec()
+    }
+
+    fn worst_difference(left: &[f32], right: &[f32]) -> f32 {
+        left.iter()
+            .zip(right)
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    #[test]
+    fn the_nine_tap_convolution_reproduces_the_direct_loop() {
+        let want = direct(&image(), &kernel());
+        let got = run(false);
+        assert_eq!(got.len(), want.len(), "shape");
+        assert!(
+            want.iter().any(|value| value.abs() > 1.0),
+            "a vacuous reference proves nothing"
+        );
+        let worst = worst_difference(&got, &want);
+        assert!(
+            worst < 1e-5,
+            "the nine-tap lowering differs from the definition by {worst}"
+        );
+    }
+
+    #[test]
+    fn the_three_block_convolution_reproduces_the_direct_loop() {
+        let want = direct(&image(), &kernel());
+        let got = run(true);
+        assert_eq!(got.len(), want.len(), "shape");
+        let worst = worst_difference(&got, &want);
+        assert!(
+            worst < 1e-5,
+            "the three-block lowering differs from the definition by {worst}"
+        );
+    }
+
+    /// Does the folded reduce's iteration space stay the size of its own
+    /// contraction, or does the block axis resolve to the whole operand? A
+    /// block axis sized from the operand is what makes the Metal dispatch never
+    /// complete, so this reads the resolved extents rather than a result.
+    #[test]
+    fn the_three_block_reduce_iterates_its_contraction_not_its_operand() {
+        let rows = (HEIGHT * WIDTH) as u32;
+        let mut program = Vec::new();
+        let activation = f32_leaf(&mut program, "image", &[rows, IN_G as u32, IN_C as u32]);
+        let pad_index = index_leaf(
+            &mut program,
+            "pad.index",
+            &conv3x3_pad_index(HEIGHT as u32, WIDTH as u32),
+        );
+        let pad_mask = f32_leaf(
+            &mut program,
+            "pad.mask",
+            &[conv3x3_pad_rows(HEIGHT as u32, WIDTH as u32)],
+        );
+        let crop_index = index_leaf(
+            &mut program,
+            "crop.index",
+            &conv3x3_crop_index(HEIGHT as u32, WIDTH as u32),
+        );
+        let weight = f32_leaf(
+            &mut program,
+            "kernel",
+            &[OUT_G as u32, OUT_C as u32, 9, IN_G as u32, IN_C as u32],
+        );
+        let columns_index = index_leaf(
+            &mut program,
+            "columns.index",
+            &conv3x3_taps_index(HEIGHT as u32, WIDTH as u32),
+        );
+        let start = program.len();
+        let _root = conv3x3_same_three(
+            &mut program,
+            activation,
+            weight,
+            pad_index,
+            pad_mask,
+            crop_index,
+            columns_index,
+        )
+        .expect("the three-block convolution builds");
+        let shapes = crate::shape::infer(&program, &[]).expect("the program infers");
+        // The reduce is the node whose body is a fold; report every new node's
+        // extent list so the block axis is visible.
+        for position in start..program.len() {
+            let node = NodeId(position as u32);
+            let extents: Vec<u64> = shapes.of(node).to_vec();
+            eprintln!("node {position} extents {extents:?}");
+            assert!(
+                extents.iter().all(|&size| size <= 4096),
+                "node {position} has a dimension of {extents:?} -- the block axis is sized from the operand"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_forms_agree_with_each_other() {
+        let worst = worst_difference(&run(true), &run(false));
+        assert!(worst < 1e-5, "the two forms differ by {worst}");
     }
 }

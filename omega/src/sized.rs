@@ -13,10 +13,13 @@
 //! - **Execution policy, build-time-configurable**: [`PACKED_ROW_BLOCK_SIMDGROUPS`]
 //!   and [`COOPERATIVE_REDUCE_MIN_LEN`] (both always compiled — the
 //!   row-blocked packed path and the cooperative/serial reduce split have no
-//!   feature gate), `TILED_GEMM_MIN_TOKENS`, `TILED_GEMM_BLOCK_M`, `TILED_GEMM_BLOCK_N`,
-//!   `TILED_GEMM_BLOCK_K` (`metal-tiled-gemm`-only, ROW 109's multi-simdgroup
-//!   redesign — ports `ggml-metal.metal:6487-6489`'s `BLOCK_SIZE_M`/
-//!   `BLOCK_SIZE_N`/`BLOCK_SIZE_K`). These trace to `omega-runtime.toml` via `build.rs`'s
+//!   feature gate), `TILED_GEMM_MIN_TOKENS` (`metal-tiled-gemm`-only: the
+//!   admission floor for the tiled path), `TILED_GEMM_BLOCK_M`,
+//!   `TILED_GEMM_BLOCK_N`, `TILED_GEMM_BLOCK_K` (every build: the geometry
+//!   `msl::TiledGemmTile::CONFIGURED` falls back to and the dense GEMM's grid
+//!   is cut by, whether or not the tiled path itself is compiled in; ROW 109's
+//!   multi-simdgroup redesign — ports `ggml-metal.metal:6487-6489`'s
+//!   `BLOCK_SIZE_M`/`BLOCK_SIZE_N`/`BLOCK_SIZE_K`). These trace to `omega-runtime.toml` via `build.rs`'s
 //!   `emit_sizing_consts` (mirrors `proxima-tensor/build.rs`'s function of
 //!   the same name over `proxima-tensor-runtime.toml`) and can be
 //!   overridden per-build via an `OMEGA_<SECTION>_<KEY>` env var

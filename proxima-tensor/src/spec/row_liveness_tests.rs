@@ -93,7 +93,7 @@ fn build(schedule: &[LayerSchedule], last_row_only: bool, row_cut: bool) -> Vec<
         SharedExpertWidth::NONE,
         DType::FLOAT32,
         KeyCacheLayout::default(),
-    )
+    None,)
     .expect("the gemma4-shaped two-range cached program lowers");
     program
 }
@@ -237,7 +237,7 @@ fn decode_shaped_program_equals_the_program_built_without_the_cut_parameter() {
         None,
         false,
         SharedExpertWidth::NONE,
-    )
+    None,)
     .expect("the two-range cached program lowers");
 
     assert!(legacy == build(&schedule, true, false));

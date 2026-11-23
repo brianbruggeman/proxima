@@ -295,7 +295,7 @@ fn model_program_with_roots(
         SharedExpertWidth::NONE,
         DType::FLOAT32,
         layout,
-    )
+    None,)
     .expect("a two-layer cached model builds");
     let attention = roots
         .into_iter()

@@ -997,6 +997,35 @@ pub fn build_forward_with_row_cut(
     descriptor: &ModelDescriptor,
     row_cut: bool,
 ) -> Result<ForwardProgram, TensorError> {
+    build_forward_with_row_cut_and_key_pad(descriptor, row_cut, None)
+}
+
+/// [`build_forward`] with a padding token id whose keys every causal mask
+/// skips ([`key_validity_mask`]): the reference's text encoder masks its pad
+/// positions, so a downstream cross-attention reads rows built without them.
+/// `None` reproduces [`build_forward`] byte-for-byte.
+///
+/// # Errors
+///
+/// Whatever [`build_forward`] can fail with.
+pub fn build_forward_with_key_pad(
+    descriptor: &ModelDescriptor,
+    key_pad_id: Option<u32>,
+) -> Result<ForwardProgram, TensorError> {
+    build_forward_with_row_cut_and_key_pad(descriptor, false, key_pad_id)
+}
+
+/// [`build_forward_with_row_cut`] with a padding-token key mask; the one
+/// implementation both public entries delegate to.
+///
+/// # Errors
+///
+/// Whatever [`build_forward`] can fail with.
+pub fn build_forward_with_row_cut_and_key_pad(
+    descriptor: &ModelDescriptor,
+    row_cut: bool,
+    key_pad_id: Option<u32>,
+) -> Result<ForwardProgram, TensorError> {
     validate_recurrence(descriptor)?;
     if descriptor.gated_attention
         || descriptor
@@ -1063,6 +1092,7 @@ pub fn build_forward_with_row_cut(
                     SharedExpertWidth(descriptor.expert_shared_feed_forward),
                     descriptor.activation_dtype(),
                     KeyCacheLayout::default(),
+                    key_pad_id,
                 )?;
             Ok(ForwardProgram {
                 program,
@@ -1106,6 +1136,7 @@ pub fn build_forward_with_row_cut(
                     descriptor.ple_dim,
                     SharedExpertWidth(descriptor.expert_shared_feed_forward),
                     descriptor.head_repeats,
+                    key_pad_id,
                 )?;
             Ok(ForwardProgram {
                 program,
@@ -1243,6 +1274,7 @@ pub fn build_forward_with_row_cut(
                     &layer_windows,
                     descriptor.sliding_kv_ring,
                     descriptor.activation_dtype(),
+                    key_pad_id,
                 )?;
             Ok(ForwardProgram {
                 program,

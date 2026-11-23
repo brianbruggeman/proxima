@@ -11,9 +11,11 @@
 //! [`super::append_attention_mixer`], whose causal mask is the switch
 //! [`non_causal_attention`] leaves off.
 
+use alloc::format;
 use alloc::vec::Vec;
 
 use crate::error::TensorError;
+use crate::map::{self, AxisIndex, AxisTerm, IndexPattern};
 use crate::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 use proxima_numeric::{DType, FormatCodec};
 
@@ -150,6 +152,795 @@ pub fn modulate(
         ScalarOp::Add,
         &[(scaled, "sd->sd"), (shift, "d->sd")],
     )
+}
+
+/// `y[t, o] = sum_i x[t, i] * weight[o, i] + bias[o]`: a checkpoint's
+/// row-major `[out, in]` weight read as-is, with `t` the activation's rows.
+/// One `Multiply` absorbed into one `Add`-reduce, so a packed weight keeps the
+/// backend's row-blocked/tiled matmul path (`weight` is bound as a packed
+/// codec by the caller) and a float weight takes the cooperative reduce.
+///
+/// # Errors
+///
+/// [`TensorError`] when a node is not part of `program`.
+pub fn linear(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    weight: NodeId,
+    bias: Option<NodeId>,
+) -> Result<NodeId, TensorError> {
+    let product = elementwise_like(
+        program,
+        x,
+        ScalarOp::Multiply,
+        &[(x, "ti->tio"), (weight, "oi->tio")],
+    )?;
+    let projected = reduce_like(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        product,
+        "tio->tio",
+        "to->tio",
+    )?;
+    match bias {
+        Some(bias) => elementwise_like(
+            program,
+            projected,
+            ScalarOp::Add,
+            &[(projected, "to->to"), (bias, "o->to")],
+        ),
+        None => Ok(projected),
+    }
+}
+
+/// `0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))`, the tanh
+/// approximation of GELU. `full` is `x`'s own identity map.
+///
+/// # Errors
+///
+/// [`TensorError`] when a node is not part of `program`.
+pub fn gelu_tanh(program: &mut Vec<Op>, x: NodeId, full: &str) -> Result<NodeId, TensorError> {
+    let squared = elementwise_like(
+        program,
+        x,
+        ScalarOp::Multiply,
+        &[(x, full), (x, full)],
+    )?;
+    let cubic = elementwise_like(
+        program,
+        x,
+        ScalarOp::Multiply,
+        &[(squared, full), (x, full)],
+    )?;
+    let coefficient = scalar_constant_like(program, 0.044_715, x)?;
+    let scaled_cubic = elementwise_like(
+        program,
+        x,
+        ScalarOp::Multiply,
+        &[(cubic, full), (coefficient, broadcast(full).as_str())],
+    )?;
+    let inner = elementwise_like(
+        program,
+        x,
+        ScalarOp::Add,
+        &[(x, full), (scaled_cubic, full)],
+    )?;
+    let root = scalar_constant_like(program, 0.797_884_6, x)?;
+    let argument = elementwise_like(
+        program,
+        x,
+        ScalarOp::Multiply,
+        &[(inner, full), (root, broadcast(full).as_str())],
+    )?;
+    let turned = elementwise_like(program, x, ScalarOp::Tanh, &[(argument, full)])?;
+    let one = scalar_constant_like(program, 1.0, x)?;
+    let gate = elementwise_like(
+        program,
+        x,
+        ScalarOp::Add,
+        &[(turned, full), (one, broadcast(full).as_str())],
+    )?;
+    let half = scalar_constant_like(program, 0.5, x)?;
+    let scaled = elementwise_like(
+        program,
+        x,
+        ScalarOp::Multiply,
+        &[(x, full), (half, broadcast(full).as_str())],
+    )?;
+    elementwise_like(
+        program,
+        x,
+        ScalarOp::Multiply,
+        &[(scaled, full), (gate, full)],
+    )
+}
+
+/// The broadcast counterpart of an identity map: the operand has one axis and
+/// the iteration space all of `full`'s. `"sd->sd"` gives `"->sd"`.
+fn broadcast(full: &str) -> alloc::string::String {
+    match full.split_once("->") {
+        Some((_, space)) => format!("->{space}"),
+        None => alloc::string::String::new(),
+    }
+}
+
+/// Channel-group normalisation over `[rows, g, cg]` with `g * cg == channels`: per
+/// group, the mean and variance of `rows * cg` values (the spatial axes are
+/// already flattened into `rows`), then
+/// `(x - mean) / sqrt(var + eps) * weight[g, cg] + bias[g, cg]`. `count` is
+/// `rows * cg`; `weight`/`bias` are one `[g, cg]` vector each.
+///
+/// # Errors
+///
+/// [`TensorError`] when a node is not part of `program`.
+pub fn group_norm(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    weight: NodeId,
+    bias: NodeId,
+    count: u32,
+    eps: f32,
+) -> Result<NodeId, TensorError> {
+    let sum = reduce_like(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        x,
+        "rgc->rgc",
+        "g->rgc",
+    )?;
+    let inverse_count = scalar_constant_like(program, 1.0 / count as f32, x)?;
+    let mean = elementwise_like(
+        program,
+        x,
+        ScalarOp::Multiply,
+        &[(sum, "g->g"), (inverse_count, "->g")],
+    )?;
+    let centered = elementwise_like(
+        program,
+        x,
+        ScalarOp::Subtract,
+        &[(x, "rgc->rgc"), (mean, "g->rgc")],
+    )?;
+    let squared = elementwise_like(
+        program,
+        x,
+        ScalarOp::Multiply,
+        &[(centered, "rgc->rgc"), (centered, "rgc->rgc")],
+    )?;
+    let variance_sum = reduce_like(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        squared,
+        "rgc->rgc",
+        "g->rgc",
+    )?;
+    let variance = elementwise_like(
+        program,
+        x,
+        ScalarOp::Multiply,
+        &[(variance_sum, "g->g"), (inverse_count, "->g")],
+    )?;
+    let eps_node = scalar_constant_like(program, eps, x)?;
+    let spread = elementwise_like(
+        program,
+        x,
+        ScalarOp::Add,
+        &[(variance, "g->g"), (eps_node, "->g")],
+    )?;
+    let deviation = elementwise_like(program, x, ScalarOp::SquareRoot, &[(spread, "g->g")])?;
+    let inverse = elementwise_like(program, x, ScalarOp::Reciprocal, &[(deviation, "g->g")])?;
+    let normalised = elementwise_like(
+        program,
+        x,
+        ScalarOp::Multiply,
+        &[(centered, "rgc->rgc"), (inverse, "g->rgc")],
+    )?;
+    let scaled = elementwise_like(
+        program,
+        x,
+        ScalarOp::Multiply,
+        &[(normalised, "rgc->rgc"), (weight, "gc->rgc")],
+    )?;
+    elementwise_like(
+        program,
+        x,
+        ScalarOp::Add,
+        &[(scaled, "rgc->rgc"), (bias, "gc->rgc")],
+    )
+}
+
+/// Gathers `source`'s axis `gathered_dim` through `indices` (a rank-1 integer
+/// leaf), keeping every other axis addressed straight through. The gathered
+/// axis's extent comes from `indices`' own declared length, which is what
+/// makes an arbitrary (non-affine) row permutation -- a pad, an upsample, a
+/// concat half -- expressible in the affine algebra at all.
+#[must_use]
+pub fn gather_axis(
+    program: &mut Vec<Op>,
+    source: NodeId,
+    indices: NodeId,
+    rank: u16,
+    gathered_dim: u16,
+    dtype: DType,
+) -> NodeId {
+    let axes = (0..rank)
+        .map(|axis| {
+            if axis == gathered_dim {
+                return AxisIndex::default();
+            }
+            AxisIndex {
+                terms: core::iter::once(AxisTerm::projection(axis)).collect(),
+                offset: 0,
+                len: None,
+            }
+        })
+        .collect();
+    let base = IndexPattern {
+        iter_rank: rank,
+        axes,
+    };
+    let index_map = map::projection(rank, &[gathered_dim]);
+    super::gather_computed(program, source, indices, index_map, base, gathered_dim, dtype)
+}
+
+/// [`gather_axis`] on a node's leading axis, keeping `trailing_rank` further
+/// axes addressed in place.
+#[must_use]
+pub fn gather_leading_axis(
+    program: &mut Vec<Op>,
+    source: NodeId,
+    indices: NodeId,
+    trailing_rank: u16,
+    dtype: DType,
+) -> NodeId {
+    gather_axis(program, source, indices, trailing_rank + 1, 0, dtype)
+}
+
+/// Nearest-neighbour 2x upsample of `[rows, g, cg]` to `[4 * rows, g, cg]`,
+/// through one leading-axis gather: `index[4 * h * width + 2 * w + y]` names source
+/// row `h * width + w` ([`upsample_x2_index`]), so the flat token axis stays a
+/// single axis a later [`conv3x3_same`] can offset.
+///
+/// # Errors
+///
+/// [`TensorError`] when a node is not part of `program`.
+pub fn nearest_upsample_x2(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    index: NodeId,
+) -> Result<NodeId, TensorError> {
+    let dtype = produced_dtype_or_binary32(program, x);
+    Ok(gather_leading_axis(program, x, index, 2, dtype))
+}
+
+/// [`conv3x3_same`] with the nine taps contracted in ONE reduce, reading one
+/// `[go, cgo, 3, 3, gi, cgi]` weight and writing ONE output tensor.
+///
+/// The nine-tap form is nine reduces plus eight adds, which the planner fuses
+/// into a single kernel whose epilogue carries the eight sibling products --
+/// measured at ~3.4 GB/s while re-reading eight ~1 GB operands per output
+/// element. This form gives the planner nothing to fuse: one reduce, no
+/// epilogue.
+///
+/// The whole stencil becomes the leading axis of one gathered operand
+/// ([`conv3x3_columns_index`]: nine blocks, block `3 * y + x` the padded grid
+/// shifted to that stencil position, `conv3x3_block_rows` rows each). The reduce
+/// then keeps `(r, g, c)` and contracts `(t, i, j)` -- the stencil block and the
+/// input channel pair -- addressing that operand as
+/// `block_rows * t + r @ block_rows`. That two-term address is the split
+/// ("reshape") form the index grammar recognises; a three-term
+/// `block * x + r + width * y` is expressible and evaluates correctly on the
+/// CPU, but its block axis is unsized by the emitter and the Metal dispatch
+/// never completes, so the tap row is folded into the block index instead of
+/// carried as a coefficient. Each block carries `2 * (width + 2)` trailing slack
+/// rows, so its shifted read stays inside itself.
+///
+/// # Errors
+///
+/// [`TensorError`] when a node is not part of `program`.
+#[allow(clippy::too_many_arguments)]
+pub fn conv3x3_same_three(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    weight: NodeId,
+    pad_index: NodeId,
+    pad_mask: NodeId,
+    crop_index: NodeId,
+    taps_index: NodeId,
+) -> Result<NodeId, TensorError> {
+    let dtype = produced_dtype_or_binary32(program, x);
+    let gathered = gather_leading_axis(program, x, pad_index, 2, dtype);
+    let zero = scalar_constant_like(program, 0.0, x)?;
+    let padded = elementwise_like(
+        program,
+        gathered,
+        ScalarOp::Select,
+        &[
+            (pad_mask, "r->rij"),
+            (gathered, "rij->rij"),
+            (zero, "->rij"),
+        ],
+    )?;
+    // The stencil staged tap-inner: `[9 * rows, in_g, in_c]` with row `r`'s
+    // nine taps adjacent, so the contraction `(t, i, j)` is contiguous.
+    let staged = gather_leading_axis(program, padded, taps_index, 2, dtype);
+    // `9 * r + t @ 9`: the outer coefficient equals `t`'s declared length, the
+    // split rule's own reshape form, so `r` and `t` separate again here.
+    let image_map = alloc::format!("9*r+t@9,i,j->rgctij");
+    let product = elementwise_like(
+        program,
+        staged,
+        ScalarOp::Multiply,
+        &[
+            (staged, image_map.as_str()),
+            (weight, "g,c,t,i,j->rgctij"),
+        ],
+    )?;
+    let sum = reduce_like(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        product,
+        "rgctij->rgctij",
+        "rgc->rgctij",
+    )?;
+    Ok(gather_leading_axis(program, sum, crop_index, 2, dtype))
+}
+
+/// One 3x3 stride-1 "same" convolution of `[rows, g, cg]` through nine
+/// `linear`-shaped reduces sharing one `[go, cgo, gi, cgi]` weight, plus the
+/// gather that crops the padding ring back to `height * width` rows.
+///
+/// The activation is first gathered onto the `(height + 2) * (width + 2)`-row
+/// grid whose interior holds the image ([`conv3x3_pad_index`]); each tap is
+/// then one reduce whose image operand is a flat `tap_row * (width + 2) +
+/// tap_column` ahead of the output row. The token axis stays a single axis, so
+/// the nine taps keep the contiguous token/feature split the tiled matmul path
+/// admits. The `ones` operand only pins the padded row count and is removed
+/// when the reduce's body is composed.
+///
+/// # Errors
+///
+/// [`TensorError`] when a node is not part of `program`.
+#[allow(clippy::too_many_arguments)]
+pub fn conv3x3_same(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    weights: &[NodeId; 9],
+    pad_index: NodeId,
+    pad_mask: NodeId,
+    crop_index: NodeId,
+    height: u32,
+    width: u32,
+) -> Result<NodeId, TensorError> {
+    let dtype = produced_dtype_or_binary32(program, x);
+    let gathered = gather_leading_axis(program, x, pad_index, 2, dtype);
+    let zero = scalar_constant_like(program, 0.0, x)?;
+    let padded = elementwise_like(
+        program,
+        gathered,
+        ScalarOp::Select,
+        &[
+            (pad_mask, "r->rij"),
+            (gathered, "rij->rij"),
+            (zero, "->rij"),
+        ],
+    )?;
+    let padded_width = width + 2;
+    let out_rows = (height + 2) * padded_width;
+    let one = scalar_constant_like(program, 1.0, x)?;
+    let mut accumulator: Option<NodeId> = None;
+    for tap_row in 0..3usize {
+        for tap_column in 0..3usize {
+            let offset = tap_row as u32 * padded_width + tap_column as u32;
+            let image_map = format!("r+{offset}@{out_rows},i,j->rij");
+            let shifted = elementwise_like(
+                program,
+                padded,
+                ScalarOp::Multiply,
+                &[(padded, image_map.as_str()), (one, "->rij")],
+            )?;
+            let product = elementwise_like(
+                program,
+                shifted,
+                ScalarOp::Multiply,
+                &[
+                    (shifted, "r,i,j->rgcij"),
+                    (weights[tap_row * 3 + tap_column], "g,c,i,j->rgcij"),
+                ],
+            )?;
+            let tap = reduce_like(
+                program,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                product,
+                "rgcij->rgcij",
+                "rgc->rgcij",
+            )?;
+            accumulator = Some(match accumulator {
+                None => tap,
+                Some(partial) => elementwise_like(
+                    program,
+                    tap,
+                    ScalarOp::Add,
+                    &[(partial, "rgc->rgc"), (tap, "rgc->rgc")],
+                )?,
+            });
+        }
+    }
+    let sum = accumulator.ok_or(TensorError::NotLowerable {
+        node: x,
+        reason: "conv3x3_same needs at least one tap",
+    })?;
+    Ok(gather_leading_axis(program, sum, crop_index, 2, dtype))
+}
+
+/// `y[o] = sum_i x[i] * weight[o, i] + bias[o]`: [`linear`]'s rank-1 form, for
+/// a checkpoint's modulation/timestep linears whose activation is one vector.
+///
+/// # Errors
+///
+/// [`TensorError`] when a node is not part of `program`.
+pub fn matvec(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    weight: NodeId,
+    bias: Option<NodeId>,
+) -> Result<NodeId, TensorError> {
+    let product = elementwise_like(
+        program,
+        x,
+        ScalarOp::Multiply,
+        &[(x, "i->io"), (weight, "oi->io")],
+    )?;
+    let projected = reduce_like(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        product,
+        "io->io",
+        "o->io",
+    )?;
+    match bias {
+        Some(bias) => elementwise_like(
+            program,
+            projected,
+            ScalarOp::Add,
+            &[(projected, "o->o"), (bias, "o->o")],
+        ),
+        None => Ok(projected),
+    }
+}
+
+/// [`linear`] over an input-column window of `weight`: `x`'s feature axis is
+/// `input_width` wide and reads the weight's columns `[input_offset,
+/// input_offset + input_width)`. A fused projection whose consumers take
+/// different columns (a residual concatenation) splits here rather than
+/// re-binding a non-contiguous byte range.
+///
+/// # Errors
+///
+/// [`TensorError`] when a node is not part of `program`.
+pub fn linear_window(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    weight: NodeId,
+    input_offset: u32,
+    input_width: u32,
+) -> Result<NodeId, TensorError> {
+    let product = elementwise_like(
+        program,
+        x,
+        ScalarOp::Multiply,
+        &[
+            (x, "ti->tio"),
+            (
+                weight,
+                format!("o,{input_offset}+i@{input_width}->tio").as_str(),
+            ),
+        ],
+    )?;
+    reduce_like(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        product,
+        "tio->tio",
+        "to->tio",
+    )
+}
+
+/// `[start, start + width)` of a rank-1 `[c]` node, as a rank-1 `[width]` one.
+///
+/// # Errors
+///
+/// [`TensorError`] when a node is not part of `program`.
+pub fn slice_range(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    start: u32,
+    width: u32,
+) -> Result<NodeId, TensorError> {
+    elementwise_like(
+        program,
+        x,
+        ScalarOp::Identity,
+        &[(x, format!("c+{start}@{width}->c").as_str())],
+    )
+}
+
+/// A rank-1 constant leaf of extent 1, the shape a per-row scalar operand
+/// (`eps`) is declared at by the norm builders.
+#[must_use]
+pub fn unit_constant(program: &mut Vec<Op>, value: f32, dtype: DType) -> NodeId {
+    op::append(
+        program,
+        Op::Constant {
+            dtype,
+            shape: alloc::vec![Extent::Static(1)],
+            value,
+        },
+    )
+}
+
+/// Columns `[start, start + width)` of a `[t, c]` node as a `[t, width]` one.
+///
+/// # Errors
+///
+/// [`TensorError`] when a node is not part of `program`.
+pub fn slice_columns(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    start: u32,
+    width: u32,
+) -> Result<NodeId, TensorError> {
+    elementwise_like(
+        program,
+        x,
+        ScalarOp::Identity,
+        &[(x, format!("t,c+{start}@{width}->tc").as_str())],
+    )
+}
+
+/// Rows `[start, start + rows)` of a `[t, c]` node.
+///
+/// # Errors
+///
+/// [`TensorError`] when a node is not part of `program`.
+pub fn slice_rows(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    start: u32,
+    rows: u32,
+) -> Result<NodeId, TensorError> {
+    elementwise_like(
+        program,
+        x,
+        ScalarOp::Identity,
+        &[(x, format!("t+{start}@{rows},c->tc").as_str())],
+    )
+}
+
+/// [`conv3x3_same`]'s gather index: the `(height + 2) * (width + 2)`-row grid
+/// plus the tail the last tap offset reads past it, entry `r` naming image row
+/// `(row - 1) * width + column - 1` for the interior and the image's last row
+/// everywhere else (the ring's outputs are cropped, so their values are not
+/// part of the result and only the address has to stay in bounds).
+#[must_use]
+pub fn conv3x3_pad_rows(height: u32, width: u32) -> u32 {
+    let padded_width = width + 2;
+    (height + 2) * padded_width + 2 * padded_width + 2
+}
+
+#[must_use]
+pub fn conv3x3_pad_index(height: u32, width: u32) -> Vec<i32> {
+    let padded_width = width + 2;
+    (0..conv3x3_pad_rows(height, width))
+        .map(|row| {
+            let along = row / padded_width;
+            let across = row % padded_width;
+            if along == 0 || across == 0 || along > height || across > width {
+                return 0;
+            }
+            ((along - 1) * width + across - 1) as i32
+        })
+        .collect()
+}
+
+/// [`conv3x3_same`]'s zero mask: 1 on the padded grid's interior rows (the
+/// image) and 0 on the ring, which is what makes the gather a zero pad.
+#[must_use]
+pub fn conv3x3_pad_mask(height: u32, width: u32) -> Vec<i32> {
+    let padded_width = width + 2;
+    (0..conv3x3_pad_rows(height, width))
+        .map(|row| {
+            let along = row / padded_width;
+            let across = row % padded_width;
+            let interior = along >= 1 && along <= height && across >= 1 && across <= width;
+            i32::from(interior)
+        })
+        .collect()
+}
+
+/// [`conv3x3_same`]'s crop index: the `height * width` output rows that hold
+/// the image's own window of the padded grid.
+#[must_use]
+pub fn conv3x3_crop_index(height: u32, width: u32) -> Vec<i32> {
+    let padded_width = width + 2;
+    (0..height * width)
+        .map(|row| ((row / width) * padded_width + row % width) as i32)
+        .collect()
+}
+
+/// [`conv3x3_same_three`]'s tap index: the padded grid staged with the tap axis
+/// **inside** the row axis, `(row, tap)` flattened row-major, so each output
+/// row's nine stencil positions are adjacent in memory and the reduce's
+/// contraction `(t, i, j)` is one contiguous run.
+///
+/// Entry `row * 9 + t` names source row `row + y * (width + 2) + x` for
+/// `t = 3 * y + x`. The gather itself produces a rank-1-axis view
+/// (`[9 * rows, in_g, in_c]`); the reduce un-flattens it with
+/// `9 * r + t @ 9`, which the split rule
+/// (`AxisIndex::split_outer_axis`: the outer term's coefficient equals the
+/// inner axis's declared `len`) recognises, so `r` comes back as the row axis
+/// and `t` as the nine-wide tap axis without a second op.
+///
+/// The *order* is the whole point: staging the taps row-inner rather than
+/// block-major is what makes the contraction contiguous in the activation, and
+/// a strided contraction is what keeps a reduce off the K-tiled GEMM and on the
+/// per-element kernel (measured at ~3.4 GB/s in this decoder's profile).
+#[must_use]
+pub fn conv3x3_taps_index(height: u32, width: u32) -> Vec<i32> {
+    let padded_width = width + 2;
+    let rows = conv3x3_block_rows(height, width);
+    (0..9 * rows)
+        .map(|index| {
+            let row = index / 9;
+            let tap = index % 9;
+            (row + (tap / 3) * padded_width + tap % 3) as i32
+        })
+        .collect()
+}
+
+/// Rows one [`conv3x3_taps_index`] output row's tap run spans: the padded
+/// output rows, one per stencil position (the shift lives in the gather).
+#[must_use]
+pub fn conv3x3_block_rows(height: u32, width: u32) -> u32 {
+    (height + 2) * (width + 2)
+}
+
+/// [`nearest_upsample_x2`]'s gather index for a `height` x `width` image:
+/// `4 * height * width` rows, row `2 * h * (2 * width) + 2 * w + dy` naming
+/// source row `h * width + w`.
+#[must_use]
+pub fn upsample_x2_index(height: u32, width: u32) -> Vec<i32> {
+    let mut index = Vec::with_capacity(4 * (height * width) as usize);
+    for row in 0..2 * height {
+        for column in 0..2 * width {
+            index.push(((row / 2) * width + column / 2) as i32);
+        }
+    }
+    index
+}
+
+/// Two `[t, c]` nodes joined along the token axis: `head`'s `head_rows` rows
+/// followed by `tail`'s `tail_rows`. `head_index`/`tail_index` are host-built
+/// leaves of the joined length whose entries clamp into each half (the half a
+/// `Select` on `head_mask` discards never reaches the result), so each half is
+/// one leading-axis gather and the join is one `Select`.
+///
+/// # Errors
+///
+/// [`TensorError`] when a node is not part of `program`.
+pub fn concat_rows(
+    program: &mut Vec<Op>,
+    head: NodeId,
+    tail: NodeId,
+    head_index: NodeId,
+    tail_index: NodeId,
+    head_mask: NodeId,
+    trailing: &str,
+) -> Result<NodeId, TensorError> {
+    let dtype = produced_dtype_or_binary32(program, head);
+    let trailing_rank = trailing.len() as u16;
+    let gathered_head = gather_leading_axis(program, head, head_index, trailing_rank, dtype);
+    let gathered_tail = gather_leading_axis(program, tail, tail_index, trailing_rank, dtype);
+    elementwise_like(
+        program,
+        head,
+        ScalarOp::Select,
+        &[
+            (head_mask, format!("t->t{trailing}").as_str()),
+            (gathered_head, format!("t{trailing}->t{trailing}").as_str()),
+            (gathered_tail, format!("t{trailing}->t{trailing}").as_str()),
+        ],
+    )
+}
+
+/// [`non_causal_attention`] for a query/key pair already split into the two
+/// halves [`super::fused_rope_pair`] returns: the score is the sum of the two
+/// halves' dots (`q_even . k_even + q_odd . k_odd`), which is the same dot
+/// product the interleaved split computes, without re-interleaving the halves
+/// into one node. `q_even`/`q_odd` are `[s, u, p]`, `k_even`/`k_odd`
+/// `[t, u, p]`, `v` is `[t, u, d]`.
+///
+/// # Errors
+///
+/// [`TensorError`] when a node is not part of `program`.
+pub fn non_causal_attention_halves(
+    program: &mut Vec<Op>,
+    q_even: NodeId,
+    q_odd: NodeId,
+    k_even: NodeId,
+    k_odd: NodeId,
+    v: NodeId,
+    inv_sqrt_head_dim: NodeId,
+) -> Result<NodeId, TensorError> {
+    let grouped_dtype = produced_dtype_or_binary32(program, q_even);
+    let single_group = op::append(
+        program,
+        Op::Constant {
+            dtype: grouped_dtype,
+            shape: alloc::vec![Extent::Static(1)],
+            value: 1.0,
+        },
+    );
+    let even_grouped = elementwise_like(
+        program,
+        q_even,
+        ScalarOp::Multiply,
+        &[
+            (q_even, "sup->sugp"),
+            (single_group, "g->sugp"),
+        ],
+    )?;
+    let odd_grouped = elementwise_like(
+        program,
+        q_odd,
+        ScalarOp::Multiply,
+        &[
+            (q_odd, "sup->sugp"),
+            (single_group, "g->sugp"),
+        ],
+    )?;
+    let even_product = elementwise_like(
+        program,
+        q_even,
+        ScalarOp::Multiply,
+        &[(even_grouped, "sugp->stugp"), (k_even, "tup->stugp")],
+    )?;
+    let odd_product = elementwise_like(
+        program,
+        q_odd,
+        ScalarOp::Multiply,
+        &[(odd_grouped, "sugp->stugp"), (k_odd, "tup->stugp")],
+    )?;
+    let even_scores = reduce_like(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        even_product,
+        "stugp->stugp",
+        "stug->stugp",
+    )?;
+    let odd_scores = reduce_like(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        odd_product,
+        "stugp->stugp",
+        "stug->stugp",
+    )?;
+    let scores = elementwise_like(
+        program,
+        q_even,
+        ScalarOp::Add,
+        &[(even_scores, "stug->stug"), (odd_scores, "stug->stug")],
+    )?;
+    append_masked_softmax_mix(program, scores, inv_sqrt_head_dim, None, None, 1, v)
 }
 
 /// Softmax attention with every key visible to every query: `q` is
@@ -920,4 +1711,196 @@ mod stft_log_mel_tests {
         );
         assert!(stft_log_mel(&mut program, &config(), signal, 8, fb).is_err());
     }
+}
+
+/// [`non_causal_attention_halves`] with the feature axes grouped the way the
+/// caller declares them and no broadcast group axis. `heads` is the letter run
+/// of the per-query feature axes: `"u"` for multi-head attention
+/// (`q_even`/`q_odd` are `[s, u, p]`, `k_even`/`k_odd` `[t, u, p]`, `v`
+/// `[t, u, d]`), `"gc"` for one attention head over a two-axis channel group
+/// (`[s, g, c]`), `""` for a single axis.
+///
+/// Every step is a two-operand `Multiply` or a one-value `Maximum`/`Add`
+/// reduce, which is the shape a backend's dense batched matmul recognises;
+/// [`non_causal_attention_halves`] with the feature axes spelled as the caller
+/// declares them and no broadcast group axis. Three letter runs describe the
+/// operands: `kept` are the per-query axes the score keeps (`"u"` for
+/// multi-head attention, `""` for one head over the whole channel), `reduced`
+/// are the axes the dot product sums over (`"p"` for the rotated pairs,
+/// `"gc"` for a two-axis channel group) and `value` is the per-key value axis
+/// (`"d"`, or `""` when the value axes are the kept/channel axes themselves).
+///
+/// Every step is a two-operand `Multiply` or a one-value `Maximum`/`Add`
+/// reduce, which is the shape a backend's dense batched matmul recognises;
+/// [`non_causal_attention_halves`]'s group axis needs a broadcast multiply that
+/// its body check does not accept.
+///
+/// # Errors
+///
+/// [`TensorError`] when a node is not part of `program`.
+#[allow(clippy::too_many_arguments)]
+pub fn non_causal_attention_heads(
+    program: &mut Vec<Op>,
+    q_even: NodeId,
+    q_odd: NodeId,
+    k_even: NodeId,
+    k_odd: NodeId,
+    v: NodeId,
+    inv_sqrt_head_dim: NodeId,
+    kept: &str,
+    reduced: &str,
+    value: &str,
+) -> Result<NodeId, TensorError> {
+    let combined = alloc::format!("{kept}{reduced}");
+    let comma = |letters: &str| -> alloc::string::String {
+        if letters.is_empty() {
+            return alloc::string::String::new();
+        }
+        alloc::format!(
+            ",{}",
+            letters
+                .chars()
+                .map(|letter| letter.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    // The score tensor is keyed `[{kept}, s, t]`: the kept (head) axes first and
+    // the key axis `t` innermost, which is the layout a backend's batched matmul
+    // writes and reads contiguously (one `[s, t]` plane per head, its key axis
+    // the fast one). `1/sqrt(head_dim)` is folded into the queries below, so the
+    // product that produces the score is one `Multiply` of two operands with no
+    // trailing scale node over the score body. With no kept axes the two layouts
+    // coincide, which is why the VAE's single-head call is unaffected.
+    let score_axes = alloc::format!("{kept}st");
+    // the product space: the kept axes, the query axis, the key axis, the
+    // reduced axes -- `t` last, so the key axis is the contiguous one.
+    let iteration = alloc::format!("{kept}st{reduced}");
+    let scores_iteration = alloc::format!("{iteration}->{iteration}");
+    let query = alloc::format!("s{}->{iteration}", comma(&combined));
+    let key = alloc::format!("t{}->{iteration}", comma(&combined));
+    let scores_out = alloc::format!("{score_axes}->{iteration}");
+    let same = alloc::format!("{score_axes}->{score_axes}");
+    let row = alloc::format!("{kept}s->{score_axes}");
+    let broadcast = alloc::format!("{score_axes}->{score_axes}{value}");
+    let value_map = alloc::format!("t{}->{score_axes}{value}", comma(&alloc::format!("{kept}{value}")));
+    let attended_in = alloc::format!("{score_axes}{value}->{score_axes}{value}");
+    let attended_out = alloc::format!("{kept}s{value}->{score_axes}{value}");
+    // `[{kept}, s, value]` is the order this reduce produces; the caller reads
+    // `[s, {kept}, value]`, so a head-first score needs one permutation back.
+    let attended_order = alloc::format!("{kept}s{value}->s{kept}{value}");
+    let query_shape = alloc::format!("s{combined}->s{combined}");
+    let query_scalar = alloc::format!("->s{combined}");
+    let q_even = elementwise_like(
+        program,
+        q_even,
+        ScalarOp::Multiply,
+        &[(q_even, query_shape.as_str()), (inv_sqrt_head_dim, query_scalar.as_str())],
+    )?;
+    let q_odd = elementwise_like(
+        program,
+        q_odd,
+        ScalarOp::Multiply,
+        &[(q_odd, query_shape.as_str()), (inv_sqrt_head_dim, query_scalar.as_str())],
+    )?;
+    let even_product = elementwise_like(
+        program,
+        q_even,
+        ScalarOp::Multiply,
+        &[(q_even, query.as_str()), (k_even, key.as_str())],
+    )?;
+    let odd_product = elementwise_like(
+        program,
+        q_odd,
+        ScalarOp::Multiply,
+        &[(q_odd, query.as_str()), (k_odd, key.as_str())],
+    )?;
+    let even_scores = reduce_like(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        even_product,
+        scores_iteration.as_str(),
+        scores_out.as_str(),
+    )?;
+    let odd_scores = reduce_like(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        odd_product,
+        scores_iteration.as_str(),
+        scores_out.as_str(),
+    )?;
+    let scores = elementwise_like(
+        program,
+        q_even,
+        ScalarOp::Add,
+        &[(even_scores, same.as_str()), (odd_scores, same.as_str())],
+    )?;
+    let peak = reduce_like(
+        program,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        scores,
+        same.as_str(),
+        row.as_str(),
+    )?;
+    let shifted = elementwise_like(
+        program,
+        q_even,
+        ScalarOp::Subtract,
+        &[(scores, same.as_str()), (peak, row.as_str())],
+    )?;
+    let weights = elementwise_like(
+        program,
+        q_even,
+        ScalarOp::Exponential,
+        &[(shifted, same.as_str())],
+    )?;
+    let total = reduce_like(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        weights,
+        same.as_str(),
+        row.as_str(),
+    )?;
+    let inverse = elementwise_like(
+        program,
+        q_even,
+        ScalarOp::Reciprocal,
+        &[(total, alloc::format!("s{kept}->s{kept}").as_str())],
+    )?;
+    let probabilities = elementwise_like(
+        program,
+        q_even,
+        ScalarOp::Multiply,
+        &[(weights, same.as_str()), (inverse, row.as_str())],
+    )?;
+    let attended_product = elementwise_like(
+        program,
+        q_even,
+        ScalarOp::Multiply,
+        &[
+            (probabilities, broadcast.as_str()),
+            (v, value_map.as_str()),
+        ],
+    )?;
+    let attended = reduce_like(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        attended_product,
+        attended_in.as_str(),
+        attended_out.as_str(),
+    )?;
+    if kept.is_empty() {
+        return Ok(attended);
+    }
+    elementwise_like(
+        program,
+        attended,
+        ScalarOp::Identity,
+        &[(attended, attended_order.as_str())],
+    )
 }

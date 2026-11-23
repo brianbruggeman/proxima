@@ -386,6 +386,14 @@ pub(crate) struct MetalOnlyExtras {
     /// entry with the static form. Default ON (unset admits; only explicit `"0"`
     /// keeps the declared array). Feeds the `_dyn` suffix.
     pub tiled_gemm_dynamic_tgmem: bool,
+    /// The `(BLOCK_M, BLOCK_N, BLOCK_K)` tile this op dispatches with, `None`
+    /// for an op that takes no tiled GEMM. Every edge is baked literally into
+    /// the staged threadgroup arrays, the fragment loop bounds and the launch
+    /// grid ([`crate::msl::TiledGemmTile::for_feature_extent`] picks them from the
+    /// op's own output shape), so two ops agreeing on every other axis but
+    /// picking different tiles must never share a compiled pipeline. Feeds the
+    /// `_tg{m}x{n}x{k}` suffix.
+    pub tiled_gemm_tile: Option<(u64, u64, u64)>,
     /// `true` when `msl::grid2d_for` chose the flat 2D form
     /// ([`crate::msl::Grid2DForm::FlatThreadgroupIndex`]) because the grid is
     /// wider than the 32 bits a `uint gid [[thread_position_in_grid]]` kernel
@@ -1106,6 +1114,14 @@ mod gated {
         }
         if metal.tiled_gemm_dynamic_tgmem {
             identity.push_str("_dyn");
+        }
+        if let Some((block_m, block_n, block_k)) = metal.tiled_gemm_tile {
+            identity.push_str("_tg");
+            identity.push_str(&block_m.to_string());
+            identity.push('x');
+            identity.push_str(&block_n.to_string());
+            identity.push('x');
+            identity.push_str(&block_k.to_string());
         }
         if metal.wide_grid {
             identity.push_str("_wg");

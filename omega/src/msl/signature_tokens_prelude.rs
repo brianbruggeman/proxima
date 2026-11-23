@@ -163,6 +163,7 @@ pub(super) fn grid_threads_with_schedule(
                             .map(|&axis| resolved.extents[axis as usize])
                             .product()
                     }),
+                    block.tile,
                 )?
             } else if let Some(block) = dense_batched_gemm_block(
                 resolved,
@@ -199,6 +200,7 @@ pub(super) fn grid_threads_with_schedule(
                         .iter()
                         .map(|&axis| resolved.extents[axis as usize])
                         .product(),
+                    TiledGemmTile::CONFIGURED,
                 )?
             } else if let Some(block) = packed_row_block(resolved, quantized, knobs) {
                 // one simdgroup per `codec_rows_per_simdgroup(block.codec)`

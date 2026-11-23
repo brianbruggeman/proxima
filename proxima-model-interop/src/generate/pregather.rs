@@ -3278,6 +3278,37 @@ impl<'file> LoadedModel<'file> {
             &descriptor,
             &descriptor,
             file_bytes,
+            None,
+        )
+    }
+
+    /// [`Self::load_from_safetensors`] whose causal masks also skip the keys of
+    /// the padding token `key_pad_id` ([`proxima_tensor::spec::build_forward_with_key_pad`]):
+    /// the reference text encoders mask their pad positions, so a downstream
+    /// cross-attention reads hidden states built without them.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::load_from_safetensors`] can fail with.
+    pub fn load_from_safetensors_with_key_pad(
+        manifest: &proxima_safetensors::Manifest,
+        file_bytes: &'file [u8],
+        data_start: u64,
+        architecture: ModelHparams,
+        vocab: Vocab,
+        key_pad_id: u32,
+    ) -> Result<Self, InteropError> {
+        let weights =
+            bind_all_weights_from_safetensors(manifest, file_bytes, data_start, &architecture)?;
+        let descriptor = canonical_safetensors_descriptor(&architecture, manifest)?;
+        Self::from_safetensors_weights(
+            Arc::new(SharedWeights::new(weights, file_bytes)),
+            architecture,
+            vocab,
+            &descriptor,
+            &descriptor,
+            file_bytes,
+            Some(key_pad_id),
         )
     }
 
@@ -3317,6 +3348,7 @@ impl<'file> LoadedModel<'file> {
             descriptor,
             &canonical,
             file_bytes,
+            None,
         )
     }
 
@@ -3363,6 +3395,7 @@ impl<'file> LoadedModel<'file> {
             descriptor,
             self.canonical_descriptor.as_ref().unwrap_or(origin),
             self.checkpoint_mapping,
+            None,
         )
     }
 
@@ -3373,6 +3406,7 @@ impl<'file> LoadedModel<'file> {
         descriptor: &ModelDescriptor,
         canonical: &ModelDescriptor,
         file_bytes: &'file [u8],
+        key_pad_id: Option<u32>,
     ) -> Result<Self, InteropError> {
         let ForwardProgram {
             program,
@@ -3383,7 +3417,7 @@ impl<'file> LoadedModel<'file> {
             hidden: hidden_root,
             readouts,
             ..
-        } = build_forward(descriptor)?;
+        } = proxima_tensor::spec::build_forward_with_key_pad(descriptor, key_pad_id)?;
         let recurrent = crate::lowering::resolved_recurrence(descriptor);
         let physical_kv_layers = alloc::vec![
             (architecture.kv_heads, architecture.head_dim, None);

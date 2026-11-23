@@ -143,6 +143,7 @@ mod q4_0_planes;
 mod tiled_gemm_cooperative_scan;
 #[cfg(feature = "metal-tiled-gemm")]
 mod contraction_grant;
+mod tiled_gemm_tile;
 mod expert_grouped_gemm;
 mod index_narrowing;
 pub mod encode_render;
@@ -173,6 +174,7 @@ pub use expert_grouped_gemm::GroupedGemmFormats;
 #[cfg(feature = "metal-tiled-gemm")]
 pub(crate) use contraction_grant::with_contraction_grants;
 pub use kernel_types_identity::*;
+pub(crate) use tiled_gemm_tile::TiledGemmTile;
 pub use signature_tokens_prelude::CachedAttentionForm;
 pub use signature_tokens_prelude::context_chunks_for;
 pub(crate) use signature_tokens_prelude::*;

@@ -3379,6 +3379,7 @@ fn push_tiled_gemm_body_rejects_an_empty_token_axis_group() {
         feature_axes: vec![0],
         codec: Codec::Q4K,
         gathered: None,
+        tile: TiledGemmTile::CONFIGURED,
     };
     let mut source = String::new();
     let error = push_tiled_gemm_body(
@@ -3416,6 +3417,7 @@ fn push_tiled_gemm_body_rejects_an_axis_not_in_output_axes() {
         feature_axes: vec![0],
         codec: Codec::Q4K,
         gathered: None,
+        tile: TiledGemmTile::CONFIGURED,
     };
     let mut source = String::new();
     let error = push_tiled_gemm_body(
@@ -4637,11 +4639,11 @@ fn dynamic_tgmem_kernel_argument_and_launch_length_always_agree() {
         assert!(declared, "{label}: the default declares the argument");
         assert_eq!(
             bytes,
-            tiled_gemm_shared_bytes(),
+            tiled_gemm_shared_bytes(TiledGemmTile::CONFIGURED),
             "{label}: the default binds the array's size"
         );
         assert_eq!(
-            tiled_gemm_shared_bytes(),
+            tiled_gemm_shared_bytes(TiledGemmTile::CONFIGURED),
             8192,
             "the 64 x 32 x 32 tile is ggml's 8192 bytes"
         );

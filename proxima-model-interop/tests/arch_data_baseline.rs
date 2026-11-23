@@ -1027,6 +1027,7 @@ fn descriptor_real_dims_gemma4_26b_program_equals_direct_builder() {
             None,
             false,
             SharedExpertWidth(descriptor.expert_shared_feed_forward),
+            None,
         )
         .expect("direct real-dims build");
 

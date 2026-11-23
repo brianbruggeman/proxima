@@ -423,7 +423,15 @@ fn emit_sizing_consts() {
         out.push_str(&format!(
             "pub const DENSE_TILED_MIN_THREADGROUPS: u64 = {dense_min_threadgroups};\n"
         ));
+    }
 
+    // The three tile edges are emitted in EVERY build, unlike the admission
+    // policy beside them: `TiledGemmTile::CONFIGURED` is the geometry the
+    // tiled-GEMM path falls back to and the dense GEMM's grid is cut by, and
+    // the shape rule in `msl/tiled_gemm_tile.rs` reads it to pick a per-op
+    // tile. Without the feature nothing dispatches a tiled GEMM, so the values
+    // are unused rather than absent.
+    {
         let block_m = require_multiple_of_sixteen(
             "tiled_gemm.block_m",
             require_nonzero(

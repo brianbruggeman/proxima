@@ -8366,7 +8366,7 @@ mod bound_graph_golden {
                 None,
                 false,
                 SharedExpertWidth::NONE,
-            )
+            None,)
             .expect("the gemma4-shaped two-range fixture lowers");
         let shapes = crate::shape::infer(&program, &[1, 1])
             .expect("the gemma4-shaped two-range fixture shape-infers at decode");

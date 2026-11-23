@@ -198,9 +198,9 @@ pub(super) fn push_tiled_gemm_body(
         found: "other codec",
     })?;
 
-    let block_m = crate::sized::TILED_GEMM_BLOCK_M;
-    let block_n = crate::sized::TILED_GEMM_BLOCK_N;
-    let block_k = crate::sized::TILED_GEMM_BLOCK_K;
+    let block_m = block.tile.block_m;
+    let block_n = block.tile.block_n;
+    let block_k = block.tile.block_k;
     let block_threads = (TILED_GEMM_NSG as u64) * SIMD_WIDTH;
     // 2 row-halves x TILE_DIM(8)-wide simdgroup-matrix fragments per half --
     // ggml's own `THREAD_MAT_M`/`THREAD_MAT_N` (`ggml-metal.metal:6490-6491`).
@@ -210,7 +210,7 @@ pub(super) fn push_tiled_gemm_body(
     let sub_k_steps = block_k / TILE_DIM as u64;
     let weight_tile_elems = block_m * block_k;
     let act_tile_elems = block_n * block_k;
-    let out_tile_elems = block_m * block_n;
+    let out_tile_elems = block_m * (block_n / 2);
 
     // `attn_q`/`attn_k`/`attn_v` fold TWO weight-owned axes (`heads`,
     // `head_dim`) into one flattened feature dimension -- `axes_fold_
@@ -307,7 +307,7 @@ pub(super) fn push_tiled_gemm_body(
         if !metal.tiled_gemm_dynamic_tgmem {
             source.push_str(&format!(
                 "    threadgroup uchar tg_shared[{}];\n",
-                tiled_gemm_shared_bytes()
+                tiled_gemm_shared_bytes(block.tile)
             ));
         }
         source.push_str("    threadgroup half *weight_tile = (threadgroup half *)tg_shared;\n");
@@ -372,7 +372,7 @@ pub(super) fn push_tiled_gemm_body(
 
     let mm_layout_schedule = metal.tiled_gemm_mm_layout
         && wide_weight_stage_eligible
-        && mm_layout_geometry_supported()
+        && mm_layout_geometry_supported(block.tile)
         && half_width == DECODE_RUN_ELEMENTS;
 
     if mm_layout_schedule {
@@ -645,28 +645,21 @@ pub(super) fn push_tiled_gemm_body(
 /// `64 x 32 x 32` tile and 128 threads, so any other sizing keeps the
 /// row-major tile path.
 #[cfg(feature = "metal-tiled-gemm")]
-pub(super) const fn mm_layout_geometry_supported() -> bool {
-    crate::sized::TILED_GEMM_BLOCK_M == 64
-        && crate::sized::TILED_GEMM_BLOCK_N == 32
-        && crate::sized::TILED_GEMM_BLOCK_K == 32
+pub(super) fn mm_layout_geometry_supported(tile: TiledGemmTile) -> bool {
+    tile.block_m == 64
+        && tile.block_n == 32
+        && tile.block_k == 32
         && (TILED_GEMM_NSG as u64) * SIMD_WIDTH == 128
 }
 
 /// Bytes of the slim threadgroup backing store of [`push_tiled_gemm_body`]: the
 /// `half` weight tile and the `float` activation tile side by side, or the `float`
 /// output tile aliased over them, whichever is larger. The one number the
-/// kernel's declared array and `Grid2DSpec::threadgroup_bytes` both read.
+/// kernel's declared array and `Grid2DSpec::threadgroup_bytes` both read
+/// ([`TiledGemmTile::threadgroup_bytes`]).
 #[cfg(feature = "metal-tiled-gemm")]
-pub(super) const fn tiled_gemm_shared_bytes() -> u64 {
-    let weight_and_activation =
-        crate::sized::TILED_GEMM_BLOCK_M * crate::sized::TILED_GEMM_BLOCK_K * 2
-            + crate::sized::TILED_GEMM_BLOCK_N * crate::sized::TILED_GEMM_BLOCK_K * 4;
-    let output = crate::sized::TILED_GEMM_BLOCK_M * crate::sized::TILED_GEMM_BLOCK_N * 4;
-    if weight_and_activation > output {
-        weight_and_activation
-    } else {
-        output
-    }
+pub(super) fn tiled_gemm_shared_bytes(tile: TiledGemmTile) -> u64 {
+    tile.threadgroup_bytes()
 }
 
 /// The K-reduction loop of [`push_tiled_gemm_body`] in ggml's own tile layout
@@ -703,7 +696,7 @@ fn push_mm_layout_k_loop(
     let weight = block.weight;
     let other = block.other;
     let reduce_dim = block.reduce_dim;
-    let block_k = crate::sized::TILED_GEMM_BLOCK_K;
+    let block_k = block.tile.block_k;
     let unit_stride = metal.tiled_gemm_wide_act_load;
     let k0_counter_type = if grid2d_active { "int" } else { "long" };
 
@@ -886,7 +879,7 @@ fn push_mm_layout_activation_stage(
         source.push_str("        float4 act_high = *(const device float4 *)(mm_act_ptr + 4);\n");
         source.push_str(&format!(
             "        mm_act_ptr += {};\n",
-            crate::sized::TILED_GEMM_BLOCK_K
+            block.tile.block_k
         ));
     } else {
         source.push_str(&format!(
@@ -915,11 +908,11 @@ fn push_mm_layout_activation_stage(
     ));
 }
 
-/// The four 8-deep multiply steps of one K-step, in `kernel_mul_mm`'s own
-/// form (`mul_mm.metal:290-314`): fragment pointers walked by addition, the
-/// loads grouped ahead of the multiplies by `simdgroup_barrier`s, every loop
-/// fully unrolled. `acc[(i % 4) * 2 + i / 4]` is ggml's flat `mc[i]` renamed to
-/// the `[feature][token]` index the write-back reads.
+/// The four 8-deep multiply steps of one K-step, in `kernel_mul_mm`'s own form
+/// (`mul_mm.metal:290-314`): fragment pointers walked by addition, the loads
+/// grouped ahead of the multiplies by `simdgroup_barrier`s, every loop fully
+/// unrolled. `acc[(i % 4) * 2 + i / 4]` is ggml's flat `mc[i]` renamed to the
+/// `[feature][token]` index the write-back reads.
 #[cfg(feature = "metal-tiled-gemm")]
 fn push_mm_layout_multiply(source: &mut String, staging: &ActivationStaging) {
     let unroll = "_Pragma(\"clang loop unroll(full)\")";
@@ -1241,18 +1234,29 @@ fn push_tiled_gemm_restage_writeback(
     } else {
         ""
     };
+    // One COLUMN HALF at a time: `col_half` is the half of `block_n` a
+    // simdgroup's column fragments cover, so the staging buffer only ever
+    // needs `block_m * (block_n / 2)` floats (`TiledGemmTile::
+    // threadgroup_bytes`'s own doc). Staging the whole tile instead costs
+    // `block_m * block_n * 4` bytes of threadgroup memory, which at `128 x 64`
+    // is the 32 KB ceiling and halves how many threadgroups a core keeps
+    // resident -- measured slower than the traffic the wider tile saves.
+    let half_n = block_n / 2;
+    source.push_str("    for (int col_part = 0; col_part < 2; ++col_part) {\n");
+    source.push_str("        if (col_half == col_part) {\n");
     source.push_str(&format!(
-        "    for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
+        "            {FULL_UNROLL}\n            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
     ));
     source.push_str(&format!(
-        "        for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
+        "                {FULL_UNROLL}\n                for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
     ));
     source.push_str(&format!(
-        "            simdgroup_store(acc[i * {thread_mat_n} + j], out_tile + (row_half * {thread_mat_m} + i) * 8 * {block_n} + (col_half * {thread_mat_n} + j) * 8, {block_n}{store_tail});\n"
+        "                    simdgroup_store(acc[i * {thread_mat_n} + j], out_tile + (row_half * {thread_mat_m} + i) * 8 * {half_n} + j * 8, {half_n}{store_tail});\n"
     ));
+    source.push_str("                }\n");
+    source.push_str("            }\n");
     source.push_str("        }\n");
-    source.push_str("    }\n");
-    source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     // `coord[]` is allocated and its provably loop-invariant slots (every
     // dim NOT one of feature/token/batch stays 0 for the op's whole rank --
     // it's the reduced axis, never an output axis at all) are set ONCE here,
@@ -1287,8 +1291,8 @@ fn push_tiled_gemm_restage_writeback(
     source.push_str(&format!(
         "    for (long idx = tiitg; idx < {out_tile_elems}; idx += {block_threads}) {{\n"
     ));
-    source.push_str(&format!("        long o_row = idx / {block_n};\n"));
-    source.push_str(&format!("        long o_col = idx % {block_n};\n"));
+    source.push_str(&format!("        long o_row = idx / {half_n};\n"));
+    source.push_str(&format!("        long o_col = col_part * {half_n} + idx % {half_n};\n"));
     source.push_str(&format!(
         "        long o_feat = row_tile * {block_m} + o_row;\n"
     ));
@@ -1324,6 +1328,8 @@ fn push_tiled_gemm_restage_writeback(
         "out_offset",
     );
     source.push_str("        }\n");
+    source.push_str("    }\n");
+    source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     source.push_str("    }\n");
 }
 
@@ -1720,9 +1726,9 @@ pub(super) fn push_dense_batched_gemm_body(
         });
     };
 
-    let block_m = crate::sized::TILED_GEMM_BLOCK_M;
-    let block_n = crate::sized::TILED_GEMM_BLOCK_N;
-    let block_k = crate::sized::TILED_GEMM_BLOCK_K;
+    let block_m = TiledGemmTile::CONFIGURED.block_m;
+    let block_n = TiledGemmTile::CONFIGURED.block_n;
+    let block_k = TiledGemmTile::CONFIGURED.block_k;
     let block_threads = (TILED_GEMM_NSG as u64) * SIMD_WIDTH;
     let thread_mat_m = block_m / (TILE_DIM as u64 * 2);
     let thread_mat_n = block_n / (TILE_DIM as u64 * 2);
@@ -1730,7 +1736,7 @@ pub(super) fn push_dense_batched_gemm_body(
     let sub_k_steps = block_k / TILE_DIM as u64;
     let weight_tile_elems = block_m * block_k;
     let act_tile_elems = block_n * block_k;
-    let out_tile_elems = block_m * block_n;
+    let out_tile_elems = block_m * (block_n / 2);
 
     let group_extent_expr = |group: &[u16]| -> Result<String, EmitError> {
         let mut terms = Vec::with_capacity(group.len());

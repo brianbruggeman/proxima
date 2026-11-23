@@ -2151,6 +2151,16 @@ pub(super) fn metal_specialization(
             ),
             _ => false,
         },
+        tiled_gemm_tile: match &resolved.kind {
+            BoundOpKind::Reduce {
+                reduce_op,
+                init,
+                output_axes,
+                ..
+            } => tiled_gemm_block(resolved, &quantized, *reduce_op, *init, output_axes, knobs)
+                .map(|block| (block.tile.block_m, block.tile.block_n, block.tile.block_k)),
+            _ => None,
+        },
         // only a reduce can render a GEMM schedule; any other kind never reads the staging layout
         tiled_gemm_staging_layout: match &resolved.kind {
             BoundOpKind::Reduce { .. } => knobs.tiled_gemm_staging,
@@ -3727,6 +3737,10 @@ pub(super) struct TiledGemmBlock {
     /// and each threadgroup column selects the tokens routed to its expert.
     #[cfg(feature = "metal-tiled-gemm")]
     pub(super) gathered: Option<ExpertGather>,
+    /// The launch geometry this op dispatches with — the one value the grid,
+    /// the staged arrays, the fragment loops and the kernel identity all read
+    /// ([`TiledGemmTile::for_feature_extent`] picks it from the output's own shape).
+    pub(super) tile: TiledGemmTile,
 }
 
 /// `resolved`/`quantized`/`reduce_op`/`init`/`output_axes` are exactly
@@ -3887,6 +3901,18 @@ pub(super) fn classify_tiled_gemm(
                 chunk_width,
             });
         }
+        let feature_extent: u64 = feature_axes
+            .iter()
+            .map(|&axis| resolved.extents[axis as usize])
+            .product();
+        // An expert-grouped launch cuts its token axis by the route, not by
+        // `N`, so it keeps the configured tile; every dense matmul takes the
+        // tile its own output shape can hold.
+        let tile = if gathered.is_some() {
+            TiledGemmTile::CONFIGURED
+        } else {
+            TiledGemmTile::for_feature_extent(feature_extent)
+        };
         Ok(TiledGemmBlock {
             weight,
             other,
@@ -3895,6 +3921,7 @@ pub(super) fn classify_tiled_gemm(
             feature_axes,
             codec,
             gathered,
+            tile,
         })
     }
 }
@@ -4301,7 +4328,8 @@ pub(super) fn mm_layout_active(
     knobs: &EmitKnobs,
 ) -> bool {
     knobs.tiled_gemm_mm_layout
-        && mm_layout_geometry_supported()
+        && tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes, knobs)
+            .is_some_and(|block| mm_layout_geometry_supported(block.tile))
         && wide_weight_stage_active(resolved, quantized, reduce_op, init, output_axes, knobs)
 }
 
@@ -4401,7 +4429,7 @@ pub(super) fn tiled_gemm_grid2d_spec(
     ) {
         return Ok(None);
     }
-    let (feature_extent, token_extent) =
+    let (feature_extent, token_extent, tile) =
         if let Some(block) = tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes, knobs) {
             (
                 block
@@ -4414,6 +4442,7 @@ pub(super) fn tiled_gemm_grid2d_spec(
                     .iter()
                     .map(|&axis| resolved.extents[axis as usize])
                     .product::<u64>(),
+                block.tile,
             )
         } else if let Some(block) = dense_batched_gemm_block(
             resolved,
@@ -4435,12 +4464,12 @@ pub(super) fn tiled_gemm_grid2d_spec(
                     .iter()
                     .map(|&axis| resolved.extents[axis as usize])
                     .product::<u64>(),
+                TiledGemmTile::CONFIGURED,
             )
         } else {
             return Ok(None);
         };
-    let row_tiles = feature_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_M);
-    let col_tiles = token_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_N);
+    let (row_tiles, col_tiles) = tile.tiles(feature_extent, token_extent);
     Ok(Some(Grid2DSpec {
         form: Grid2DForm::TileCoordinates,
         threadgroups_x: col_tiles,
@@ -4456,7 +4485,7 @@ pub(super) fn tiled_gemm_grid2d_spec(
             output_axes,
             knobs,
         ) {
-            tiled_gemm_shared_bytes()
+            tile.threadgroup_bytes()
         } else {
             0
         },
@@ -4692,16 +4721,16 @@ pub(super) fn tiled_gemm_threadgroups(
     node: NodeId,
     feature_extent: u64,
     token_extent: u64,
+    tile: TiledGemmTile,
 ) -> Result<u64, EmitError> {
     #[cfg(not(feature = "metal-tiled-gemm"))]
     {
-        let _ = (feature_extent, token_extent);
+        let _ = (feature_extent, token_extent, tile);
         Err(EmitError::TiledGemmFeatureDisabled { node })
     }
     #[cfg(feature = "metal-tiled-gemm")]
     {
-        let row_tiles = feature_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_M);
-        let col_tiles = token_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_N);
+        let (row_tiles, col_tiles) = tile.tiles(feature_extent, token_extent);
         checked_product(
             node,
             [row_tiles, col_tiles, TILED_GEMM_NSG as u64, SIMD_WIDTH],

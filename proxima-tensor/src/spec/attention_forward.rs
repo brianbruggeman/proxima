@@ -2234,6 +2234,7 @@ pub fn scheduled_forward_program_with_experts(
         ple_dim,
         expert_shared_feed_forward,
         1,
+        None,
     )
 }
 
@@ -2261,6 +2262,7 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
     ple_dim: Option<u32>,
     expert_shared_feed_forward: SharedExpertWidth,
     head_repeats: u32,
+    key_pad_id: Option<u32>,
 ) -> Result<(Vec<Op>, NodeId, MoeSites, alloc::vec::Vec<NodeId>), TensorError> {
     if schedule.len() != block_count as usize {
         return Err(TensorError::LayerScheduleCountMismatch {
@@ -2316,7 +2318,20 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
 
     let attention_resources =
         build_attention_layer_resources(&mut program, schedule, query_heads, |program, window| {
-            causal_mask_windowed(program, window)
+            let (is_future, neg_infinity) = causal_mask_windowed(program, window)?;
+            match key_pad_id {
+                None => Ok((is_future, neg_infinity)),
+                Some(pad) => {
+                    let invalid = key_validity_mask(program, ids, pad)?;
+                    let widened = elementwise(
+                        program,
+                        DType::FLOAT32,
+                        ScalarOp::Maximum,
+                        &[(is_future, "st->st"), (invalid, "t->st")],
+                    )?;
+                    Ok((widened, neg_infinity))
+                }
+            }
         })?;
     let mut attention_layer_index: usize = 0;
     let mut moe_sites: Vec<MoeSite> = Vec::new();
@@ -2872,6 +2887,7 @@ pub fn gqa_cached_forward_program_with_experts_and_layer_taps(
         &[],
         false,
         DType::FLOAT32,
+        None,
     )
 }
 
@@ -2906,6 +2922,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
     layer_windows: &[Option<u32>],
     sliding_kv_ring: bool,
     activation: DType,
+    key_pad_id: Option<u32>,
 ) -> Result<GqaRoutedForwardProgramWithLayerTaps, TensorError> {
     if !layer_windows.is_empty() && layer_windows.len() != block_count as usize {
         return Err(TensorError::LayerScheduleCountMismatch {
@@ -3011,6 +3028,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
         (ones, ones)
     };
     let (is_future, _neg_infinity) = causal_mask(&mut program)?;
+    let is_future = with_pad_key_mask(&mut program, is_future, ids, key_pad_id)?;
     // Rank-0 `Op::Input`, same precedent `eps`/`rope_cos`/`rope_sin` set
     // (`causal_mask_merged`'s own doc), named "cached_len" so
     // `proxima_tensor::bind::cached_attention_candidates` can find it by
@@ -3026,6 +3044,25 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
     // mask node in this graph (`BoundOpKind::CachedAttention`'s own doc on
     // the `cached_key_rows != 0` discriminator).
     let cached_len = input_leaf(&mut program, DType::FLOAT32, Vec::new(), "cached_len");
+    // A padding predicate is not one of the mask shapes the fused
+    // cached-attention matcher recognizes, so a padded program runs on the
+    // two-block path -- which scores the cached block with no `cached_key_rows`
+    // clip (that clip belongs to the fused op). Mask the rows at/past
+    // `cached_len` here, the same predicate `gated_attention`'s own
+    // `is_cached_padding` builds, so the unfused path excludes the cache
+    // bucket's zero padding exactly as the fused op's clip did. `None` (every
+    // caller before the pad mask) adds no node, keeping the program
+    // byte-for-byte what it was.
+    let cached_padding_mask = key_pad_id
+        .map(|_| {
+            super::scheduled_cached::causal_mask_cached_windowed(
+                &mut program,
+                cached_len,
+                Extent::Symbolic(1),
+                None,
+            )
+        })
+        .transpose()?;
     // A windowed layer masks the cached block too (the fused attention's
     // `cached_len` bound cannot express a window), and a ring layer counts its
     // rows from the sliding slot's own length input. A schedule with no window
@@ -3044,6 +3081,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
             continue;
         }
         let (new_block, _) = causal_mask_windowed(&mut program, Some(width))?;
+        let new_block = with_pad_key_mask(&mut program, new_block, ids, key_pad_id)?;
         let cached_block = match ring_len {
             Some(ring_len) => causal_mask_cached_windowed(
                 &mut program,
@@ -3074,7 +3112,22 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
         let masks =
             window.and_then(|width| window_masks.iter().find(|(built, ..)| *built == width));
         let layer_is_future = masks.map_or(is_future, |(_, new_block, _)| *new_block);
-        let cached_window_mask = masks.map(|(_, _, cached_block)| *cached_block);
+        let cached_window_mask = match (
+            masks.map(|(_, _, cached_block)| *cached_block),
+            cached_padding_mask,
+        ) {
+            (None, None) => None,
+            (Some(pair), None) | (None, Some(pair)) => Some(pair),
+            (Some((window, neg_infinity)), Some((padding, _))) => {
+                let both = elementwise(
+                    &mut program,
+                    DType::FLOAT32,
+                    ScalarOp::Maximum,
+                    &[(window, "st->st"), (padding, "st->st")],
+                )?;
+                Some((both, neg_infinity))
+            }
+        };
         let cache_bound = if ring_len.is_some() && window.is_some() {
             Extent::Symbolic(SLIDING_KV_SYMBOL)
         } else {
@@ -4365,4 +4418,64 @@ mod exclusive_dense_post_norm_tests {
              not pass it through unchanged: max_abs_diff={max_abs_diff}"
         );
     }
+}
+
+/// `mask` ([`causal_mask`] or [`causal_mask_windowed`]'s own `"st->st"` node)
+/// OR-ed with [`key_validity_mask`], so a padding token is masked as a key for
+/// every query. `None` returns `mask` untouched, so an unmasked program is
+/// byte-for-byte the one this builder emitted before the toggle existed.
+///
+/// A padding mask is a *key* property, so it reaches every lowered attention:
+/// this applies it to the block-local mask only, which is where tail padding
+/// lands. A pad id only ever appears at the tail of a prompt (left padding
+/// would make the ids non-causal yet still visible as keys), so the cached
+/// range's own mask is not widened.
+fn with_pad_key_mask(
+    program: &mut Vec<Op>,
+    mask: NodeId,
+    ids: NodeId,
+    key_pad_id: Option<u32>,
+) -> Result<NodeId, TensorError> {
+    let Some(pad) = key_pad_id else {
+        return Ok(mask);
+    };
+    let invalid = key_validity_mask(program, ids, pad)?;
+    elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Maximum,
+        &[(mask, "st->st"), (invalid, "t->st")],
+    )
+}
+
+/// `1.0` for every key position whose token id is `pad`: the key-validity half
+/// of a causal mask. A padding token's hidden state is not a real position, so
+/// every query must skip it as a key; the reference's text encoders do this,
+/// and the rows it leaves behind are what a downstream cross-attention reads.
+///
+/// `ids` is the program's token-id leaf (an INT32 input), widened to f32 before
+/// the comparison because the closed scalar set compares floats only. Token ids
+/// are exact in f32 below 2^24.
+///
+/// # Errors
+///
+/// [`TensorError`] when a notation or extent fails to build.
+pub fn key_validity_mask(
+    program: &mut Vec<Op>,
+    ids: NodeId,
+    pad: u32,
+) -> Result<NodeId, TensorError> {
+    let widened = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Identity,
+        &[(ids, "t->t")],
+    )?;
+    let pad_value = scalar_constant(program, pad as f32);
+    elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Equal,
+        &[(widened, "t->t"), (pad_value, "->t")],
+    )
 }
