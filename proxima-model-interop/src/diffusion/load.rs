@@ -15,10 +15,12 @@ use super::WeightBinding;
 
 /// One bound leaf's bytes: a packed matrix the backend's matmul paths decode,
 /// or the plain scalar vector a per-channel scale or bias binds (a packed
-/// rank-1 operand has no matmul reader, so it stays plain).
+/// rank-1 operand has no matmul reader, so it stays plain). A packed matrix is
+/// encoded in [`Weights::codec`], which keeps the 672-byte codec out of the
+/// variant.
 #[derive(Debug)]
 pub enum WeightData {
-    Packed(Codec, Vec<u8>),
+    Packed(Vec<u8>),
     Plain(Vec<f32>),
 }
 
@@ -38,8 +40,8 @@ impl Weights {
             .iter()
             .map(|(name, data)| {
                 let block = match data {
-                    WeightData::Packed(codec, bytes) => QuantizedBlock::Packed {
-                        codec: *codec,
+                    WeightData::Packed(bytes) => QuantizedBlock::Packed {
+                        codec: self.codec,
                         bytes: bytes.as_slice(),
                     },
                     WeightData::Plain(values) => QuantizedBlock::Float32(values),
@@ -254,7 +256,7 @@ pub fn load_weights(
         let data = if shape.len() == 1 {
             WeightData::Plain(values)
         } else {
-            WeightData::Packed(codec, encode(&values, codec)?)
+            WeightData::Packed(encode(&values, codec)?)
         };
         entries.push((binding.leaf.clone(), data));
     }
