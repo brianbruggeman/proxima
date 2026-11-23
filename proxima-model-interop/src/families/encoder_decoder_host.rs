@@ -4,6 +4,8 @@
 //! graph builders themselves stay alloc-only and model-neutral.
 
 use std::collections::BTreeMap;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -422,8 +424,11 @@ impl<'a> Bound<'a> {
             }
             #[cfg(all(feature = "metal", target_os = "macos"))]
             Device::Metal(policy) => {
-                let plan = omega::plan_named(&self.program, symbols, &named, outputs, policy)
+                let mut plan = omega::plan_named(&self.program, symbols, &named, outputs, policy)
                     .map_err(|error| anyhow::anyhow!("metal plan: {error:?}"))?;
+                let resident: BTreeSet<&str> =
+                    self.blocks.iter().map(|(name, _)| name.as_str()).collect();
+                plan.mark_resident(&resident);
                 let evaluated = omega::execute_plan_named(&plan, &named)
                     .map_err(|error| anyhow::anyhow!("metal executes: {error:?}"))?;
                 collect_outputs(&evaluated, outputs)
