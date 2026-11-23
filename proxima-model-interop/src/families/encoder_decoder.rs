@@ -297,12 +297,7 @@ pub fn project_heads(program: &mut Vec<Op>, x: NodeId, w: Linear) -> Result<Node
 ///
 /// [`TensorError`] when the map or node is malformed.
 pub fn transpose(program: &mut Vec<Op>, x: NodeId) -> Result<NodeId, TensorError> {
-    elementwise(
-        program,
-        ACTIVATION,
-        ScalarOp::Identity,
-        &[(x, "ab->ba")],
-    )
+    elementwise(program, ACTIVATION, ScalarOp::Identity, &[(x, "ab->ba")])
 }
 
 /// `gelu_pytorch_tanh`: `0.5*x*(1 + tanh(sqrt(2/pi)*(x + 0.044715*x^3)))`, the
