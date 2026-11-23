@@ -55,7 +55,7 @@ pub fn write_png(path: &Path, width: u32, height: u32, channels: u8, pixels: &[f
 /// feature when the file uses one this reader does not cover.
 pub fn read_png(path: &Path) -> Result<PngImage, String> {
     let bytes = std::fs::read(path).map_err(|why| format!("{}: {why}", path.display()))?;
-    if bytes.len() < 8 || &bytes[..8] != [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a] {
+    if bytes.len() < 8 || bytes[..8] != [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a] {
         return Err(format!("{}: not a PNG", path.display()));
     }
     let mut offset = 8;
@@ -143,7 +143,7 @@ fn unfilter(filter: u8, channels: usize, current: &mut [u8], previous: &[u8]) ->
                 let left = i32::from(if index >= channels { current[index - channels] } else { 0 });
                 let above = i32::from(previous[index]);
                 let corner = i32::from(if index >= channels { previous[index - channels] } else { 0 });
-                current[index] = current[index].wrapping_add(paeth(left, above, corner) as u8);
+                current[index] = current[index].wrapping_add(paeth(left, above, corner));
             }
             Some(())
         }
