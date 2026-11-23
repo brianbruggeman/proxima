@@ -8,9 +8,10 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use conflaguration::Settings;
+use proxima_model_interop::ServingSettings;
 use proxima_model_interop::audio::wav;
 use proxima_model_interop::families::encoder_decoder_host::{Device, Model};
-use proxima_numeric::NumericPolicy;
 
 fn main() -> Result<()> {
     let mut wav_path: Option<PathBuf> = None;
@@ -27,7 +28,11 @@ fn main() -> Result<()> {
             "--device" => {
                 device = match args.next().context("--device wants cpu|metal")?.as_str() {
                     "cpu" => Device::Cpu,
-                    "metal" => Device::Metal(NumericPolicy::default()),
+                    "metal" => Device::Metal(
+                        <ServingSettings as Settings>::from_env()
+                            .context("serving settings from env")?
+                            .numeric_policy,
+                    ),
                     other => bail!("unknown device {other}"),
                 }
             }

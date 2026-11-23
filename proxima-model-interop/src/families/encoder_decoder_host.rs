@@ -411,14 +411,8 @@ impl<'a> Bound<'a> {
             }
             #[cfg(all(feature = "metal", target_os = "macos"))]
             Device::Metal(policy) => {
-                let plan = omega::plan_named(
-                    &self.program,
-                    &[],
-                    &named,
-                    outputs,
-                    policy,
-                )
-                .map_err(|error| anyhow::anyhow!("metal plan: {error:?}"))?;
+                let plan = omega::plan_named(&self.program, &[], &named, outputs, policy)
+                    .map_err(|error| anyhow::anyhow!("metal plan: {error:?}"))?;
                 let evaluated = omega::execute_plan_named(&plan, &named)
                     .map_err(|error| anyhow::anyhow!("metal executes: {error:?}"))?;
                 collect_outputs(&evaluated, outputs)
@@ -479,14 +473,24 @@ impl Model {
         )?;
         let shape = Shape::from_config(&config)?;
         let tensors = Tensors::load(&dir.join("model.safetensors"))?;
-        Ok(Self {
+        Ok(Self::from_parts(tensors, shape, generation, config, dir))
+    }
+
+    fn from_parts(
+        tensors: Tensors,
+        shape: Shape,
+        generation: Value,
+        config: Value,
+        dir: &Path,
+    ) -> Self {
+        Self {
             tensors,
             shape,
             generation,
             config,
             dir: dir.to_path_buf(),
             device: Device::Cpu,
-        })
+        }
     }
 
     pub fn shape(&self) -> &Shape {
@@ -760,4 +764,57 @@ fn pad(wav: &[f32]) -> Result<Vec<f32>> {
     }
     out[200..200 + wav.len()].copy_from_slice(wav);
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use conflaguration::Settings;
+    use proxima_numeric::NumericPolicy;
+
+    use super::*;
+    use crate::serving_settings::ServingSettings;
+
+    const BIT_EXACT_JSON: &str = r#"{"contraction":false,"reassociation":false,"nan_assumptions":false,"signed_zero":false,"approx_functions":false,"epilogue_sources":false}"#;
+
+    fn empty_model() -> Model {
+        let tensors = Tensors {
+            bytes: Vec::new(),
+            manifest: Manifest::default(),
+            data_start: 0,
+            decoded: BTreeMap::new(),
+        };
+        let config = serde_json::json!({
+            "encoder_layers": 1, "decoder_layers": 1,
+            "encoder_attention_heads": 1, "decoder_attention_heads": 1,
+            "d_model": 4, "num_mel_bins": 1, "encoder_ffn_dim": 4, "decoder_ffn_dim": 4,
+            "max_source_positions": 1, "max_target_positions": 1, "vocab_size": 1,
+        });
+        let shape = Shape::from_config(&config).expect("the tiny config is complete");
+        Model::from_parts(tensors, shape, Value::Null, config, Path::new(""))
+    }
+
+    #[test]
+    fn metal_device_carries_the_serving_settings_policy() {
+        let policy = ServingSettings::default().numeric_policy;
+
+        let model = empty_model();
+        assert_eq!(model.device, Device::Cpu);
+        let model = model.with_device(Device::Metal(policy));
+
+        assert_eq!(model.device, Device::Metal(policy));
+    }
+
+    #[test]
+    fn serving_env_spells_the_bit_exact_policy() {
+        let loaded = temp_env::with_vars(
+            [("PROXIMA_SERVING_NUMERIC_POLICY", Some(BIT_EXACT_JSON))],
+            || ServingSettings::from_env().expect("the bit-exact env parses"),
+        );
+
+        assert_eq!(loaded.numeric_policy, NumericPolicy::bit_exact());
+        assert_ne!(
+            loaded.numeric_policy,
+            ServingSettings::default().numeric_policy
+        );
+    }
 }
