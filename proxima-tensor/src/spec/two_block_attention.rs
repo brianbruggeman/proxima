@@ -372,8 +372,10 @@ pub(super) fn append_local_block_and_combine_with_reads(
     Ok((attended, score_max_cached))
 }
 
-pub(super) const PLANE_CACHE_READS: (&str, &str) = ("tui->stugi", "tui->stugi");
-pub(super) const PLANE_NEW_READS: (&str, &str) = ("wui->swugi", "wui->swugi");
+/// Operand maps reading two key half planes `[t, u, i]` as the cached block.
+pub const PLANE_CACHE_READS: (&str, &str) = ("tui->stugi", "tui->stugi");
+/// Operand maps reading two key half planes `[w, u, i]` as the local block.
+pub const PLANE_NEW_READS: (&str, &str) = ("wui->swugi", "wui->swugi");
 
 /// Attends a query range over the cache and its own new keys with one online
 /// softmax: groups the rotated query halves, scores the cached block, then the
