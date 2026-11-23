@@ -32,7 +32,7 @@ def rawval($r; $base; $stage):
     lift([$r.timings.ttft_us, $r.timings.ttlt_us]; (.[1] - .[0]) as $dt
       | if $dt > 0 and $r.generated_tokens != null then ($r.generated_tokens - 1) / ($dt / 1000000) else null end)
   elif $base == "prefill_tok_s" then
-    lift([$r.timings.ttft_us]; if .[0] > 0 and $r.prompt_tokens != null then $r.prompt_tokens / (.[0] / 1000000) else null end)
+    lift([$r.timings.ttft_us, $r.prompt_tokens]; if .[0] > 0 and .[1] != null then .[1] / (.[0] / 1000000) else null end)
   elif $base == "rtf" then
     lift([$r.timings.ttlt_us, $r.timings.load_us]; (($r.input.duration_us // 0)) as $d
       | if $d > 0 then (.[0] - .[1]) / $d else null end)

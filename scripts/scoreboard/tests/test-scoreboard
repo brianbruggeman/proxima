@@ -13,7 +13,7 @@ SCRATCH="${SCRATCH:-$HOME/.cache/kvgate/proxnum684/test}"
 BASE="$FIX/whisper_metal.jsonl"
 PASSED=0
 FAILED=0
-EXPECTED=36
+EXPECTED=39
 
 mkdir -p "$SCRATCH"
 rm -f "$SCRATCH"/*
@@ -58,7 +58,7 @@ check_eq "cov [10,11,10,12,11]" "7.75" "$(metric_of "$FIX/cov_5.jsonl" '.backend
 # the committed fixtures are what the generator emits
 "$FIX/gen-fixtures.sh" "$SCRATCH" 2>/dev/null
 if cmp -s "$SCRATCH/whisper_metal.jsonl" "$BASE" && cmp -s "$SCRATCH/percentile_1_20.jsonl" "$FIX/percentile_1_20.jsonl" \
-   && cmp -s "$SCRATCH/cov_5.jsonl" "$FIX/cov_5.jsonl"; then ok; else fail "fixtures current" "gen-fixtures.sh output differs from the committed files"; fi
+   && cmp -s "$SCRATCH/cov_5.jsonl" "$FIX/cov_5.jsonl" && cmp -s "$SCRATCH/llm_prefill.jsonl" "$FIX/llm_prefill.jsonl"; then ok; else fail "fixtures current" "gen-fixtures.sh output differs from the committed files"; fi
 
 # a complete raw file, then one broken rule at a time
 validate_passes "complete file passes" "$BASE"
@@ -141,6 +141,12 @@ check_eq "census shape" "tables=2 data_rows=4 prose_number_lines=3 cited=2 defec
 cp "$SCRATCH/render1.md" "$SCRATCH/SCOREBOARD.md"
 out="$("$TOOL" census "$SCRATCH/SCOREBOARD.md" 2>&1)"; code=$?
 check_eq "census of rendered rows" "uncited=0 exit=0" "$(tail -1 <<<"$out") exit=$code"
+
+# prefill rate: proxima 120 prompt tokens at ttft 400000 us is 120 / 0.4 = 300 tok/s; the incumbent reports no prompt tokens
+LLM="$FIX/llm_prefill.jsonl"
+validate_passes "llm file with incumbent prompt_tokens unreported" "$LLM"
+check_eq "proxima prefill_tok_s p50" "300" "$(metric_of "$LLM" '.backends.metal.arms.proxima.metrics.prefill_tok_s_cold.p50')"
+check_eq "incumbent prefill_tok_s is unreported" '"incumbent-does-not-report"' "$(metric_of "$LLM" '.backends.metal.arms.incumbent.metrics.prefill_tok_s_cold.unreported')"
 
 echo "passed=$PASSED failed=$FAILED expected=$EXPECTED"
 [[ "$FAILED" -eq 0 && "$PASSED" -eq "$EXPECTED" ]]
