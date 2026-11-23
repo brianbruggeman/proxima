@@ -481,10 +481,8 @@ mod bench {
                 &dit_config(1, 0),
                 &inputs,
                 "double_blocks.0",
-                image,
-                text,
-                image_mod,
-                text_mod,
+                [image, text],
+                [image_mod, text_mod],
             )
             .expect("double block");
             let symbols = [(MIN_LENGTH + IMAGE_TOKENS as usize) as u64];

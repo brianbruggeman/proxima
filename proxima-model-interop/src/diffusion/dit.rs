@@ -319,19 +319,18 @@ fn rope(graph: &mut Graph, x: NodeId, inputs: &DitInputs) -> Result<(NodeId, Nod
     )
 }
 
-/// One double-stream block.
-#[allow(clippy::too_many_arguments)]
+/// One double-stream block; `streams` and `modulation` are ordered `[image, text]`.
 fn double_block(
     graph: &mut Graph,
     config: &DitConfig,
     inputs: &DitInputs,
     prefix: &str,
-    image: NodeId,
-    text: NodeId,
-    image_mod: [NodeId; 6],
-    text_mod: [NodeId; 6],
+    streams: [NodeId; 2],
+    modulation: [[NodeId; 6]; 2],
     mut trace: Option<&mut Vec<(&'static str, NodeId)>>,
 ) -> Result<(NodeId, NodeId), TensorError> {
+    let [image, text] = streams;
+    let [image_mod, text_mod] = modulation;
     let count = inputs.norm_count;
     let inv_sqrt = inputs.attention_scale;
     let program = &mut graph.program;
@@ -548,20 +547,15 @@ fn single_block(
 /// # Errors
 ///
 /// [`TensorError`] when a notation, extent, or tensor name fails to build.
-#[allow(clippy::too_many_arguments)]
 pub fn build_double_block(
     graph: &mut Graph,
     config: &DitConfig,
     inputs: &DitInputs,
     prefix: &str,
-    image: NodeId,
-    text: NodeId,
-    image_mod: [NodeId; 6],
-    text_mod: [NodeId; 6],
+    streams: [NodeId; 2],
+    modulation: [[NodeId; 6]; 2],
 ) -> Result<(NodeId, NodeId), TensorError> {
-    double_block(
-        graph, config, inputs, prefix, image, text, image_mod, text_mod, None,
-    )
+    double_block(graph, config, inputs, prefix, streams, modulation, None)
 }
 
 /// The constant every per-head norm divides by, built once per program.
@@ -707,10 +701,8 @@ pub fn build_dit(
             config,
             inputs,
             &prefix,
-            image,
-            text,
-            image_mod,
-            text_mod,
+            [image, text],
+            [image_mod, text_mod],
             (block == 0).then_some(&mut trace),
         )?;
         image = next_image;
