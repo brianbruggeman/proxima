@@ -39,10 +39,16 @@ enum AxisClass {
 ///
 /// Returns `None` when nothing merges, when the op is not a plain
 /// `Elementwise` or `Keep::Reduce` fold, or when any operand is gathered, the
-/// fold scatters, or an epilogue is fused in (its operands are addressed in
-/// the pre-merge output-axis space). Only the executor's copy is rewritten:
-/// the caller's `BoundOp` is untouched, so bind-level consumers and the
-/// post-fold epilogue keep their original axes.
+/// fold scatters, or the fold's epilogue is gathered or re-broadcasts over a
+/// reduced axis.
+///
+/// A fused plain epilogue joins the contiguity check: its operand layouts are
+/// addressed by position in `output_axes` (`apply_plain_reduce_epilogue`), so
+/// two kept axes merge only when every epilogue layout is also one affine run
+/// over that adjacent pair, and the epilogue layouts are then rewritten
+/// through the same groups. Only the executor's copy is rewritten: the
+/// caller's `BoundOp` is untouched, so bind-level consumers keep their
+/// original axes.
 #[must_use]
 pub fn coalesce_dims(resolved: &BoundOp) -> Option<BoundOp> {
     if resolved.extents.len() < 2 {
@@ -55,10 +61,16 @@ pub fn coalesce_dims(resolved: &BoundOp) -> Option<BoundOp> {
     let layouts: SmallVec<[&Layout; 8]> = operands
         .iter()
         .map(|(_, layout, _)| layout)
-        .chain(output_fold.map(|(layout, _)| layout))
+        .chain(output_fold.map(|(layout, _, _)| layout))
+        .chain(
+            output_fold
+                .into_iter()
+                .flat_map(|(_, _, epilogue)| epilogue.iter().map(|(_, layout, _)| layout)),
+        )
         .collect();
-    let output_axes = output_fold.map(|(_, axes)| axes);
-    let groups = group_axes(&resolved.extents, &layouts, output_axes);
+    let output_axes = output_fold.map(|(_, axes, _)| axes);
+    let local_from = operands.len() + 1;
+    let groups = group_axes(&resolved.extents, &layouts, output_axes, local_from);
     if groups.len() == resolved.extents.len() {
         return None;
     }
@@ -68,8 +80,8 @@ pub fn coalesce_dims(resolved: &BoundOp) -> Option<BoundOp> {
 /// One bound operand: source node, layout, optional gather.
 type Operand = (NodeId, Layout, Option<Lookup>);
 
-/// The fold's `(out_layout, output_axes)` pair.
-type FoldView<'a> = (&'a Layout, &'a [u16]);
+/// The fold's `(out_layout, output_axes, epilogue_operands)` triple.
+type FoldView<'a> = (&'a Layout, &'a [u16], &'a [Operand]);
 
 /// The layouts [`coalesce_dims`] may rewrite, or `None` when the op shape is
 /// outside its contract. The second field is the fold's `(out_layout,
@@ -91,10 +103,15 @@ fn coalescible_layouts(resolved: &BoundOp) -> Option<(&[Operand], Option<FoldVie
             epilogue_broadcast_axes,
             ..
         } if operands.iter().all(|(_, _, gather)| gather.is_none())
-            && epilogue_operands.is_empty()
+            && epilogue_operands
+                .iter()
+                .all(|(_, _, gather)| gather.is_none())
             && epilogue_broadcast_axes.is_empty() =>
         {
-            Some((operands, Some((out_layout, output_axes.as_slice()))))
+            Some((
+                operands,
+                Some((out_layout, output_axes.as_slice(), epilogue_operands)),
+            ))
         }
         _ => None,
     }
@@ -102,12 +119,29 @@ fn coalescible_layouts(resolved: &BoundOp) -> Option<(&[Operand], Option<FoldVie
 
 /// Greedy outer-to-inner scan: each axis either extends the current group or
 /// opens a new one.
-fn group_axes(extents: &[u64], layouts: &[&Layout], output_axes: Option<&[u16]>) -> Vec<AxisGroup> {
+///
+/// Layouts from slot `local_from` on are epilogue operands, addressed by
+/// position in `output_axes` rather than by iteration axis: their stride on an
+/// axis is the one at that axis' position, and `0` on an axis the fold reduces.
+fn group_axes(
+    extents: &[u64],
+    layouts: &[&Layout],
+    output_axes: Option<&[u16]>,
+    local_from: usize,
+) -> Vec<AxisGroup> {
     let mut groups: Vec<AxisGroup> = Vec::with_capacity(extents.len());
     for (axis, &extent) in extents.iter().enumerate() {
         let strides: SmallVec<[i64; MAX_INLINE_RANK]> = layouts
             .iter()
-            .map(|layout| layout.stride(axis as u16))
+            .enumerate()
+            .map(|(slot, layout)| {
+                if slot < local_from {
+                    return layout.stride(axis as u16);
+                }
+                output_axes
+                    .and_then(|axes| axes.iter().position(|&kept| kept as usize == axis))
+                    .map_or(0, |position| layout.stride(position as u16))
+            })
             .collect();
         match groups.last_mut() {
             Some(group) if can_extend(group, axis, extent, &strides, output_axes) => {
@@ -224,9 +258,11 @@ fn rebuild_coalesced(resolved: &BoundOp, groups: &[AxisGroup]) -> BoundOp {
             operands,
             output_axes,
             out_layout,
+            epilogue_operands,
             ..
         } => {
             rewrite_layouts(operands, Some(out_layout), groups, layout_count);
+            rewrite_epilogue_layouts(epilogue_operands, output_axes, groups, layout_count + 1);
             *output_axes = remap_output_axes(output_axes, groups);
         }
         _ => {}
@@ -251,10 +287,28 @@ fn rewrite_layouts(
     }
 }
 
+/// An epilogue layout has one stride per entry of the remapped `output_axes`,
+/// each read from the group that entry names. `first_slot` is the slot of the
+/// first epilogue operand in every group's `strides`.
+fn rewrite_epilogue_layouts(
+    epilogue_operands: &mut [Operand],
+    output_axes: &[u16],
+    groups: &[AxisGroup],
+    first_slot: usize,
+) {
+    let kept_groups = remap_output_axes(output_axes, groups);
+    for (offset, (_, layout, _)) in epilogue_operands.iter_mut().enumerate() {
+        layout.strides = kept_groups
+            .iter()
+            .map(|&group| groups[group as usize].strides[first_slot + offset])
+            .collect();
+    }
+}
+
 /// Each kept axis becomes its group's index; merged kept axes were adjacent
 /// in `output_axes`, so the duplicates are consecutive.
 fn remap_output_axes(
-    output_axes: &SmallVec<[u16; MAX_INLINE_RANK]>,
+    output_axes: &[u16],
     groups: &[AxisGroup],
 ) -> SmallVec<[u16; MAX_INLINE_RANK]> {
     let mut remapped: SmallVec<[u16; MAX_INLINE_RANK]> = SmallVec::new();

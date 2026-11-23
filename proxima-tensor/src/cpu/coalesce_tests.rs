@@ -698,17 +698,236 @@ fn kept_axes_written_in_swapped_order_do_not_merge() {
     );
 }
 
+/// One output buffer, named through the table type the cases already use.
+type Column = <<BufferTable as IntoIterator>::Item as IntoIterator>::Item;
+
+fn bias_add_body() -> ComposedBody {
+    ComposedBody {
+        steps: vec![BodyStep {
+            op: ScalarOp::Add,
+            args: vec![StepArg::Operand(0), StepArg::Operand(1)],
+        }],
+    }
+}
+
+/// Fuses a bias-add epilogue onto a fold. `bias` is addressed by position in
+/// the fold's `output_axes`, the space `apply_plain_reduce_epilogue` walks.
+fn with_bias_epilogue(op: &mut BoundOp, bias: Layout) {
+    let bias_node = NodeId(op.node.0 + 1);
+    if let BoundOpKind::Reduce {
+        epilogue_body,
+        epilogue_operands,
+        ..
+    } = &mut op.kind
+    {
+        *epilogue_body = bias_add_body();
+        epilogue_operands.clear();
+        epilogue_operands.push((bias_node, bias, None));
+    }
+}
+
+fn epilogue_strides(op: &BoundOp) -> Vec<Vec<i64>> {
+    let BoundOpKind::Reduce {
+        epilogue_operands, ..
+    } = &op.kind
+    else {
+        unreachable!("only a reduce carries an epilogue")
+    };
+    epilogue_operands
+        .iter()
+        .map(|(_, layout, _)| layout.strides.to_vec())
+        .collect()
+}
+
+/// Fold then fused epilogue on `op` exactly as given: the executor's own
+/// `run_reduce_planned` followed by `apply_reduce_epilogue`.
+fn run_fold_with_epilogue(op: &BoundOp, buffers: &BufferTable, output_len: usize) -> Column {
+    let mut output: Column = vec![Default::default(); output_len];
+    run_reduce_planned(op, buffers, &mut output, None).expect("fold runs");
+    apply_reduce_epilogue(op, buffers, &mut output).expect("epilogue runs");
+    output
+}
+
+/// The same op run uncoalesced and through `coalesce_dims`; the last field
+/// is whether the pass merged anything.
+fn run_both_ways(case: &Case) -> (Column, Column, bool) {
+    let uncoalesced = run_fold_with_epilogue(&case.op, &case.buffers, case.output_len);
+    match coalesce_dims(&case.op) {
+        Some(merged) => {
+            let coalesced = run_fold_with_epilogue(&merged, &case.buffers, case.output_len);
+            (uncoalesced, coalesced, true)
+        }
+        None => (uncoalesced.clone(), uncoalesced, false),
+    }
+}
+
+fn reduce_case_with_bias(seed: u64, integers: bool) -> Case {
+    let mut case = reduce_case_with(seed, integers, Some(true));
+    let mut lcg = Lcg(seed ^ 0xb1a5_0001);
+    let BoundOpKind::Reduce { output_axes, .. } = &case.op.kind else {
+        unreachable!("reduce_case_with builds a reduce")
+    };
+    let local_extents: Vec<u64> = output_axes
+        .iter()
+        .map(|&axis| case.op.extents[axis as usize])
+        .collect();
+    let kinds: Vec<AxisKind> = local_extents
+        .iter()
+        .map(|_| pick_axis_kind(&mut lcg))
+        .collect();
+    let (bias, bias_len) = build_layout(&local_extents, &kinds);
+    with_bias_epilogue(&mut case.op, bias);
+    case.buffers.push(None);
+    case.buffers
+        .push(Some(operand_values(&mut lcg, bias_len, integers)));
+    case
+}
+
 #[test]
-fn a_fold_with_a_fused_epilogue_is_left_alone() {
+fn a_bias_epilogue_that_is_one_run_over_a_kept_pair_lets_it_merge() {
     let mut op = delta_net_state_fold();
+    with_bias_epilogue(&mut op, layout(0, &[16, 2, 1]));
+
+    let merged = coalesce_dims(&op).expect("kv_heads and group are contiguous in the bias too");
+
+    assert_eq!(merged.extents, vec![4, 4, 16]);
+    assert_eq!(epilogue_strides(&merged), vec![vec![16, 1]]);
+}
+
+#[test]
+fn a_bias_epilogue_with_a_padded_kept_axis_blocks_that_merge() {
+    let mut op = delta_net_state_fold();
+    with_bias_epilogue(&mut op, layout(0, &[16, 3, 1]));
+
+    assert!(
+        coalesce_dims(&op).is_none(),
+        "the bias steps 3 over a group of 2, so (kv_heads, group) is not one run there"
+    );
+}
+
+#[test]
+fn a_bias_epilogue_that_is_broadcast_over_a_kept_pair_still_merges() {
+    let mut op = delta_net_state_fold();
+    with_bias_epilogue(&mut op, layout(0, &[16, 0, 0]));
+
+    let merged = coalesce_dims(&op).expect("a stride-0 pair is one affine run");
+
+    assert_eq!(merged.extents, vec![4, 4, 16]);
+    assert_eq!(epilogue_strides(&merged), vec![vec![16, 0]]);
+}
+
+#[test]
+fn a_gathered_epilogue_operand_is_never_coalesced() {
+    let mut op = delta_net_state_fold();
+    with_bias_epilogue(&mut op, layout(0, &[16, 2, 1]));
     if let BoundOpKind::Reduce {
         epilogue_operands, ..
     } = &mut op.kind
     {
-        epilogue_operands.push((NodeId(7), layout(0, &[0, 16, 2, 1]), None));
+        epilogue_operands[0].2 = Some(Lookup {
+            indices: NodeId(9),
+            index_layout: layout(0, &[0, 0, 0]),
+            element_stride: 1,
+            extent: 4,
+        });
     }
 
     assert!(coalesce_dims(&op).is_none());
+}
+
+#[test]
+fn the_delta_net_fold_with_a_bias_runs_identically_coalesced_and_not() {
+    let mut lcg = Lcg(0xde17_b1a5);
+    let mut op = delta_net_state_fold();
+    with_bias_epilogue(&mut op, layout(0, &[16, 2, 1]));
+    let case = Case {
+        op,
+        buffers: vec![
+            Some(operand_values(&mut lcg, 256, true)),
+            Some(operand_values(&mut lcg, 128, true)),
+            Some(operand_values(&mut lcg, 16, true)),
+            None,
+            Some(operand_values(&mut lcg, 4 * 8 * 2, true)),
+        ],
+        output_len: 4 * 8 * 2,
+    };
+
+    let (uncoalesced, coalesced, merged) = run_both_ways(&case);
+
+    assert!(merged, "the bias is one run over (kv_heads, group)");
+    assert_same(&coalesced, &uncoalesced, true, "bias fold coalesced");
+}
+
+proptest! {
+    #[test]
+    fn a_coalesced_fold_with_a_bias_epilogue_is_bit_exact_on_integers(seed in any::<u64>()) {
+        let case = reduce_case_with_bias(seed, true);
+        let (uncoalesced, coalesced, _) = run_both_ways(&case);
+        assert_same(&coalesced, &uncoalesced, true, "coalesced bias fold, integers");
+    }
+
+    #[test]
+    fn a_coalesced_fold_with_a_bias_epilogue_matches_within_tolerance_on_floats(seed in any::<u64>()) {
+        let case = reduce_case_with_bias(seed, false);
+        let (uncoalesced, coalesced, _) = run_both_ways(&case);
+        assert_same(&coalesced, &uncoalesced, false, "coalesced bias fold, floats");
+    }
+}
+
+/// The FLUX VAE conv as the bound op carries it: output `(r, g, c)` =
+/// `(rows, 32, 16)`, contraction `(t, i, j)` = `(9, 32, 16)`. The staged
+/// activation is read at `9*r + t` rows of 512, so `r` and `t` carry strides
+/// 4608 and 512 into one buffer; the weight is `[32, 16, 9, 32, 16]`; the
+/// bias `[32, 16]` is fused and addressed over `(r, g, c)`.
+fn vae_conv_fold(rows: u64) -> BoundOp {
+    let mut op = delta_net_state_fold();
+    op.extents = vec![rows, 32, 16, 9, 32, 16];
+    if let BoundOpKind::Reduce {
+        element_body,
+        operands,
+        output_axes,
+        out_layout,
+        ..
+    } = &mut op.kind
+    {
+        *element_body = multiply_body();
+        *operands = vec![
+            (NodeId(0), layout(0, &[4608, 0, 0, 512, 16, 1]), None),
+            (NodeId(1), layout(0, &[0, 73728, 4608, 512, 16, 1]), None),
+        ];
+        *output_axes = smallvec![0, 1, 2];
+        *out_layout = layout(0, &[512, 16, 1, 0, 0, 0]);
+    }
+    op.node = NodeId(2);
+    with_bias_epilogue(&mut op, layout(0, &[0, 16, 1]));
+    op
+}
+
+#[test]
+fn the_vae_conv_fold_coalesces_to_rank_three_and_runs_bit_identically() {
+    let rows = 4u64;
+    let mut lcg = Lcg(0x0aec_0001);
+    let case = Case {
+        op: vae_conv_fold(rows),
+        buffers: vec![
+            Some(operand_values(&mut lcg, (rows * 4608) as usize, true)),
+            Some(operand_values(&mut lcg, 512 * 4608, true)),
+            None,
+            Some(operand_values(&mut lcg, 512, true)),
+        ],
+        output_len: (rows * 512) as usize,
+    };
+
+    let merged = coalesce_dims(&case.op).expect("every axis group is contiguous");
+    let (uncoalesced, coalesced, _) = run_both_ways(&case);
+
+    assert_eq!(merged.extents, vec![rows, 512, 4608]);
+    assert_eq!(epilogue_strides(&merged), vec![vec![0, 1]]);
+    assert_eq!(
+        operand_strides(&merged),
+        vec![vec![4608, 0, 1], vec![0, 4608, 1]]
+    );
+    assert_same(&coalesced, &uncoalesced, true, "vae conv fold coalesced");
 }
 
 #[test]
