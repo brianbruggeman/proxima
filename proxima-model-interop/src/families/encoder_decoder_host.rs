@@ -164,7 +164,11 @@ impl Tensors {
     }
 
     fn dims(&self, name: &str) -> Vec<usize> {
-        self.entry(name).shape.iter().map(|&dim| dim as usize).collect()
+        self.entry(name)
+            .shape
+            .iter()
+            .map(|&dim| dim as usize)
+            .collect()
     }
 }
 
@@ -236,7 +240,11 @@ impl<'a> Bound<'a> {
         let weight_name = format!("{name}.weight");
         let weight = self.weight(
             &weight_name,
-            &[self.shape.width, self.shape.encoder_heads, self.shape.encoder_head_dim],
+            &[
+                self.shape.width,
+                self.shape.encoder_heads,
+                self.shape.encoder_head_dim,
+            ],
             &weight_name,
             tensors,
         );
@@ -254,7 +262,11 @@ impl<'a> Bound<'a> {
         let weight_name = format!("{name}.weight");
         let weight = self.weight(
             &weight_name,
-            &[self.shape.encoder_heads, self.shape.encoder_head_dim, self.shape.width],
+            &[
+                self.shape.encoder_heads,
+                self.shape.encoder_head_dim,
+                self.shape.width,
+            ],
             &weight_name,
             tensors,
         );
@@ -385,7 +397,11 @@ impl<'a> Bound<'a> {
             .named
             .iter()
             .map(|(name, data)| (name.as_str(), QuantizedBlock::from(data.as_slice())))
-            .chain(self.blocks.iter().map(|(name, block)| (name.as_str(), *block)))
+            .chain(
+                self.blocks
+                    .iter()
+                    .map(|(name, block)| (name.as_str(), *block)),
+            )
             .collect();
         match device {
             Device::Cpu => {
@@ -498,7 +514,11 @@ impl Model {
         let padded = pad(wav)?;
         let front = front_end(&self.dir)?;
         if front.mels != self.shape.mels {
-            bail!("preprocessor_config.json says {} mels, config.json says {}", front.mels, self.shape.mels);
+            bail!(
+                "preprocessor_config.json says {} mels, config.json says {}",
+                front.mels,
+                self.shape.mels
+            );
         }
         let frames = ((padded.len() as u32 - front.n_fft) / front.hop) + 1;
         let mut mel_bound = Bound::new(self.shape.clone());
