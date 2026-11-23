@@ -11,9 +11,10 @@ use anyhow::{Context, Result, bail};
 use proxima_numeric::decode_blocks;
 use proxima_safetensors::{Manifest, SafetensorsParser, TensorEntry};
 use proxima_tensor::cpu::{Evaluated, QuantizedBlock, evaluate_quantized_named};
-use proxima_tensor::op::{NodeId, Op};
+use proxima_tensor::op::{Extent, NodeId, Op};
 use proxima_tensor::spec::{
-    STFT_COS_INPUT, STFT_SIN_INPUT, STFT_WINDOW_INPUT, StftLogMelConfig, stft_log_mel, stft_tables,
+    STFT_COS_INPUT, STFT_SIN_INPUT, STFT_WINDOW_INPUT, StftLogMelConfig, cross_kv, input_leaf,
+    stft_log_mel, stft_tables,
 };
 use serde_json::Value;
 
@@ -191,6 +192,15 @@ impl<'a> Bound<'a> {
 
     fn leaf(&mut self, name: &str, shape: &[u32]) -> NodeId {
         super::encoder_decoder::leaf(&mut self.program, shape, name)
+    }
+
+    fn symbolic_leaf(&mut self, name: &str) -> NodeId {
+        input_leaf(
+            &mut self.program,
+            super::encoder_decoder::ACTIVATION,
+            vec![Extent::Symbolic(0)],
+            name,
+        )
     }
 
     fn weight(&mut self, name: &str, shape: &[u32], stored: &str, tensors: &'a Tensors) -> NodeId {
@@ -392,7 +402,7 @@ impl<'a> Bound<'a> {
         }
     }
 
-    fn run(&self, outputs: &[NodeId], device: Device) -> Result<Vec<Vec<f32>>> {
+    fn run(&self, outputs: &[NodeId], symbols: &[u64], device: Device) -> Result<Vec<Vec<f32>>> {
         let named: Vec<(&str, QuantizedBlock<'_>)> = self
             .named
             .iter()
@@ -405,13 +415,14 @@ impl<'a> Bound<'a> {
             .collect();
         match device {
             Device::Cpu => {
-                let evaluated = evaluate_quantized_named(&self.program, &[], &named, outputs)
-                    .map_err(|error| anyhow::anyhow!("program does not evaluate: {error:?}"))?;
+                let evaluated =
+                    evaluate_quantized_named(&self.program, symbols, &named, outputs)
+                        .map_err(|error| anyhow::anyhow!("program does not evaluate: {error:?}"))?;
                 collect_outputs(&evaluated, outputs)
             }
             #[cfg(all(feature = "metal", target_os = "macos"))]
             Device::Metal(policy) => {
-                let plan = omega::plan_named(&self.program, &[], &named, outputs, policy)
+                let plan = omega::plan_named(&self.program, symbols, &named, outputs, policy)
                     .map_err(|error| anyhow::anyhow!("metal plan: {error:?}"))?;
                 let evaluated = omega::execute_plan_named(&plan, &named)
                     .map_err(|error| anyhow::anyhow!("metal executes: {error:?}"))?;
@@ -562,7 +573,7 @@ impl Model {
             .named
             .insert(STFT_SIN_INPUT.into(), decode(&tables.sin));
         let mel_start = std::time::Instant::now();
-        let mel_values = mel_bound.run(&[mel], device)?.remove(0);
+        let mel_values = mel_bound.run(&[mel], &[], device)?.remove(0);
         let mel = mel_start.elapsed();
         // The encoder consumes the first 2*source_positions frames.
         let needed = (self.shape.source_positions * 2) as usize;
@@ -596,12 +607,13 @@ impl Model {
             let prefix = format!("model.decoder.layers.{layer}.encoder_attn");
             let k = bound.heads(&format!("{prefix}.k_proj"), &self.tensors, false);
             let v = bound.heads(&format!("{prefix}.v_proj"), &self.tensors, true);
-            let (k, v) = super::encoder_decoder::cross_kv(
+            let (k, v) = cross_kv(
                 &mut bound.program,
                 memory,
-                k,
-                v,
-                self.shape.decoder_head_dim,
+                k.weight,
+                k.bias,
+                v.weight,
+                v.bias,
             )?;
             cross.push((k, v));
         }
@@ -611,7 +623,7 @@ impl Model {
             outputs.push(*v);
         }
         let encode_start = std::time::Instant::now();
-        let values = bound.run(&outputs, device)?;
+        let values = bound.run(&outputs, &[], device)?;
         let encode = encode_start.elapsed();
         let cross_values: Vec<(Vec<f32>, Vec<f32>)> = (0..self.shape.decoder_layers)
             .map(|layer| (values[1 + layer * 2].clone(), values[2 + layer * 2].clone()))
@@ -623,9 +635,8 @@ impl Model {
         for step in 0..policy.step_cap() as usize {
             let mut decoder = Bound::new(self.shape.clone());
             let n = tokens.len() as u32;
-            let token_leaf = decoder.leaf("tokens", &[n]);
-            let positions = decoder.leaf("positions", &[n]);
-            let _ = &[0_u8; 0];
+            let token_leaf = decoder.symbolic_leaf("tokens");
+            let positions = decoder.symbolic_leaf("positions");
             let stem = decoder.decoder_stem(&self.tensors);
             let layers: Vec<_> = (0..self.shape.decoder_layers)
                 .map(|layer| decoder.decoder_layer(layer, &self.tensors))
@@ -654,13 +665,14 @@ impl Model {
                 decoder.named.insert(v_name, v.clone());
                 cross_nodes.push((k_node, v_node));
             }
-            let logits = super::encoder_decoder::decoder(
+            let (logits, _) = super::encoder_decoder::decoder(
                 &mut decoder.program,
                 token_leaf,
                 positions,
                 &stem,
                 &layers,
                 &cross_nodes,
+                None,
                 self.shape.decoder_heads,
                 self.shape.decoder_head_dim,
                 self.shape.eps,
@@ -672,7 +684,9 @@ impl Model {
             decoder
                 .named
                 .insert("positions".into(), (0..n).map(|i| i as f32).collect());
-            let flat = decoder.run(&[logits], device)?.remove(0);
+            let flat = decoder
+                .run(&[logits], &[u64::from(n), 0], device)?
+                .remove(0);
             let vocab = self.shape.vocab as usize;
             let last = &flat[(n as usize - 1) * vocab..n as usize * vocab];
             let mut row = last.to_vec();

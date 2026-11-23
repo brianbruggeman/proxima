@@ -1044,7 +1044,14 @@ mod encoder {
             let prefix = format!("model.decoder.layers.{layer}.encoder_attn");
             let k = bound.heads(&format!("{prefix}.k_proj"), &tensors, false);
             let v = bound.heads(&format!("{prefix}.v_proj"), &tensors, true);
-            let (k, v) = encoder_decoder::cross_kv(&mut bound.program, encoded, k, v, HEAD_DIM)?;
+            let (k, v) = proxima_tensor::spec::cross_kv(
+                &mut bound.program,
+                encoded,
+                k.weight,
+                k.bias,
+                v.weight,
+                v.bias,
+            )?;
             cross.push((k, v));
             outputs.push(k);
             outputs.push(v);
@@ -1147,7 +1154,8 @@ mod encoder {
             &mut bound.program,
             1.0 / (HEAD_DIM as f32).sqrt(),
         );
-        let attended = encoder_decoder::attention(&mut bound.program, q, k, v, inv, None)?;
+        let attended =
+            proxima_tensor::spec::non_causal_attention(&mut bound.program, q, k, v, inv)?;
         let projected =
             encoder_decoder::project_heads(&mut bound.program, attended, layer.attn.out)?;
         let residual = proxima_tensor::spec::elementwise(
