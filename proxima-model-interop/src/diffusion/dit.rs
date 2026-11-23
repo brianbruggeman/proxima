@@ -609,6 +609,13 @@ fn modulation_chunks(
         .collect()
 }
 
+fn exact_chunks<const COUNT: usize>(chunks: Vec<NodeId>) -> Result<[NodeId; COUNT], TensorError> {
+    let found = chunks.len();
+    chunks.try_into().map_err(|_| {
+        TensorError::InvalidPlan(format!("expected {COUNT} modulation chunks, found {found}"))
+    })
+}
+
 /// The backbone's output plus the intermediate nodes a parity check reads.
 #[derive(Debug, Clone)]
 pub struct DitOutput {
@@ -686,13 +693,15 @@ pub fn build_dit(
         config.hidden,
         2,
     )?;
+    let image_mod: [NodeId; 6] = exact_chunks(image_mod)?;
+    let text_mod: [NodeId; 6] = exact_chunks(text_mod)?;
+    let single_mod: [NodeId; 3] = exact_chunks(single_mod)?;
+    let final_mod: [NodeId; 2] = exact_chunks(final_mod)?;
 
     let mut image = image_in;
     let mut text = text_in;
     for block in 0..config.double_blocks {
         let prefix = format!("double_blocks.{block}");
-        let image_mod: [NodeId; 6] = image_mod[..6].try_into().expect("six image modulations");
-        let text_mod: [NodeId; 6] = text_mod[..6].try_into().expect("six text modulations");
         let (next_image, next_text) = double_block(
             graph,
             config,
@@ -715,9 +724,6 @@ pub fn build_dit(
     let index = graph.concat_indices(inputs.text_tokens, inputs.image_tokens, "single.joint");
     let program = &mut graph.program;
     let mut stream = concat_rows(program, text, image, index[0], index[1], index[2], "c")?;
-    let single_mod: [NodeId; 3] = single_mod[..3]
-        .try_into()
-        .expect("three single modulations");
     for block in 0..config.single_blocks {
         let prefix = format!("single_blocks.{block}");
         stream = single_block(graph, config, inputs, &prefix, stream, single_mod)?;
@@ -726,7 +732,6 @@ pub fn build_dit(
         }
     }
 
-    let final_mod: [NodeId; 2] = final_mod[..2].try_into().expect("two final modulations");
     let program = &mut graph.program;
     let normed = layer_norm_no_affine(program, stream, config.hidden, NORM_EPS)?;
     let normed = modulate(program, normed, final_mod[0], final_mod[1])?;
