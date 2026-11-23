@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "proxima_arm": "proxima",
+  "backends": ["cpu", "metal", "cuda", "hip", "wgpu"],
+  "percentiles": ["p50", "p90", "p95", "p99"],
+  "separating_n": {"p90": 10, "p95": 20, "p99": 100},
+  "min_n_per_arm": 20,
+  "min_inputs": {"llm": 3, "speech": 3, "image": 3, "training": 1},
+  "timestamp_pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$",
+  "unreported_reasons": [
+    "incumbent-does-not-report",
+    "incumbent-no-api",
+    "incumbent-non-streaming",
+    "incumbent-single-shot",
+    "not-measurable-on-backend"
+  ],
+  "not_run_reasons": [
+    "no-host",
+    "driver-mismatch",
+    "unexercised",
+    "backend-unsupported-by-model",
+    "incumbent-unavailable"
+  ],
+  "required_always": [
+    {"path": "model", "type": "string"},
+    {"path": "modality", "type": "string"},
+    {"path": "backend", "type": "string"},
+    {"path": "arm", "type": "string"},
+    {"path": "index", "type": "number"},
+    {"path": "repeat", "type": "number"},
+    {"path": "session_id", "type": "string"},
+    {"path": "started_at", "type": "utc"},
+    {"path": "ended_at", "type": "utc"},
+    {"path": "exit_status", "type": "number"},
+    {"path": "admitted", "type": "bool"},
+    {"path": "discarded_warmup", "type": "bool"}
+  ],
+  "required_common": [
+    {"path": "arm_version", "type": "string"},
+    {"path": "commit", "type": "string"},
+    {"path": "round", "type": "number"},
+    {"path": "position", "type": "number"},
+    {"path": "input.id", "type": "string"},
+    {"path": "host.load1", "type": "number"},
+    {"path": "host.hw_model", "type": "string"},
+    {"path": "host.chip", "type": "string"},
+    {"path": "host.memory_bytes", "type": "number"},
+    {"path": "host.os_build", "type": "string"},
+    {"path": "host.power_source", "type": "string"},
+    {"path": "resources.footprint_peak_bytes", "type": "number"},
+    {"path": "resources.steady_rss_bytes", "type": "number", "unreportable": true},
+    {"path": "resources.gpu_allocated_peak_bytes", "type": "number", "unreportable": true},
+    {"path": "resources.cpu_user_us", "type": "number"},
+    {"path": "resources.cpu_sys_us", "type": "number"},
+    {"path": "resources.wall_us", "type": "number"},
+    {"path": "quality.match", "type": "bool"},
+    {"path": "quality.match_incumbent", "type": "bool"}
+  ],
+  "metrics": {
+    "ttft_us": {"unit": "us", "temps": ["cold", "warm"], "modalities": ["llm", "speech"]},
+    "ttlt_us": {"unit": "us", "temps": ["cold", "warm"], "modalities": ["llm", "speech", "image"]},
+    "decode_tok_s": {"unit": "tok/s", "temps": ["cold", "warm"], "modalities": ["llm", "speech"]},
+    "prefill_tok_s": {"unit": "tok/s", "temps": ["cold", "warm"], "modalities": ["llm"]},
+    "footprint_peak_bytes": {"unit": "bytes", "temps": ["cold"], "modalities": ["llm", "speech", "image", "training"]},
+    "steady_rss_bytes": {"unit": "bytes", "temps": ["cold"], "modalities": ["llm", "speech", "image", "training"]},
+    "gpu_allocated_peak_bytes": {"unit": "bytes", "temps": ["cold"], "modalities": ["llm", "speech", "image", "training"]},
+    "cpu_pct": {"unit": "%", "temps": ["cold", "warm"], "modalities": ["llm", "speech", "image", "training"]},
+    "step_us": {"unit": "us", "temps": ["all"], "modalities": ["llm", "speech"]},
+    "rtf": {"unit": "ratio", "temps": ["cold"], "modalities": ["speech"], "derived": true}
+  },
+  "modalities": {
+    "llm": {
+      "stages": ["load", "prefill", "decode"],
+      "temps": ["cold", "warm"],
+      "required": [
+        {"path": "prompt_tokens", "type": "number"},
+        {"path": "generated_tokens", "type": "number"},
+        {"path": "timings.ttft_us", "type": "number", "unreportable": true},
+        {"path": "timings.ttlt_us", "type": "number"},
+        {"path": "timings.load_us", "type": "number", "unreportable": true},
+        {"path": "timings.prefill_us", "type": "number", "unreportable": true},
+        {"path": "timings.decode_us", "type": "number", "unreportable": true},
+        {"path": "timings.step_us", "type": "array", "unreportable": true}
+      ]
+    },
+    "speech": {
+      "stages": ["load", "mel", "encode", "decode"],
+      "temps": ["cold", "warm"],
+      "required": [
+        {"path": "prompt_tokens", "type": "number"},
+        {"path": "generated_tokens", "type": "number"},
+        {"path": "input.duration_us", "type": "number"},
+        {"path": "timings.ttft_us", "type": "number", "unreportable": true},
+        {"path": "timings.ttlt_us", "type": "number"},
+        {"path": "timings.load_us", "type": "number", "unreportable": true},
+        {"path": "timings.mel_us", "type": "number", "unreportable": true},
+        {"path": "timings.encode_us", "type": "number", "unreportable": true},
+        {"path": "timings.decode_us", "type": "number", "unreportable": true},
+        {"path": "timings.step_us", "type": "array", "unreportable": true}
+      ]
+    },
+    "image": {
+      "stages": ["load", "text", "denoise_step", "vae"],
+      "temps": ["cold", "warm"],
+      "required": [
+        {"path": "timings.ttlt_us", "type": "number"},
+        {"path": "timings.load_us", "type": "number", "unreportable": true},
+        {"path": "timings.text_us", "type": "number", "unreportable": true},
+        {"path": "timings.denoise_step_us", "type": "number", "unreportable": true},
+        {"path": "timings.vae_us", "type": "number", "unreportable": true}
+      ]
+    },
+    "training": {
+      "stages": ["step"],
+      "temps": ["cold"],
+      "required": [
+        {"path": "timings.step_us", "type": "number"},
+        {"path": "tokens_per_step", "type": "number"},
+        {"path": "loss", "type": "number"},
+        {"path": "grad_norm", "type": "number", "unreportable": true},
+        {"path": "seed", "type": "number"},
+        {"path": "data_shard", "type": "string"}
+      ]
+    }
+  }
+}

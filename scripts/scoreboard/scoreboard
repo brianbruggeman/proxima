@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# PROXNUM-684 S1: the scoreboard contract, enforced from raw run records.
+#
+# usage: scripts/scoreboard/scoreboard <validate|summarize|render|census> <file>
+#
+#   validate  <raw.jsonl>      exit 0 only when the raw runs satisfy contract.json; one line per failure
+#   summarize <raw.jsonl>      JSON: p50/p90/p95/p99, mean, CoV%, n per (backend, arm, metric), p50 ratios
+#   render    <raw.jsonl>      markdown table lines, each ending with ' runs=<path>@<sha256>'
+#   census    <SCOREBOARD.md>  rows and prose number lines without a valid runs= citation; exit 1 when any
+#
+# env (defaults in brackets):
+#   SCOREBOARD_CONTRACT  contract file [contract.json next to this script]
+#
+# raw file: one JSON object per attempted run (every arm, failures and warm-ups included), plus
+# {"record":"not-run","backend":..,"reason":..} for each backend that was not measured.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB="$HERE/lib"
+CONTRACT="${SCOREBOARD_CONTRACT:-$HERE/contract.json}"
+
+usage() {
+  echo "usage: ${0##*/} <validate|summarize|render> <raw.jsonl> | census <SCOREBOARD.md>" >&2
+  exit 2
+}
+
+sha256_of() { shasum -a 256 "$1" | cut -d' ' -f1; }
+
+require_file() {
+  [[ -f "$1" ]] || { echo "missing file $1" >&2; exit 2; }
+  [[ -f "$CONTRACT" ]] || { echo "missing contract $CONTRACT" >&2; exit 2; }
+}
+
+require_jsonl() {
+  require_file "$1"
+  if ! [[ -s "$1" ]]; then
+    echo "raw: $1 is empty, no run records" >&2
+    exit 1
+  fi
+  if ! jq -e . "$1" >/dev/null 2>&1; then
+    echo "raw: $1 is not valid JSON lines" >&2
+    exit 1
+  fi
+}
+
+cmd_validate() {
+  require_jsonl "$1"
+  local failures
+  failures="$(jq -rs --slurpfile c "$CONTRACT" -f "$LIB/validate.jq" "$1")"
+  if [[ -n "$failures" ]]; then
+    echo "$failures"
+    echo "validate: $(echo "$failures" | wc -l | tr -d ' ') failure(s) in $1" >&2
+    exit 1
+  fi
+}
+
+cmd_summarize() {
+  require_jsonl "$1"
+  jq -s --slurpfile c "$CONTRACT" -f "$LIB/summarize.jq" "$1"
+}
+
+cmd_render() {
+  require_jsonl "$1"
+  local sha
+  sha="$(sha256_of "$1")"
+  cmd_summarize "$1" | jq -r --slurpfile c "$CONTRACT" --arg cite "runs=$1@$sha" -f "$LIB/render.jq"
+}
+
+# a citation is valid when the file exists and its sha256 matches; relative paths resolve against the census file's directory, then cwd
+cmd_census() {
+  require_file "$1"
+  local base token path sha resolved valid="[]"
+  base="$(cd "$(dirname "$1")" && pwd)"
+  while IFS= read -r token; do
+    path="${token#runs=}"
+    sha="${path##*@}"
+    path="${path%@*}"
+    resolved=""
+    for candidate in "$path" "$base/$path"; do
+      [[ -f "$candidate" ]] && { resolved="$candidate"; break; }
+    done
+    if [[ -n "$resolved" && "$(sha256_of "$resolved")" == "$sha" ]]; then
+      valid="$(jq -c --arg t "$token" '. + [$t]' <<<"$valid")"
+    fi
+  done < <(grep -oE 'runs=[^[:space:]`|]+@[0-9a-f]{64}' "$1" | sort -u || true)
+  local report
+  report="$(jq -nrR --argjson valid "$valid" -f "$LIB/census.jq" "$1" 2>&1)"
+  echo "$report"
+  [[ "$(echo "$report" | tail -1)" == "uncited=0" && "$report" != *"defect:"* ]]
+}
+
+main() {
+  [[ $# -eq 2 ]] || usage
+  case "$1" in
+    validate) cmd_validate "$2" ;;
+    summarize) cmd_summarize "$2" ;;
+    render) cmd_render "$2" ;;
+    census) cmd_census "$2" ;;
+    *) usage ;;
+  esac
+}
+
+main "$@"
