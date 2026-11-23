@@ -19,6 +19,8 @@ fn main() -> Result<()> {
     let mut language = String::from("en");
     let mut noise = 0.0_f32;
     let mut device = Device::Cpu;
+    let settings =
+        <ServingSettings as Settings>::from_env().context("serving settings from env")?;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -28,11 +30,7 @@ fn main() -> Result<()> {
             "--device" => {
                 device = match args.next().context("--device wants cpu|metal")?.as_str() {
                     "cpu" => Device::Cpu,
-                    "metal" => Device::Metal(
-                        <ServingSettings as Settings>::from_env()
-                            .context("serving settings from env")?
-                            .numeric_policy,
-                    ),
+                    "metal" => Device::Metal(settings.numeric_policy),
                     other => bail!("unknown device {other}"),
                 }
             }
@@ -68,7 +66,9 @@ fn main() -> Result<()> {
     }
 
     let load_start = std::time::Instant::now();
-    let model = Model::load(&model_path)?.with_device(device);
+    let model = Model::load(&model_path)?
+        .with_settings(settings)
+        .with_device(device);
     let load = load_start.elapsed();
     let transcript = model.transcribe(&samples, &language)?;
     let ids: Vec<String> = transcript.tokens.iter().map(ToString::to_string).collect();

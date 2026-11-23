@@ -25,7 +25,12 @@ use crate::decode_policy::{DecodeConfig, DecodePolicy};
 use crate::families::encoder_decoder::{
     DecoderLayer, DecoderStem, EncoderLayer, EncoderStem, Linear, encoder,
 };
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use crate::generate::BackendRuntime;
 use crate::hf_bind::safetensors_tensor_as_packed_block;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use crate::serving::GPU_LAYERS_ALL;
+use crate::serving_settings::ServingSettings;
 
 /// The dimensions a checkpoint states, read from its `config.json`.
 #[derive(Debug, Clone)]
@@ -174,6 +179,12 @@ impl Tensors {
             .collect()
     }
 }
+
+/// the serving runtime every Metal stage plans and executes through
+#[cfg(all(feature = "metal", target_os = "macos"))]
+type Runtime = BackendRuntime;
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+type Runtime = ();
 
 struct Bound<'a> {
     program: Vec<Op>,
@@ -404,7 +415,13 @@ impl<'a> Bound<'a> {
         }
     }
 
-    fn run(&self, outputs: &[NodeId], symbols: &[u64], device: Device) -> Result<Vec<Vec<f32>>> {
+    fn run(
+        &self,
+        outputs: &[NodeId],
+        symbols: &[u64],
+        device: Device,
+        runtime: &mut Runtime,
+    ) -> Result<Vec<Vec<f32>>> {
         let named: Vec<(&str, QuantizedBlock<'_>)> = self
             .named
             .iter()
@@ -423,18 +440,19 @@ impl<'a> Bound<'a> {
                 collect_outputs(&evaluated, outputs)
             }
             #[cfg(all(feature = "metal", target_os = "macos"))]
-            Device::Metal(policy) => {
-                let mut plan = omega::plan_named(&self.program, symbols, &named, outputs, policy)
-                    .map_err(|error| anyhow::anyhow!("metal plan: {error:?}"))?;
+            Device::Metal(_) => {
                 let resident: BTreeSet<&str> =
                     self.blocks.iter().map(|(name, _)| name.as_str()).collect();
-                plan.mark_resident(&resident);
-                let evaluated = omega::execute_plan_named(&plan, &named)
-                    .map_err(|error| anyhow::anyhow!("metal executes: {error:?}"))?;
+                let evaluated = runtime
+                    .evaluate_segment(&self.program, symbols, &named, outputs, &resident, None)
+                    .map_err(|error| anyhow::anyhow!("metal segment: {error:?}"))?;
                 collect_outputs(&evaluated, outputs)
             }
             #[cfg(not(all(feature = "metal", target_os = "macos")))]
-            Device::Metal(_) => bail!("the metal backend needs --features metal on macOS"),
+            Device::Metal(_) => {
+                let _ = runtime;
+                bail!("the metal backend needs --features metal on macOS")
+            }
         }
     }
 }
@@ -476,6 +494,7 @@ pub struct Model {
     config: Value,
     dir: PathBuf,
     device: Device,
+    settings: ServingSettings,
 }
 
 impl Model {
@@ -506,8 +525,29 @@ impl Model {
             config,
             dir: dir.to_path_buf(),
             device: Device::Cpu,
+            settings: ServingSettings::default(),
         }
     }
+
+    /// Replaces the serving settings every Metal stage lowers into its runtime.
+    #[must_use]
+    pub fn with_settings(mut self, settings: ServingSettings) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    fn runtime(&self, device: Device) -> Runtime {
+        let mut settings = self.settings.clone();
+        if let Device::Metal(policy) = device {
+            settings.gpu_layers = GPU_LAYERS_ALL;
+            settings.numeric_policy = policy;
+        }
+        BackendRuntime::new(&settings.as_serving_config(&[]))
+    }
+
+    #[cfg(not(all(feature = "metal", target_os = "macos")))]
+    fn runtime(&self, _device: Device) -> Runtime {}
 
     pub fn shape(&self) -> &Shape {
         &self.shape
@@ -531,6 +571,10 @@ impl Model {
             },
         )?;
 
+        let mut runtime = self.runtime(device);
+        // the runtime keys a segment plan on the program's address, so every
+        // decoder program stays alive here until the transcription ends
+        let mut kept_programs: Vec<Vec<Op>> = Vec::new();
         let padded = pad(wav)?;
         let front = front_end(&self.dir)?;
         if front.mels != self.shape.mels {
@@ -578,7 +622,7 @@ impl Model {
             .named
             .insert(STFT_SIN_INPUT.into(), decode(&tables.sin));
         let mel_start = std::time::Instant::now();
-        let mel_values = mel_bound.run(&[mel], &[], device)?.remove(0);
+        let mel_values = mel_bound.run(&[mel], &[], device, &mut runtime)?.remove(0);
         let mel = mel_start.elapsed();
         // The encoder consumes the first 2*source_positions frames.
         let needed = (self.shape.source_positions * 2) as usize;
@@ -628,7 +672,7 @@ impl Model {
             outputs.push(*v);
         }
         let encode_start = std::time::Instant::now();
-        let values = bound.run(&outputs, &[], device)?;
+        let values = bound.run(&outputs, &[], device, &mut runtime)?;
         let encode = encode_start.elapsed();
         let cross_values: Vec<(Vec<f32>, Vec<f32>)> = (0..self.shape.decoder_layers)
             .map(|layer| (values[1 + layer * 2].clone(), values[2 + layer * 2].clone()))
@@ -690,8 +734,9 @@ impl Model {
                 .named
                 .insert("positions".into(), (0..n).map(|i| i as f32).collect());
             let flat = decoder
-                .run(&[logits], &[u64::from(n), 0], device)?
+                .run(&[logits], &[u64::from(n), 0], device, &mut runtime)?
                 .remove(0);
+            kept_programs.push(decoder.program);
             let vocab = self.shape.vocab as usize;
             let last = &flat[(n as usize - 1) * vocab..n as usize * vocab];
             let mut row = last.to_vec();
@@ -791,7 +836,6 @@ mod tests {
     use proxima_numeric::NumericPolicy;
 
     use super::*;
-    use crate::serving_settings::ServingSettings;
 
     const BIT_EXACT_JSON: &str = r#"{"contraction":false,"reassociation":false,"nan_assumptions":false,"signed_zero":false,"approx_functions":false,"epilogue_sources":false}"#;
 
@@ -818,6 +862,7 @@ mod tests {
 
         let model = empty_model();
         assert_eq!(model.device, Device::Cpu);
+        assert_eq!(model.settings.numeric_policy, policy);
         let model = model.with_device(Device::Metal(policy));
 
         assert_eq!(model.device, Device::Metal(policy));
