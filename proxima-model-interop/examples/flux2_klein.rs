@@ -264,6 +264,110 @@ fn report_op_profile(timings: &[omega::metal::OpGpuTiming], program: &[proxima_t
     );
 }
 
+#[cfg(feature = "instrument")]
+fn is_gather(op: &proxima_tensor::op::Op) -> bool {
+    matches!(op, proxima_tensor::op::Op::Elementwise { operands, .. }
+        if operands.iter().any(|(_, map)| matches!(map, proxima_tensor::IndexMap::Computed { .. })))
+}
+
+#[cfg(feature = "instrument")]
+fn op_kind(op: &proxima_tensor::op::Op) -> String {
+    match op {
+        proxima_tensor::op::Op::Input { .. } => String::from("input"),
+        proxima_tensor::op::Op::Reduce(reduce) => format!("reduce:{:?}", reduce.body),
+        proxima_tensor::op::Op::Elementwise { .. } if is_gather(op) => String::from("gather"),
+        proxima_tensor::op::Op::Elementwise { body, .. } => format!("elementwise:{body:?}"),
+        _ => String::from("other"),
+    }
+}
+
+/// The step class of one timed node, from its builder step and its position in
+/// that step: a conv's three gathers are pad, taps and crop in program order.
+#[cfg(feature = "instrument")]
+fn step_class(program: &[proxima_tensor::op::Op], node: usize, step: &str, range: &core::ops::Range<usize>) -> &'static str {
+    use proxima_tensor::ScalarOp;
+    use proxima_tensor::op::Op;
+    let gather_ordinal = program[range.start..node].iter().filter(|op| is_gather(op)).count();
+    match (step.split(':').next().unwrap_or(""), &program[node]) {
+        ("conv", op) if is_gather(op) => ["pad-gather", "taps-gather", "crop-gather"].get(gather_ordinal).copied().unwrap_or("other"),
+        ("conv", Op::Elementwise { body: ScalarOp::Select, .. }) => "pad-select",
+        ("conv", Op::Elementwise { body: ScalarOp::Multiply, .. } | Op::Reduce(_)) => "conv product/reduce",
+        ("conv" | "pointwise", Op::Elementwise { body: ScalarOp::Add, .. }) => "bias add",
+        ("pointwise", Op::Elementwise { body: ScalarOp::Multiply, .. } | Op::Reduce(_)) => "pointwise product/reduce",
+        ("group_norm", _) => "group_norm",
+        ("silu", _) => "silu",
+        ("upsample", _) => "upsample",
+        ("attention", _) => "attention",
+        _ => "other",
+    }
+}
+
+/// MACs of a conv product/reduce node, `H*W*cout*cin*9`, from the builder step
+/// label `conv:<tensor>:<H>x<W>:<cin>-><cout>`; a pointwise reduce's own
+/// iteration extents are `rows*cout*cin`.
+#[cfg(feature = "instrument")]
+fn product_macs(step: &str, extents: &[u64]) -> u64 {
+    let mut parts = step.split(':');
+    if parts.next() != Some("conv") {
+        return extents.iter().product();
+    }
+    let (grid, channels) = (parts.nth(1).unwrap_or(""), parts.next().unwrap_or(""));
+    let numbers = |text: &str, separator: &str| -> Vec<u64> {
+        text.split(separator).filter_map(|value| value.parse().ok()).collect()
+    };
+    match (numbers(grid, "x").as_slice(), numbers(channels, "->").as_slice()) {
+        ([height, width], [cin, cout]) => height * width * cin * cout * 9,
+        _ => 0,
+    }
+}
+
+/// One row per timed op to `path` (node, op kind, `OpGpuTiming.kind`, extents,
+/// gpu_ns, weight_name, builder step, step class, macs), then the per-class
+/// table. Integer arithmetic only: ms and GMAC/s are tenths.
+#[cfg(feature = "instrument")]
+fn write_op_profile(
+    path: &Path,
+    timings: &[omega::metal::OpGpuTiming],
+    graph: &ModelGraph,
+) -> Result<(), String> {
+    let mut rows = String::from("node\top_kind\ttiming_kind\textents\tgpu_ns\tweight_name\tstep\tclass\tmacs\n");
+    let mut by_class: std::collections::BTreeMap<&'static str, (u64, u64, u64)> = Default::default();
+    for timing in timings {
+        let node = timing.node.0 as usize;
+        let (step, range) = graph
+            .steps()
+            .iter()
+            .find(|(_, range)| range.contains(&node))
+            .map_or(("?", 0..0), |(label, range)| (label.as_str(), range.clone()));
+        let class = if step == "?" { "other" } else { step_class(&graph.program, node, step, &range) };
+        let reduces = matches!(graph.program[node], proxima_tensor::op::Op::Reduce(_));
+        let macs = if reduces && class.ends_with("product/reduce") { product_macs(step, &timing.extents) } else { 0 };
+        let entry = by_class.entry(class).or_default();
+        entry.0 += 1;
+        entry.1 += timing.gpu_ns;
+        entry.2 += macs;
+        rows.push_str(&format!(
+            "{node}\t{}\t{}\t{:?}\t{}\t{}\t{step}\t{class}\t{macs}\n",
+            op_kind(&graph.program[node]),
+            timing.kind,
+            timing.extents,
+            timing.gpu_ns,
+            timing.weight_name.as_deref().unwrap_or("-"),
+        ));
+    }
+    std::fs::write(path, rows).map_err(|why| format!("{}: {why}", path.display()))?;
+    let total: u64 = timings.iter().map(|timing| timing.gpu_ns).sum();
+    for (class, (count, nanos, macs)) in &by_class {
+        eprintln!(
+            "vae_class class={class} ops={count} gpu_ns={nanos} share_permille={} macs={macs} gmac_per_s_x10={}",
+            1000 * nanos / total.max(1),
+            10 * macs / (*nanos).max(1),
+        );
+    }
+    eprintln!("vae_class timed_sum_ns={total} ops={}", timings.len());
+    Ok(())
+}
+
 fn dit_config() -> DitConfig {
     DitConfig {
         in_channels: 128,
@@ -433,6 +537,7 @@ fn run() -> Result<(), String> {
     let mut seed: u64 = 42;
     let mut latent_reference: Option<PathBuf> = None;
     let mut profile_stage: Option<String> = None;
+    let mut op_profile_path: Option<PathBuf> = None;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -452,6 +557,9 @@ fn run() -> Result<(), String> {
             "--profile" => {
                 profile_stage = Some(arguments.next().ok_or("--profile value")?)
             }
+            "--vae-op-profile" => {
+                op_profile_path = Some(PathBuf::from(arguments.next().ok_or("--vae-op-profile value")?))
+            }
             "--latent-reference" => {
                 latent_reference = Some(PathBuf::from(arguments.next().ok_or("--latent-reference value")?))
             }
@@ -459,9 +567,9 @@ fn run() -> Result<(), String> {
         }
     }
     #[cfg(not(feature = "instrument"))]
-    if profile_stage.is_some() {
+    if profile_stage.is_some() || op_profile_path.is_some() {
         return Err(String::from(
-            "--profile needs --features std,metal,instrument",
+            "--profile and --vae-op-profile need --features std,metal,instrument",
         ));
     }
     let started = Instant::now();
@@ -570,7 +678,7 @@ fn run() -> Result<(), String> {
     // `omega::backend`, the surface a serving caller uses.
     let vae_runtime = runtime();
     #[cfg(feature = "instrument")]
-    let profiled_plan = if profile_stage.as_deref() == Some("vae") {
+    let profiled_plan = if profile_stage.as_deref() == Some("vae") || op_profile_path.is_some() {
         Some(
             omega::metal::plan_named_with_config(
                 &vae_graph.program,
@@ -587,10 +695,19 @@ fn run() -> Result<(), String> {
     #[cfg(feature = "instrument")]
     if let Some(plan) = profiled_plan {
         eprintln!("vae profile plan {:.1}s", vae_plan.elapsed().as_secs_f64());
+        if op_profile_path.is_some() {
+            let warm_started = Instant::now();
+            omega::metal::execute_plan_named_op_timed(&plan, &vae_named, None)
+                .map_err(|why| format!("vae warm profile: {why}"))?;
+            eprintln!("vae warm decode: {:.2?} (discarded)", warm_started.elapsed());
+        }
         let decode_started = Instant::now();
         let (evaluated, timings) =
             omega::metal::execute_plan_named_op_timed(&plan, &vae_named, None)
                 .map_err(|why| format!("vae profile: {why}"))?;
+        if let Some(path) = &op_profile_path {
+            write_op_profile(path, &timings, &vae_graph)?;
+        }
         eprintln!(
             "vae profile decode: {:.2}s (one command buffer per op)",
             decode_started.elapsed().as_secs_f64()

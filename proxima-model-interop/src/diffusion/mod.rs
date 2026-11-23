@@ -6,10 +6,11 @@
 //! weight leaf records the checkpoint tensor it binds.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use proxima_numeric::DType;
-use proxima_tensor::op::{Extent, NodeId, Op};
 use proxima_tensor::QuantizedBlock;
+use proxima_tensor::op::{Extent, NodeId, Op};
 use proxima_tensor::spec::input_leaf;
 
 mod dit;
@@ -18,9 +19,7 @@ pub mod png;
 mod settings;
 mod vae;
 
-pub use dit::{
-    DitConfig, DitInputs, DitOutput, build_dit, build_double_block, build_single_block,
-};
+pub use dit::{DitConfig, DitInputs, DitOutput, build_dit, build_double_block, build_single_block};
 pub use load::{Checkpoint, WeightData, Weights, encode, load_weights};
 pub use png::{PngImage, read_png, write_png};
 pub use settings::DiffusionSettings;
@@ -62,6 +61,7 @@ pub struct Graph {
     pub hosts: Vec<HostLeaf>,
     host_nodes: BTreeMap<String, NodeId>,
     activation: DType,
+    steps: Vec<(String, Range<usize>)>,
 }
 
 impl Graph {
@@ -73,7 +73,20 @@ impl Graph {
             hosts: Vec::new(),
             host_nodes: BTreeMap::new(),
             activation,
+            steps: Vec::new(),
         }
+    }
+
+    /// Each builder call in order, with the `program` index range it appended
+    /// (leaf `Input`s included). A profiler reads this to name the builder step
+    /// behind a timed node.
+    #[must_use]
+    pub fn steps(&self) -> &[(String, Range<usize>)] {
+        &self.steps
+    }
+
+    fn record_step(&mut self, label: String, start: usize) {
+        self.steps.push((label, start..self.program.len()));
     }
 
     #[must_use]

@@ -2,13 +2,13 @@
 //! convolutions, 32-group normalisation, nearest-x2 upsampling and one
 //! single-head non-causal attention at the latent resolution.
 
+use proxima_tensor::TensorError;
 use proxima_tensor::op::NodeId;
 use proxima_tensor::spec::{
     conv3x3_crop_index, conv3x3_pad_index, conv3x3_pad_mask, conv3x3_pad_rows, conv3x3_same,
     conv3x3_same_three, conv3x3_taps_index, group_norm, nearest_upsample_x2,
     non_causal_attention_heads, scalar_constant_like, silu, unit_constant, upsample_x2_index,
 };
-use proxima_tensor::TensorError;
 
 use super::Graph;
 
@@ -83,22 +83,28 @@ fn norm(
     groups: u32,
     rows: u32,
 ) -> Result<NodeId, TensorError> {
+    let start = graph.program.len();
     let group_width = channels / groups;
     let weight = graph.weight(&format!("{tensor}.weight"), &[groups, group_width], None);
     let bias = graph.weight(&format!("{tensor}.bias"), &[groups, group_width], None);
-    group_norm(
+    let normed = group_norm(
         &mut graph.program,
         x,
         weight,
         bias,
         rows * group_width,
         GROUP_EPS,
-    )
+    )?;
+    graph.record_step(format!("group_norm:{tensor}"), start);
+    Ok(normed)
 }
 
 fn activated(graph: &mut Graph, x: NodeId) -> Result<NodeId, TensorError> {
+    let start = graph.program.len();
     let one = scalar_constant_like(&mut graph.program, 1.0, x)?;
-    silu(&mut graph.program, x, one, "rgc->rgc")
+    let activated = silu(&mut graph.program, x, one, "rgc->rgc")?;
+    graph.record_step(String::from("silu"), start);
+    Ok(activated)
 }
 
 /// One 3x3 "same" convolution: the weight is the checkpoint's
@@ -116,7 +122,13 @@ fn conv(
     out_groups: u32,
     tap_form: ConvTaps,
 ) -> Result<NodeId, TensorError> {
-    let weight_shape = [out_groups, out_channels / out_groups, in_groups, in_channels / in_groups];
+    let start = graph.program.len();
+    let weight_shape = [
+        out_groups,
+        out_channels / out_groups,
+        in_groups,
+        in_channels / in_groups,
+    ];
     let bias = graph.weight(
         &format!("{tensor}.bias"),
         &[out_groups, out_channels / out_groups],
@@ -192,12 +204,17 @@ fn conv(
         }
     };
     let program = &mut graph.program;
-    proxima_tensor::spec::elementwise_like(
+    let biased = proxima_tensor::spec::elementwise_like(
         program,
         convolved,
         proxima_tensor::ScalarOp::Add,
         &[(convolved, "rgc->rgc"), (bias, "gc->rgc")],
-    )
+    )?;
+    graph.record_step(
+        format!("conv:{tensor}:{height}x{width}:{in_channels}->{out_channels}"),
+        start,
+    );
+    Ok(biased)
 }
 
 /// One `1x1` convolution: a channel linear over the token axis.
@@ -209,12 +226,17 @@ fn pointwise(
     out_channels: u32,
     groups: u32,
 ) -> Result<NodeId, TensorError> {
+    let start = graph.program.len();
     let weight = graph.weight(
         &format!("{tensor}.weight"),
         &[groups, out_channels / groups, groups, in_channels / groups],
         None,
     );
-    let bias = graph.weight(&format!("{tensor}.bias"), &[groups, out_channels / groups], None);
+    let bias = graph.weight(
+        &format!("{tensor}.bias"),
+        &[groups, out_channels / groups],
+        None,
+    );
     let program = &mut graph.program;
     let product = proxima_tensor::spec::elementwise_like(
         program,
@@ -230,12 +252,17 @@ fn pointwise(
         "rgcij->rgcij",
         "rgc->rgcij",
     )?;
-    proxima_tensor::spec::elementwise_like(
+    let biased = proxima_tensor::spec::elementwise_like(
         program,
         projected,
         proxima_tensor::ScalarOp::Add,
         &[(projected, "rgc->rgc"), (bias, "gc->rgc")],
-    )
+    )?;
+    graph.record_step(
+        format!("pointwise:{tensor}:{in_channels}->{out_channels}"),
+        start,
+    );
+    Ok(biased)
 }
 
 /// One 3x3 "same" convolution as a program fragment, for a caller that composes
@@ -287,7 +314,14 @@ fn resnet(
     config: &VaeConfig,
 ) -> Result<NodeId, TensorError> {
     let rows = height * width;
-    let first = norm(graph, x, &format!("{prefix}.norm1"), in_channels, config.groups, rows)?;
+    let first = norm(
+        graph,
+        x,
+        &format!("{prefix}.norm1"),
+        in_channels,
+        config.groups,
+        rows,
+    )?;
     let first = activated(graph, first)?;
     let first = conv(
         graph,
@@ -301,7 +335,14 @@ fn resnet(
         config.groups,
         config.conv_taps,
     )?;
-    let second = norm(graph, first, &format!("{prefix}.norm2"), out_channels, config.groups, rows)?;
+    let second = norm(
+        graph,
+        first,
+        &format!("{prefix}.norm2"),
+        out_channels,
+        config.groups,
+        rows,
+    )?;
     let second = activated(graph, second)?;
     let second = conv(
         graph,
@@ -327,13 +368,16 @@ fn resnet(
             config.groups,
         )?
     };
+    let start = graph.program.len();
     let program = &mut graph.program;
-    proxima_tensor::spec::elementwise_like(
+    let summed = proxima_tensor::spec::elementwise_like(
         program,
         second,
         proxima_tensor::ScalarOp::Add,
         &[(second, "rgc->rgc"), (residual, "rgc->rgc")],
-    )
+    )?;
+    graph.record_step(format!("resnet_add:{prefix}"), start);
+    Ok(summed)
 }
 
 fn upsample(
@@ -346,12 +390,14 @@ fn upsample(
     config: &VaeConfig,
     trace: &mut Vec<(&'static str, NodeId)>,
 ) -> Result<NodeId, TensorError> {
+    let start = graph.program.len();
     let index = graph.index_leaf(
         &format!("upsample.{height}x{width}.index"),
         upsample_x2_index(height, width),
     );
     let program = &mut graph.program;
     let grown = nearest_upsample_x2(program, x, index)?;
+    graph.record_step(format!("upsample:{prefix}"), start);
     trace.push(("upsample", grown));
     conv(
         graph,
@@ -376,12 +422,45 @@ fn attention(
     rows: u32,
     config: &VaeConfig,
 ) -> Result<NodeId, TensorError> {
-    let normed = norm(graph, x, &format!("{prefix}.norm"), channels, config.groups, rows)?;
-    let q = pointwise(graph, normed, &format!("{prefix}.q"), channels, channels, config.groups)?;
-    let k = pointwise(graph, normed, &format!("{prefix}.k"), channels, channels, config.groups)?;
-    let v = pointwise(graph, normed, &format!("{prefix}.v"), channels, channels, config.groups)?;
+    let normed = norm(
+        graph,
+        x,
+        &format!("{prefix}.norm"),
+        channels,
+        config.groups,
+        rows,
+    )?;
+    let q = pointwise(
+        graph,
+        normed,
+        &format!("{prefix}.q"),
+        channels,
+        channels,
+        config.groups,
+    )?;
+    let k = pointwise(
+        graph,
+        normed,
+        &format!("{prefix}.k"),
+        channels,
+        channels,
+        config.groups,
+    )?;
+    let v = pointwise(
+        graph,
+        normed,
+        &format!("{prefix}.v"),
+        channels,
+        channels,
+        config.groups,
+    )?;
+    let start = graph.program.len();
     let activation = graph.activation();
-    let inv_sqrt = unit_constant(&mut graph.program, 1.0 / (channels as f32).sqrt(), activation);
+    let inv_sqrt = unit_constant(
+        &mut graph.program,
+        1.0 / (channels as f32).sqrt(),
+        activation,
+    );
     let half = config.groups / 2;
     let q_even = group_range(graph, q, 0, half)?;
     let q_odd = group_range(graph, q, half, half)?;
@@ -399,6 +478,7 @@ fn attention(
         "gc",
         "gc",
     )?;
+    graph.record_step(format!("attention:{prefix}:core"), start);
     let projected = pointwise(
         graph,
         attended,
@@ -407,12 +487,15 @@ fn attention(
         channels,
         config.groups,
     )?;
-    proxima_tensor::spec::elementwise_like(
+    let start = graph.program.len();
+    let summed = proxima_tensor::spec::elementwise_like(
         &mut graph.program,
         projected,
         proxima_tensor::ScalarOp::Add,
         &[(projected, "rgc->rgc"), (x, "rgc->rgc")],
-    )
+    )?;
+    graph.record_step(format!("attention:{prefix}:residual"), start);
+    Ok(summed)
 }
 
 /// The decoder's output plus the node of every stage a parity check reads.
@@ -465,18 +548,43 @@ pub fn build_vae_decode(
     )?;
     trace.push(("conv_in", hidden));
     let rows = height * width;
-    hidden = resnet(graph, hidden, "decoder.mid.block_1", first, first, height, width, config)?;
+    hidden = resnet(
+        graph,
+        hidden,
+        "decoder.mid.block_1",
+        first,
+        first,
+        height,
+        width,
+        config,
+    )?;
     trace.push(("mid1", hidden));
     hidden = attention(graph, hidden, "decoder.mid.attn_1", first, rows, config)?;
     trace.push(("attn", hidden));
-    hidden = resnet(graph, hidden, "decoder.mid.block_2", first, first, height, width, config)?;
+    hidden = resnet(
+        graph,
+        hidden,
+        "decoder.mid.block_2",
+        first,
+        first,
+        height,
+        width,
+        config,
+    )?;
     trace.push(("mid2", hidden));
     for level in (0..4).rev() {
         let out_channels = config.block_channels[level];
         for layer in 0..=config.layers_per_block {
             let prefix = format!("decoder.up.{level}.block.{layer}");
             hidden = resnet(
-                graph, hidden, &prefix, channels, out_channels, height, width, config,
+                graph,
+                hidden,
+                &prefix,
+                channels,
+                out_channels,
+                height,
+                width,
+                config,
             )?;
             channels = out_channels;
         }
@@ -514,7 +622,14 @@ pub fn build_vae_decode(
         }
     }
     let rows = height * width;
-    let normed = norm(graph, hidden, "decoder.norm_out", channels, config.groups, rows)?;
+    let normed = norm(
+        graph,
+        hidden,
+        "decoder.norm_out",
+        channels,
+        config.groups,
+        rows,
+    )?;
     trace.push(("norm_out", normed));
     let normed = activated(graph, normed)?;
     let image = conv(
@@ -537,7 +652,11 @@ pub fn build_vae_decode(
 /// `sqrt(running_var + eps)` of each latent channel, both from the VAE's own
 /// batch-norm buffers.
 #[must_use]
-pub fn latent_statistics(running_mean: &[f32], running_var: &[f32], eps: f32) -> (Vec<f32>, Vec<f32>) {
+pub fn latent_statistics(
+    running_mean: &[f32],
+    running_var: &[f32],
+    eps: f32,
+) -> (Vec<f32>, Vec<f32>) {
     let deviation = running_var
         .iter()
         .map(|variance| (variance + eps).sqrt())
