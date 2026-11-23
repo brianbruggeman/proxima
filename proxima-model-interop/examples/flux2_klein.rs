@@ -284,11 +284,14 @@ fn op_kind(op: &proxima_tensor::op::Op) -> String {
 /// The step class of one timed node, from its builder step and its position in
 /// that step: a conv's three gathers are pad, taps and crop in program order.
 #[cfg(feature = "instrument")]
-fn step_class(program: &[proxima_tensor::op::Op], node: usize, step: &str, range: &core::ops::Range<usize>) -> &'static str {
+fn step_class(program: &[proxima_tensor::op::Op], node: usize, step: &str, range: &core::ops::Range<usize>, timing_kind: &str) -> &'static str {
     use proxima_tensor::ScalarOp;
     use proxima_tensor::op::Op;
     let gather_ordinal = program[range.start..node].iter().filter(|op| is_gather(op)).count();
     match (step.split(':').next().unwrap_or(""), &program[node]) {
+        // a gemm fused into its bias epilogue is timed at the Add node
+        ("pointwise", _) if timing_kind.starts_with("reduce") => "pointwise product/reduce",
+        ("resnet_add", _) => "bias add",
         ("conv", op) if is_gather(op) => ["pad-gather", "taps-gather", "crop-gather"].get(gather_ordinal).copied().unwrap_or("other"),
         ("conv", Op::Elementwise { body: ScalarOp::Select, .. }) => "pad-select",
         ("conv", Op::Elementwise { body: ScalarOp::Multiply, .. } | Op::Reduce(_)) => "conv product/reduce",
@@ -339,9 +342,8 @@ fn write_op_profile(
             .iter()
             .find(|(_, range)| range.contains(&node))
             .map_or(("?", 0..0), |(label, range)| (label.as_str(), range.clone()));
-        let class = if step == "?" { "other" } else { step_class(&graph.program, node, step, &range) };
-        let reduces = matches!(graph.program[node], proxima_tensor::op::Op::Reduce(_));
-        let macs = if reduces && class.ends_with("product/reduce") { product_macs(step, &timing.extents) } else { 0 };
+        let class = if step == "?" { "other" } else { step_class(&graph.program, node, step, &range, timing.kind) };
+        let macs = if timing.kind.starts_with("reduce") && class.ends_with("product/reduce") { product_macs(step, &timing.extents) } else { 0 };
         let entry = by_class.entry(class).or_default();
         entry.0 += 1;
         entry.1 += timing.gpu_ns;
