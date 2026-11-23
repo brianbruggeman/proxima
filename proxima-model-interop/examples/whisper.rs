@@ -9,18 +9,16 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use conflaguration::Settings;
-use proxima_model_interop::ServingSettings;
 use proxima_model_interop::audio::wav;
-use proxima_model_interop::families::encoder_decoder_host::{Device, Model};
+use proxima_model_interop::families::encoder_decoder_host::Model;
+use proxima_model_interop::{GPU_LAYERS_ALL, ServingSettings};
 
 fn main() -> Result<()> {
     let mut wav_path: Option<PathBuf> = None;
     let mut model_path: Option<PathBuf> = None;
     let mut language = String::from("en");
     let mut noise = 0.0_f32;
-    let mut device = Device::Cpu;
-    let settings =
-        <ServingSettings as Settings>::from_env().context("serving settings from env")?;
+    let mut device = "cpu";
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -29,8 +27,8 @@ fn main() -> Result<()> {
             "--lang" => language = args.next().context("--lang wants a name")?,
             "--device" => {
                 device = match args.next().context("--device wants cpu|metal")?.as_str() {
-                    "cpu" => Device::Cpu,
-                    "metal" => Device::Metal(settings.numeric_policy),
+                    "cpu" => "cpu",
+                    "metal" => "metal",
                     other => bail!("unknown device {other}"),
                 }
             }
@@ -66,13 +64,14 @@ fn main() -> Result<()> {
     }
 
     let load_start = std::time::Instant::now();
-    let model = Model::load(&model_path)?
-        .with_settings(settings)
-        .with_device(device);
+    let mut settings =
+        <ServingSettings as Settings>::from_env().context("serving settings from env")?;
+    settings.gpu_layers = if device == "metal" { GPU_LAYERS_ALL } else { 0 };
+    let model = Model::load(&model_path)?.with_settings(settings);
     let load = load_start.elapsed();
     let transcript = model.transcribe(&samples, &language)?;
     let ids: Vec<String> = transcript.tokens.iter().map(ToString::to_string).collect();
-    println!("models=1 ids={} noise={noise} device={device:?}", ids.len());
+    println!("models=1 ids={} noise={noise} device={device}", ids.len());
     println!("ids={}", ids.join(","));
     println!("eot={}", transcript.ended_on_eot);
     println!(

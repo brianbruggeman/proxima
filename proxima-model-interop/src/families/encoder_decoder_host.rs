@@ -28,8 +28,7 @@ use crate::families::encoder_decoder::{
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use crate::generate::BackendRuntime;
 use crate::hf_bind::safetensors_tensor_as_packed_block;
-#[cfg(all(feature = "metal", target_os = "macos"))]
-use crate::serving::GPU_LAYERS_ALL;
+use crate::serving::{ServingConfig, apply_serving_config};
 use crate::serving_settings::ServingSettings;
 
 /// The dimensions a checkpoint states, read from its `config.json`.
@@ -184,7 +183,17 @@ impl Tensors {
 #[cfg(all(feature = "metal", target_os = "macos"))]
 type Runtime = BackendRuntime;
 #[cfg(not(all(feature = "metal", target_os = "macos")))]
-type Runtime = ();
+struct Runtime;
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn open_runtime(config: &ServingConfig<'_>) -> Runtime {
+    BackendRuntime::new(config)
+}
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+fn open_runtime(_config: &ServingConfig<'_>) -> Runtime {
+    Runtime
+}
 
 struct Bound<'a> {
     program: Vec<Op>,
@@ -419,7 +428,6 @@ impl<'a> Bound<'a> {
         &self,
         outputs: &[NodeId],
         symbols: &[u64],
-        device: Device,
         runtime: &mut Runtime,
     ) -> Result<Vec<Vec<f32>>> {
         let named: Vec<(&str, QuantizedBlock<'_>)> = self
@@ -432,28 +440,19 @@ impl<'a> Bound<'a> {
                     .map(|(name, block)| (name.as_str(), *block)),
             )
             .collect();
-        match device {
-            Device::Cpu => {
-                let evaluated =
-                    evaluate_quantized_named(&self.program, symbols, &named, outputs)
-                        .map_err(|error| anyhow::anyhow!("program does not evaluate: {error:?}"))?;
-                collect_outputs(&evaluated, outputs)
-            }
-            #[cfg(all(feature = "metal", target_os = "macos"))]
-            Device::Metal(_) => {
-                let resident: BTreeSet<&str> =
-                    self.blocks.iter().map(|(name, _)| name.as_str()).collect();
-                let evaluated = runtime
-                    .evaluate_segment(&self.program, symbols, &named, outputs, &resident, None)
-                    .map_err(|error| anyhow::anyhow!("metal segment: {error:?}"))?;
-                collect_outputs(&evaluated, outputs)
-            }
-            #[cfg(not(all(feature = "metal", target_os = "macos")))]
-            Device::Metal(_) => {
-                let _ = runtime;
-                bail!("the metal backend needs --features metal on macOS")
-            }
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if runtime.is_metal() {
+            let resident: BTreeSet<&str> =
+                self.blocks.iter().map(|(name, _)| name.as_str()).collect();
+            let evaluated = runtime
+                .evaluate_segment(&self.program, symbols, &named, outputs, &resident, None)
+                .map_err(|error| anyhow::anyhow!("metal segment: {error:?}"))?;
+            return collect_outputs(&evaluated, outputs);
         }
+        let _ = runtime;
+        let evaluated = evaluate_quantized_named(&self.program, symbols, &named, outputs)
+            .map_err(|error| anyhow::anyhow!("program does not evaluate: {error:?}"))?;
+        collect_outputs(&evaluated, outputs)
     }
 }
 
@@ -467,13 +466,6 @@ fn collect_outputs(evaluated: &Evaluated, outputs: &[NodeId]) -> Result<Vec<Vec<
                 .with_context(|| format!("evaluated program has no output for node {node:?}"))
         })
         .collect()
-}
-
-/// Which backend executes a stage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Device {
-    Cpu,
-    Metal(proxima_numeric::NumericPolicy),
 }
 
 /// One transcription and the values the caller can check.
@@ -493,7 +485,6 @@ pub struct Model {
     generation: Value,
     config: Value,
     dir: PathBuf,
-    device: Device,
     settings: ServingSettings,
 }
 
@@ -524,7 +515,6 @@ impl Model {
             generation,
             config,
             dir: dir.to_path_buf(),
-            device: Device::Cpu,
             settings: ServingSettings::default(),
         }
     }
@@ -536,32 +526,23 @@ impl Model {
         self
     }
 
-    #[cfg(all(feature = "metal", target_os = "macos"))]
-    fn runtime(&self, device: Device) -> Runtime {
-        let mut settings = self.settings.clone();
-        if let Device::Metal(policy) = device {
-            settings.gpu_layers = GPU_LAYERS_ALL;
-            settings.numeric_policy = policy;
-        }
-        BackendRuntime::new(&settings.as_serving_config(&[]))
+    fn runtime(&self) -> Result<Runtime> {
+        let config = self.settings.as_serving_config(&[]);
+        apply_serving_config(&config, 0)
+            .map_err(|error| anyhow::anyhow!("serving settings are not admitted: {error:?}"))?;
+        Ok(open_runtime(&config))
     }
-
-    #[cfg(not(all(feature = "metal", target_os = "macos")))]
-    fn runtime(&self, _device: Device) -> Runtime {}
 
     pub fn shape(&self) -> &Shape {
         &self.shape
     }
 
-    /// Runs every stage on `device`; a Metal device carries the run's numeric policy.
-    #[must_use]
-    pub const fn with_device(mut self, device: Device) -> Self {
-        self.device = device;
-        self
+    /// Transcribes on the device the serving settings select: `gpu_layers` of `GPU_LAYERS_ALL` runs the stages on Metal.
+    pub fn transcribe(&self, wav: &[f32], language: &str) -> Result<Transcript> {
+        self.transcribe_with(wav, language)
     }
 
-    pub fn transcribe(&self, wav: &[f32], language: &str) -> Result<Transcript> {
-        let device = self.device;
+    pub fn transcribe_with(&self, wav: &[f32], language: &str) -> Result<Transcript> {
         let policy = DecodePolicy::from_checkpoint(
             &self.generation,
             &self.config,
@@ -571,7 +552,7 @@ impl Model {
             },
         )?;
 
-        let mut runtime = self.runtime(device);
+        let mut runtime = self.runtime()?;
         // the runtime keys a segment plan on the program's address, so every
         // decoder program stays alive here until the transcription ends
         let mut kept_programs: Vec<Vec<Op>> = Vec::new();
@@ -622,7 +603,7 @@ impl Model {
             .named
             .insert(STFT_SIN_INPUT.into(), decode(&tables.sin));
         let mel_start = std::time::Instant::now();
-        let mel_values = mel_bound.run(&[mel], &[], device, &mut runtime)?.remove(0);
+        let mel_values = mel_bound.run(&[mel], &[], &mut runtime)?.remove(0);
         let mel = mel_start.elapsed();
         // The encoder consumes the first 2*source_positions frames.
         let needed = (self.shape.source_positions * 2) as usize;
@@ -672,7 +653,7 @@ impl Model {
             outputs.push(*v);
         }
         let encode_start = std::time::Instant::now();
-        let values = bound.run(&outputs, &[], device, &mut runtime)?;
+        let values = bound.run(&outputs, &[], &mut runtime)?;
         let encode = encode_start.elapsed();
         let cross_values: Vec<(Vec<f32>, Vec<f32>)> = (0..self.shape.decoder_layers)
             .map(|layer| (values[1 + layer * 2].clone(), values[2 + layer * 2].clone()))
@@ -734,7 +715,7 @@ impl Model {
                 .named
                 .insert("positions".into(), (0..n).map(|i| i as f32).collect());
             let flat = decoder
-                .run(&[logits], &[u64::from(n), 0], device, &mut runtime)?
+                .run(&[logits], &[u64::from(n), 0], &mut runtime)?
                 .remove(0);
             kept_programs.push(decoder.program);
             let vocab = self.shape.vocab as usize;
@@ -857,15 +838,39 @@ mod tests {
     }
 
     #[test]
-    fn metal_device_carries_the_serving_settings_policy() {
-        let policy = ServingSettings::default().numeric_policy;
-
+    fn model_defaults_to_the_serving_settings_policy() {
         let model = empty_model();
-        assert_eq!(model.device, Device::Cpu);
-        assert_eq!(model.settings.numeric_policy, policy);
-        let model = model.with_device(Device::Metal(policy));
 
-        assert_eq!(model.device, Device::Metal(policy));
+        assert_eq!(
+            model.settings.numeric_policy,
+            ServingSettings::default().numeric_policy
+        );
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn runtime_is_metal_exactly_when_settings_offload_every_layer() {
+        let cpu = empty_model();
+        let metal = empty_model().with_settings(ServingSettings {
+            gpu_layers: crate::serving::GPU_LAYERS_ALL,
+            ..ServingSettings::default()
+        });
+
+        assert!(!cpu.runtime().expect("cpu settings are admitted").is_metal());
+        assert!(metal.runtime().expect("metal settings are admitted").is_metal());
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn every_layer_offload_is_refused_without_a_gpu_build() {
+        let model = empty_model().with_settings(ServingSettings {
+            gpu_layers: crate::serving::GPU_LAYERS_ALL,
+            ..ServingSettings::default()
+        });
+
+        let refusal = model.runtime().err().expect("a build without a gpu backend refuses -ngl all");
+
+        assert!(format!("{refusal}").contains("no GPU backend"), "{refusal}");
     }
 
     #[test]
