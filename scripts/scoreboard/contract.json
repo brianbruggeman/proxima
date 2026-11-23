@@ -73,7 +73,7 @@
       "stages": ["load", "prefill", "decode"],
       "temps": ["cold", "warm"],
       "required": [
-        {"path": "prompt_tokens", "type": "number"},
+        {"path": "prompt_tokens", "type": "number", "unreportable": true},
         {"path": "generated_tokens", "type": "number"},
         {"path": "timings.ttft_us", "type": "number", "unreportable": true},
         {"path": "timings.ttlt_us", "type": "number"},
@@ -87,7 +87,7 @@
       "stages": ["load", "mel", "encode", "decode"],
       "temps": ["cold", "warm"],
       "required": [
-        {"path": "prompt_tokens", "type": "number"},
+        {"path": "prompt_tokens", "type": "number", "unreportable": true},
         {"path": "generated_tokens", "type": "number"},
         {"path": "input.duration_us", "type": "number"},
         {"path": "timings.ttft_us", "type": "number", "unreportable": true},

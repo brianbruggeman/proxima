@@ -13,7 +13,7 @@ SCRATCH="${SCRATCH:-$HOME/.cache/kvgate/proxnum684/test}"
 BASE="$FIX/whisper_metal.jsonl"
 PASSED=0
 FAILED=0
-EXPECTED=34
+EXPECTED=36
 
 mkdir -p "$SCRATCH"
 rm -f "$SCRATCH"/*
@@ -101,6 +101,13 @@ derive non_streaming 'map(if .arm == "whisper.cpp" and .repeat == 1 then .timing
 validate_passes "incumbent-non-streaming is accepted" "$SCRATCH/non_streaming.jsonl"
 check_eq "unreported carried into summary" '{"unreported":"incumbent-non-streaming","unit":"us"}' "$(metric_of "$SCRATCH/non_streaming.jsonl" '.backends.metal.arms.incumbent.metrics.ttft_us_warm')"
 check_eq "derived metric follows unreported" '"incumbent-non-streaming"' "$(metric_of "$SCRATCH/non_streaming.jsonl" '.backends.metal.arms.incumbent.metrics.decode_tok_s_warm.unreported')"
+
+# whisper-cli and whisper-server never print prompt tokens
+derive incumbent_no_prompt_tokens 'map(if .arm == "whisper.cpp" then .prompt_tokens = {unreported: "incumbent-does-not-report"} else . end)'
+validate_passes "incumbent may leave prompt_tokens unreported" "$SCRATCH/incumbent_no_prompt_tokens.jsonl"
+
+derive proxima_no_prompt_tokens 'map(if .index == 8 then .prompt_tokens = {unreported: "incumbent-does-not-report"} else . end)'
+validate_fails_with "proxima arm cannot leave prompt_tokens unreported" "$SCRATCH/proxima_no_prompt_tokens.jsonl" 'run 8 field prompt_tokens: unreported is not allowed here'
 
 # empty sets fail closed with a message
 : > "$SCRATCH/empty.jsonl"
