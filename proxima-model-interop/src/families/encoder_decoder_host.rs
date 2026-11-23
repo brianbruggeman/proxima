@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use proxima_numeric::decode_blocks;
@@ -476,6 +477,34 @@ pub struct Transcript {
     pub mel: std::time::Duration,
     pub encode: std::time::Duration,
     pub decode: std::time::Duration,
+    pub prompt_tokens: usize,
+    /// transcription start to the end of the decode step that picked the first generated token
+    pub first_token: Duration,
+    /// transcription start to the end of the last decode step
+    pub last_token: Duration,
+    /// one entry per decode step, each from the step's start to its token pick
+    pub step_times: Vec<Duration>,
+    /// bytes Metal had allocated when the transcription ended; `None` off Metal
+    pub gpu_allocated_bytes: Option<u64>,
+    /// largest allocation sampled after each stage and each decode step; `None` off Metal
+    pub gpu_allocated_peak_bytes: Option<u64>,
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn gpu_allocated(runtime: &Runtime) -> Option<u64> {
+    runtime
+        .is_metal()
+        .then(omega::metal::current_allocated_size)
+        .flatten()
+}
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+fn gpu_allocated(_runtime: &Runtime) -> Option<u64> {
+    None
+}
+
+fn sample_peak(peak: &mut Option<u64>, runtime: &Runtime) {
+    *peak = (*peak).max(gpu_allocated(runtime));
 }
 
 /// A loaded checkpoint ready to transcribe.
@@ -543,6 +572,7 @@ impl Model {
     }
 
     pub fn transcribe_with(&self, wav: &[f32], language: &str) -> Result<Transcript> {
+        let start = Instant::now();
         let policy = DecodePolicy::from_checkpoint(
             &self.generation,
             &self.config,
@@ -553,6 +583,7 @@ impl Model {
         )?;
 
         let mut runtime = self.runtime()?;
+        let mut gpu_peak = None;
         // the runtime keys a segment plan on the program's address, so every
         // decoder program stays alive here until the transcription ends
         let mut kept_programs: Vec<Vec<Op>> = Vec::new();
@@ -605,6 +636,7 @@ impl Model {
         let mel_start = std::time::Instant::now();
         let mel_values = mel_bound.run(&[mel], &[], &mut runtime)?.remove(0);
         let mel = mel_start.elapsed();
+        sample_peak(&mut gpu_peak, &runtime);
         // The encoder consumes the first 2*source_positions frames.
         let needed = (self.shape.source_positions * 2) as usize;
         let mut mel_input = vec![0.0; (self.shape.mels as usize) * needed];
@@ -655,14 +687,19 @@ impl Model {
         let encode_start = std::time::Instant::now();
         let values = bound.run(&outputs, &[], &mut runtime)?;
         let encode = encode_start.elapsed();
+        sample_peak(&mut gpu_peak, &runtime);
         let cross_values: Vec<(Vec<f32>, Vec<f32>)> = (0..self.shape.decoder_layers)
             .map(|layer| (values[1 + layer * 2].clone(), values[2 + layer * 2].clone()))
             .collect();
 
         let mut tokens: Vec<u32> = policy.prompt().to_vec();
         let mut ended = false;
-        let decode_start = std::time::Instant::now();
+        let mut step_times = Vec::new();
+        let mut first_token = Duration::ZERO;
+        let mut last_token = Duration::ZERO;
+        let decode_start = Instant::now();
         for step in 0..policy.step_cap() as usize {
+            let step_start = Instant::now();
             let mut decoder = Bound::new(self.shape.clone());
             let n = tokens.len() as u32;
             let token_leaf = decoder.symbolic_leaf("tokens");
@@ -723,6 +760,12 @@ impl Model {
             let mut row = last.to_vec();
             let chosen = policy.pick(&mut row, step)?;
             tokens.push(chosen);
+            sample_peak(&mut gpu_peak, &runtime);
+            step_times.push(step_start.elapsed());
+            last_token = start.elapsed();
+            if step == 0 {
+                first_token = last_token;
+            }
             if chosen == policy.end_token() {
                 ended = true;
                 break;
@@ -738,6 +781,12 @@ impl Model {
             mel,
             encode,
             decode,
+            prompt_tokens: policy.prompt().len(),
+            first_token,
+            last_token,
+            step_times,
+            gpu_allocated_bytes: gpu_allocated(&runtime),
+            gpu_allocated_peak_bytes: gpu_peak,
         })
     }
 }
@@ -850,7 +899,10 @@ mod tests {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     #[test]
     fn runtime_is_metal_exactly_when_settings_offload_every_layer() {
-        let cpu = empty_model();
+        let cpu = empty_model().with_settings(ServingSettings {
+            gpu_layers: 0,
+            ..ServingSettings::default()
+        });
         let metal = empty_model().with_settings(ServingSettings {
             gpu_layers: crate::serving::GPU_LAYERS_ALL,
             ..ServingSettings::default()

@@ -6,6 +6,7 @@
 //! the oracle: the reference ids are the caller's comparison, not an input.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use conflaguration::Settings;
@@ -14,6 +15,8 @@ use proxima_model_interop::families::encoder_decoder_host::Model;
 use proxima_model_interop::{GPU_LAYERS_ALL, ServingSettings};
 
 fn main() -> Result<()> {
+    let process_start = Instant::now();
+    let mut repeats = 1_usize;
     let mut wav_path: Option<PathBuf> = None;
     let mut model_path: Option<PathBuf> = None;
     let mut language = String::from("en");
@@ -31,6 +34,13 @@ fn main() -> Result<()> {
                     "metal" => "metal",
                     other => bail!("unknown device {other}"),
                 }
+            }
+            "--repeat" => {
+                repeats = args
+                    .next()
+                    .context("--repeat wants a count")?
+                    .parse()
+                    .context("--repeat is a count")?
             }
             "--noise" => {
                 noise = args
@@ -69,18 +79,50 @@ fn main() -> Result<()> {
     settings.gpu_layers = if device == "metal" { GPU_LAYERS_ALL } else { 0 };
     let model = Model::load(&model_path)?.with_settings(settings);
     let load = load_start.elapsed();
-    let transcript = model.transcribe(&samples, &language)?;
-    let ids: Vec<String> = transcript.tokens.iter().map(ToString::to_string).collect();
-    println!("models=1 ids={} noise={noise} device={device}", ids.len());
-    println!("ids={}", ids.join(","));
-    println!("eot={}", transcript.ended_on_eot);
-    println!(
-        "load={load:?} mel={:?} encode={:?} decode={:?} decode_per_token={:?}",
-        transcript.mel,
-        transcript.encode,
-        transcript.decode,
-        transcript.decode.checked_div(transcript.tokens.len().try_into()?).unwrap_or_default(),
-    );
-    println!("text={}", transcript.text);
+    println!("models=1 noise={noise} device={device}");
+    for repeat in 0..repeats {
+        let begin = Instant::now();
+        let transcript = model.transcribe(&samples, &language)?;
+        let cold_offset = if repeat == 0 {
+            begin.duration_since(process_start)
+        } else {
+            Duration::ZERO
+        };
+        let ids: Vec<String> = transcript.tokens.iter().map(ToString::to_string).collect();
+        println!("ids={}", ids.join(","));
+        println!("eot={}", transcript.ended_on_eot);
+        let steps: Vec<String> = transcript
+            .step_times
+            .iter()
+            .map(|step| step.as_micros().to_string())
+            .collect();
+        print!(
+            "repeat={repeat} load_us={} mel_us={} encode_us={} decode_us={} decode_us_per_token={} ttft_us={} ttlt_us={} step_us={}",
+            load.as_micros(),
+            transcript.mel.as_micros(),
+            transcript.encode.as_micros(),
+            transcript.decode.as_micros(),
+            transcript
+                .decode
+                .checked_div(transcript.tokens.len().try_into()?)
+                .unwrap_or_default()
+                .as_micros(),
+            (cold_offset + transcript.first_token).as_micros(),
+            (cold_offset + transcript.last_token).as_micros(),
+            steps.join(","),
+        );
+        if let (Some(bytes), Some(peak)) = (
+            transcript.gpu_allocated_bytes,
+            transcript.gpu_allocated_peak_bytes,
+        ) {
+            print!(" gpu_allocated_bytes={bytes} gpu_allocated_peak_bytes={peak}");
+        }
+        println!(
+            " prompt_tokens={} generated_tokens={}",
+            transcript.prompt_tokens,
+            transcript.tokens.len(),
+        );
+        println!("text={}", transcript.text);
+    }
     Ok(())
 }
