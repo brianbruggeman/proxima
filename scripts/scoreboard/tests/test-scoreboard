@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# the scoreboard's own gate. PASSED is counted and compared against EXPECTED, since
+# a case that asserts nothing passes identically to one that asserts everything.
+#
+# usage: scripts/scoreboard/tests/test-scoreboard
+# env: SCRATCH  scratch directory for derived fixtures [~/.cache/kvgate/proxnum684/test]
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOOL="$HERE/../scoreboard"
+FIX="$HERE/fixtures"
+SCRATCH="${SCRATCH:-$HOME/.cache/kvgate/proxnum684/test}"
+BASE="$FIX/whisper_metal.jsonl"
+PASSED=0
+FAILED=0
+EXPECTED=34
+
+mkdir -p "$SCRATCH"
+rm -f "$SCRATCH"/*
+
+ok() { PASSED=$((PASSED + 1)); }
+fail() { FAILED=$((FAILED + 1)); echo "FAIL $1: $2"; }
+
+check_eq() {
+  local name="$1" want="$2" got="$3"
+  if [[ "$want" == "$got" ]]; then ok; else fail "$name" "want '$want', got '$got'"; fi
+}
+
+# derive <name> <jq filter over the slurped base array, returning an array>
+derive() {
+  jq -sc "$2 | .[]" "$BASE" > "$SCRATCH/$1.jsonl"
+}
+
+validate_passes() {
+  local name="$1" file="$2" out
+  out="$("$TOOL" validate "$file" 2>&1)"
+  check_eq "$name" "0" "$?"
+  [[ -z "$out" ]] || echo "  unexpected output: $out"
+}
+
+validate_fails_with() {
+  local name="$1" file="$2" pattern="$3" out code
+  out="$("$TOOL" validate "$file" 2>&1)"
+  code=$?
+  if [[ "$code" -ne 0 ]] && grep -qE -- "$pattern" <<<"$out"; then ok
+  else fail "$name" "want nonzero exit and /$pattern/, got exit $code: $(head -3 <<<"$out")"; fi
+}
+
+metric_of() { "$TOOL" summarize "$1" | jq -c "$2"; }
+
+# percentiles by nearest rank on 1..20, and sample CoV
+check_eq "percentile p50" "10" "$(metric_of "$FIX/percentile_1_20.jsonl" '.backends.metal.arms.proxima.metrics.ttft_us_cold.p50')"
+check_eq "percentile p90" "18" "$(metric_of "$FIX/percentile_1_20.jsonl" '.backends.metal.arms.proxima.metrics.ttft_us_cold.p90')"
+check_eq "percentile p95" "19" "$(metric_of "$FIX/percentile_1_20.jsonl" '.backends.metal.arms.proxima.metrics.ttft_us_cold.p95')"
+check_eq "percentile p99" "20" "$(metric_of "$FIX/percentile_1_20.jsonl" '.backends.metal.arms.proxima.metrics.ttft_us_cold.p99')"
+check_eq "cov [10,11,10,12,11]" "7.75" "$(metric_of "$FIX/cov_5.jsonl" '.backends.metal.arms.proxima.metrics.ttlt_us_cold.cov_pct | . * 100 | round / 100')"
+
+# the committed fixtures are what the generator emits
+"$FIX/gen-fixtures.sh" "$SCRATCH" 2>/dev/null
+if cmp -s "$SCRATCH/whisper_metal.jsonl" "$BASE" && cmp -s "$SCRATCH/percentile_1_20.jsonl" "$FIX/percentile_1_20.jsonl" \
+   && cmp -s "$SCRATCH/cov_5.jsonl" "$FIX/cov_5.jsonl"; then ok; else fail "fixtures current" "gen-fixtures.sh output differs from the committed files"; fi
+
+# a complete raw file, then one broken rule at a time
+validate_passes "complete file passes" "$BASE"
+
+derive n19 'map(select(.record == "not-run" or .index < 80))'
+validate_fails_with "n=19 per arm" "$SCRATCH/n19.jsonl" 'arm proxima: n=19 .*minimum 20'
+
+derive missing_arm 'map(select(.arm != "whisper.cpp"))'
+validate_fails_with "missing arm" "$SCRATCH/missing_arm.jsonl" 'backend metal: incumbent arm missing'
+
+derive no_not_run 'map(select(.record == "run" or .backend != "cuda"))'
+validate_fails_with "backend without not-run" "$SCRATCH/no_not_run.jsonl" 'backend cuda: neither measured nor covered by a not-run record'
+
+derive dropped 'map(select(.index != 7))'
+validate_fails_with "dropped run index" "$SCRATCH/dropped.jsonl" 'index: run 7 is missing'
+
+derive two_sessions 'map(if .index == 79 then .session_id = "s-20261123T150000Z-b2" else . end)'
+validate_fails_with "two session ids" "$SCRATCH/two_sessions.jsonl" 'session_id: 2 distinct values'
+
+derive quality 'map(if .index == 40 then .quality.match = false else . end)'
+validate_fails_with "failed quality verdict" "$SCRATCH/quality.jsonl" 'run 40 backend metal arm .*quality verdict failed'
+
+derive missing_field 'map(if .index == 12 then del(.timings.encode_us) else . end)'
+validate_fails_with "missing required field" "$SCRATCH/missing_field.jsonl" 'run 12 field timings.encode_us: missing'
+
+derive bad_reason 'map(if .index == 6 then .resources.gpu_allocated_peak_bytes = {unreported: "because"} else . end)'
+validate_fails_with "unreported reason outside the list" "$SCRATCH/bad_reason.jsonl" "run 6 field resources.gpu_allocated_peak_bytes: unreported reason 'because' is not in the closed list"
+
+derive bad_not_run 'map(if .record == "not-run" and .backend == "hip" then .reason = "lazy" else . end)'
+validate_fails_with "not-run reason outside the list" "$SCRATCH/bad_not_run.jsonl" "backend hip: not-run reason 'lazy' is not in the closed list"
+
+derive proxima_unreported 'map(if .index == 8 then .timings.ttft_us = {unreported: "incumbent-non-streaming"} else . end)'
+validate_fails_with "unreported on the proxima arm" "$SCRATCH/proxima_unreported.jsonl" 'run 8 field timings.ttft_us: unreported is not allowed here'
+
+derive off_by_one_arm 'map(if .index == 22 then .arm = "proxima" else . end)'
+validate_fails_with "arms do not alternate" "$SCRATCH/off_by_one_arm.jsonl" 'arms do not alternate'
+
+# an incumbent that answers non-streaming has no warm ttft
+derive non_streaming 'map(if .arm == "whisper.cpp" and .repeat == 1 then .timings.ttft_us = {unreported: "incumbent-non-streaming"} else . end)'
+validate_passes "incumbent-non-streaming is accepted" "$SCRATCH/non_streaming.jsonl"
+check_eq "unreported carried into summary" '{"unreported":"incumbent-non-streaming","unit":"us"}' "$(metric_of "$SCRATCH/non_streaming.jsonl" '.backends.metal.arms.incumbent.metrics.ttft_us_warm')"
+check_eq "derived metric follows unreported" '"incumbent-non-streaming"' "$(metric_of "$SCRATCH/non_streaming.jsonl" '.backends.metal.arms.incumbent.metrics.decode_tok_s_warm.unreported')"
+
+# empty sets fail closed with a message
+: > "$SCRATCH/empty.jsonl"
+out="$("$TOOL" summarize "$SCRATCH/empty.jsonl" 2>&1)"; code=$?
+if [[ "$code" -ne 0 ]] && grep -q 'no run records' <<<"$out"; then ok; else fail "empty file" "exit $code: $out"; fi
+jq -c 'select(.record == "not-run")' "$BASE" > "$SCRATCH/only_not_run.jsonl"
+out="$("$TOOL" summarize "$SCRATCH/only_not_run.jsonl" 2>&1)"; code=$?
+if [[ "$code" -ne 0 ]] && grep -q 'no run records' <<<"$out"; then ok; else fail "only not-run" "exit $code: $out"; fi
+jq -c 'select(.record == "run" and .repeat == 0)' "$FIX/cov_5.jsonl" > "$SCRATCH/no_warm.jsonl"
+out="$("$TOOL" summarize "$SCRATCH/no_warm.jsonl" 2>&1)"; code=$?
+if [[ "$code" -ne 0 ]] && grep -q 'metric ttft_us_warm: no values' <<<"$out"; then ok; else fail "no warm records" "exit $code: $out"; fi
+
+# render is deterministic, cites the sha, marks =max, and never lacks a citation
+"$TOOL" render "$BASE" > "$SCRATCH/render1.md"
+"$TOOL" render "$BASE" > "$SCRATCH/render2.md"
+if cmp -s "$SCRATCH/render1.md" "$SCRATCH/render2.md" && [[ -s "$SCRATCH/render1.md" ]]; then ok; else fail "render deterministic" "two renders differ or are empty"; fi
+SHA="$(shasum -a 256 "$BASE" | cut -d' ' -f1)"
+check_eq "render lines citing the sha" "0" "$(tail -n +3 "$SCRATCH/render1.md" | grep -vc " runs=$BASE@$SHA\$")"
+check_eq "render marks p99 =max at n=20" "1" "$(grep -c '^| metal | ttft_us_cold .*=max.*=max' "$SCRATCH/render1.md" )"
+check_eq "render leaves p95 unmarked at n=20" "0" "$(grep '^| metal | ttft_us_cold ' "$SCRATCH/render1.md" | cut -d'|' -f6 | grep -c '=max')"
+check_eq "render has every backend" "5" "$(cut -d'|' -f2 "$SCRATCH/render1.md" | tr -d ' ' | sort -u | grep -cxE 'cpu|metal|cuda|hip|wgpu')"
+
+# census over the fixture scoreboard: 3 uncited rows (hand typed, wrong sha, mismatched) + 2 uncited prose lines
+out="$("$TOOL" census "$FIX/census/SCOREBOARD.md" 2>&1)"; code=$?
+check_eq "census count" "uncited=5" "$(tail -1 <<<"$out")"
+check_eq "census exits nonzero while uncited" "1" "$code"
+if grep -q 'defect: line 13: 4 cells, header at line 11 has 3' <<<"$out"; then ok; else fail "census cell mismatch" "no defect line in: $out"; fi
+check_eq "census shape" "tables=2 data_rows=4 prose_number_lines=3 cited=2 defects=1" "$(grep '^tables=' <<<"$out")"
+
+# a scoreboard made of rendered rows carries no debt
+cp "$SCRATCH/render1.md" "$SCRATCH/SCOREBOARD.md"
+out="$("$TOOL" census "$SCRATCH/SCOREBOARD.md" 2>&1)"; code=$?
+check_eq "census of rendered rows" "uncited=0 exit=0" "$(tail -1 <<<"$out") exit=$code"
+
+echo "passed=$PASSED failed=$FAILED expected=$EXPECTED"
+[[ "$FAILED" -eq 0 && "$PASSED" -eq "$EXPECTED" ]]
