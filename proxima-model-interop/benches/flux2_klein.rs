@@ -1199,7 +1199,7 @@ mod bench {
                 &Arm {
                     label: "b_plain_gemm",
                     program: &graph.program,
-                    symbols: &[],
+                    symbols: &[u64::from(rows)],
                     named: &named,
                     output,
                     macs: conv_macs(case),
@@ -1235,7 +1235,8 @@ mod bench {
                 &Arm {
                     label: "d_dit_shaped_linear",
                     program: &graph.program,
-                    symbols: &[],
+                    // the arena cap scales with symbols[0], the plan's row count
+                    symbols: &[u64::from(CONTROL_ROWS)],
                     named: &named,
                     output,
                     macs: u64::from(CONTROL_ROWS)
