@@ -1445,9 +1445,9 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
     }
     if config.gpu_layers == GPU_LAYERS_ALL && !cfg!(feature = "gpu") {
         return Err(InteropError::UnsupportedServingConfig(format!(
-            "gpu_layers={GPU_LAYERS_ALL} (-ngl all): this build was not compiled with \
-             proxima-model-interop's `metal` feature, so there is no GPU backend to \
-             offload onto"
+            "gpu_layers={GPU_LAYERS_ALL} (-ngl all): this build has no GPU backend to \
+             offload onto; set gpu_layers to 0 (PROXIMA_SERVING_GPU_LAYERS=0) to run on the \
+             CPU, or build with a GPU feature such as `metal` or `cuda`"
         )));
     }
 
