@@ -451,7 +451,7 @@ fn architecture_matrix_lfm_layer_bind() {
             assert_eq!(view.role, Role::InOut);
             assert_eq!(view.program_axes.as_slice(), &[shape[1], shape[0]]);
         } else {
-            assert_eq!(view.role, Role::Native);
+            assert_eq!(view.role, Role::Pointwise);
             assert_eq!(view.program_axes.as_slice(), *shape);
         }
     }

@@ -584,7 +584,7 @@ fn validated_view<'manifest, 'file>(
         program_axes.push(u64::from(*axis));
     }
     let axes_match = match role {
-        Role::Native => native_view_matches(&part_shape, &program_axes),
+        Role::Native | Role::Pointwise => native_view_matches(&part_shape, &program_axes),
         Role::InOut => inout_view_matches(&part_shape, &program_axes),
         Role::Gathered => false,
     };
@@ -776,7 +776,9 @@ fn bind_safetensors_leaf<'file>(
         let output = transpose_out_in_to_in_out(&decoded, leaf, rows, columns)?;
         weights.resident_bytes += output.len() * core::mem::size_of::<f32>();
         weights.owned.push((leaf.into(), output));
-    } else if role == Role::InOut {
+    } else if role == Role::InOut
+        || (role == Role::Native && expert_stack_codec(dtype).is_some())
+    {
         let packed = match view.part {
             Some(_) => packed_block_over(view.name, dtype, bytes)?,
             None => {
@@ -1652,6 +1654,7 @@ mod tests {
     use proxima_numeric::float_layout::{
         FloatLayout, NAMED_LAYOUTS, NanPolicy, SignEncoding, Specials,
     };
+    use proxima_numeric::{NumericFormat, decode_blocks};
     use proxima_safetensors::{SafetensorsModel, TensorPayload, write_complete};
 
     use super::*;
@@ -2264,7 +2267,7 @@ mod tests {
         let (file_bytes, manifest, data_start) = ramp_checkpoint(PART_LEAF, 4, 4);
         let binding = BindingProfile::default();
 
-        let view = part_view(&file_bytes, &manifest, data_start, &binding, &[4, 2, 2], Role::Native)
+        let view = part_view(&file_bytes, &manifest, data_start, &binding, &[4, 2, 2], Role::Pointwise)
             .expect("[4, 2, 2] re-views the stored [4, 4]");
         let mut weights = BoundWeights::new(&[]);
         bind_safetensors_leaf(&manifest, &file_bytes, data_start, &binding, &view, &mut weights)
@@ -2275,6 +2278,50 @@ mod tests {
         assert!(core::ptr::eq(view.bytes.as_ptr(), whole.as_ptr()));
         assert_eq!(weights.owned.len(), 1);
         assert_eq!(weights.owned[0].1.len(), 16);
+    }
+
+    #[test]
+    fn native_contracted_two_byte_leaf_binds_a_packed_view_over_the_file_bytes() {
+        let (file_bytes, manifest, data_start) = ramp_checkpoint(PART_LEAF, 4, 4);
+        let binding = BindingProfile::default();
+        let view = part_view(&file_bytes, &manifest, data_start, &binding, &[4, 4], Role::Native)
+            .expect("[4, 4] is the stored matrix");
+        let mut weights = BoundWeights::new(&[]);
+
+        bind_safetensors_leaf(&manifest, &file_bytes, data_start, &binding, &view, &mut weights)
+            .expect("the leaf binds");
+
+        let whole = &file_bytes[data_start as usize..];
+        let [(name, QuantizedBlock::Packed { codec, bytes })] = weights.packed.as_slice() else {
+            panic!("a contracted two-byte leaf must bind as one packed block");
+        };
+        assert_eq!(name, PART_LEAF);
+        assert_eq!(Some(*codec), expert_stack_codec(DType::Layout(two_byte_layout())));
+        assert!(core::ptr::eq(bytes.as_ptr(), whole.as_ptr()));
+        assert!(weights.owned.is_empty());
+    }
+
+    #[test]
+    fn pointwise_two_byte_leaf_binds_owned_with_the_exact_widened_values() {
+        let (file_bytes, manifest, data_start) = ramp_checkpoint(PART_LEAF, 4, 4);
+        let binding = BindingProfile::default();
+        let view = part_view(&file_bytes, &manifest, data_start, &binding, &[4, 4], Role::Pointwise)
+            .expect("[4, 4] is the stored matrix");
+        let mut weights = BoundWeights::new(&[]);
+
+        bind_safetensors_leaf(&manifest, &file_bytes, data_start, &binding, &view, &mut weights)
+            .expect("the leaf binds");
+
+        let stored = &file_bytes[data_start as usize..];
+        let mut expected = vec![Default::default(); 16];
+        decode_blocks(&NumericFormat::Scalar(two_byte_layout()), stored, &mut expected)
+            .expect("the stored bytes decode through proxima-numeric");
+        assert!(weights.packed.is_empty());
+        let [(name, widened)] = weights.owned.as_slice() else {
+            panic!("a pointwise two-byte leaf must bind as one owned block");
+        };
+        assert_eq!(name, PART_LEAF);
+        assert_eq!(widened, &expected);
     }
 
     #[test]

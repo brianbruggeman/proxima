@@ -59,8 +59,11 @@ use crate::serving::WeightPrecisionRule;
 /// How the program reads a leaf, decided from the ops that consume it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Role {
-    /// The leaf is read in the order the file stores it.
+    /// The leaf is a matmul weight contracted over its last axis, in the order
+    /// the file stores it.
     Native,
+    /// The leaf is read with no contraction: a scale, bias or table.
+    Pointwise,
     /// The leaf is a matmul weight the program declares `[in, out]` over a file
     /// that stores `[out, in]`.
     InOut,
@@ -475,7 +478,7 @@ fn bind_direct<'file>(
             state,
         ),
         (_, true) => bind_native_f32(parsed, file_bytes, &tensor.name, leaf.name.into(), state),
-        (Role::Native, false) if leaf.gathered => {
+        (Role::Native | Role::Pointwise, false) if leaf.gathered => {
             bind_gathered_as(parsed, file_bytes, &tensor.name, leaf.name.into(), state)
         }
         (_, false) => bind_dense_as(parsed, file_bytes, &tensor.name, leaf.name.into(), state),
@@ -689,7 +692,7 @@ pub(crate) fn consumers_of(program: &[Op]) -> Vec<Vec<usize>> {
 
 /// Whether any op reads `leaf_index` through a data-dependent map under a
 /// non-`Multiply` body, e.g. the `embedding_lookup` `Identity` gather. `role_of`
-/// reads only `Multiply` consumers, so it reports those leaves as `Native`.
+/// reads only `Multiply` consumers, so it reports those leaves as `Pointwise`.
 pub(crate) fn is_gathered_table(
     program: &[Op],
     consumers: &[Vec<usize>],
@@ -745,7 +748,7 @@ pub(crate) fn role_of(
     match (found.next(), found.next()) {
         (Some(_), Some(_)) => Err(InteropError::LeafAxesInterleaved { leaf: leaf.into() }),
         (Some(order), None) => Ok(order),
-        (None, _) => Ok(Role::Native),
+        (None, _) => Ok(Role::Pointwise),
     }
 }
 
@@ -995,6 +998,34 @@ mod tests {
 
     #[test]
     fn a_leaf_the_program_declares_out_in_binds_as_stored() {
+        let program = contraction("blk.0.ffn_down.weight", &[2, 3], [1, 2]);
+
+        assert_eq!(
+            role_of_leaf(&program, "blk.0.ffn_down.weight", &[2, 3]),
+            Role::Native
+        );
+        assert_binds_the_stored_ramp_borrowed(&program);
+    }
+
+    #[test]
+    fn a_leaf_read_with_no_contraction_is_pointwise_and_binds_the_block_it_did_as_native() {
+        let mut program = contraction("blk.0.ffn_down.weight", &[2, 3], [1, 2]);
+        program.pop();
+
+        assert_eq!(
+            role_of_leaf(&program, "blk.0.ffn_down.weight", &[2, 3]),
+            Role::Pointwise
+        );
+        assert_binds_the_stored_ramp_borrowed(&program);
+    }
+
+    fn role_of_leaf(program: &[Op], leaf: &str, shape: &[u32]) -> Role {
+        let consumers = consumers_of(program);
+        let extents: Vec<Extent> = shape.iter().map(|width| Extent::Static(*width)).collect();
+        role_of(program, &consumers, 1, leaf, &extents).expect("the leaf has one role")
+    }
+
+    fn assert_binds_the_stored_ramp_borrowed(program: &[Op]) {
         let stored: Vec<f32> = (0..6).map(|value| value as f32).collect();
         let bytes = gguf(&[(
             "blk.0.ffn_down.weight",
@@ -1002,15 +1033,30 @@ mod tests {
             GgmlType::F32,
             &f32_bytes(&stored),
         )]);
-        let program = contraction("blk.0.ffn_down.weight", &[2, 3], [1, 2]);
 
-        let weights = bind(&bytes, &program, &defaults()).expect("binds");
+        let weights = bind(&bytes, program, &defaults()).expect("binds");
 
         let [(name, QuantizedBlock::Float32(bound))] = weights.packed() else {
             panic!("one borrowed f32 weight, got {:?}", weights.packed().len());
         };
         assert_eq!(name, "blk.0.ffn_down.weight");
         assert_eq!(*bound, stored.as_slice());
+    }
+
+    #[test]
+    fn a_leaf_multiplied_with_no_reduce_is_pointwise_and_an_out_in_matrix_is_native() {
+        let mut scale = contraction("blk.0.attn_norm.weight", &[1, 3], [0, 2]);
+        scale.pop();
+        let matmul = contraction("blk.0.ffn_down.weight", &[2, 3], [1, 2]);
+
+        assert_eq!(
+            role_of_leaf(&scale, "blk.0.attn_norm.weight", &[1, 3]),
+            Role::Pointwise
+        );
+        assert_eq!(
+            role_of_leaf(&matmul, "blk.0.ffn_down.weight", &[2, 3]),
+            Role::Native
+        );
     }
 
     #[test]
