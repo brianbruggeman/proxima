@@ -167,7 +167,8 @@ pub use bind_leaves::bind_program_leaves;
 pub use codec_policy_settings::{CodecPolicySettings, CodecPolicyWeights};
 #[cfg(feature = "std")]
 pub use hobbit_plan::{
-    HobbitExpertAddress, HobbitExpertPlan, HobbitLayerPlan, HobbitLayerScore,
+    FIXED_ONE, HobbitExpertAddress, HobbitExpertPlan, HobbitLayerPlan, HobbitLayerScore,
+    HobbitSelection, PPM,
 };
 #[cfg(feature = "std")]
 pub use hobbit_settings::{HobbitQualitySettings, HobbitSettings};

@@ -13,7 +13,17 @@ use conflaguration::{Settings, Validate};
 use proxima_numeric::NumericFormat;
 use serde::{Deserialize, Serialize};
 
+use crate::hobbit_plan::PPM;
 use crate::hobbit_settings::HobbitQualitySettings;
+
+fn within_ppm(value: u32, name: &str) -> Result<u32, String> {
+    if value > PPM {
+        return Err(format!(
+            "moe_expert_precision.{name} must be at most {PPM} parts per million"
+        ));
+    }
+    Ok(value)
+}
 
 fn from_name<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, serde_json::Error> {
     serde_json::from_value(serde_json::Value::String(raw.to_owned()))
@@ -49,16 +59,16 @@ pub struct MoeExpertPrecisionSettings {
     #[setting(resolve_with = "from_name", default_str = "q4_k")]
     #[builder(default = NumericFormat::Q4K)]
     pub low_codec: NumericFormat,
-    /// The fraction of each layer's experts the per-expert plan assigns the
-    /// low codec, ranked by the model's own selection counter.
-    #[setting(default = 0.25)]
-    #[builder(default = 0.25)]
-    pub low_expert_fraction: f32,
-    /// The fraction of layers the contiguous-stack universal plan assigns
-    /// the low codec, ranked by the summed selection counter.
-    #[setting(default = 0.25)]
-    #[builder(default = 0.25)]
-    pub low_layer_fraction: f32,
+    /// The parts per million of each layer's experts the per-expert plan
+    /// assigns the low codec, ranked by the model's own selection counter.
+    #[setting(default = 250_000)]
+    #[builder(default = 250_000)]
+    pub low_expert_ppm: u32,
+    /// The parts per million of layers the contiguous-stack universal plan
+    /// assigns the low codec, ranked by the summed selection counter.
+    #[setting(default = 250_000)]
+    #[builder(default = 250_000)]
+    pub low_layer_ppm: u32,
     /// Prompts the universal plan's quality gate uses; they must not be the
     /// calibration prompts the plan was ranked on.
     #[setting(
@@ -106,32 +116,22 @@ impl MoeExpertPrecisionSettings {
         self.quality.bound()
     }
 
-    /// The universal plan's fraction after the range check.
+    /// The universal plan's layer share after the range check.
     ///
     /// # Errors
     ///
-    /// A message naming the field when the value is not a finite number in
-    /// `0.0..=1.0`.
-    pub fn checked_low_layer_fraction(&self) -> Result<f32, String> {
-        if !(0.0..=1.0).contains(&self.low_layer_fraction)
-            || !self.low_layer_fraction.is_finite()
-        {
-            return Err(String::from(
-                "moe_expert_precision.low_layer_fraction must be a finite number in 0.0..=1.0",
-            ));
-        }
-        Ok(self.low_layer_fraction)
+    /// A message naming the field when the value exceeds [`PPM`].
+    pub fn checked_low_layer_ppm(&self) -> Result<u32, String> {
+        within_ppm(self.low_layer_ppm, "low_layer_ppm")
     }
 
-    pub fn checked_low_expert_fraction(&self) -> Result<f32, String> {
-        if !(0.0..=1.0).contains(&self.low_expert_fraction)
-            || !self.low_expert_fraction.is_finite()
-        {
-            return Err(String::from(
-                "moe_expert_precision.low_expert_fraction must be a finite number in 0.0..=1.0",
-            ));
-        }
-        Ok(self.low_expert_fraction)
+    /// The per-expert plan's share after the range check.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the field when the value exceeds [`PPM`].
+    pub fn checked_low_expert_ppm(&self) -> Result<u32, String> {
+        within_ppm(self.low_expert_ppm, "low_expert_ppm")
     }
 
     pub fn checked_threshold(&self) -> Result<Option<f32>, String> {
@@ -234,5 +234,34 @@ low_codec = "q4_k"
             .high_threshold(f32::NAN)
             .build();
         nan.checked_threshold().expect_err("NaN is not a threshold");
+    }
+
+    #[test]
+    fn moe_expert_precision_data_files_carry_the_quarter_share_in_ppm() {
+        let files = [
+            include_str!("../examples/data/hobbit-universal-granitemoe.toml"),
+            include_str!("../examples/data/hobbit-universal-granitemoe-metal.toml"),
+            include_str!("../examples/data/hobbit-universal-granitemoe-q2k.toml"),
+            include_str!("../examples/data/hobbit-universal-qwen35moe.toml"),
+        ];
+        for text in files {
+            let settings: crate::ServingSettings =
+                conflaguration::from_toml_str(text).expect("the data file loads");
+            let section = &settings.moe_expert_precision;
+            assert_eq!(section.checked_low_expert_ppm(), Ok(PPM / 4));
+            assert_eq!(section.checked_low_layer_ppm(), Ok(PPM / 4));
+        }
+    }
+
+    #[test]
+    fn moe_expert_precision_rejects_a_share_above_one() {
+        let bad = MoeExpertPrecisionSettings::builder()
+            .low_expert_ppm(PPM + 1)
+            .low_layer_ppm(PPM + 1)
+            .build();
+        let expert = bad.checked_low_expert_ppm().expect_err("above one");
+        assert!(expert.contains("low_expert_ppm"), "{expert}");
+        let layer = bad.checked_low_layer_ppm().expect_err("above one");
+        assert!(layer.contains("low_layer_ppm"), "{layer}");
     }
 }

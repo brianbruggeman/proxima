@@ -2497,35 +2497,43 @@ impl<'file> LoadedModel<'file> {
     #[must_use]
     pub fn hobbit_plan_from_selection(
         &self,
-        low_expert_fraction: f32,
+        low_expert_ppm: u32,
     ) -> crate::hobbit_plan::HobbitExpertPlan {
         let counts = self.hobbit_selection_snapshot();
-        self.hobbit_plan_from_counts(&counts, low_expert_fraction)
+        self.hobbit_plan_from_counts(&counts, low_expert_ppm)
     }
 
     /// Drains the routed-expert selection counter into a local snapshot. A
     /// calibration run must have populated it; an empty snapshot means the
     /// calibration used a path that does not record selections.
     #[must_use]
-    pub fn hobbit_selection_snapshot(&self) -> alloc::vec::Vec<(proxima_tensor::NodeId, u32, u64, f64)> {
+    pub fn hobbit_selection_snapshot(&self) -> alloc::vec::Vec<crate::hobbit_plan::HobbitSelection> {
         let layers = self.architecture.block_count as usize;
         let experts = self.architecture.expert_count as usize;
         proxima_tensor::cpu::snapshot_expert_selection_top_n(layers.saturating_mul(experts).max(1))
+            .into_iter()
+            .map(|(node, expert, count, ema)| crate::hobbit_plan::HobbitSelection {
+                node,
+                expert,
+                count,
+                ema_fixed: crate::fixed_point!(ema),
+            })
+            .collect()
     }
 
     /// Builds the per-layer universal plan from an explicit snapshot.
     #[must_use]
     pub fn hobbit_layer_plan_from_counts(
         &self,
-        counts: &[(proxima_tensor::NodeId, u32, u64, f64)],
-        low_layer_fraction: f32,
+        counts: &[crate::hobbit_plan::HobbitSelection],
+        low_layer_ppm: u32,
     ) -> crate::hobbit_plan::HobbitLayerPlan {
         let slab = self.expert_slab.lock();
         crate::hobbit_plan::HobbitLayerPlan::from_selection(
             counts,
             |node| slab.model_layer_for_weight_node(node),
             self.architecture.block_count,
-            low_layer_fraction,
+            low_layer_ppm,
         )
     }
 
@@ -2533,8 +2541,8 @@ impl<'file> LoadedModel<'file> {
     #[must_use]
     pub fn hobbit_plan_from_counts(
         &self,
-        counts: &[(proxima_tensor::NodeId, u32, u64, f64)],
-        low_expert_fraction: f32,
+        counts: &[crate::hobbit_plan::HobbitSelection],
+        low_expert_ppm: u32,
     ) -> crate::hobbit_plan::HobbitExpertPlan {
         let slab = self.expert_slab.lock();
         crate::hobbit_plan::HobbitExpertPlan::from_selection(
@@ -2542,7 +2550,7 @@ impl<'file> LoadedModel<'file> {
             |node| slab.model_layer_for_weight_node(node),
             self.architecture.block_count,
             self.architecture.expert_count,
-            low_expert_fraction,
+            low_expert_ppm,
         )
     }
 

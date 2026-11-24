@@ -10,11 +10,17 @@
 //!
 //! `plan` runs one CPU calibration generation, reads the model's own routed
 //! expert selection counter, and ranks each layer's experts by `(count, ema,
-//! expert)`; the coldest `low_expert_fraction` are low. `prepare` writes the
-//! low-codec copies. `run` installs only the plan's low experts into the slab
-//! and measures high-only versus mixed arms interleaved; the slab's own
-//! `sources_for_step` is the mixed table, so the same code path works for the
-//! uniform, sliding-pattern and recurrent MoE families on CPU and GPU.
+//! expert)`; the coldest `low_expert_ppm` parts per million are low.
+//! `prepare` writes the low-codec copies. `run` installs only the plan's low
+//! experts into the slab and measures high-only versus mixed arms
+//! interleaved; the slab's own `sources_for_step` is the mixed table, so the
+//! same code path works for the uniform, sliding-pattern and recurrent MoE
+//! families on CPU and GPU.
+//!
+//! `run` prints one raw JSON record per arm run (integer nanoseconds, token
+//! counts and byte sizes; no rates, no statistics). Collect them with
+//! `grep '^{'` into a file and run `scripts/scoreboard/scoreboard summarize`
+//! on it for the percentiles, mean and CoV.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -29,11 +35,11 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::expert_sidecar::write_expert_sidecar;
 use proxima_model_interop::hobbit::{
-    calibration_ids, check_quality_bound, quality_delta,
+    HobbitQualityDelta, calibration_ids, check_quality_bound, quality_delta,
 };
 use proxima_model_interop::{
-    ExpertStackSpec, HobbitLayerPlan, HobbitLayerScore, LoadedModel, ServingConfig,
-    ServingSettings, TokenEvent,
+    ExpertStackSpec, HobbitLayerPlan, HobbitLayerScore, LoadedModel, PPM, ServingConfig,
+    ServingSettings, TokenEvent, fixed_point,
 };
 use proxima_numeric::NumericFormat;
 
@@ -41,6 +47,13 @@ const USAGE: &str = "usage: hobbit_universal <plan|prepare|run> --config PATH --
 [--sidecar PATH] [--plan PATH] [--json-out PATH] [--pairs N] [--max-tokens N] [--llama-bench PATH]";
 
 type DriverResult<T> = Result<T, String>;
+
+/// A plan to measure and the sidecar its low stacks come from.
+#[derive(Clone, Copy)]
+struct Candidate<'a> {
+    sidecar_path: &'a Path,
+    plan: &'a HobbitLayerPlan,
+}
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
@@ -180,13 +193,6 @@ fn calibrate(
     settings: &ServingSettings,
     sidecar_path: &Path,
 ) -> DriverResult<HobbitLayerPlan> {
-    let fraction = settings
-        .moe_expert_precision
-        .checked_low_layer_fraction()?;
-    let bound = settings
-        .moe_expert_precision
-        .quality_bound()
-        .ok_or("moe_expert_precision.quality sets no bound; no bound, no apply")?;
     let config = base_config(settings);
     let held_out = calibration_ids(
         parsed,
@@ -194,7 +200,22 @@ fn calibrate(
         settings.hobbit.max_calibration_tokens,
     )
     .map_err(|error| error.to_string())?;
-    let reference = logits_for(parsed, bytes, &config, None, &held_out)?;
+    with_reference(parsed, bytes, &config, &held_out, |delta_for| {
+        search_plan(parsed, settings, sidecar_path, delta_for)
+    })
+}
+
+fn search_plan(
+    parsed: &ParsedGguf,
+    settings: &ServingSettings,
+    sidecar_path: &Path,
+    delta_for: &dyn Fn(Option<Candidate<'_>>) -> DriverResult<HobbitQualityDelta>,
+) -> DriverResult<HobbitLayerPlan> {
+    let share = settings.moe_expert_precision.checked_low_layer_ppm()?;
+    let bound = settings
+        .moe_expert_precision
+        .quality_bound()
+        .ok_or("moe_expert_precision.quality sets no bound; no bound, no apply")?;
     let layers = parsed
         .metadata_value("general.architecture")
         .and_then(|value| match value {
@@ -210,25 +231,21 @@ fn calibrate(
         .ok_or("the checkpoint has no block_count")?;
     let mut scores = Vec::with_capacity(layers as usize);
     for layer in 0..layers {
-        let plan = HobbitLayerPlan::from_low_layers(layers, 1.0, vec![layer], Vec::new());
-        let candidate = logits_for(parsed, bytes, &config, Some((sidecar_path, &plan)), &held_out)?;
-        let delta = quality_delta(std::slice::from_ref(&reference), std::slice::from_ref(&candidate))
-            .map_err(|error| error.to_string())?;
+        let plan = HobbitLayerPlan::from_low_layers(layers, PPM, vec![layer], Vec::new());
+        let delta = delta_for(Some(Candidate { sidecar_path, plan: &plan }))?;
         eprintln!(
             "layer={layer} mean_kl={:.9} top1_agreement={:.6}",
             delta.mean_kl, delta.top1_agreement
         );
         scores.push(HobbitLayerScore {
             layer,
-            mean_kl: delta.mean_kl,
-            top1_agreement: delta.top1_agreement,
+            mean_kl_fixed: fixed_point!(delta.mean_kl),
+            top1_agreement_fixed: fixed_point!(delta.top1_agreement),
         });
     }
-    let mut plan = HobbitLayerPlan::from_measured(scores, layers, fraction);
+    let mut plan = HobbitLayerPlan::from_measured(scores, layers, share);
     loop {
-        let candidate = logits_for(parsed, bytes, &config, Some((sidecar_path, &plan)), &held_out)?;
-        let delta = quality_delta(std::slice::from_ref(&reference), std::slice::from_ref(&candidate))
-            .map_err(|error| error.to_string())?;
+        let delta = delta_for(Some(Candidate { sidecar_path, plan: &plan }))?;
         match check_quality_bound(&delta, Some(bound)) {
             Ok(()) => {
                 println!(
@@ -247,9 +264,9 @@ fn calibrate(
                             plan.layer_scores
                                 .iter()
                                 .find(|score| score.layer == layer)
-                                .map_or(0.0, |score| score.mean_kl)
+                                .map_or(0, |score| score.mean_kl_fixed)
                         };
-                        score(*left).total_cmp(&score(*right))
+                        score(*left).cmp(&score(*right))
                     })
                 else {
                     return Err(format!(
@@ -264,7 +281,7 @@ fn calibrate(
                     .collect::<Vec<_>>();
                 plan = HobbitLayerPlan::from_low_layers(
                     layers,
-                    plan.low_layer_fraction,
+                    plan.low_layer_ppm,
                     remaining,
                     plan.layer_scores.clone(),
                 );
@@ -323,7 +340,7 @@ fn prepare(
         .map(|stack| stack.out_dim as usize * stack.in_dim as usize)
         .max()
         .unwrap_or(0);
-    let mut scratch = vec![0.0f32; max_elements];
+    let mut scratch = vec![Default::default(); max_elements];
     let mut output = vec![0u8; codec_bytes(codec, max_elements)];
     let mut file = File::create(sidecar_path)
         .map_err(|error| format!("{}: {error}", sidecar_path.display()))?;
@@ -393,9 +410,7 @@ fn run_arms(
             runs.entry(name).or_default().push(run);
         }
     }
-    for (name, samples) in &runs {
-        print_summary(name, samples);
-    }
+    println!("statistics: keep the lines that start with a brace and run scripts/scoreboard/scoreboard summarize on them");
     println!(
         "pairing pairs={} high_only_runs={} mixed_runs={}",
         flags.pairs,
@@ -434,9 +449,9 @@ fn quality_gate(
         .moe_expert_precision
         .quality_bound()
         .ok_or("moe_expert_precision.quality sets no bound; no bound, no apply")?;
-    let reference = logits_for(parsed, bytes, config, None, held_out)?;
-    let candidate = logits_for(parsed, bytes, config, Some((sidecar_path, plan)), held_out)?;
-    let delta = quality_delta(&[reference], &[candidate]).map_err(|error| error.to_string())?;
+    let delta = with_reference(parsed, bytes, config, held_out, |delta_for| {
+        delta_for(Some(Candidate { sidecar_path, plan }))
+    })?;
     check_quality_bound(&delta, Some(bound)).map_err(|error| error.to_string())?;
     println!(
         "quality positions={} top1_agreement={:.6} mean_kl={:.9} bound_max_mean_kl={:?} bound_min_top1={:?} holds=true",
@@ -445,45 +460,62 @@ fn quality_gate(
     Ok(())
 }
 
-fn logits_for(
+/// Runs the unmodified model once as the reference, then hands `body` a
+/// function that measures any candidate plan against it. The logits row
+/// type is whatever the engine returns; it never leaves this function.
+fn with_reference<T>(
     parsed: &ParsedGguf,
     bytes: &[u8],
     config: &ServingConfig<'_>,
-    plan: Option<(&Path, &HobbitLayerPlan)>,
     held_out: &[Vec<u32>],
-) -> DriverResult<Vec<f32>> {
-    let mut model =
-        LoadedModel::load_with_serving(parsed, bytes, config).map_err(|error| error.to_string())?;
-    if let Some((sidecar_path, plan)) = plan {
-        let sidecar = File::open(sidecar_path)
-            .map_err(|error| format!("{}: {error}", sidecar_path.display()))?;
-        model
-            .attach_expert_sidecar_file(sidecar)
+    body: impl FnOnce(
+        &dyn Fn(Option<Candidate<'_>>) -> DriverResult<HobbitQualityDelta>,
+    ) -> DriverResult<T>,
+) -> DriverResult<T> {
+    let logits = |plan: Option<Candidate<'_>>| -> DriverResult<_> {
+        let mut model = LoadedModel::load_with_serving(parsed, bytes, config)
             .map_err(|error| error.to_string())?;
-        model
-            .apply_hobbit_layer_plan(plan)
+        if let Some(Candidate { sidecar_path, plan }) = plan {
+            let sidecar = File::open(sidecar_path)
+                .map_err(|error| format!("{}: {error}", sidecar_path.display()))?;
+            model
+                .attach_expert_sidecar_file(sidecar)
+                .map_err(|error| error.to_string())?;
+            model
+                .apply_hobbit_layer_plan(plan)
+                .map_err(|error| error.to_string())?;
+        }
+        let last = held_out
+            .first()
+            .and_then(|ids| ids.last())
+            .copied()
+            .ok_or("the held-out prompt set is empty")?;
+        let values = model
+            .forward_node_values_from_ids(&[last], &[model.logits_root()], config)
             .map_err(|error| error.to_string())?;
-    }
-    let last = held_out
-        .first()
-        .and_then(|ids| ids.last())
-        .copied()
-        .ok_or("the held-out prompt set is empty")?;
-    let values = model
-        .forward_node_values_from_ids(&[last], &[model.logits_root()], config)
-        .map_err(|error| error.to_string())?;
-    values
-        .into_iter()
-        .next()
-        .ok_or_else(|| "the logits root produced no row".to_owned())
+        values
+            .into_iter()
+            .next()
+            .ok_or_else(|| "the logits root produced no row".to_owned())
+    };
+    let reference = logits(None)?;
+    body(&|plan| {
+        let candidate = logits(plan)?;
+        quality_delta(
+            std::slice::from_ref(&reference),
+            std::slice::from_ref(&candidate),
+        )
+        .map_err(|error| error.to_string())
+    })
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 struct ArmRun {
     ttft_cold_ns: u64,
     ttft_warm_ns: u64,
+    warm_tokens: usize,
+    warm_span_ns: u64,
     tokens: usize,
-    tok_s: f64,
     peak_rss_bytes: u64,
     steady_rss_bytes: u64,
     peak_footprint_bytes: u64,
@@ -510,12 +542,9 @@ fn bench_arm(
         generate_measured(model, config, warm_prompt, max_tokens, &mut run)?;
     run.ttft_cold_ns = cold_ns;
     run.ttft_warm_ns = warm_ns;
+    run.warm_tokens = warm_tokens;
+    run.warm_span_ns = warm_span_ns;
     run.tokens = cold_tokens + warm_tokens;
-    run.tok_s = if warm_tokens > 1 && warm_span_ns > 0 {
-        (warm_tokens.saturating_sub(1)) as f64 * 1e9 / warm_span_ns as f64
-    } else {
-        0.0
-    };
     run.text_hash = cold_hash ^ warm_hash.rotate_left(17);
     run.steady_rss_bytes = current_rss_bytes();
     run.steady_footprint_bytes = current_footprint_bytes();
@@ -555,52 +584,25 @@ fn generate_measured(
 }
 
 fn print_run(pair: usize, arm: &str, run: &ArmRun) {
-    println!(
-        "pair={pair} arm={arm} ttft_cold_ms={:.3} ttft_warm_ms={:.3} tok_s={:.3} peak_rss_bytes={} steady_rss_bytes={} peak_footprint_bytes={} steady_footprint_bytes={} tokens={} text_hash={:016x}",
-        run.ttft_cold_ns as f64 / 1e6,
-        run.ttft_warm_ns as f64 / 1e6,
-        run.tok_s,
-        run.peak_rss_bytes,
-        run.steady_rss_bytes,
-        run.peak_footprint_bytes,
-        run.steady_footprint_bytes,
-        run.tokens,
-        run.text_hash
-    );
-}
-
-type ArmMetric = (&'static str, fn(&ArmRun) -> f64);
-
-fn print_summary(arm: &str, samples: &[ArmRun]) {
-    let metrics: [ArmMetric; 7] = [
-        ("ttft_cold_ms", |run| run.ttft_cold_ns as f64 / 1e6),
-        ("ttft_warm_ms", |run| run.ttft_warm_ns as f64 / 1e6),
-        ("tok_s", |run| run.tok_s),
-        ("peak_rss_bytes", |run| run.peak_rss_bytes as f64),
-        ("steady_rss_bytes", |run| run.steady_rss_bytes as f64),
-        ("peak_footprint_bytes", |run| run.peak_footprint_bytes as f64),
-        ("steady_footprint_bytes", |run| {
-            run.steady_footprint_bytes as f64
-        }),
-    ];
-    for (name, read) in metrics {
-        let values = samples.iter().map(read).collect::<Vec<_>>();
-        let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let variance = values
-            .iter()
-            .map(|value| (value - mean) * (value - mean))
-            .sum::<f64>()
-            / values.len() as f64;
-        let cov = if mean == 0.0 {
-            0.0
-        } else {
-            variance.sqrt() / mean * 100.0
-        };
-        println!(
-            "summary arm={arm} metric={name} mean={mean:.6} cov_percent={cov:.3} n={}",
-            values.len()
-        );
-    }
+    let record = serde_json::json!({
+        "arm": arm,
+        "pair": pair,
+        "timings_ns": {
+            "ttft_cold": run.ttft_cold_ns,
+            "ttft_warm": run.ttft_warm_ns,
+            "warm_span": run.warm_span_ns,
+        },
+        "tokens": run.tokens,
+        "warm_tokens": run.warm_tokens,
+        "resources": {
+            "peak_rss_bytes": run.peak_rss_bytes,
+            "steady_rss_bytes": run.steady_rss_bytes,
+            "peak_footprint_bytes": run.peak_footprint_bytes,
+            "steady_footprint_bytes": run.steady_footprint_bytes,
+        },
+        "text_hash": format!("{:016x}", run.text_hash),
+    });
+    println!("{record}");
 }
 
 fn run_llama_bench(

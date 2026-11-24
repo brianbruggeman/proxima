@@ -20,7 +20,7 @@ max_calibration_tokens = 16
 enabled = true
 high_threshold = 0.6
 low_codec = "q4_k"
-low_expert_fraction = 0.25
+low_expert_ppm = 250000
 held_out_prompts = [
   "A held-out sentence the plan was not ranked on, used only for quality.",
 ]
