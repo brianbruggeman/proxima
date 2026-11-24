@@ -354,6 +354,17 @@ fn field_store_nan_msl(layout: &FloatLayout) -> String {
     )
 }
 
+/// The MSL that sends a NaN `value` to the layout's own NaN code, the one step a hardware
+/// conversion cannot be trusted with because it emits a single canonical NaN.
+#[must_use]
+pub fn field_store_nan_branch_msl(layout: &FloatLayout) -> String {
+    let nan = field_store_nan_msl(layout);
+    let sign_shift = sign_shift(layout);
+    format!(
+        "    uint bits = as_type<uint>(value);\n    uint sign = (bits >> 31u) << {sign_shift}u;\n    if ((bits & {F32_ABS_MASK:#x}u) > {F32_INFINITY_BITS:#010x}u) {{\n{nan}    }}\n"
+    )
+}
+
 fn field_store_msl(layout: &FloatLayout, name: &str) -> String {
     let mantissa_bits = layout.mantissa_bits;
     let sign_shift = sign_shift(layout);

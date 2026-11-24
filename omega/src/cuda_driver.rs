@@ -4903,6 +4903,72 @@ mod tests {
         }
         assert!(compiled > 0, "no encode kernel was compiled");
     }
+
+    #[test]
+    fn every_cuda_encode_matches_the_host_encoder_byte_for_byte_at_an_offset() {
+        use crate::cuda::target::Target;
+        use crate::cuda_encode::CudaEncode;
+        use crate::encode_render::{EncodeRows, format_encode_kernel};
+        use proxima_numeric::{FormatCodec, NumericFormat};
+
+        let driver = CudaDriver::new(0).expect("a cuda device");
+        let dialect = CudaEncode { target: Target::CUDA };
+        let guard_byte = u8::MAX;
+        let offset = core::mem::size_of::<u64>();
+        let mut covered = Vec::new();
+        for format in NumericFormat::every() {
+            let Ok(rendered) = format_encode_kernel(&dialect, &format, "probe_encode") else { continue };
+            let NumericFormat::Scalar(layout) = &format else { panic!("{format:?} rendered without a scalar layout") };
+            let maximum = layout.max_normal();
+            let half_ulp = (0..=layout.mantissa_bits).fold(1.0, |scale, _| scale * 0.5);
+            let infinity = maximum / (maximum * 0.0);
+            let nan = infinity - infinity;
+            let magnitudes = [
+                maximum * 0.0,
+                layout.min_subnormal(),
+                layout.min_subnormal() * 0.5,
+                layout.min_subnormal() * 1.5,
+                layout.min_normal(),
+                1.0,
+                1.0 + half_ulp,
+                1.0 + 3.0 * half_ulp,
+                2.0 + 2.0 * half_ulp,
+                0.1,
+                maximum / 3.0,
+                maximum,
+                maximum * 1.5,
+                maximum * 2.0,
+                maximum * maximum * maximum * maximum,
+                infinity,
+            ];
+            let mut values: Vec<_> = magnitudes.iter().flat_map(|value| [*value, -*value]).collect();
+            values.extend([nan, -nan]);
+            while values.len() % rendered.elements_per_thread != 0 {
+                values.push(1.0);
+            }
+            let codec = FormatCodec::for_format(&format).expect("a rendered format resolves");
+            let mut expected = vec![0u8; codec.packed_len(values.len()).expect("whole elements")];
+            codec.encode(&values, &mut expected).expect("the host encodes");
+
+            let rows = EncodeRows { element_count: values.len(), byte_offset: offset };
+            let source = driver.stream.clone_htod(&values).expect("upload rows");
+            let mut destination = driver.stream.clone_htod(&vec![guard_byte; offset + expected.len() + offset]).expect("upload guard");
+            driver.encode_rows(&rendered, &format, &source, &mut destination, rows).expect("the encode launches");
+            driver.stream.synchronize().expect("the encode completes");
+            let device = driver.stream.clone_dtoh(&destination).expect("read back");
+
+            assert!(device[..offset].iter().all(|byte| *byte == guard_byte), "{format:?}: bytes before the offset changed");
+            assert!(device[offset + expected.len()..].iter().all(|byte| *byte == guard_byte), "{format:?}: bytes past the range changed");
+            let width = rendered.bytes_per_thread;
+            for (index, (device_code, host_code)) in device[offset..offset + expected.len()].chunks(width).zip(expected.chunks(width)).enumerate() {
+                let first = index * rendered.elements_per_thread;
+                assert_eq!(device_code, host_code, "{format:?} element {first}: input bits {:#010x}, device {device_code:?}, host {host_code:?}", values[first].to_bits());
+            }
+            covered.push(format);
+        }
+        eprintln!("device encode covered {covered:?}");
+        assert!(!covered.is_empty(), "no format was encoded on the device");
+    }
 }
 
 // ---- ROCm runtime boundary -------------------------------------------------

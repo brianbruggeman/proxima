@@ -9,7 +9,7 @@ use alloc::string::String;
 
 use proxima_numeric::float_layout::FloatLayout;
 
-use crate::msl::layout_render::{hardware_type, layout_load_msl, layout_store_msl};
+use crate::msl::layout_render::{field_store_nan_branch_msl, hardware_type, layout_load_msl, layout_store_msl};
 
 fn cuda_dialect(msl: &str) -> String {
     msl.replace("uint", "unsigned int")
@@ -36,18 +36,17 @@ pub fn layout_load_cuda(layout: FloatLayout, name: &str) -> String {
 }
 
 /// `__device__ unsigned int name(float value)`: the `layout.width()`-bit code nearest `value`, ties
-/// to the even code, overflow and NaN under the layout's specials.
+/// to the even code, overflow and NaN under the layout's specials. The conversion intrinsics emit
+/// one canonical NaN, so a NaN input takes the layout's own NaN text and the intrinsic keeps the rest.
 #[must_use]
 pub fn layout_store_cuda(layout: FloatLayout, name: &str) -> String {
     let signature = format!("__device__ __forceinline__ unsigned int {name}(float value)");
-    match hardware_type(&layout) {
-        Some("float") => format!("\n{signature} {{\n    return __float_as_uint(value);\n}}\n"),
-        Some("half") => format!(
-            "\n{signature} {{\n    return (unsigned int)__half_as_ushort(__float2half_rn(value));\n}}\n"
-        ),
-        Some(_) => format!(
-            "\n{signature} {{\n    return (unsigned int)__bfloat16_as_ushort(__float2bfloat16_rn(value));\n}}\n"
-        ),
-        None => cuda_dialect(&layout_store_msl(layout, name)),
-    }
+    let convert = match hardware_type(&layout) {
+        Some("float") => return format!("\n{signature} {{\n    return __float_as_uint(value);\n}}\n"),
+        Some("half") => "__half_as_ushort(__float2half_rn(value))",
+        Some(_) => "__bfloat16_as_ushort(__float2bfloat16_rn(value))",
+        None => return cuda_dialect(&layout_store_msl(layout, name)),
+    };
+    let branch = cuda_dialect(&field_store_nan_branch_msl(&layout));
+    format!("\n{signature} {{\n{branch}    return (unsigned int){convert};\n}}\n")
 }
