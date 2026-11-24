@@ -659,19 +659,28 @@ mod tests {
         }
     }
 
+    fn activation_extremes() -> (NumericFormat, NumericFormat) {
+        let quantized = || NumericFormat::ALL.into_iter().filter(NumericFormat::is_quantized_activation);
+        let narrow = quantized().min_by_key(NumericFormat::elements_per_block).expect("a quantized activation format exists");
+        let wide = quantized().max_by_key(NumericFormat::elements_per_block).expect("a quantized activation format exists");
+        (narrow, wide)
+    }
+
     #[test]
     fn depth_picks_the_aligned_grouped_layout_only_when_it_fills_whole_groups() {
-        assert_eq!(activation_codec(4096, None, false), NumericFormat::Q8_1Grouped);
-        assert_eq!(activation_codec(128, None, false), NumericFormat::Q8_1Grouped);
-        assert_eq!(activation_codec(96, None, false), NumericFormat::Q8_1);
-        assert_eq!(activation_codec(32, None, false), NumericFormat::Q8_1);
+        let (narrow, wide) = activation_extremes();
+        assert_eq!(activation_codec(4096, None, false), wide);
+        assert_eq!(activation_codec(128, None, false), wide);
+        assert_eq!(activation_codec(96, None, false), narrow);
+        assert_eq!(activation_codec(32, None, false), narrow);
     }
 
     #[test]
     fn a_flat_activation_policy_holds_q8_1_at_a_depth_the_grouped_block_fills() {
-        assert_eq!(activation_codec(4096, None, true), NumericFormat::Q8_1);
-        assert_eq!(activation_codec(128, None, true), NumericFormat::Q8_1);
-        assert_eq!(activation_codec(4096, Some(NumericFormat::Q8_1Grouped), true), NumericFormat::Q8_1Grouped);
+        let (narrow, wide) = activation_extremes();
+        assert_eq!(activation_codec(4096, None, true), narrow);
+        assert_eq!(activation_codec(128, None, true), narrow);
+        assert_eq!(activation_codec(4096, Some(wide), true), wide);
     }
 
     fn derived_arithmetics(fixture: &Fixture, policy: NumericPolicy) -> Vec<ScaleArithmetic> {
