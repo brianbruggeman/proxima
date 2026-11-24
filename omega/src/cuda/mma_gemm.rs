@@ -54,14 +54,14 @@ pub(super) struct MmaGemm {
     pub(super) token_positions: Vec<usize>,
 }
 
-struct CodecShape {
+pub(super) struct CodecShape {
     decode: &'static str,
     block_bytes: usize,
     block_elements: usize,
     has_minimum: bool,
 }
 
-fn codec_shape(codec: Codec) -> Option<CodecShape> {
+pub(super) fn codec_shape(codec: Codec) -> Option<CodecShape> {
     let (decode, block_bytes, block_elements, has_minimum) = match codec {
         Codec::Q8_0 => ("mma_decode_q8_0", Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS, false),
         Codec::Q4_0 => ("mma_decode_q4_0", Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS, false),

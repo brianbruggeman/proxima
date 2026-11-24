@@ -6264,53 +6264,81 @@ mod tests {
             .expect("one bound emitted")
     }
 
-    fn packed_expert_weight(bound: &BoundOp) -> PackedOperands {
+    fn packed_expert_weight(bound: &BoundOp, codec: Codec) -> PackedOperands {
         let mut packed = PackedOperands::new();
-        packed.insert(bound.operands()[0].0, Codec::Q8_0);
+        packed.insert(bound.operands()[0].0, codec);
         packed
     }
 
-    fn grouped_pair(bound: &BoundOp) -> Option<([CudaKernel; 2], usize)> {
-        let packed = packed_expert_weight(bound);
+    fn grouped_codecs() -> impl Iterator<Item = Codec> {
+        Codec::ALL.into_iter().filter(|codec| mma_gemm::codec_shape(*codec).is_some())
+    }
+
+    fn grouped_pair(bound: &BoundOp, codec: Codec) -> Option<([CudaKernel; 2], usize)> {
+        let packed = packed_expert_weight(bound, codec);
         emit_cuda_grouped_on_device(bound, &packed, NumericPolicy::llama_relaxed(), EmitDevice::default()).expect("grouped emit succeeds")
     }
 
     #[test]
-    fn a_gathered_expert_product_above_the_grouped_minimum_renders_a_prepass_and_a_grouped_kernel() {
+    fn a_gathered_expert_product_above_the_grouped_minimum_renders_a_prepass_and_a_grouped_kernel_for_every_decoded_codec() {
         let slots = u32::try_from(crate::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS).expect("minimum fits") + 8;
         let bound = stacked_expert_op(8, 128, 512, slots);
-        let (kernels, words) = grouped_pair(&bound).expect("the grouped form is taken");
-        let [prepass, grouped] = kernels;
-        assert!(prepass.entry.ends_with("_route_prepass"), "{}", prepass.entry);
-        assert!(prepass.entry.starts_with(&grouped.entry), "the prepass shares the grouped kernel's name");
-        assert!(grouped.entry.contains("_grp1"), "{}", grouped.entry);
-        assert_eq!(prepass.source, grouped.source, "both entries live in one module");
-        assert!(grouped.source.contains("scratch0"), "the grouped kernel runs the shared tile loop");
-        assert!(grouped.source.contains("const unsigned int *tile_list"), "activation rows come through the compacted list");
-        assert!(grouped.source.contains("tile_expert_base + tile_index"), "the slice names its expert from the tile table");
-        assert!(grouped.source.contains("grouped_expert * u.gather_element_stride[0]"), "the weight is read at the slice's expert");
-        assert!(prepass.source.contains("__ballot_sync"), "the prepass ranks rows by ballot");
-        assert!(words > 0);
+        assert!(grouped_codecs().count() > 0, "the decode table accepts codecs");
+        for codec in grouped_codecs() {
+            let (kernels, words) = grouped_pair(&bound, codec).unwrap_or_else(|| panic!("the grouped form is taken for {codec:?}"));
+            let [prepass, grouped] = kernels;
+            assert!(prepass.entry.ends_with("_route_prepass"), "{}", prepass.entry);
+            assert!(prepass.entry.starts_with(&grouped.entry), "the prepass shares the grouped kernel's name");
+            assert!(grouped.entry.contains("_grp1"), "{}", grouped.entry);
+            assert_eq!(prepass.source, grouped.source, "both entries live in one module");
+            assert!(grouped.source.contains("scratch0"), "the grouped kernel runs the shared tile loop");
+            assert!(grouped.source.contains("const unsigned int *tile_list"), "activation rows come through the compacted list");
+            assert!(grouped.source.contains("tile_expert_base + tile_index"), "the slice names its expert from the tile table");
+            assert!(grouped.source.contains("grouped_expert * u.gather_element_stride[0]"), "the weight is read at the slice's expert");
+            assert!(prepass.source.contains("__ballot_sync"), "the prepass ranks rows by ballot");
+            assert!(words > 0);
+        }
+    }
+
+    #[test]
+    fn the_plain_emit_of_a_grouped_product_is_the_grouped_kernel_with_its_prepass_as_the_prologue() {
+        let slots = u32::try_from(crate::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS).expect("minimum fits") + 8;
+        let bound = stacked_expert_op(8, 128, 512, slots);
+        for codec in grouped_codecs() {
+            let packed = packed_expert_weight(&bound, codec);
+            let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed()).expect("emit succeeds");
+            let (pair, words) = grouped_pair(&bound, codec).expect("the grouped form is taken");
+            assert_eq!(kernel.entry, pair[1].entry);
+            assert_eq!(kernel.route_compaction_words, words);
+            assert_eq!(kernel.prologue.len(), 1, "{codec:?}");
+            assert_eq!(kernel.prologue[0].entry, pair[0].entry);
+            assert!(!kernel.prologue[0].bindings.iter().any(|binding| matches!(binding, Binding::Output(_))));
+        }
     }
 
     #[test]
     fn the_dense_product_keeps_the_tiled_mma_kernel_and_takes_no_grouped_form() {
         let bound = dense_expert_free_op(128, 512, 200);
-        let packed = packed_expert_weight(&bound);
-        let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed()).expect("dense emit succeeds");
-        assert!(kernel.entry.contains("_mma"), "{}", kernel.entry);
-        assert!(!kernel.entry.contains("_grp1"), "{}", kernel.entry);
-        assert!(grouped_pair(&bound).is_none());
+        for codec in grouped_codecs() {
+            let packed = packed_expert_weight(&bound, codec);
+            let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed()).expect("dense emit succeeds");
+            assert!(kernel.entry.contains("_mma"), "{}", kernel.entry);
+            assert!(!kernel.entry.contains("_grp1"), "{}", kernel.entry);
+            assert!(grouped_pair(&bound, codec).is_none());
+        }
     }
 
     #[test]
     fn a_gathered_product_below_the_grouped_minimum_keeps_the_cooperative_reduce() {
         let bound = stacked_expert_op(8, 128, 512, 8);
-        assert!(grouped_pair(&bound).is_none());
-        let packed = packed_expert_weight(&bound);
-        let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed()).expect("emit succeeds");
-        assert!(!kernel.entry.contains("_mma"), "{}", kernel.entry);
-        assert!(!kernel.entry.contains("_grp1"), "{}", kernel.entry);
+        for codec in grouped_codecs() {
+            assert!(grouped_pair(&bound, codec).is_none());
+            let packed = packed_expert_weight(&bound, codec);
+            let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed()).expect("emit succeeds");
+            assert!(!kernel.entry.contains("_mma"), "{}", kernel.entry);
+            assert!(!kernel.entry.contains("_grp1"), "{}", kernel.entry);
+            assert!(kernel.prologue.is_empty());
+        }
     }
 
     #[test]
