@@ -10,6 +10,7 @@
 
 use super::*;
 use crate::msl::encode_render::{RenderedEncode, format_encode_kernel_msl};
+use crate::encode_render::EncodeRows;
 use proxima_numeric::NumericFormat;
 
 /// A compiled encode for one registered output node.
@@ -93,7 +94,7 @@ pub(super) fn encoded_bytes(plan: &Plan, node: NodeId, element_count: u64) -> Re
     let format = plan.encoded_outputs.get(&node).ok_or_else(|| refuse(node, "not an encoded output"))?;
     usize::try_from(element_count)
         .ok()
-        .and_then(|count| format.packed_len(count))
+        .and_then(|count| EncodeRows { element_count: count, byte_offset: 0 }.byte_len(format))
         .ok_or_else(|| refuse(node, "the node's rows are not whole blocks of the cache format"))
 }
 
@@ -105,19 +106,19 @@ pub(super) fn encode_rows(
     encoder: &EncoderGuard,
     compiled: &EncodePipeline,
     source: &DeviceBuffer,
-    destination: (&MetalBuffer, usize),
-    element_count: usize,
+    destination: &MetalBuffer,
+    rows: EncodeRows,
     tracker: Option<&mut HazardTracker<HazardId>>,
 ) {
     if let Some(tracker) = tracker {
-        let source_region = hazard_region(&source.0, source.1, element_count * core::mem::size_of::<f32>());
+        let source_region = hazard_region(&source.0, source.1, rows.element_count * core::mem::size_of::<f32>());
         if tracker.needs_barrier(&[source_region], None) {
             tracker.reset();
             encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
         }
         tracker.record(&[source_region], None);
     }
-    let threads = element_count / compiled.elements_per_thread;
+    let threads = rows.threads(compiled.elements_per_thread);
     let width = compiled.pipeline.maxTotalThreadsPerThreadgroup().min(32);
     encoder.setComputePipelineState(&compiled.pipeline);
     // SAFETY: both buffers outlive the encoder (the plan's arena and the caller's placed buffer),
@@ -125,7 +126,7 @@ pub(super) fn encode_rows(
     // range holds `threads * bytes_per_thread` bytes past its offset.
     unsafe {
         encoder.setBuffer_offset_atIndex(Some(&source.0), source.1, 0);
-        encoder.setBuffer_offset_atIndex(Some(destination.0), destination.1, 1);
+        encoder.setBuffer_offset_atIndex(Some(destination), rows.byte_offset, 1);
     }
     encoder.dispatchThreads_threadsPerThreadgroup(
         MTLSize { width: threads, height: 1, depth: 1 },

@@ -146,3 +146,33 @@ pub fn wrap_block_kernel(dialect: &dyn EncodeDialect, layout: &BlockLayout, name
     let source = format!("{prelude}{function}\n{open}    {name}(input + gid * {elements}u, output + gid * {bytes}u);\n}}\n");
     Some(RenderedEncode { source, entry: format!("{name}_kernel"), elements_per_thread: elements, bytes_per_thread: bytes })
 }
+
+/// Which rows a dispatch of a rendered encode covers: the element count of the source rows and the
+/// byte offset in the destination buffer where the packed bytes start. Every backend sizes and
+/// splits the dispatch through this one type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncodeRows {
+    pub element_count: usize,
+    pub byte_offset: usize,
+}
+
+impl EncodeRows {
+    /// Threads to dispatch: one per `elements_per_thread` values.
+    #[must_use]
+    pub const fn threads(&self, elements_per_thread: usize) -> usize {
+        self.element_count / elements_per_thread
+    }
+
+    /// Bytes the destination must hold past its offset, `None` when the rows are not whole blocks of `format`.
+    #[must_use]
+    pub fn byte_len(&self, format: &NumericFormat) -> Option<usize> {
+        format.packed_len(self.element_count)
+    }
+
+    /// The byte range the packed rows occupy in the destination, `None` on overflow or partial blocks.
+    #[must_use]
+    pub fn byte_range(&self, format: &NumericFormat) -> Option<core::ops::Range<usize>> {
+        let end = self.byte_offset.checked_add(self.byte_len(format)?)?;
+        Some(self.byte_offset..end)
+    }
+}

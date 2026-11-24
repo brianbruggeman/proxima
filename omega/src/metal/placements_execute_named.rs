@@ -1745,8 +1745,11 @@ pub(super) fn execute_plan_with_placements_inner(
                     &encoder,
                     compiled,
                     source,
-                    (destination, destination_offset),
-                    plan.prepared.shapes.of(produced).iter().product::<u64>() as usize,
+                    destination,
+                    crate::encode_render::EncodeRows {
+                        element_count: plan.prepared.shapes.of(produced).iter().product::<u64>() as usize,
+                        byte_offset: destination_offset,
+                    },
                     (dispatch_type == DispatchType::Concurrent).then_some(&mut hazard_state.tracker),
                 );
                 encoded_dispatches += 1;
