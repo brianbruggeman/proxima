@@ -16,15 +16,14 @@ use std::time::Instant;
 use conflaguration::Settings;
 use proxima_model_interop::ServingConfig;
 use proxima_model_interop::diffusion::{
-    Checkpoint, DiffusionSettings, DitConfig, DitInputs, Graph as ModelGraph, VaeConfig,
-    build_dit, build_vae_decode, load_weights, timestep_sinusoid, write_png,
+    Checkpoint, Decoder, Denoiser, DiffusionSettings, DitConfig, DitInputs, Graph as ModelGraph,
+    VaeConfig, build_dit, build_vae_decode, timestep_sinusoid, write_png,
 };
 use proxima_model_interop::{
     LoadedModel, ServingSettings, architecture_from_hf_config, parse_hf_config,
 };
-use proxima_numeric::codec::Codec;
-use proxima_numeric::{DType, FloatLayout, FlowMatchSchedule, Philox, euler_step};
-use proxima_tensor::QuantizedBlock;
+use proxima_numeric::{FloatLayout, FlowMatchSchedule, Philox, euler_step};
+use proxima_tensor::op::NodeId;
 use proxima_tensor::spec::multi_axis_rope_tables;
 use proxima_tokenizer::Vocab;
 
@@ -190,17 +189,6 @@ fn serving_settings(dir: &Path, tokens: usize) -> Result<ServingSettings, String
     settings.model_path = dir.to_string_lossy().into_owned();
     settings.context_length = u32::try_from(tokens).map_err(|why| why.to_string())?;
     Ok(settings)
-}
-
-fn runtime(serving: &ServingConfig) -> omega::config::RuntimeConfig {
-    omega::config::RuntimeConfig::builder()
-        .with_engine("gpu")
-        .with_gpu_driver("metal")
-        .with_allow_fusion(true)
-        .with_numeric(serving.numeric_policy)
-        .with_exact_activations(serving.exact_activations)
-        .build()
-        .expect("metal runtime")
 }
 
 /// The per-op GPU attribution table: total, one row per `kind`, then the top
@@ -421,22 +409,29 @@ fn vae_config() -> VaeConfig {
 /// The four Euler steps: Philox noise, the DiT velocity and the flow-match
 /// update. Returns the latent after step 4, the per-step seconds and the weight
 /// load time.
+fn step_leaves(graph: &mut ModelGraph) -> [NodeId; 3] {
+    let latent = graph.host("latent", &[IMAGE_TOKENS as u32, LATENT_CHANNELS as u32], Vec::new());
+    let text = graph.host("text", &[MIN_LENGTH as u32, JOINT_ATTENTION as u32], Vec::new());
+    let timestep = graph.host("timestep", &[256], Vec::new());
+    [latent, text, timestep]
+}
+
 fn diffuse(
     dir: &Path,
     text: &[f32],
     seed: u64,
-    serving: &ServingConfig,
+    settings: &ServingSettings,
+    diffusion: &DiffusionSettings,
 ) -> Result<(Vec<f32>, Vec<f64>, f64), String> {
     let checkpoint = Checkpoint::open(&dir.join("flux-2-klein-4b.safetensors"))?;
-    let mut graph = ModelGraph::new(DType::FLOAT32);
-    let latent_leaf = graph.host("latent", &[IMAGE_TOKENS as u32, LATENT_CHANNELS as u32], Vec::new());
-    let text_leaf = graph.host("text", &[MIN_LENGTH as u32, JOINT_ATTENTION as u32], Vec::new());
-    let timestep_leaf = graph.host("timestep", &[256], Vec::new());
+    let activation = diffusion.dit_activation_dtype()?;
+    let mut graph = ModelGraph::new(activation);
+    let [latent_leaf, text_leaf, timestep_leaf] = step_leaves(&mut graph);
     let (cos_bytes, sin_bytes) = multi_axis_rope_tables(
         &rope_positions(),
         &[32, 32, 32, 32],
         &[2000.0; 4],
-        DType::FLOAT32,
+        activation,
     )
     .map_err(|why| why.to_string())?;
     let decode = |bytes: &[u8]| -> Vec<f32> {
@@ -463,65 +458,48 @@ fn diffuse(
         },
     )
     .map_err(|why| why.to_string())?;
+    let rows = (MIN_LENGTH + IMAGE_TOKENS) as u64;
     let dit_load = Instant::now();
-    let dit_weights = load_weights(&checkpoint, &graph.weights, Codec::Float16, false)?;
-    let dit_integers = graph.int_buffers();
+    let mut denoiser = Denoiser::new(
+        &checkpoint,
+        graph,
+        output.velocity,
+        &[rows],
+        diffusion.dit_weights,
+        settings,
+    )?;
     let dit_seconds_load = dit_load.elapsed().as_secs_f64();
     drop(checkpoint);
     let mut latent_values = token_major(&Philox::new(seed).normal(IMAGE_TOKENS * LATENT_CHANNELS));
-    let cos_values = decode(&cos_bytes);
-    let sin_values = decode(&sin_bytes);
     let sigmas = FlowMatchSchedule::new(STEPS, IMAGE_TOKENS as u32)
         .sigmas()
         .map_err(|why| why.to_string())?;
-    let planning_timestep = timestep_sinusoid(1.0, 256);
-    let mut named: Vec<(&str, QuantizedBlock)> = dit_weights.blocks();
-    named.extend(graph.host_blocks(
-        &[
-            ("latent", latent_values.as_slice()),
-            ("text", text),
-            ("timestep", planning_timestep.as_slice()),
-            ("rope_cos", cos_values.as_slice()),
-            ("rope_sin", sin_values.as_slice()),
-        ],
-        &dit_integers,
-    ));
-    let plan_started = Instant::now();
-    let (mut plan, _) = omega::backend::plan_named_with_config(
-        &runtime(serving),
-        &graph.program,
-        &[(MIN_LENGTH + IMAGE_TOKENS) as u64],
-        &named,
-        &[output.velocity],
-    )
-    .map_err(|why| format!("dit plan: {why}"))?;
     eprintln!(
-        "dit: {} ops, {} weights, load {dit_seconds_load:.1}s, plan {:.1}s",
-        graph.program.len(),
-        graph.weights.len(),
-        plan_started.elapsed().as_secs_f64()
+        "dit: {} ops, {} weights, load {dit_seconds_load:.1}s (step 1 plans)",
+        denoiser.graph().program.len(),
+        denoiser.graph().weights.len(),
     );
+    let mut call_graph = ModelGraph::new(activation);
+    step_leaves(&mut call_graph);
     let mut dit_seconds = Vec::with_capacity(STEPS as usize);
     for step in 0..STEPS as usize {
         let timestep = timestep_sinusoid(sigmas[step], 256);
-        let mut step_named: Vec<(&str, QuantizedBlock)> = dit_weights.blocks();
-        step_named.extend(graph.host_blocks(
+        let inputs = call_graph.host_blocks(
             &[
                 ("latent", latent_values.as_slice()),
                 ("text", text),
                 ("timestep", timestep.as_slice()),
-                ("rope_cos", cos_values.as_slice()),
-                ("rope_sin", sin_values.as_slice()),
             ],
-            &dit_integers,
-        ));
+            &[],
+        );
         let ran = Instant::now();
-        let evaluated = omega::backend::execute_plan_named(&mut plan, &step_named)
+        let evaluated = denoiser
+            .evaluate(&inputs, &[])
             .map_err(|why| format!("dit step {}: {why}", step + 1))?;
         let elapsed = ran.elapsed().as_secs_f64();
         dit_seconds.push(elapsed);
         let velocity = evaluated
-            .get(output.velocity)
+            .get(denoiser.velocity())
             .ok_or("velocity is not an output")?
             .0
             .to_vec();
@@ -633,7 +611,7 @@ fn run() -> Result<(), String> {
             (token_major(&dump), Vec::new())
         }
         None => {
-            let (latent, seconds, _) = diffuse(&dir, &text, seed, &serving)?;
+            let (latent, seconds, _) = diffuse(&dir, &text, seed, &settings, &diffusion)?;
             (latent, seconds)
         }
     };
@@ -662,70 +640,53 @@ fn run() -> Result<(), String> {
             }
         }
     }
-    let mut vae_graph = ModelGraph::new(DType::FLOAT32);
-    let vae_latent = vae_graph.host(
-        "latent",
-        &[
-            LATENT_SIDE * LATENT_SIDE * 4,
-            (LATENT_CHANNELS / 4) as u32,
-            1,
-        ],
-        Vec::new(),
-    );
+    let latent_shape = [LATENT_SIDE * LATENT_SIDE * 4, (LATENT_CHANNELS / 4) as u32, 1];
+    let vae_activation = diffusion.vae_activation_dtype()?;
+    let mut vae_graph = ModelGraph::new(vae_activation);
+    let vae_latent = vae_graph.host("latent", &latent_shape, Vec::new());
     let vae_output = build_vae_decode(&mut vae_graph, &vae_config(), vae_latent)
         .map_err(|why| why.to_string())?;
     let vae_load = Instant::now();
-    let vae_weights = load_weights(&vae, &vae_graph.weights, Codec::Float16, true)?;
-    let vae_integers = vae_graph.int_buffers();
+    let mut decoder = Decoder::new(
+        &vae,
+        vae_graph,
+        vae_output.image,
+        &[u64::from(latent_shape[0])],
+        diffusion.vae_weights,
+        &settings,
+    )?;
     eprintln!(
         "vae: {} ops, {} weights, load {:.1}s",
-        vae_graph.program.len(),
-        vae_graph.weights.len(),
+        decoder.graph().program.len(),
+        decoder.graph().weights.len(),
         vae_load.elapsed().as_secs_f64()
     );
-    let mut vae_named: Vec<(&str, QuantizedBlock)> = vae_weights.blocks();
-    vae_named.extend(vae_graph.host_blocks(&[("latent", decoder_input.as_slice())], &vae_integers));
-    let vae_plan = Instant::now();
-    // The op-timed submission takes `omega`'s own Metal plan, so a profiling run
-    // plans through the Metal entry point directly; every other run goes through
-    // `omega::backend`, the surface a serving caller uses.
-    let vae_runtime = runtime(&serving);
+    let mut call_graph = ModelGraph::new(vae_activation);
+    call_graph.host("latent", &latent_shape, Vec::new());
+    let vae_inputs = call_graph.host_blocks(&[("latent", decoder_input.as_slice())], &[]);
+    // A profiled decode runs on the decoder's profile-local runtime, so its
+    // one-command-buffer-per-op plan never enters the cache a plain decode reads.
     #[cfg(feature = "instrument")]
-    let profiled_plan = if profile_stage.as_deref() == Some("vae") || op_profile_path.is_some() {
-        Some(
-            omega::metal::plan_named_with_config(
-                &vae_graph.program,
-                &[(LATENT_SIDE * LATENT_SIDE * 4) as u64],
-                &vae_named,
-                &[vae_output.image],
-                &vae_runtime,
-            )
-            .map_err(|why| format!("vae profile plan: {why}"))?,
-        )
-    } else {
-        None
-    };
-    #[cfg(feature = "instrument")]
-    if let Some(plan) = profiled_plan {
-        eprintln!("vae profile plan {:.1}s", vae_plan.elapsed().as_secs_f64());
+    if profile_stage.as_deref() == Some("vae") || op_profile_path.is_some() {
         if op_profile_path.is_some() {
             let warm_started = Instant::now();
-            omega::metal::execute_plan_named_op_timed(&plan, &vae_named, None)
+            decoder
+                .evaluate_op_timed(&vae_inputs)
                 .map_err(|why| format!("vae warm profile: {why}"))?;
             eprintln!("vae warm decode: {:.2?} (discarded)", warm_started.elapsed());
         }
         let decode_started = Instant::now();
-        let (evaluated, timings) =
-            omega::metal::execute_plan_named_op_timed(&plan, &vae_named, None)
-                .map_err(|why| format!("vae profile: {why}"))?;
+        let (evaluated, timings) = decoder
+            .evaluate_op_timed(&vae_inputs)
+            .map_err(|why| format!("vae profile: {why}"))?;
         if let Some(path) = &op_profile_path {
-            write_op_profile(path, &timings, &vae_graph)?;
+            write_op_profile(path, &timings, decoder.graph())?;
         }
         eprintln!(
             "vae profile decode: {:.2}s (one command buffer per op)",
             decode_started.elapsed().as_secs_f64()
         );
-        report_op_profile(&timings, &vae_graph.program, diffusion.profile_top as usize);
+        report_op_profile(&timings, &decoder.graph().program, diffusion.profile_top as usize);
         // `PROXIMA_DIFFUSION_CAPTURE_NODES=<node,..>` re-runs the same plan with omega's
         // live capture on, so the record for each named op carries the launch
         // grid, the emitted entry and each operand's codec -- the facts the
@@ -770,15 +731,9 @@ fn run() -> Result<(), String> {
                 std::env::set_var("PROXIMA_CAPTURE_LIVE", "1");
             }
             let _ = omega::take_captured_dispatches();
-            let (mut capture_plan, _) = omega::backend::plan_named_with_config(
-                &runtime(&serving),
-                &vae_graph.program,
-                &[(LATENT_SIDE * LATENT_SIDE * 4) as u64],
-                &vae_named,
-                &[vae_output.image],
-            )
-            .map_err(|why| format!("vae capture plan: {why}"))?;
-            let _ = omega::backend::execute_plan_named(&mut capture_plan, &vae_named);
+            decoder
+                .evaluate_fresh(&vae_inputs)
+                .map_err(|why| format!("vae capture: {why}"))?;
             for record in omega::take_captured_dispatches() {
                 eprintln!(
                     "vae_capture node={} kind={} entry={} extents={:?} grid={:?} operands={:?}",
@@ -787,27 +742,19 @@ fn run() -> Result<(), String> {
             }
         }
         let image = evaluated
-            .get(vae_output.image)
+            .get(decoder.image())
             .ok_or("image is not an output")?
             .0
             .to_vec();
         return finish_image(image, out);
     }
-    let (mut plan, _) = omega::backend::plan_named_with_config(
-        &vae_runtime,
-        &vae_graph.program,
-        &[(LATENT_SIDE * LATENT_SIDE * 4) as u64],
-        &vae_named,
-        &[vae_output.image],
-    )
-    .map_err(|why| format!("vae plan: {why}"))?;
-    eprintln!("vae plan {:.1}s", vae_plan.elapsed().as_secs_f64());
     let decode_started = Instant::now();
-    let evaluated = omega::backend::execute_plan_named(&mut plan, &vae_named)
+    let evaluated = decoder
+        .evaluate(&vae_inputs)
         .map_err(|why| format!("vae decode: {why}"))?;
     let vae_seconds = decode_started.elapsed().as_secs_f64();
-    let image = evaluated.get(vae_output.image).ok_or("image is not an output")?.0;
-    eprintln!("vae decode: {vae_seconds:.2}s");
+    let image = evaluated.get(decoder.image()).ok_or("image is not an output")?.0;
+    eprintln!("vae decode: {vae_seconds:.2}s (includes the plan)");
 
     finish_image(image.to_vec(), out)?;
     let dit_total: f64 = dit_seconds.iter().sum();
