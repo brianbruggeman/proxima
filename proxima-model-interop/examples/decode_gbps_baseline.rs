@@ -146,6 +146,10 @@ fn counts_toward_decode_span(is_prefill: bool, step: usize) -> bool {
 /// llama-server's `predicted_ms / predicted_n` in float ms: the summed
 /// `step_ns` of the steps `counts_toward_decode_span` admits, over the
 /// `tokens_generated - 1` tokens they produced.
+fn start_prompt_label(text: &str, ids: Option<&[u32]>) -> String {
+    ids.map_or_else(|| text.to_owned(), |supplied| format!("{} ids", supplied.len()))
+}
+
 fn decode_step_ms_per_token(decode_step_ns: u64, tokens_generated: usize) -> f64 {
     decode_step_ns as f64 / 1_000_000.0 / tokens_generated.saturating_sub(1).max(1) as f64
 }
@@ -423,14 +427,9 @@ fn main() {
         );
     }
 
-    // Chat-template prompt (same convention as `gemma4_correctness_gate.rs`)
-    // chosen because its locked greedy completion runs the full 46-token
-    // budget without an early EOS -- a short factual completion like
-    // "The capital of France is" hits EOS after ~5 tokens, too few steps
-    // for a steady-state decode average. `PROXIMA_PROMPT` overrides it
-    // verbatim -- the caller supplies any chat-template markers, this
-    // example does not add or infer any.
-    let default_prompt = "<|turn>user\nWhich of these is smaller in size: a hippopotamus or a large office building?<turn|>\n<|turn>model\n";
+    // plain text default; `PROXIMA_PROMPT` overrides it verbatim and this example adds or
+    // infers no template markers.
+    let default_prompt = "Which of these is smaller in size: a hippopotamus or a large office building?";
     let prompt_override = std::env::var("PROXIMA_PROMPT").ok();
     let prompt: &str = prompt_override.as_deref().unwrap_or(default_prompt);
     let prompt_ids_override = std::env::var("PROXIMA_PROMPT_IDS").ok().map(|raw| {
@@ -442,6 +441,7 @@ fn main() {
             })
             .collect::<Vec<u32>>()
     });
+    let prompt_label = start_prompt_label(prompt, prompt_ids_override.as_deref());
     let max_tokens: usize = std::env::var("PROXIMA_MAX_TOKENS")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -459,7 +459,7 @@ fn main() {
     #[cfg(feature = "instrument")]
     proxima_telemetry::info!(
         run = "start",
-        prompt = ?prompt,
+        prompt = ?prompt_label,
         max_tokens = max_tokens as u64,
         batch_size = u64::from(serving_config.batch_size),
         ubatch_size = u64::from(serving_config.ubatch_size),
@@ -468,7 +468,7 @@ fn main() {
     );
     #[cfg(not(feature = "instrument"))]
     eprintln!(
-        "decode_gbps_baseline run=start prompt={prompt:?} max_tokens={max_tokens} batch_size={} ubatch_size={} kv_key={:?} kv_value={:?} flash_attention={} attention_variant={:?} context={:?} seed={} ignore_eos={} config_diff_count={}",
+        "decode_gbps_baseline run=start prompt={prompt_label:?} max_tokens={max_tokens} batch_size={} ubatch_size={} kv_key={:?} kv_value={:?} flash_attention={} attention_variant={:?} context={:?} seed={} ignore_eos={} config_diff_count={}",
         serving_config.batch_size,
         serving_config.ubatch_size,
         serving_config.kv_cache_key_quant,
@@ -709,7 +709,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{counts_toward_decode_span, decode_step_ms_per_token};
+    use super::{counts_toward_decode_span, decode_step_ms_per_token, start_prompt_label};
 
     /// run_index=0 step_time lines and the run=done line from a real 128-token
     /// F32 run of the 26-token chat prompt (sb1 `prox-short-F32-r1.log`).
@@ -747,6 +747,12 @@ mod tests {
         assert_eq!(sum_ns, 1_251_123_583);
         let per_token = decode_step_ms_per_token(sum_ns, tokens_generated);
         assert!((per_token - 9.851_366_795).abs() < 1e-9, "got {per_token}");
+    }
+
+    #[test]
+    fn start_label_reports_the_id_count_and_no_text_when_ids_are_supplied() {
+        assert_eq!(start_prompt_label("some text", Some(&[7, 8, 9])), "3 ids");
+        assert_eq!(start_prompt_label("some text", None), "some text");
     }
 
     #[test]
