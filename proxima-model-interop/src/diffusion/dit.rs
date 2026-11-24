@@ -4,13 +4,13 @@
 //! is the checkpoint's own (the diffusers layout its safetensors header
 //! declares).
 
+use proxima_tensor::TensorError;
 use proxima_tensor::op::{NodeId, ReduceInit, ScalarOp};
 use proxima_tensor::spec::{
-    RopePairing, scalar_constant_like, concat_rows, count_constant, elementwise_like, fused_rope_pair,
+    RopePairing, concat_rows, count_constant, elementwise_like, fused_rope_pair,
     layer_norm_no_affine, linear, matvec, modulate, non_causal_attention_heads, reduce_like,
-    rmsnorm_per_head, silu, slice_columns, slice_range, unit_constant,
+    rmsnorm_per_head, scalar_constant_like, silu, slice_columns, slice_range, unit_constant,
 };
-use proxima_tensor::TensorError;
 
 use super::Graph;
 
@@ -58,6 +58,10 @@ pub struct DitInputs {
     /// `[image_tokens + text_tokens, head_dim / 2]`.
     pub rope_cos: NodeId,
     pub rope_sin: NodeId,
+    /// The per-head norm count constant, from [`head_norm_count`].
+    pub norm_count: NodeId,
+    /// The attention scale `1 / sqrt(head_dim)`, from [`attention_scale`].
+    pub attention_scale: NodeId,
     pub image_tokens: u32,
     pub text_tokens: u32,
 }
@@ -107,16 +111,36 @@ fn reduce(
     reduce_like(&mut graph.program, body, init, operand, in_map, out_map)
 }
 
-fn scaled_sum(graph: &mut Graph, left: NodeId, right: NodeId, map: &str) -> Result<NodeId, TensorError> {
+fn scaled_sum(
+    graph: &mut Graph,
+    left: NodeId,
+    right: NodeId,
+    map: &str,
+) -> Result<NodeId, TensorError> {
     dense(graph, left, ScalarOp::Add, &[(left, map), (right, map)])
 }
 
-fn scaled_mul(graph: &mut Graph, left: NodeId, right: NodeId, map: &str) -> Result<NodeId, TensorError> {
-    dense(graph, left, ScalarOp::Multiply, &[(left, map), (right, map)])
+fn scaled_mul(
+    graph: &mut Graph,
+    left: NodeId,
+    right: NodeId,
+    map: &str,
+) -> Result<NodeId, TensorError> {
+    dense(
+        graph,
+        left,
+        ScalarOp::Multiply,
+        &[(left, map), (right, map)],
+    )
 }
 
 fn multiply_gate(graph: &mut Graph, value: NodeId, gate: NodeId) -> Result<NodeId, TensorError> {
-    dense(graph, value, ScalarOp::Multiply, &[(value, "td->td"), (gate, "d->td")])
+    dense(
+        graph,
+        value,
+        ScalarOp::Multiply,
+        &[(value, "td->td"), (gate, "d->td")],
+    )
 }
 
 fn norm(graph: &mut Graph, x: NodeId, hidden: u32) -> Result<NodeId, TensorError> {
@@ -166,8 +190,7 @@ fn head_split(
         graph,
         x,
         ScalarOp::Multiply,
-        &
-        [
+        &[
             (x, format!("t,{head_dim}*h+d->thd").as_str()),
             (ones, "hd->thd"),
         ],
@@ -183,30 +206,26 @@ fn slice_tokens(
     trailing: &str,
 ) -> Result<NodeId, TensorError> {
     let axes: Vec<String> = trailing.chars().map(|letter| letter.to_string()).collect();
-    let map = format!(
-        "t+{start}@{rows},{}->t{trailing}",
-        axes.join(",")
-    );
+    let map = format!("t+{start}@{rows},{}->t{trailing}", axes.join(","));
     dense(graph, x, ScalarOp::Identity, &[(x, map.as_str())])
 }
 
 /// `[t, heads, head_dim]` projected by a checkpoint's `[out, feature]` weight
-/// into `[t, out]`: one reduce whose weight feature axis is the head split.
+/// into `[t, hidden]`: one reduce whose weight feature axis is the head split.
 fn project_heads(
     graph: &mut Graph,
     x: NodeId,
     tensor: &str,
-    out_width: u32,
-    head_dim: u32,
+    config: &DitConfig,
     total_features: u32,
     used_features: u32,
     feature_offset: Option<(u32, u32)>,
 ) -> Result<NodeId, TensorError> {
-    let declared_heads = total_features / head_dim;
-    let used_heads = used_features / head_dim;
+    let declared_heads = total_features / config.head_dim;
+    let used_heads = used_features / config.head_dim;
     let weight = graph.weight_slice(
         tensor,
-        &[out_width, declared_heads, head_dim],
+        &[config.hidden, declared_heads, config.head_dim],
         None,
         feature_offset,
     );
@@ -217,7 +236,15 @@ fn project_heads(
         ScalarOp::Multiply,
         &[(x, "sud->soud"), (weight, map.as_str())],
     )?;
-    reduce(graph, x, ScalarOp::Add, ReduceInit::Zero, product, "soud->soud", "so->soud")
+    reduce(
+        graph,
+        x,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        product,
+        "soud->soud",
+        "so->soud",
+    )
 }
 
 /// `[t, width]` scaled by a rank-1 gate and added to the residual.
@@ -232,13 +259,35 @@ fn gated_residual(
 }
 
 /// The `silu`-gated MLP of one stream: `down(silu(gate) * up)`.
-fn swiglu(graph: &mut Graph, x: NodeId, prefix: &str, config: &DitConfig) -> Result<NodeId, TensorError> {
+fn swiglu(
+    graph: &mut Graph,
+    x: NodeId,
+    prefix: &str,
+    config: &DitConfig,
+) -> Result<NodeId, TensorError> {
     let mlp = config.mlp_hidden();
-    let gate = linear_rows(graph, x, &format!("{prefix}.0.weight"), config.hidden, (0, mlp))?;
+    let gate = linear_rows(
+        graph,
+        x,
+        &format!("{prefix}.0.weight"),
+        config.hidden,
+        (0, mlp),
+    )?;
     let gate = activated(graph, gate, "td->td")?;
-    let up = linear_rows(graph, x, &format!("{prefix}.0.weight"), config.hidden, (mlp, 2 * mlp))?;
+    let up = linear_rows(
+        graph,
+        x,
+        &format!("{prefix}.0.weight"),
+        config.hidden,
+        (mlp, 2 * mlp),
+    )?;
     let gained = scaled_mul(graph, gate, up, "td->td")?;
-    linear_of(graph, gained, &format!("{prefix}.2.weight"), &[config.hidden, mlp])
+    linear_of(
+        graph,
+        gained,
+        &format!("{prefix}.2.weight"),
+        &[config.hidden, mlp],
+    )
 }
 
 /// Per-head RMSNorm of a `[t, heads, head_dim]` query or key.
@@ -259,11 +308,7 @@ fn head_norm(
     rmsnorm_per_head(&mut graph.program, x, gamma, count, eps, "h")
 }
 
-fn rope(
-    graph: &mut Graph,
-    x: NodeId,
-    inputs: &DitInputs,
-) -> Result<(NodeId, NodeId), TensorError> {
+fn rope(graph: &mut Graph, x: NodeId, inputs: &DitInputs) -> Result<(NodeId, NodeId), TensorError> {
     fused_rope_pair(
         &mut graph.program,
         x,
@@ -285,17 +330,16 @@ fn double_block(
     text: NodeId,
     image_mod: [NodeId; 6],
     text_mod: [NodeId; 6],
-    count: NodeId,
-    inv_sqrt: NodeId,
-    trace: &mut Vec<(&'static str, NodeId)>,
-    record: bool,
+    mut trace: Option<&mut Vec<(&'static str, NodeId)>>,
 ) -> Result<(NodeId, NodeId), TensorError> {
+    let count = inputs.norm_count;
+    let inv_sqrt = inputs.attention_scale;
     let program = &mut graph.program;
     let image_normed = layer_norm_no_affine(program, image, config.hidden, NORM_EPS)?;
     let image_normed = modulate(program, image_normed, image_mod[0], image_mod[1])?;
     let text_normed = layer_norm_no_affine(program, text, config.hidden, NORM_EPS)?;
     let text_normed = modulate(program, text_normed, text_mod[0], text_mod[1])?;
-    if record {
+    if let Some(trace) = trace.as_mut() {
         trace.push(("b_imgmod", image_normed));
     }
 
@@ -338,12 +382,15 @@ fn double_block(
             });
         }
     }
-    let (text_q, text_k, text_v, image_q, image_k, image_v) = (
-        parts[0], parts[1], parts[2], parts[3], parts[4], parts[5],
+    let (text_q, text_k, text_v, image_q, image_k, image_v) =
+        (parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]);
+    let index = graph.concat_indices(
+        inputs.text_tokens,
+        inputs.image_tokens,
+        &format!("{prefix}.qkv"),
     );
-    let index = graph.concat_indices(inputs.text_tokens, inputs.image_tokens, &format!("{prefix}.qkv"));
     let program = &mut graph.program;
-    if record {
+    if let Some(trace) = trace.as_mut() {
         trace.push(("b_imgq", image_q));
         trace.push(("b_imgk", image_k));
         trace.push(("b_imgv", image_v));
@@ -357,16 +404,21 @@ fn double_block(
     let attended = non_causal_attention_heads(
         program, q_even, q_odd, k_even, k_odd, v, inv_sqrt, "u", "p", "d",
     )?;
-    if record {
+    if let Some(trace) = trace.as_mut() {
         trace.push(("b_attn", attended));
     }
-    let image_attended = slice_tokens(graph, attended, inputs.text_tokens, inputs.image_tokens, "ud")?;
+    let image_attended = slice_tokens(
+        graph,
+        attended,
+        inputs.text_tokens,
+        inputs.image_tokens,
+        "ud",
+    )?;
     let image_attended = project_heads(
         graph,
         image_attended,
         &format!("{prefix}.img_attn.proj.weight"),
-        config.hidden,
-        config.head_dim,
+        config,
         config.hidden,
         config.hidden,
         None,
@@ -376,13 +428,12 @@ fn double_block(
         graph,
         text_attended,
         &format!("{prefix}.txt_attn.proj.weight"),
-        config.hidden,
-        config.head_dim,
+        config,
         config.hidden,
         config.hidden,
         None,
     )?;
-    if record {
+    if let Some(trace) = trace.as_mut() {
         trace.push(("b_imgattnproj", image_attended));
     }
     let image = gated_residual(graph, image, image_attended, image_mod[2])?;
@@ -394,7 +445,7 @@ fn double_block(
         modulate(program, image_mlp_in, image_mod[3], image_mod[4])?
     };
     let image_mlp = swiglu(graph, image_mlp_in, &format!("{prefix}.img_mlp"), config)?;
-    if record {
+    if let Some(trace) = trace.as_mut() {
         trace.push(("b_imgmlp", image_mlp));
     }
     let image = gated_residual(graph, image, image_mlp, image_mod[5])?;
@@ -416,9 +467,9 @@ fn single_block(
     prefix: &str,
     x: NodeId,
     modulation: [NodeId; 3],
-    count: NodeId,
-    inv_sqrt: NodeId,
 ) -> Result<NodeId, TensorError> {
+    let count = inputs.norm_count;
+    let inv_sqrt = inputs.attention_scale;
     let program = &mut graph.program;
     let normed = layer_norm_no_affine(program, x, config.hidden, NORM_EPS)?;
     let normed = modulate(program, normed, modulation[0], modulation[1])?;
@@ -431,10 +482,30 @@ fn single_block(
     let attention_in = config.attention_width();
     let rows = inputs.text_tokens + inputs.image_tokens;
     let q = slice_heads(graph, fused, 0, attention_in, config.head_dim)?;
-    let q = head_norm(graph, q, &format!("{prefix}.norm.query_norm.scale"), config, count, rows)?;
+    let q = head_norm(
+        graph,
+        q,
+        &format!("{prefix}.norm.query_norm.scale"),
+        config,
+        count,
+        rows,
+    )?;
     let k = slice_heads(graph, fused, attention_in, attention_in, config.head_dim)?;
-    let k = head_norm(graph, k, &format!("{prefix}.norm.key_norm.scale"), config, count, rows)?;
-    let v = slice_heads(graph, fused, attention_in * 2, attention_in, config.head_dim)?;
+    let k = head_norm(
+        graph,
+        k,
+        &format!("{prefix}.norm.key_norm.scale"),
+        config,
+        count,
+        rows,
+    )?;
+    let v = slice_heads(
+        graph,
+        fused,
+        attention_in * 2,
+        attention_in,
+        config.head_dim,
+    )?;
     let program = &mut graph.program;
     let mlp = slice_columns(program, fused, attention_in * 3, config.mlp_hidden() * 2)?;
     let program = &mut graph.program;
@@ -462,8 +533,7 @@ fn single_block(
         graph,
         attended,
         &format!("{prefix}.linear2.weight"),
-        config.hidden,
-        config.head_dim,
+        config,
         attention_in,
         attention_in,
         Some((0, attention_in)),
@@ -489,27 +559,23 @@ pub fn build_double_block(
     image_mod: [NodeId; 6],
     text_mod: [NodeId; 6],
 ) -> Result<(NodeId, NodeId), TensorError> {
+    double_block(
+        graph, config, inputs, prefix, image, text, image_mod, text_mod, None,
+    )
+}
+
+/// The constant every per-head norm divides by, built once per program.
+pub fn head_norm_count(graph: &mut Graph, config: &DitConfig) -> NodeId {
+    count_constant(&mut graph.program, config.head_dim)
+}
+
+/// The constant attention scores are scaled by, built once per program.
+pub fn attention_scale(graph: &mut Graph, config: &DitConfig) -> NodeId {
     let activation = graph.activation();
-    let count = count_constant(&mut graph.program, config.head_dim);
-    let inv_sqrt = unit_constant(
+    unit_constant(
         &mut graph.program,
         1.0 / (config.head_dim as f32).sqrt(),
         activation,
-    );
-    let mut trace = Vec::new();
-    double_block(
-        graph,
-        config,
-        inputs,
-        prefix,
-        image,
-        text,
-        image_mod,
-        text_mod,
-        count,
-        inv_sqrt,
-        &mut trace,
-        false,
     )
 }
 
@@ -526,14 +592,7 @@ pub fn build_single_block(
     x: NodeId,
     modulation: [NodeId; 3],
 ) -> Result<NodeId, TensorError> {
-    let activation = graph.activation();
-    let count = count_constant(&mut graph.program, config.head_dim);
-    let inv_sqrt = unit_constant(
-        &mut graph.program,
-        1.0 / (config.head_dim as f32).sqrt(),
-        activation,
-    );
-    single_block(graph, config, inputs, prefix, x, modulation, count, inv_sqrt)
+    single_block(graph, config, inputs, prefix, x, modulation)
 }
 
 fn modulation_chunks(
@@ -627,13 +686,6 @@ pub fn build_dit(
         config.hidden,
         2,
     )?;
-    let activation = graph.activation();
-    let count = count_constant(&mut graph.program, config.head_dim);
-    let inv_sqrt = unit_constant(
-        &mut graph.program,
-        1.0 / (config.head_dim as f32).sqrt(),
-        activation,
-    );
 
     let mut image = image_in;
     let mut text = text_in;
@@ -650,10 +702,7 @@ pub fn build_dit(
             text,
             image_mod,
             text_mod,
-            count,
-            inv_sqrt,
-            &mut trace,
-            block == 0,
+            (block == 0).then_some(&mut trace),
         )?;
         image = next_image;
         text = next_text;
@@ -666,12 +715,12 @@ pub fn build_dit(
     let index = graph.concat_indices(inputs.text_tokens, inputs.image_tokens, "single.joint");
     let program = &mut graph.program;
     let mut stream = concat_rows(program, text, image, index[0], index[1], index[2], "c")?;
-    let single_mod: [NodeId; 3] = single_mod[..3].try_into().expect("three single modulations");
+    let single_mod: [NodeId; 3] = single_mod[..3]
+        .try_into()
+        .expect("three single modulations");
     for block in 0..config.single_blocks {
         let prefix = format!("single_blocks.{block}");
-        stream = single_block(
-            graph, config, inputs, &prefix, stream, single_mod, count, inv_sqrt,
-        )?;
+        stream = single_block(graph, config, inputs, &prefix, stream, single_mod)?;
         if block == 0 {
             trace.push(("s0", stream));
         }

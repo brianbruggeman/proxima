@@ -150,8 +150,8 @@ mod dit {
     use conflaguration::Settings;
     use proxima_model_interop::ServingSettings;
     use proxima_model_interop::diffusion::{
-        Checkpoint, Denoiser, DiffusionSettings, DitConfig, DitInputs, Graph, build_dit,
-        timestep_sinusoid,
+        Checkpoint, Denoiser, DiffusionSettings, DitConfig, DitInputs, Graph, attention_scale,
+        build_dit, head_norm_count, timestep_sinusoid,
     };
     use proxima_numeric::{DType, FloatLayout, FlowMatchSchedule, euler_step};
     use proxima_tensor::op::NodeId;
@@ -302,12 +302,17 @@ mod dit {
         };
         let rope_cos = graph.host("rope_cos", &[JOINT as u32, 64], decode(&cos_bytes));
         let rope_sin = graph.host("rope_sin", &[JOINT as u32, 64], decode(&sin_bytes));
+        let config = dit_config();
+        let norm_count = head_norm_count(&mut graph, &config);
+        let scale = attention_scale(&mut graph, &config);
         let inputs = DitInputs {
             latent,
             text,
             timestep,
             rope_cos,
             rope_sin,
+            norm_count,
+            attention_scale: scale,
             image_tokens: IMAGE_TOKENS as u32,
             text_tokens: TEXT_TOKENS as u32,
         };
@@ -476,7 +481,9 @@ mod dit {
 
 #[cfg(feature = "std")]
 mod dit_shape {
-    use proxima_model_interop::diffusion::{DitConfig, DitInputs, Graph, build_dit};
+    use proxima_model_interop::diffusion::{
+        DitConfig, DitInputs, Graph, attention_scale, build_dit, head_norm_count,
+    };
     use proxima_numeric::DType;
 
     const IMAGE_TOKENS: usize = 64 * 64;
@@ -505,12 +512,17 @@ mod dit_shape {
         let timestep = graph.host("timestep", &[256], vec![0.0; 8]);
         let rope_cos = graph.host("rope_cos", &[JOINT as u32, 64], vec![0.0; 8]);
         let rope_sin = graph.host("rope_sin", &[JOINT as u32, 64], vec![0.0; 8]);
+        let config = dit_config();
+        let norm_count = head_norm_count(&mut graph, &config);
+        let scale = attention_scale(&mut graph, &config);
         let inputs = DitInputs {
             latent,
             text,
             timestep,
             rope_cos,
             rope_sin,
+            norm_count,
+            attention_scale: scale,
             image_tokens: IMAGE_TOKENS as u32,
             text_tokens: TEXT_TOKENS as u32,
         };

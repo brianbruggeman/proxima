@@ -20,7 +20,10 @@ pub mod png;
 mod settings;
 mod vae;
 
-pub use dit::{DitConfig, DitInputs, DitOutput, build_dit, build_double_block, build_single_block};
+pub use dit::{
+    DitConfig, DitInputs, DitOutput, attention_scale, build_dit, build_double_block,
+    build_single_block, head_norm_count,
+};
 pub use host::{Decoder, Denoiser};
 pub use load::{Checkpoint, WeightData, Weights, encode, load_weights};
 pub use png::{PngImage, read_png, write_png};

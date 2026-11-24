@@ -32,8 +32,9 @@ mod bench {
     use conflaguration::Settings;
     use proxima_model_interop::diffusion::{
         Checkpoint, ConvTaps, Decoder, Denoiser, DiffusionSettings, DitConfig, DitInputs,
-        Graph as ModelGraph, VaeConfig, Weights, build_conv3x3, build_dit, build_double_block,
-        build_single_block, build_vae_decode, timestep_sinusoid,
+        Graph as ModelGraph, VaeConfig, Weights, attention_scale, build_conv3x3, build_dit,
+        build_double_block, build_single_block, build_vae_decode, head_norm_count,
+        timestep_sinusoid,
     };
     use proxima_model_interop::{
         LoadedModel, ServingConfig, ServingSettings, architecture_from_hf_config, parse_hf_config,
@@ -422,6 +423,9 @@ mod bench {
         );
         let timestep = graph.host("timestep", &[256], timestep_sinusoid(0.5, 256));
         let (cos, sin) = rope_hosts(graph);
+        let config = dit_config(0, 0);
+        let norm_count = head_norm_count(graph, &config);
+        let attention_scale = attention_scale(graph, &config);
         (
             DitInputs {
                 latent,
@@ -429,6 +433,8 @@ mod bench {
                 timestep,
                 rope_cos: cos,
                 rope_sin: sin,
+                norm_count,
+                attention_scale,
                 image_tokens: IMAGE_TOKENS,
                 text_tokens: TEXT_TOKENS,
             },

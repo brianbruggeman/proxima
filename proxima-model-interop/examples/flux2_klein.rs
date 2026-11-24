@@ -17,7 +17,8 @@ use conflaguration::Settings;
 use proxima_model_interop::ServingConfig;
 use proxima_model_interop::diffusion::{
     Checkpoint, Decoder, Denoiser, DiffusionSettings, DitConfig, DitInputs, Graph as ModelGraph,
-    VaeConfig, build_dit, build_vae_decode, timestep_sinusoid, write_png,
+    VaeConfig, attention_scale, build_dit, build_vae_decode, head_norm_count, timestep_sinusoid,
+    write_png,
 };
 use proxima_model_interop::{
     LoadedModel, ServingSettings, architecture_from_hf_config, parse_hf_config,
@@ -478,15 +479,20 @@ fn diffuse(
     };
     let rope_cos = graph.host("rope_cos", &[(MIN_LENGTH + IMAGE_TOKENS) as u32, 64], decode(&cos_bytes));
     let rope_sin = graph.host("rope_sin", &[(MIN_LENGTH + IMAGE_TOKENS) as u32, 64], decode(&sin_bytes));
+    let config = dit_config();
+    let norm_count = head_norm_count(&mut graph, &config);
+    let scale = attention_scale(&mut graph, &config);
     let output = build_dit(
         &mut graph,
-        &dit_config(),
+        &config,
         &DitInputs {
             latent: latent_leaf,
             text: text_leaf,
             timestep: timestep_leaf,
             rope_cos,
             rope_sin,
+            norm_count,
+            attention_scale: scale,
             image_tokens: IMAGE_TOKENS as u32,
             text_tokens: MIN_LENGTH as u32,
         },
