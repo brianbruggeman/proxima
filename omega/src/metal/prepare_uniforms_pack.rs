@@ -229,28 +229,14 @@ fn prepare_bound(
     // reduction over one materializes as its own op: the row-blocked packed kernel
     // admits only a bare weight-times-activation product, and a fused 3-operand body
     // (attn_output's softmax normalization) falls to the per-element generic reduce
-    #[cfg(not(feature = "top-fraction-fusion"))]
     let mut resolved = {
         let no_codecs = crate::lowering::PackedOperands::new();
         let bind_config = crate::bind_plan::BindConfig::new(numeric_policy, allow_fusion, &no_codecs)
             .with_fused_cached_attention(fuse_cached_attention)
             .with_packed_leaves(&packed_operand_nodes);
+        #[cfg(feature = "top-fraction-fusion")]
+        let bind_config = bind_config.with_top_fraction(crate::sized::SELECTION_TOP_FRACTION_MIN_ROWS);
         crate::bind_plan::bind_plan(program, &shapes, &effective_outputs, &bind_config, &executes())?.resolved
-    };
-    #[cfg(feature = "top-fraction-fusion")]
-    let mut resolved = if allow_fusion {
-        bind_with_top_fraction_and_packed_leaves(
-            program,
-            &shapes,
-            &effective_outputs,
-            fuse_cached_attention,
-            numeric_policy,
-            crate::sized::SELECTION_TOP_FRACTION_MIN_ROWS,
-            &packed_operand_nodes,
-            &executes(),
-        )?
-    } else {
-        bind_unfused(program, &shapes, &effective_outputs, numeric_policy)?
     };
     #[cfg(feature = "instrument")]
     counter!(PREPARE_BIND_TICKS, elapsed_ticks(bind_started));

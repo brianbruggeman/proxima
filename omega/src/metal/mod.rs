@@ -219,11 +219,6 @@ use objc2_metal::{MTLCounterSampleBuffer, MTLCounterSet};
 #[cfg(feature = "instrument")]
 use proxima_tensor::apply_repeat_nodes;
 use proxima_tensor::bind::{coalesce_dims, narrow_accumulations};
-use proxima_tensor::bind_unfused;
-#[cfg(not(feature = "top-fraction-fusion"))]
-use proxima_tensor::bind::bind_with_fusion_and_packed_leaves;
-#[cfg(feature = "top-fraction-fusion")]
-use proxima_tensor::bind::bind_with_top_fraction_and_packed_leaves;
 #[cfg(feature = "twin-elementwise-fusion")]
 use proxima_tensor::fuse_twin_elementwise;
 #[cfg(feature = "instrument")]

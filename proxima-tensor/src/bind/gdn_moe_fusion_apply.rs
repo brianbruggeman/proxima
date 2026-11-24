@@ -244,6 +244,7 @@ pub fn bind_with_fusion_and_packed_leaves(
         let skip = env::var_os("PROXIMA_DISABLE_REDUCE_EPILOGUE_FUSION").is_some();
         #[cfg(not(feature = "std"))]
         let skip = false;
+        let skip = skip || !executes.forms.contains(Form::ReduceEpilogue);
         if skip {
             built
         } else {

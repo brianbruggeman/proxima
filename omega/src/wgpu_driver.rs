@@ -44,9 +44,10 @@ use std::sync::mpsc;
 
 use proxima_telemetry::counter;
 use proxima_telemetry::metric::Counter;
-use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Executes, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes, TensorError, bind_unfused, bind_without_reduce_epilogue_fusion, infer, prune_dead, resolve_named_blocks};
+use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Executes, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes, TensorError, infer, resolve_named_blocks};
 use proxima_numeric::{DType, NumericPolicy};
 
+use crate::bind_plan::{BindConfig, bind_plan};
 use crate::config::{ResourceConstraints, RuntimeConfig};
 use crate::error::EmitError;
 use crate::lowering::{Binding, Codec, PackedOperands, gather_count, reduction_dims};
@@ -224,8 +225,7 @@ pub struct WgpuPlan {
 /// What the wgpu renderer executes: the unfused algebra, since `crate::wgsl::emit_wgsl_with_policy`
 /// returns `UnsupportedOpKind` for every fused kind (`wgsl.rs:232-279`). Composes
 /// [`Executes::BASE`], the value `crate::cuda::executes` and `crate::metal::executes` extend.
-/// `bind_unfused` and `bind_without_reduce_epilogue_fusion`, which this driver binds with, never
-/// reach the fusion gates this value feeds.
+/// `crate::bind_plan::bind_plan` binds with it, so no form-gated fusion runs.
 #[must_use]
 pub fn executes() -> Executes {
     Executes::BASE
@@ -627,27 +627,11 @@ fn plan_with_options(
     } else {
         outputs.to_vec()
     };
-    // the gpu incumbents sum norms in float (`ggml-cuda/norm.cu:130-140`)
-    let numeric_policy = numeric_policy.with_accumulator_narrowing().with_flash_narrowing(true);
-    // no persistent arena to skip a dead slot inside between calls -- see
-    // `proxima_tensor::prune_dead`'s own doc. `fuse_cached_attention: false`
-    // because `crate::wgsl::emit_wgsl` has no renderer for
-    // `BoundOpKind::CachedAttention` yet -- the fused rewrite is a
-    // Metal/CPU-only optimization until wgpu grows one.
-    let resolved = prune_dead(
-        if config.is_some_and(|value| !value.allow_fusion) {
-            bind_unfused(program, &shapes, &effective_outputs, numeric_policy)?
-        } else {
-            bind_without_reduce_epilogue_fusion(
-                program,
-                &shapes,
-                &effective_outputs,
-                false,
-                numeric_policy,
-            )?
-        },
-        &effective_outputs,
-    );
+    // the grant has no cached attention or reduce epilogue, so the entry binds the plain algebra
+    let no_codecs = PackedOperands::new();
+    let allow_fusion = config.is_none_or(|value| value.allow_fusion);
+    let bind_config = BindConfig::new(numeric_policy, allow_fusion, &no_codecs);
+    let resolved = bind_plan(program, &shapes, &effective_outputs, &bind_config, &executes())?.resolved;
     let (device, queue, caps, device_identity) = acquire_device()?;
     let mut plan = WgpuPlan {
         resource_rows: Vec::new(),
