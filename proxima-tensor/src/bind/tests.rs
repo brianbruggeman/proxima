@@ -8247,7 +8247,13 @@ mod bound_graph_golden {
         outputs: &[NodeId],
         policy: NumericPolicy,
     ) -> Vec<BoundOp> {
-        bind_under(&metal_executes(), program, shapes, outputs, policy)
+        bind_under(
+            &metal_executes().without(Form::ReduceEpilogue),
+            program,
+            shapes,
+            outputs,
+            policy,
+        )
     }
 
     fn bind_cuda(
@@ -8256,7 +8262,13 @@ mod bound_graph_golden {
         outputs: &[NodeId],
         policy: NumericPolicy,
     ) -> Vec<BoundOp> {
-        bind_under(&cuda_executes(), program, shapes, outputs, policy)
+        bind_under(
+            &cuda_executes().without(Form::ReduceEpilogue),
+            program,
+            shapes,
+            outputs,
+            policy,
+        )
     }
 
     fn granite_moe_decoder() -> (Vec<Op>, Shapes, Vec<NodeId>) {
@@ -8734,5 +8746,115 @@ mod bound_graph_golden {
             fingerprint(&pinned, &outputs),
             fingerprint(&logits_only, &outputs[..1])
         );
+    }
+
+    /// The grant decides the form: a grant holding `Form::ReduceEpilogue`
+    /// folds the reduce epilogue when the crate compiles the pass in
+    /// (`reduce-epilogue-fusion`), and that bound graph has its own goldens.
+    /// Every golden above binds under a grant WITHOUT the form, so it is
+    /// the same bound graph whether or not the feature is on. The fused
+    /// goldens exist only where the pass does. Constants recorded from the
+    /// `actual (...)` half of `assert_golden`'s own failure message.
+    #[cfg(feature = "reduce-epilogue-fusion")]
+    mod reduce_epilogue_granted {
+        use super::*;
+
+        fn bind_metal_granting_the_epilogue(
+            program: &[Op],
+            shapes: &Shapes,
+            outputs: &[NodeId],
+            policy: NumericPolicy,
+        ) -> Vec<BoundOp> {
+            bind_under(&metal_executes(), program, shapes, outputs, policy)
+        }
+
+        fn bind_cuda_granting_the_epilogue(
+            program: &[Op],
+            shapes: &Shapes,
+            outputs: &[NodeId],
+            policy: NumericPolicy,
+        ) -> Vec<BoundOp> {
+            bind_under(&cuda_executes(), program, shapes, outputs, policy)
+        }
+
+        #[test]
+        fn bound_graph_golden_granting_reduce_epilogue_moe_decoder_is_unchanged() {
+            let (program, shapes, outputs) = granite_moe_decoder();
+            let policy = NumericPolicy::bit_exact();
+            let golden = Golden {
+                op_count: 73,
+                cached_attention: 3,
+                moe_topk: 3,
+                fingerprint: 0x90a4_5cee_7232_da0e,
+            };
+            let metal = bind_metal_granting_the_epilogue(&program, &shapes, &outputs, policy);
+            assert_golden("moe decoder, epilogue granted", &metal, &outputs, &golden);
+            let cuda = bind_cuda_granting_the_epilogue(&program, &shapes, &outputs, policy);
+            assert_golden("moe decoder, cuda, epilogue granted", &cuda, &outputs, &golden);
+        }
+
+        #[test]
+        fn bound_graph_golden_granting_reduce_epilogue_sixteen_expert_moe_decoder_is_unchanged() {
+            let (program, shapes, outputs) = moe_decoder(128, 64, 16, 4, true, 4);
+            let policy = NumericPolicy::bit_exact();
+            let golden = Golden {
+                op_count: 135,
+                cached_attention: 4,
+                moe_topk: 4,
+                fingerprint: 0x05e0_8115_bde4_e2d6,
+            };
+            let metal = bind_metal_granting_the_epilogue(&program, &shapes, &outputs, policy);
+            assert_golden("16 experts, epilogue granted", &metal, &outputs, &golden);
+            let cuda = bind_cuda_granting_the_epilogue(&program, &shapes, &outputs, policy);
+            assert_golden("16 experts, cuda, epilogue granted", &cuda, &outputs, &golden);
+        }
+
+        #[test]
+        fn bound_graph_golden_granting_reduce_epilogue_openchat_single_range_is_unchanged() {
+            let (program, shapes, outputs) = openchat_single_range();
+            let policy = NumericPolicy::bit_exact();
+            let golden = Golden {
+                op_count: 458,
+                cached_attention: 32,
+                moe_topk: 0,
+                fingerprint: 0xcf7f_242d_c4f6_bb61,
+            };
+            let metal = bind_metal_granting_the_epilogue(&program, &shapes, &outputs, policy);
+            assert_golden("openchat, epilogue granted", &metal, &outputs, &golden);
+            let cuda = bind_cuda_granting_the_epilogue(&program, &shapes, &outputs, policy);
+            assert_golden("openchat, cuda, epilogue granted", &cuda, &outputs, &golden);
+        }
+
+        #[test]
+        fn bound_graph_golden_granting_reduce_epilogue_qwen35_dense_layer_is_unchanged() {
+            let (program, shapes, outputs) = qwen35_dense_layer();
+            let policy = NumericPolicy::bit_exact().with_flash_narrowing(true);
+            let golden = Golden {
+                op_count: 38,
+                cached_attention: 1,
+                moe_topk: 0,
+                fingerprint: 0xb3f7_6e28_598f_3b34,
+            };
+            let metal = bind_metal_granting_the_epilogue(&program, &shapes, &outputs, policy);
+            assert_golden("qwen35 dense, epilogue granted", &metal, &outputs, &golden);
+            let cuda = bind_cuda_granting_the_epilogue(&program, &shapes, &outputs, policy);
+            assert_golden("qwen35 dense, cuda, epilogue granted", &cuda, &outputs, &golden);
+        }
+
+        #[test]
+        fn bound_graph_golden_granting_reduce_epilogue_gemma4_two_range_decode_is_unchanged() {
+            let (program, shapes, outputs) = gemma4_two_range_decode();
+            let policy = NumericPolicy::llama_relaxed();
+            let golden = Golden {
+                op_count: 66,
+                cached_attention: 2,
+                moe_topk: 2,
+                fingerprint: 0x3eae_fa8f_6c3f_7d42,
+            };
+            let metal = bind_metal_granting_the_epilogue(&program, &shapes, &outputs, policy);
+            assert_golden("gemma4, epilogue granted", &metal, &outputs, &golden);
+            let cuda = bind_cuda_granting_the_epilogue(&program, &shapes, &outputs, policy);
+            assert_golden("gemma4, cuda, epilogue granted", &cuda, &outputs, &golden);
+        }
     }
 }
