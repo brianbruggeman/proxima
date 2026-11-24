@@ -1379,7 +1379,10 @@ impl MappedExpertSidecar {
             )?;
             bytes.extend_from_slice(&self.mapping[range]);
         }
-        Ok((bytes, codec.unwrap_or(Codec::Q4K)))
+        let codec = codec.ok_or(InteropError::UnsupportedCodec {
+            codec: "an empty expert stack",
+        })?;
+        Ok((bytes, codec))
     }
 
     /// Replaces only the plan's experts with their low-codec sidecar view;
