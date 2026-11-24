@@ -6120,3 +6120,58 @@ fn a_gathered_expert_product_above_the_grouped_minimum_takes_the_grouped_kernel_
         .collect();
     assert!(failures.is_empty(), "grouped kernel disagrees with the decode oracle; failing rows (codec, planned_grouped, worst, magnitude): {failures:?}; whole table: {table:?}");
 }
+
+/// The grouped form on the int8 tensor-core path: with activation quantization granted the gathered
+/// expert product plans the prepass and the grouped kernel over the q8_1 activation rows, and equals
+/// the decode oracle dotted with the activation quantized to q8_1 by the independent test-side oracle.
+#[test]
+fn a_gathered_expert_product_under_activation_quantization_takes_the_int8_grouped_kernel_and_matches_the_q8_1_oracle_on_cuda() {
+    let (experts, rows, depth) = (8, 128, 512);
+    let tokens = usize::try_from(omega::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS).expect("the minimum fits a count") + 16;
+    let route: Vec<_> = (0..tokens).map(|token| ((token * 5 + token / 3) % experts) as _).collect();
+    let activation: Vec<_> = random_vec(741, tokens * depth).into_iter().map(|value| value * 2.0 - 1.0).collect();
+    let inputs = vec![("route".to_string(), route), ("activation".to_string(), activation)];
+    let codecs: Vec<Codec> = Codec::ALL
+        .into_iter()
+        .filter(|codec| omega::cuda::is_mma_weight(*codec) && omega::cuda::is_int8_weight(*codec))
+        .filter(|codec| codec.block_layout().is_some_and(|layout| depth % usize::from(layout.elements) == 0))
+        .collect();
+    assert!(!codecs.is_empty(), "the int8 table accepts block codecs");
+    let route = &inputs[0].1;
+    let quantized = fake_quantize_blocks(&inputs[1].1, true);
+    let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true);
+    let mut table: Vec<(Codec, bool, f32, f32)> = Vec::new();
+    for codec in codecs {
+        let layout = codec.block_layout().expect("a block codec");
+        let weight = arbitrary_blocks(&layout, experts * rows * depth / usize::from(layout.elements), 743);
+        let (program, sum) = gathered_expert_program(experts.try_into().unwrap(), rows.try_into().unwrap(), depth.try_into().unwrap(), tokens.try_into().unwrap());
+        let mut named = as_named_blocks(&inputs);
+        named.push(("weight", QuantizedBlock::Packed { codec, bytes: &weight }));
+        let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), &program, &[], &named, &[sum], policy)
+            .expect("the gathered expert product plans on cuda");
+        let identities = cuda_kernel_identities(&plan).expect("a cuda plan");
+        let entries: Vec<&str> = identities.iter().filter_map(|identity| identity.lines().next()).collect();
+        let planned_grouped = entries.iter().any(|entry| entry.contains("_grp1") && !entry.ends_with("_route_prepass"))
+            && entries.iter().any(|entry| entry.contains("_grp1") && entry.ends_with("_route_prepass"));
+        let actual = execute_plan_named(&mut plan, &named).expect("the int8 grouped product runs on cuda");
+        assert_eq!(actual.root().len(), tokens * rows, "{codec:?}: one output per (token, row)");
+        let mut decoded = vec![0.0f32; experts * rows * depth];
+        block_layout::dequantize(&layout, &weight, &mut decoded).expect("whole blocks");
+        let exact_at = |token: usize, row: usize| {
+            let start = (route[token] as usize * rows + row) * depth;
+            (0..depth).map(|index| f64::from(decoded[start + index]) * f64::from(quantized[token * depth + index])).sum::<f64>() as f32
+        };
+        let (mut worst, mut magnitude) = (0.0f32, 0.0f32);
+        for (slot, got) in actual.root().iter().enumerate() {
+            let exact = exact_at(slot / rows, slot % rows);
+            worst = (got - exact).abs().max(worst);
+            magnitude = exact.abs().max(magnitude);
+        }
+        table.push((codec, planned_grouped, worst, magnitude));
+    }
+    let failures: Vec<_> = table
+        .iter()
+        .filter(|(_, planned_grouped, worst, magnitude)| !planned_grouped || *magnitude <= 0.0 || worst / magnitude >= 1e-5)
+        .collect();
+    assert!(failures.is_empty(), "int8 grouped kernel disagrees with the q8_1 oracle; failing rows (codec, planned_grouped, worst, magnitude): {failures:?}; whole table: {table:?}");
+}
