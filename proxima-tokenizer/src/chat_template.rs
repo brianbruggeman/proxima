@@ -24,6 +24,36 @@ use minijinja_contrib::pycompat::unknown_method_callback;
 use thiserror::Error;
 
 const TEMPLATE_NAME: &str = "chat_template";
+const SECONDS_PER_DAY: i64 = 86_400;
+const SECONDS_PER_HOUR: i64 = 3_600;
+const SECONDS_PER_MINUTE: i64 = 60;
+const DAYS_PER_WEEK: i64 = 7;
+const EPOCH_WEEKDAY: i64 = 4;
+const MONTH_NAMES: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+const MONTH_DAYS: [i64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+const WEEKDAY_NAMES: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+const ABBREVIATION_LEN: usize = 3;
 
 /// Why a chat template could not be rendered.
 #[derive(Debug, Error)]
@@ -34,7 +64,10 @@ pub enum ChatTemplateError {
     Template(#[from] Error),
 }
 
-/// Renders `template` over `messages` (`(role, content)` pairs, as ragd sends them).
+/// Renders `template` over `messages` (`(role, content)` pairs, as callers send them).
+///
+/// `now_unix_seconds` is the UTC instant `strftime_now` formats; the caller owns it
+/// so every render in one session shows the same date.
 ///
 /// `bos_token` / `eos_token` are the checkpoint's own strings (llama passes the
 /// same two variables). `add_generation_prompt` is the template variable of the
@@ -54,10 +87,14 @@ pub fn render_chat(
     bos_token: &str,
     eos_token: &str,
     flags: &[(&str, bool)],
+    now_unix_seconds: i64,
 ) -> Result<String, ChatTemplateError> {
     let mut environment = Environment::new();
     environment.set_unknown_method_callback(unknown_method_callback);
     environment.add_function("raise_exception", raise_exception);
+    environment.add_function("strftime_now", move |format: String| {
+        strftime(&format, now_unix_seconds)
+    });
     environment.add_template(TEMPLATE_NAME, template)?;
     let rendered_messages: Vec<Value> = messages
         .iter()
@@ -76,6 +113,94 @@ pub fn render_chat(
 
 fn raise_exception(message: String) -> Result<String, Error> {
     Err(Error::new(ErrorKind::InvalidOperation, message))
+}
+
+/// Days since 1970-01-01 to a proleptic Gregorian `(year, month, day)`.
+#[must_use]
+pub fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    (year, month, day)
+}
+
+fn is_leap_year(year: i64) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+fn day_of_year(year: i64, month: i64, day: i64) -> i64 {
+    let before = usize::try_from(month - 1).unwrap_or(0);
+    let leap_day = i64::from(month > 2 && is_leap_year(year));
+    MONTH_DAYS.iter().take(before).sum::<i64>() + leap_day + day
+}
+
+fn table_entry<'a>(table: &[&'a str], index: i64) -> &'a str {
+    usize::try_from(index)
+        .ok()
+        .and_then(|slot| table.get(slot))
+        .copied()
+        .unwrap_or_default()
+}
+
+fn abbreviation(name: &str) -> &str {
+    name.get(..ABBREVIATION_LEN).unwrap_or(name)
+}
+
+fn strftime(format: &str, unix_seconds: i64) -> Result<String, Error> {
+    let days = unix_seconds.div_euclid(SECONDS_PER_DAY);
+    let in_day = unix_seconds.rem_euclid(SECONDS_PER_DAY);
+    let (year, month, day) = civil_from_days(days);
+    let month_name = table_entry(&MONTH_NAMES, month - 1);
+    let weekday_name = table_entry(
+        &WEEKDAY_NAMES,
+        (days + EPOCH_WEEKDAY).rem_euclid(DAYS_PER_WEEK),
+    );
+    let mut out = String::new();
+    let mut chars = format.chars();
+    while let Some(character) = chars.next() {
+        if character != '%' {
+            out.push(character);
+            continue;
+        }
+        let directive = chars.next().ok_or_else(|| unsupported_directive("%"))?;
+        match directive {
+            'Y' => out.push_str(&format!("{year:04}")),
+            'm' => out.push_str(&format!("{month:02}")),
+            'd' => out.push_str(&format!("{day:02}")),
+            'B' => out.push_str(month_name),
+            'b' => out.push_str(abbreviation(month_name)),
+            'A' => out.push_str(weekday_name),
+            'a' => out.push_str(abbreviation(weekday_name)),
+            'H' => out.push_str(&format!("{:02}", in_day / SECONDS_PER_HOUR)),
+            'M' => out.push_str(&format!(
+                "{:02}",
+                in_day % SECONDS_PER_HOUR / SECONDS_PER_MINUTE
+            )),
+            'S' => out.push_str(&format!("{:02}", in_day % SECONDS_PER_MINUTE)),
+            'j' => out.push_str(&format!("{:03}", day_of_year(year, month, day))),
+            '%' => out.push('%'),
+            other => return Err(unsupported_directive(&format!("%{other}"))),
+        }
+    }
+    Ok(out)
+}
+
+fn unsupported_directive(directive: &str) -> Error {
+    Error::new(
+        ErrorKind::InvalidOperation,
+        format!("strftime_now: unsupported directive {directive}"),
+    )
 }
 
 #[cfg(test)]
@@ -98,6 +223,7 @@ mod tests {
             "",
             "",
             &[],
+            0,
         );
         assert!(
             matches!(outcome, Err(ChatTemplateError::Template(_))),
@@ -114,9 +240,59 @@ mod tests {
             "",
             "",
             &[],
+            0,
         );
         let message = outcome.expect_err("template raised").to_string();
         assert!(message.contains("roles must alternate"), "got {message}");
+    }
+
+    const FIXED_INSTANT: i64 = 1_795_442_709;
+    const LEAP_INSTANT: i64 = 1_709_251_200;
+    const GRANITE_DATE_SNIPPET: &str = "{%- set system_message = \"Knowledge Cutoff Date: April 2024.\nToday's Date: \" + strftime_now('%B %d, %Y') + \".\nYou are Granite, developed by IBM.\" %}{{ system_message }}";
+
+    fn render_at(template: &str, instant: i64) -> Result<String, ChatTemplateError> {
+        render_chat(template, &MESSAGES, true, "", "", &[], instant)
+    }
+
+    #[test]
+    fn strftime_now_formats_the_caller_instant() {
+        let rendered = render_at("{{ strftime_now('%d %b %Y') }}", FIXED_INSTANT).unwrap();
+        assert_eq!(rendered, "23 Nov 2026");
+    }
+
+    #[test]
+    fn strftime_now_supports_every_listed_directive() {
+        let rendered = render_at(
+            "{{ strftime_now('%Y-%m-%d %H:%M:%S %A %a %B %b %j %%') }}",
+            FIXED_INSTANT,
+        )
+        .unwrap();
+        assert_eq!(
+            rendered,
+            "2026-11-23 14:05:09 Monday Mon November Nov 327 %"
+        );
+    }
+
+    #[test]
+    fn strftime_now_counts_the_leap_day() {
+        let rendered = render_at("{{ strftime_now('%j %A') }}", LEAP_INSTANT).unwrap();
+        assert_eq!(rendered, "061 Friday");
+    }
+
+    #[test]
+    fn strftime_now_unsupported_directive_names_it() {
+        let outcome = render_at("{{ strftime_now('%Q') }}", FIXED_INSTANT);
+        let message = outcome.expect_err("unsupported directive").to_string();
+        assert!(message.contains("%Q"), "got {message}");
+    }
+
+    #[test]
+    fn granite_date_line_renders() {
+        let rendered = render_at(GRANITE_DATE_SNIPPET, FIXED_INSTANT).unwrap();
+        assert_eq!(
+            rendered,
+            "Knowledge Cutoff Date: April 2024.\nToday's Date: November 23, 2026.\nYou are Granite, developed by IBM."
+        );
     }
 
     #[cfg(feature = "gguf")]
@@ -202,7 +378,7 @@ mod tests {
         #[test]
         fn flint_real_template_matches_llama_server_b12110() {
             let (template, bos, eos) = template_and_specials(&flint_path());
-            let rendered = render_chat(&template, &MESSAGES, true, &bos, &eos, &[])
+            let rendered = render_chat(&template, &MESSAGES, true, &bos, &eos, &[], 0)
                 .expect("flint template renders");
             assert_eq!(rendered, FLINT_PROMPT);
         }
@@ -219,6 +395,7 @@ mod tests {
                 "",
                 &eos,
                 &[("enable_thinking", true)],
+                0,
             )
             .expect("gemma4 template renders");
             let expected: Json = serde_json::from_str(GEMMA4_FIXTURE).expect("fixture is json");
