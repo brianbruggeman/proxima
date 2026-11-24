@@ -54,14 +54,14 @@ pub(super) struct MmaGemm {
     pub(super) token_positions: Vec<usize>,
 }
 
-pub(super) struct CodecShape {
+struct CodecShape {
     decode: &'static str,
     block_bytes: usize,
     block_elements: usize,
     has_minimum: bool,
 }
 
-pub(super) fn codec_shape(codec: Codec) -> Option<CodecShape> {
+fn codec_shape(codec: Codec) -> Option<CodecShape> {
     let (decode, block_bytes, block_elements, has_minimum) = match codec {
         Codec::Q8_0 => ("mma_decode_q8_0", Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS, false),
         Codec::Q4_0 => ("mma_decode_q4_0", Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS, false),
@@ -81,6 +81,12 @@ pub(super) fn codec_shape(codec: Codec) -> Option<CodecShape> {
         block_elements,
         has_minimum,
     })
+}
+
+/// Whether the tensor-core gemm decodes a weight of this codec.
+#[must_use]
+pub fn is_mma_weight(codec: Codec) -> bool {
+    codec_shape(codec).is_some()
 }
 
 /// The contraction grant of the tensor-core path, shared by `mma_gemm_plan` and `crate::cuda::executes`.

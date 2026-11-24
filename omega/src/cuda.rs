@@ -100,6 +100,7 @@ use split_attention::{
     render_combine, split_chunks, split_pass, split_scratch_len, split_scratch_node,
 };
 pub use int8_gemm::is_int8_weight;
+pub use mma_gemm::is_mma_weight;
 use block_quantize::{block_quantize_grid, quantize_device, render_block_quantize};
 pub use block_quantize::Missing;
 #[cfg(feature = "cuda-driver")]
@@ -6271,7 +6272,7 @@ mod tests {
     }
 
     fn grouped_codecs() -> impl Iterator<Item = Codec> {
-        Codec::ALL.into_iter().filter(|codec| mma_gemm::codec_shape(*codec).is_some())
+        Codec::ALL.into_iter().filter(|codec| is_mma_weight(*codec))
     }
 
     fn grouped_pair(bound: &BoundOp, codec: Codec) -> Option<([CudaKernel; 2], usize)> {
