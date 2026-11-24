@@ -9,6 +9,8 @@ use proxima_numeric::codec::Codec;
 use proxima_numeric::{DType, FormatCodec};
 use proxima_tensor::QuantizedBlock;
 
+use crate::CheckpointMapping;
+
 use super::WeightBinding;
 
 /// One bound leaf's bytes: a packed matrix the backend's matmul paths decode,
@@ -48,23 +50,25 @@ impl Weights {
     }
 }
 
-/// One safetensors file's tensor directory and byte buffer.
+/// One safetensors file's tensor directory over its mapped bytes: the file is
+/// addressed in place through [`CheckpointMapping`], never copied to the heap.
 pub struct Checkpoint {
-    bytes: Vec<u8>,
+    mapping: CheckpointMapping,
     manifest: proxima_safetensors::Manifest,
     data_start: usize,
 }
 
 impl Checkpoint {
-    /// Reads `path` and parses its header.
+    /// Maps `path` and parses its header.
     ///
     /// # Errors
     ///
-    /// A message naming the file and the parse failure.
+    /// A message naming the file and the mapping or parse failure.
     pub fn open(path: &Path) -> Result<Self, String> {
-        let bytes =
-            std::fs::read(path).map_err(|why| format!("{}: {why}", path.display()))?;
-        let manifest = proxima_safetensors::parse_complete(&bytes)
+        let mapping = CheckpointMapping::open_file(path)
+            .map_err(|why| format!("{}: {why}", path.display()))?;
+        let bytes = mapping.bytes();
+        let manifest = proxima_safetensors::parse_complete(bytes)
             .map_err(|why| format!("{}: {why}", path.display()))?;
         if bytes.len() < 8 {
             return Err(format!("{}: truncated header", path.display()));
@@ -75,7 +79,7 @@ impl Checkpoint {
                 .map_err(|_| format!("{}: truncated length", path.display()))?,
         );
         Ok(Self {
-            bytes,
+            mapping,
             manifest,
             data_start: 8 + header as usize,
         })
@@ -96,7 +100,7 @@ impl Checkpoint {
         Ok((
             entry.dtype,
             entry.shape.clone(),
-            &self.bytes[start..end],
+            &self.mapping.bytes()[start..end],
         ))
     }
 
