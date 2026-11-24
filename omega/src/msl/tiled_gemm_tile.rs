@@ -27,14 +27,17 @@ use crate::sized::{TILED_GEMM_BLOCK_K, TILED_GEMM_BLOCK_M, TILED_GEMM_BLOCK_N};
 
 /// Edge of one `simdgroup_matrix` fragment: `TILE_DIM` on each side, the fixed
 /// 8x8 of `simdgroup_float8x8`.
+#[cfg(any(test, feature = "metal-tiled-gemm"))]
 const TILE_DIM: u64 = 8;
 /// Smallest tile edge: two fragment rows per row-half, so both the row and the
 /// column edge split evenly between the [`crate::msl::TILED_GEMM_NSG`] = 4
 /// simdgroups' 2x2 halves (`row_half`/`col_half` each own half an edge, and
 /// `simdgroup_load`/`simdgroup_store` address fragments, never half of one).
+#[cfg(any(test, feature = "metal-tiled-gemm"))]
 pub(crate) const TILE_MIN_EDGE: u64 = 2 * 2 * TILE_DIM;
 /// Metal's threadgroup memory ceiling: the slim staging store
 /// ([`Self::threadgroup_bytes`]) must fit inside it.
+#[cfg(any(test, feature = "metal-tiled-gemm"))]
 pub(crate) const TILE_THREADGROUP_BYTES: u64 = 32 * 1024;
 
 /// One tiled-GEMM launch geometry. Every consumer -- the dispatch grid, the
@@ -70,6 +73,7 @@ impl TiledGemmTile {
     /// this module's own doc is that the threadgroup store a wider edge costs
     /// is worth more than the re-read it saves. [`Self::tiles`] cuts the token
     /// extent into whole column tiles, rounding the boundary up.
+    #[cfg(any(test, feature = "metal-tiled-gemm"))]
     pub(crate) fn for_feature_extent(feature_extent: u64) -> Self {
         let configured = Self::CONFIGURED;
         let mut tile = Self {
@@ -96,6 +100,7 @@ impl TiledGemmTile {
     /// and a 32 KB threadgroup halves the number of threadgroups one core can
     /// keep resident, which measured slower than every traffic saving the
     /// wider tile bought.
+    #[cfg(any(test, feature = "metal-tiled-gemm"))]
     pub(crate) fn threadgroup_bytes(self) -> u64 {
         let weight_and_activation =
             self.block_m * self.block_k * 2 + self.block_n * self.block_k * 4;
@@ -108,6 +113,7 @@ impl TiledGemmTile {
     }
 
     /// `(row_tiles, col_tiles)` this tile cuts an `M` by `N` output into.
+    #[cfg(any(test, feature = "metal-tiled-gemm"))]
     pub(crate) fn tiles(self, feature_extent: u64, token_extent: u64) -> (u64, u64) {
         (
             feature_extent.div_ceil(self.block_m),
@@ -117,6 +123,7 @@ impl TiledGemmTile {
 }
 
 /// `edge` rounded up to the smallest legal tile edge at or above it.
+#[cfg(any(test, feature = "metal-tiled-gemm"))]
 fn round_up_edge(edge: u64) -> u64 {
     edge.div_ceil(TILE_MIN_EDGE) * TILE_MIN_EDGE
 }
