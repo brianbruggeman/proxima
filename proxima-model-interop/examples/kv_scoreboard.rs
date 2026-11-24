@@ -2786,15 +2786,24 @@ fn not_run_records(contract: &Value, measured: &str) -> Vec<Value> {
         .collect()
 }
 
-/// The raw.jsonl text: every row's records with contiguous indices, then one not-run record per unmeasured backend.
+/// The raw.jsonl text: one not-run record per unmeasured backend, then every row's records with contiguous indices.
 fn raw_jsonl(warmups: &[Row], rows: &[Row], context: &RecordContext, contract: &Value) -> String {
-    let mut records: Vec<Value> = Vec::new();
+    let mut text = not_run_text(contract, context);
+    let mut next = 0;
     for row in warmups.iter().chain(rows) {
-        let next = records.len();
-        records.extend(run_records(row, context, next));
+        let records = run_records(row, context, next);
+        next += records.len();
+        text.push_str(&jsonl_text(&records));
     }
-    records.extend(not_run_records(contract, &context.backend));
+    text
+}
+
+fn jsonl_text(records: &[Value]) -> String {
     records.iter().map(|record| format!("{record}\n")).collect()
+}
+
+fn not_run_text(contract: &Value, context: &RecordContext) -> String {
+    jsonl_text(&not_run_records(contract, &context.backend))
 }
 
 struct Session<'a> {
@@ -2884,7 +2893,7 @@ fn adopt_flash(session: &mut Session, row: &Row) -> Result<(), HarnessError> {
 
 /// One discarded process per arm before round 1, on the first (prompt, kv) group. The proxima
 /// warm-up runs first because its report decides the `-fa` the llama arm uses from then on.
-fn run_warmups(session: &mut Session, cells: &[Cell], sink: &mut RawSink) -> Result<Vec<Row>, HarnessError> {
+fn run_warmups(session: &mut Session, cells: &[Cell]) -> Result<Vec<Row>, HarnessError> {
     let first_group = cells.first().map(Cell::group);
     let mut warmups: Vec<Row> = Vec::new();
     for cell in cells.iter().take_while(|cell| Some(cell.group()) == first_group) {
@@ -2897,7 +2906,6 @@ fn run_warmups(session: &mut Session, cells: &[Cell], sink: &mut RawSink) -> Res
         let port_index = PORT_SPAN - 1 - warmups.len();
         let mut row = measure(session, cell, Slot { round: 0, step: warmups.len(), port_index })?;
         row.warmup = true;
-        sink.append(&row)?;
         adopt_flash(session, &row)?;
         warmups.push(row);
     }
@@ -2937,23 +2945,36 @@ fn run(config: &Config) -> Result<(), HarnessError> {
         proxima_arm: contract_proxima_arm(&contract),
         host: host_facts(),
     };
-    let mut sink = RawSink::create(&config.out, &context, &facts)?;
+    let mut sink = RawSink::create(&config.out, &context, &facts, &contract)?;
     let mut session = Session { config, prompts: &prompts, logs, llama_sha256: llama_identity.sha256, llama_flash: String::new(), flash_refusal: String::new() };
-    let mut warmups = run_warmups(&mut session, &cells, &mut sink)?;
-    let mut rows = Vec::new();
-    for (step, (round, index)) in round_plan(config.rounds, &group_sizes(&cells)).into_iter().enumerate() {
+    let mut warmups = run_warmups(&mut session, &cells)?;
+    evaluate_all(&mut warmups, &facts);
+    sink.append_group(&warmups)?;
+    let plan = round_plan(config.rounds, &group_sizes(&cells));
+    let mut rows: Vec<Row> = Vec::new();
+    let mut settled = 0;
+    for (step, &(round, index)) in plan.iter().enumerate() {
         let row = measure(&session, &cells[index], Slot { round, step, port_index: step })?;
-        sink.append(&row)?;
         adopt_flash(&mut session, &row)?;
         rows.push(row);
+        if ends_group(&plan, &cells, step) {
+            evaluate_all(&mut rows[settled..], &facts);
+            sink.append_group(&rows[settled..])?;
+            settled = rows.len();
+        }
     }
-    evaluate_all(&mut warmups, &facts);
-    evaluate_all(&mut rows, &facts);
     write_outputs(config, &cells, &rows, &facts, &RawRecords { warmups: &warmups, context: &context, contract: &contract })
 }
 
-/// Appends each finished process to raw.jsonl and raw.tsv so a run that stops early keeps every
-/// earlier attempt. These are provisional (parity is not evaluated yet); write_outputs rewrites both.
+/// whether the plan's next step starts a different (round, prompt, kv) group, so every row of this one has run
+fn ends_group(plan: &[(usize, usize)], cells: &[Cell], step: usize) -> bool {
+    let key = |(round, index): (usize, usize)| (round, cells[index].group());
+    plan.get(step + 1).is_none_or(|&next| key(next) != key(plan[step]))
+}
+
+/// Writes raw.jsonl and raw.tsv as the run goes, so a run that stops early keeps what finished.
+/// The not-run records go first. A group's rows are appended only once the whole group has run and
+/// its parity is evaluated, so every appended record is final and write_outputs rewrites it identically.
 struct RawSink<'a> {
     jsonl: PathBuf,
     tsv: PathBuf,
@@ -2963,18 +2984,25 @@ struct RawSink<'a> {
 }
 
 impl<'a> RawSink<'a> {
-    fn create(out: &Path, context: &'a RecordContext, facts: &'a Facts) -> Result<Self, HarnessError> {
+    fn create(out: &Path, context: &'a RecordContext, facts: &'a Facts, contract: &Value) -> Result<Self, HarnessError> {
         let sink = RawSink { jsonl: out.join("raw.jsonl"), tsv: out.join("raw.tsv"), next_index: 0, context, facts };
-        fs::write(&sink.jsonl, "").map_err(io_error(&sink.jsonl))?;
+        fs::write(&sink.jsonl, not_run_text(contract, context)).map_err(io_error(&sink.jsonl))?;
         fs::write(&sink.tsv, format!("{TSV_HEADER}\n")).map_err(io_error(&sink.tsv))?;
         Ok(sink)
     }
 
-    fn append(&mut self, row: &Row) -> Result<(), HarnessError> {
-        let records = run_records(row, self.context, self.next_index);
-        self.next_index += records.len();
-        append_text(&self.jsonl, &records.iter().map(|record| format!("{record}\n")).collect::<String>())?;
-        append_text(&self.tsv, &format!("{}\n", tsv_line(row, None, self.facts)))
+    fn append_group(&mut self, group: &[Row]) -> Result<(), HarnessError> {
+        for row in group {
+            let records = run_records(row, self.context, self.next_index);
+            self.next_index += records.len();
+            append_text(&self.jsonl, &jsonl_text(&records))?;
+        }
+        let tsv: String = group
+            .iter()
+            .filter(|row| !row.warmup)
+            .map(|row| format!("{}\n", tsv_line(row, find_peer(group, row), self.facts)))
+            .collect();
+        append_text(&self.tsv, &tsv)
     }
 }
 
@@ -5645,23 +5673,61 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
     }
 
     #[test]
+    fn a_run_stopped_after_its_second_cell_keeps_evaluated_records_the_final_rewrite_repeats() {
+        let dir = std::env::temp_dir().join(format!("kv_scoreboard_stopped_{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("scratch dir");
+        let contract = load_contract().expect("contract.json");
+        let context = fixture_context(&contract);
+        let facts = facts();
+        let mut warmups = fixture_rows();
+        for row in &mut warmups {
+            row.warmup = true;
+            row.round = 0;
+        }
+        let mut rows = fixture_rows();
+        rows.extend(fixture_rows());
+        rows[3] = llama_row(vec![1, 2, 4]);
+        rows[3].round = 2;
+        rows[2].round = 2;
+        let mut sink = RawSink::create(&dir, &context, &facts, &contract).expect("sink");
+        evaluate_all(&mut warmups, &facts);
+        sink.append_group(&warmups).expect("warmups");
+        for cell in [0..2, 2..4] {
+            evaluate_all(&mut rows[cell.clone()], &facts);
+            sink.append_group(&rows[cell]).expect("cell");
+        }
+        let stopped = fs::read_to_string(dir.join("raw.jsonl")).expect("raw.jsonl");
+        assert_eq!(stopped, raw_jsonl(&warmups, &rows, &context, &contract), "appended records are the final rewrite's");
+        let records: Vec<Value> = stopped.lines().map(|line| serde_json::from_str(line).expect("record")).collect();
+        assert_eq!(records[0]["record"], "not-run", "not-run records open the file");
+        let runs: Vec<&Value> = records.iter().filter(|record| record["record"] == "run").collect();
+        assert!(runs.iter().all(|record| record["admitted"] == record["quality"]["match"] || record["discarded_warmup"] == true));
+        let diverged: Vec<&&Value> = runs.iter().filter(|record| record["round"] == 2 && record["arm"] != "proxima").collect();
+        assert!(!diverged.is_empty() && diverged.iter().all(|record| record["quality"]["match"] == false && record["admitted"] == false));
+        let lines: Vec<String> = stopped.lines().map(str::to_owned).collect();
+        let report = validate_lines("stopped", &lines).join("
+");
+        assert!(!report.contains("not evaluated") && !report.contains("neither measured nor covered"), "{report}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+        #[test]
     fn records_appended_before_an_error_are_on_disk_after_it() {
         let dir = std::env::temp_dir().join(format!("kv_scoreboard_sink_{}", std::process::id()));
         fs::create_dir_all(&dir).expect("scratch dir");
         let contract = load_contract().expect("contract.json");
         let context = fixture_context(&contract);
         let facts = facts();
-        let mut sink = RawSink::create(&dir, &context, &facts).expect("sink");
+        let mut sink = RawSink::create(&dir, &context, &facts, &contract).expect("sink");
         let rows = fixture_rows();
-        sink.append(&rows[0]).expect("first row");
-        sink.append(&rows[1]).expect("second row");
+        sink.append_group(&rows).expect("first group");
         let (config, prompts) = (short_config(), short_prompts());
         let mut session = short_session(&config, &prompts);
         let mut silent = row(Engine::Proxima { binary: PathBuf::from("/bin/a") }, Evidence::None);
         silent.flash.clear();
         assert!(adopt_flash(&mut session, &silent).is_err());
         let jsonl = fs::read_to_string(dir.join("raw.jsonl")).expect("raw.jsonl exists after the error");
-        let indices: Vec<u64> = jsonl.lines().map(|line| serde_json::from_str::<Value>(line).expect("record")["index"].as_u64().expect("index")).collect();
+        let indices: Vec<u64> = jsonl.lines().map(|line| serde_json::from_str::<Value>(line).expect("record")).filter(|record| record["record"] == "run").map(|record| record["index"].as_u64().expect("index")).collect();
         let expected: Vec<u64> = (0..u64::try_from(indices.len()).expect("count")).collect();
         assert!(indices.len() >= 2, "one record per row at least");
         assert_eq!(indices, expected, "contiguous across appends");
@@ -6082,9 +6148,10 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
     #[test]
     fn a_record_missing_a_required_field_fails_validation_naming_that_field() {
         let mut lines = raw_lines();
-        let mut first: Value = serde_json::from_str(&lines[0]).expect("record json");
+        let at = lines.iter().position(|line| line.contains("\"record\":\"run\"")).expect("a run record");
+        let mut first: Value = serde_json::from_str(&lines[at]).expect("record json");
         first["timings"].as_object_mut().expect("timings object").remove("ttft_us");
-        lines[0] = first.to_string();
+        lines[at] = first.to_string();
         let failures = validate_lines("negative", &lines);
         assert!(failures.iter().any(|line| line.contains("run 0 field timings.ttft_us: missing")), "{failures:#?}");
     }
