@@ -918,7 +918,7 @@ mod tests {
     fn decoded(format: &NumericFormat, packed: &[u8]) -> std::vec::Vec<f32> {
         let elements = usize::from(format.elements_per_block());
         let bytes = usize::from(format.bytes_per_block());
-        let mut out = std::vec![0.0f32; packed.len() / bytes * elements];
+        let mut out = std::vec![0.0; packed.len() / bytes * elements];
         decode_blocks(format, packed, &mut out).expect("the bytes this encoder wrote decode");
         out
     }
@@ -1033,7 +1033,7 @@ mod tests {
         // one shared E8M0 scale byte (127 = 2^0), then element i in the low nibble of byte 1+(i%16)
         // and element i+16 in its high nibble; the grid is its own code, so the block is the codes
         // in order
-        let mut input = std::vec![0.0f32; 32];
+        let mut input = std::vec![0.0; 32];
         for (index, value) in E2M1_GRID.iter().enumerate() {
             input[index] = *value;
             input[index + 8] = -*value;
@@ -1049,7 +1049,7 @@ mod tests {
 
     #[test]
     fn nvfp4_writes_one_e4m3_scale_per_sixteen_and_six_bit_fields_do_not_straddle() {
-        let mut input = std::vec![0.0f32; 64];
+        let mut input = std::vec![0.0; 64];
         for (index, value) in E2M1_GRID.iter().enumerate() {
             input[index] = *value;
             input[index + 8] = -*value;
@@ -1068,13 +1068,13 @@ mod tests {
         // 28 is E3M2's largest magnitude (2^4 * 1.75, §5.3.2 Table 4), so a block of ones sits on
         // the top code 0b011111; six-bit fields do not divide a byte, so laid LSB-first they repeat
         // with period 3 bytes: byte0 111_01111, byte1 11_01111_1, byte2 1_01111_11
-        let input = std::vec![1.0f32; 32];
+        let input = std::vec![1.0; 32];
         let mut block = std::vec![0u8; 26];
         encode_blocks(&NumericFormat::Fp6E3M2, &input, &mut block).expect("fp6 e3m2 encodes");
         let scale = uint16_bytes(&block[0..2]);
         let straddled: std::vec::Vec<u8> = (0..24).map(|step| [0xdf, 0xf7, 0x7d][step % 3]).collect();
         assert_eq!(&block[2..], &straddled[..], "six-bit top codes across byte borders");
-        let mut wide = std::vec![0.0f32; 32];
+        let mut wide = std::vec![0.0; 32];
         decode_blocks(&NumericFormat::Fp6E3M2, &block, &mut wide).expect("it decodes");
         for value in &wide {
             assert_eq!(value.to_bits(), (28.0 * scale).to_bits(), "the top code is 28");
@@ -1103,11 +1103,11 @@ mod tests {
             match encode_blocks(&format, &input, &mut packed) {
                 Ok(blocks) => {
                     assert_eq!(blocks, 1, "{format:?} is one block");
-                    let mut wide = std::vec![0.0f32; elements];
+                    let mut wide = std::vec![0.0; elements];
                     decode_blocks(&format, &packed, &mut wide).expect("what this encoder wrote decodes");
                     let mut again = std::vec![0u8; bytes];
                     encode_blocks(&format, &wide, &mut again).expect("a decoded block re-encodes");
-                    let mut twice = std::vec![0.0f32; elements];
+                    let mut twice = std::vec![0.0; elements];
                     decode_blocks(&format, &again, &mut twice).expect("the second pass decodes");
                     for (once, twice) in wide.iter().zip(&twice) {
                         assert_eq!(
@@ -1165,7 +1165,7 @@ mod tests {
 
     #[test]
     fn q4_1_rounds_an_exact_half_up_where_ties_to_even_would_give_zero() {
-        let mut block = std::vec![0.0f32; 32];
+        let mut block = std::vec![0.0; 32];
         block[1] = 30.0;
         block[2] = 1.0;
 
@@ -1458,9 +1458,9 @@ mod tests {
     /// `00 3c 20 58 | 01 3c a1 52 | 00 00 00 00 | 00 3c f0 57`.
     #[test]
     fn q8_1_grouped_equals_four_flat_q8_1_runs_and_the_cuda_arithmetic_at_near_ties() {
-        let scale_zero = 1.0f32 + 5.0 / 16384.0;
-        let scale_one = 1.0f32 + 3.0 / 4096.0;
-        let mut input = [0.0f32; 128];
+        let scale_zero = 1.0 + 5.0 / 16384.0;
+        let scale_one = 1.0 + 3.0 / 4096.0;
+        let mut input = [0.0; 128];
         input[0] = 5.500_278;
         input[1] = 127.0 * scale_zero;
         input[32] = 127.0 * scale_one;
@@ -1499,7 +1499,7 @@ mod tests {
         assert_eq!(grouped_codes, expected_codes);
 
         for (run, group) in input.chunks(32).enumerate() {
-            let amax = group.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+            let amax = group.iter().fold(0.0, |peak, value| libm::fmaxf(peak, value.abs()));
             let delta = amax / 127.0;
             for (index, &value) in group.iter().enumerate() {
                 let code = if amax == 0.0 { 0 } else { (value / delta).round() as i8 };
@@ -1514,10 +1514,10 @@ mod tests {
     /// amax / 127`, `id = 1 / d` (0 when `d` is 0), `q = roundf(x * id)`, `s = f16(sum(q) * d)`.
     /// Returns one 36-byte flat block per 32 values: `d` and `s` little endian, then the codes.
     fn llama_quantize_row_q8_1_ref(row: &[f32]) -> std::vec::Vec<u8> {
-        let half = |value: f32| (float_layout_codec::encode(value, FloatLayout::F16) as u16).to_le_bytes();
+        let half = |value| (float_layout_codec::encode(value, BlockLayout::Q8_1.scale.layout) as u16).to_le_bytes();
         let mut out = std::vec::Vec::new();
         for group in row.chunks(32) {
-            let amax = group.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+            let amax = group.iter().fold(0.0, |peak, value| libm::fmaxf(peak, value.abs()));
             let scale = amax / 127.0;
             let inverse = if scale != 0.0 { 1.0 / scale } else { 0.0 };
             let codes: std::vec::Vec<i8> = group.iter().map(|value| libm::roundf(value * inverse) as i8).collect();
@@ -1530,9 +1530,9 @@ mod tests {
     }
 
     fn near_tie_row() -> [f32; 128] {
-        let scale_zero = 1.0f32 + 5.0 / 16384.0;
-        let scale_one = 1.0f32 + 3.0 / 4096.0;
-        let mut input = [0.0f32; 128];
+        let scale_zero = 1.0 + 5.0 / 16384.0;
+        let scale_one = 1.0 + 3.0 / 4096.0;
+        let mut input = [0.0; 128];
         input[0] = 5.500_278;
         input[1] = 127.0 * scale_zero;
         input[32] = 127.0 * scale_one;
@@ -1550,8 +1550,8 @@ mod tests {
         let swept = values(128 * 64, 0x51_71);
         for (name, row) in [("near ties", &tie[..]), ("activation row", &real[..]), ("sweep", &swept[..])] {
             let expected = llama_quantize_row_q8_1_ref(row);
-            assert_eq!(packed(&NumericFormat::Q8_1, row), expected, "{name}: flat q8_1");
-            let grouped = packed(&NumericFormat::Q8_1Grouped, row);
+            assert_eq!(packed(&NumericFormat::Block(BlockLayout::Q8_1), row), expected, "{name}: flat q8_1");
+            let grouped = packed(&NumericFormat::Block(BlockLayout::Q8_1_GROUPED), row);
             for (block, (group, runs)) in grouped.chunks(144).zip(expected.chunks(144)).enumerate() {
                 for (run, flat) in runs.chunks(36).enumerate() {
                     assert_eq!(&group[run * 4..run * 4 + 4], &flat[..4], "{name} block {block} run {run} header");
@@ -1563,21 +1563,19 @@ mod tests {
 
     const UNIT_PEAK_TIES: [u32; 6] = [0x3d11_2244, 0x3d31_62c5, 0x3d51_a346, 0x3d71_e3c7, 0x3f30_60c1, 0x3f50_a142];
     const WIDE_PEAK_TIES: [u32; 6] = [0x3d32_ff98, 0x3d95_2a54, 0x3dd0_d4dc, 0x3e06_3fb2, 0x3e24_14f6, 0x3e41_ea3a];
-    const WIDE_PEAK: f32 = 3.7;
     const UNIT_RECIPROCAL_CODES: [i8; 6] = [4, 5, 6, 7, 87, 103];
     const UNIT_QUOTIENT_CODES: [i8; 6] = [5, 6, 7, 8, 88, 104];
     const WIDE_RECIPROCAL_CODES: [i8; 6] = [2, 3, 4, 5, 6, 7];
     const WIDE_QUOTIENT_CODES: [i8; 6] = [1, 2, 3, 4, 5, 6];
 
     fn near_tie_groups() -> [f32; 64] {
-        let mut values = [0.0f32; 64];
+        let mut values = [0.0; 64];
         values[0] = 1.0;
-        values[32] = WIDE_PEAK;
-        for (lane, bits) in UNIT_PEAK_TIES.iter().enumerate() {
-            values[1 + lane] = f32::from_bits(*bits);
-        }
-        for (lane, bits) in WIDE_PEAK_TIES.iter().enumerate() {
-            values[33 + lane] = f32::from_bits(*bits);
+        values[32] = 3.7;
+        for (first, ties) in [(1, UNIT_PEAK_TIES), (33, WIDE_PEAK_TIES)] {
+            for (lane, bits) in ties.iter().enumerate() {
+                values[first + lane] = f32::from_bits(*bits);
+            }
         }
         values
     }
@@ -1614,12 +1612,12 @@ mod tests {
         let own = layout.encode_rule().expect("q8_1 has a rule");
         assert_eq!(own.arithmetic, ScaleArithmetic::InverseOfScale);
         let values = near_tie_groups();
-        assert_eq!(q8_1_under(ScaleArithmetic::InverseOfScale, &values), packed(&NumericFormat::Q8_1, &values));
+        assert_eq!(q8_1_under(ScaleArithmetic::InverseOfScale, &values), packed(&NumericFormat::Block(BlockLayout::Q8_1), &values));
     }
 
     #[test]
     fn a_zero_group_is_zero_under_every_arithmetic_and_rows_choose_like_llama() {
-        let zeros = [0.0f32; 32];
+        let zeros = [0.0; 32];
         for arithmetic in [ScaleArithmetic::InverseOfScale, ScaleArithmetic::Quotient, ScaleArithmetic::ReciprocalMultiply] {
             assert!(q8_1_under(arithmetic, &zeros).iter().all(|byte| *byte == 0), "{arithmetic:?}");
         }
@@ -1685,7 +1683,7 @@ mod tests {
         let layout = BlockLayout::row_scaled(FloatLayout::F16, row.len() as u16);        let codec = FormatCodec::coded(&layout, staging_rule()).expect("the row rule fits the row layout");
         let mut bytes = vec![0u8; codec.block_bytes()];
         codec.encode(row, &mut bytes).expect("one whole row encodes");
-        let mut restored = vec![0.0f32; row.len()];
+        let mut restored = vec![0.0; row.len()];
         decode_blocks(&NumericFormat::Block(layout), &bytes, &mut restored).expect("the row decodes");
         (i32::from(bytes[0]) - 127, restored)
     }
@@ -1773,7 +1771,7 @@ mod float_rule_tests {
     }
 
     fn decoded(format: &NumericFormat, bytes: &[u8], count: usize) -> Vec<f32> {
-        let mut out = vec![0.0f32; count];
+        let mut out = vec![0.0; count];
         decode_blocks(format, bytes, &mut out).expect("whole blocks decode");
         out
     }
@@ -1909,7 +1907,7 @@ mod float_rule_tests {
         let values = attention_rows(0xbeef, 16, 64);
         for group in values.chunks(64) {
             let block = llama_quantize_block_nvfp4(group);
-            let mut ours = [0.0f32; 64];
+            let mut ours = [0.0; 64];
             crate::decode::decode_block(&NumericFormat::Nvfp4, &block, &mut ours).expect("one block decodes");
             let reference = llama_dequantize_block_nvfp4(&block);
             assert_eq!(ours.to_vec(), reference.to_vec(), "dequantize_row_nvfp4 against the nvfp4 layout's decode");
@@ -1920,7 +1918,7 @@ mod float_rule_tests {
     fn mxfp4_decodes_what_llama_quantize_row_mxfp4_ref_wrote() {
         for group in attention_rows(0xbeef, 16, 32).chunks(32) {
             let block = llama_quantize_block_mxfp4(group);
-            let mut ours = [0.0f32; 32];
+            let mut ours = [0.0; 32];
             crate::decode::decode_block(&NumericFormat::Mxfp4, &block, &mut ours).expect("one block decodes");
             assert_eq!(ours.to_vec(), llama_dequantize_block_mxfp4(&block).to_vec());
         }
