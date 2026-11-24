@@ -884,6 +884,7 @@ mod tests {
     use super::*;
     use crate::block_layout::BlockLayout;
     use crate::encode_rule::ScaleArithmetic;
+    use crate::numeric::NumericPolicy;
     use crate::decode::decode_blocks;
 
     /// half of a binary16 ulp at 1.0: every stored scale is a binary16, so the scale itself is
@@ -1623,9 +1624,12 @@ mod tests {
             assert!(q8_1_under(arithmetic, &zeros).iter().all(|byte| *byte == 0), "{arithmetic:?}");
         }
         let limit = 3;
-        assert_eq!(ScaleArithmetic::for_rows(limit as u64, Some(limit)), ScaleArithmetic::Quotient);
-        assert_eq!(ScaleArithmetic::for_rows(limit as u64 + 1, Some(limit)), ScaleArithmetic::ReciprocalMultiply);
-        assert_eq!(ScaleArithmetic::for_rows(limit as u64 + 1, None), ScaleArithmetic::Quotient);
+        let unset = NumericPolicy::bit_exact();
+        let named = unset.with_reciprocal_activation_scale_above_rows(Some(limit)).with_activation_scale_arithmetic(ScaleArithmetic::Quotient);
+        assert_eq!(ScaleArithmetic::for_rows(limit as u64, named), ScaleArithmetic::Quotient);
+        assert_eq!(ScaleArithmetic::for_rows(limit as u64 + 1, named), ScaleArithmetic::ReciprocalMultiply);
+        assert_eq!(ScaleArithmetic::for_rows(limit as u64 + 1, unset), ScaleArithmetic::InverseOfScale);
+        assert_eq!(ScaleArithmetic::for_rows(limit as u64 + 1, unset.with_reciprocal_activation_scale_above_rows(Some(limit))), ScaleArithmetic::ReciprocalMultiply);
     }
 
     const FLINT_EXPERT_ROWS: &str =

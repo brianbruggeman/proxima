@@ -4418,6 +4418,16 @@ mod tests {
     }
 
     #[test]
+    fn gpu_quantize_with_no_configuration_equals_the_layout_rule_on_near_ties() {
+        let driver = CudaDriver::new(0).expect("a cuda device");
+        let values = near_tie_values();
+        let own = BlockLayout::Q8_1.encode_rule().expect("q8_1 has a rule").arithmetic;
+        let default = ScaleArithmetic::for_rows(1, NumericPolicy::bit_exact());
+        assert_eq!(default, own);
+        assert_eq!(quantize_on_gpu(&driver, BlockLayout::Q8_1, &values, default), host_quantize(BlockLayout::Q8_1, &values, own));
+    }
+
+    #[test]
     fn gpu_reciprocal_multiply_grouped_quantize_is_four_flat_runs_behind_one_header() {
         let driver = CudaDriver::new(0).expect("a cuda device");
         let values = near_tie_values();

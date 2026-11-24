@@ -4554,7 +4554,7 @@ async fn mma_prefill_attention_matches_the_fp16_rounded_f64_oracle_on_cuda(
     let shape = PrefillAttentionShape { cached, rows, heads, groups, head_dim, rotary_dim };
     let planes = prefill_attention_planes(&shape);
     let rounded: [Vec<f32>; PREFILL_PLANE_COUNT] = planes.each_ref().map(|plane| round_through_fp16(plane));
-    let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true).with_reciprocal_activation_scale_above_rows(llama_reciprocal_above_rows());
+    let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true).with_reciprocal_activation_scale_above_rows(llama_reciprocal_above_rows()).with_activation_scale_arithmetic(llama_scale_arithmetic());
 
     let (actual, entry, source) = run_prefill_attention(&shape, &planes, policy);
     assert!(entry.contains("_mma16x8x8h"), "policy-on prefill attention did not take the mma kernel: {entry}");
@@ -4701,7 +4701,7 @@ fn run_policy_prefill(
         NumericPolicy::bit_exact()
             .with_reassociation(true)
             .with_activation_quantization(activation_quantization)
-            .with_reciprocal_activation_scale_above_rows(llama_reciprocal_above_rows()),
+            .with_reciprocal_activation_scale_above_rows(llama_reciprocal_above_rows()).with_activation_scale_arithmetic(llama_scale_arithmetic()),
     )
     .expect("omega::backend plans the policy prefill matmul");
     let identities = cuda_kernel_identities(&plan).expect("cuda plan exposes its kernels");
@@ -4875,6 +4875,15 @@ fn llama_reciprocal_above_rows() -> Option<usize> {
     Some(usize::try_from(rows).expect("a row limit is a count"))
 }
 
+fn llama_scale_arithmetic() -> ScaleArithmetic {
+    let table: toml::Table = include_str!("fixtures/llama_numeric_policy.toml").parse().expect("the llama policy fixture is toml");
+    table["numeric_policy"]["activation_scale_arithmetic"].clone().try_into().expect("the fixture names the arithmetic")
+}
+
+fn llama_policy() -> NumericPolicy {
+    NumericPolicy::bit_exact().with_reciprocal_activation_scale_above_rows(llama_reciprocal_above_rows()).with_activation_scale_arithmetic(llama_scale_arithmetic())
+}
+
 fn fake_quantize_blocks(activation: &[f32], scale_through_fp16: bool, arithmetic: ScaleArithmetic) -> Vec<f32> {
     let layout = BlockLayout::Q8_1;
     let rule = EncodeRule { arithmetic, ..layout.encode_rule().expect("q8_1 has a rule") };
@@ -4941,7 +4950,7 @@ async fn int8_prefill_gemm_matches_the_fake_quantized_activation_reference_on_cu
         ("weight", QuantizedBlock::Packed { codec: Codec::Pq2_0, bytes: &weight_blocks }),
         ("activation", QuantizedBlock::Float32(&activation)),
     ];
-    let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true).with_reciprocal_activation_scale_above_rows(llama_reciprocal_above_rows());
+    let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true).with_reciprocal_activation_scale_above_rows(llama_reciprocal_above_rows()).with_activation_scale_arithmetic(llama_scale_arithmetic());
     let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), &program, &[], &named, &[root], policy)
         .expect("omega::backend plans the int8 prefill matmul");
     let identities = cuda_kernel_identities(&plan).expect("cuda plan exposes its kernels");
@@ -4951,8 +4960,8 @@ async fn int8_prefill_gemm_matches_the_fake_quantized_activation_reference_on_cu
         identities.iter().any(|identity| identity.contains("_mma8x8x16s8c")),
         "the activation-quantized prefill gemm did not take the int8 mma kernel: {identities:?}"
     );
-    let block_scale_reference = gemm_rows_max_over_peak(&output, &dequantized, &fake_quantize_blocks(&activation, true, ScaleArithmetic::for_rows(tokens as u64, llama_reciprocal_above_rows())), depth, tokens);
-    let f32_scale_reference = gemm_rows_max_over_peak(&output, &dequantized, &fake_quantize_blocks(&activation, false, ScaleArithmetic::for_rows(tokens as u64, llama_reciprocal_above_rows())), depth, tokens);
+    let block_scale_reference = gemm_rows_max_over_peak(&output, &dequantized, &fake_quantize_blocks(&activation, true, ScaleArithmetic::for_rows(tokens as u64, llama_policy())), depth, tokens);
+    let f32_scale_reference = gemm_rows_max_over_peak(&output, &dequantized, &fake_quantize_blocks(&activation, false, ScaleArithmetic::for_rows(tokens as u64, llama_policy())), depth, tokens);
     let unquantized = gemm_rows_max_over_peak(&output, &dequantized, &activation, depth, tokens);
     println!("int8 gemm {features}x{depth}x{tokens}: vs fp16-scale fake-quantized {block_scale_reference:.3e}, vs f32-scale fake-quantized {f32_scale_reference:.3e}, vs unquantized {unquantized:.3e}");
     assert!(output.iter().all(|value| value.is_finite()) && block_scale_reference < 2e-5,
@@ -5004,7 +5013,7 @@ fn assert_derived_parity_on(codec: Codec, weight_blocks: &[u8], dequantized: &[f
     let (program, root) = int8_gemm_program_over(features as u32, trailing, tokens as u32);
     let named: Vec<(&str, QuantizedBlock<'_>)> =
         vec![("weight", QuantizedBlock::Packed { codec, bytes: weight_blocks }), ("activation", QuantizedBlock::Float32(activation))];
-    let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true).with_reciprocal_activation_scale_above_rows(llama_reciprocal_above_rows());
+    let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true).with_reciprocal_activation_scale_above_rows(llama_reciprocal_above_rows()).with_activation_scale_arithmetic(llama_scale_arithmetic());
     let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), &program, &[], &named, &[root], policy)
         .expect("omega::backend plans the derived-activation matmul");
     let identities = cuda_kernel_identities(&plan).expect("cuda plan exposes its kernels");
@@ -5025,7 +5034,7 @@ fn assert_derived_parity_on(codec: Codec, weight_blocks: &[u8], dequantized: &[f
         identities.iter().all(|identity| !identity.contains("_prepass") && !identity.contains("_smv8x4g")),
         "the activation must be quantized by the derived node, not an own prologue: {identities:?}"
     );
-    let reference = gemm_rows_max_over_peak(&output, dequantized, &fake_quantize_blocks(activation, true, ScaleArithmetic::for_rows(tokens as u64, llama_reciprocal_above_rows())), depth, tokens);
+    let reference = gemm_rows_max_over_peak(&output, dequantized, &fake_quantize_blocks(activation, true, ScaleArithmetic::for_rows(tokens as u64, llama_policy())), depth, tokens);
     let unquantized = gemm_rows_max_over_peak(&output, dequantized, activation, depth, tokens);
     println!("derived matvec {codec:?} {features}x{depth}x{tokens}: vs fp16-scale fake-quantized {reference:.3e}, vs unquantized {unquantized:.3e}");
     assert!(output.iter().all(|value| value.is_finite()) && reference < 2e-5,
@@ -5202,7 +5211,7 @@ fn kernel_entries(identities: &[String]) -> Vec<&str> {
 type MixedReader = (Codec, (Vec<u8>, Vec<f32>));
 
 fn assert_int8_reader_matches(label: &str, output: &[f32], dequantized: &[f32], activation: &[f32], depth: usize, tokens: usize) {
-    let reference = gemm_rows_max_over_peak(output, dequantized, &fake_quantize_blocks(activation, true, ScaleArithmetic::for_rows(tokens as u64, llama_reciprocal_above_rows())), depth, tokens);
+    let reference = gemm_rows_max_over_peak(output, dequantized, &fake_quantize_blocks(activation, true, ScaleArithmetic::for_rows(tokens as u64, llama_policy())), depth, tokens);
     let unquantized = gemm_rows_max_over_peak(output, dequantized, activation, depth, tokens);
     println!("{label} int8 reader at {tokens} tokens: vs fp16-scale fake-quantized {reference:.3e}, vs unquantized {unquantized:.3e}");
     assert!(output.iter().all(|value| value.is_finite()) && reference < 2e-5,
@@ -5238,7 +5247,7 @@ fn assert_mixed_readers_parity(first: MixedReader, second: MixedReader, second_i
         ("second_weight", QuantizedBlock::Packed { codec: second_codec, bytes: &second_blocks }),
         ("activation", QuantizedBlock::Float32(&activation)),
     ];
-    let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true).with_reciprocal_activation_scale_above_rows(llama_reciprocal_above_rows());
+    let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true).with_reciprocal_activation_scale_above_rows(llama_reciprocal_above_rows()).with_activation_scale_arithmetic(llama_scale_arithmetic());
     let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), &program, &[], &named, &[first_gemm, second_gemm], policy)
         .expect("omega::backend plans the mixed-reader program");
     let identities = cuda_kernel_identities(&plan).expect("cuda plan exposes its kernels");
@@ -5462,7 +5471,7 @@ fn run_int8_epilogue_plan(
     root: NodeId,
     named: &[(&str, QuantizedBlock<'_>)],
 ) -> (Vec<f32>, Vec<String>) {
-    let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true).with_reciprocal_activation_scale_above_rows(llama_reciprocal_above_rows());
+    let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true).with_reciprocal_activation_scale_above_rows(llama_reciprocal_above_rows()).with_activation_scale_arithmetic(llama_scale_arithmetic());
     let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), program, &[], named, &[root], policy)
         .expect("omega::backend plans the int8 gemm with a fused epilogue");
     let identities = cuda_kernel_identities(&plan).expect("cuda plan exposes its kernels");
@@ -5500,7 +5509,7 @@ fn int8_prefill_gemm_with_a_fused_residual_add_matches_the_fake_quantized_refere
     let (output, identities) = run_int8_epilogue_plan(&program, root, &named);
 
     assert_int8_epilogue_kernel(&identities);
-    let reference: Vec<f64> = exact_gemm(&dequantized, &fake_quantize_blocks(&activation, true, ScaleArithmetic::for_rows(tokens as u64, llama_reciprocal_above_rows())), depth, tokens)
+    let reference: Vec<f64> = exact_gemm(&dequantized, &fake_quantize_blocks(&activation, true, ScaleArithmetic::for_rows(tokens as u64, llama_policy())), depth, tokens)
         .into_iter()
         .zip(&residual)
         .map(|(product, addend)| product + f64::from(*addend))
@@ -6153,7 +6162,7 @@ fn a_gathered_expert_product_under_activation_quantization_takes_the_int8_groupe
     assert!(!codecs.is_empty(), "the int8 table accepts block codecs");
     let route = &inputs[0].1;
     let quantized = fake_quantize_blocks(&inputs[1].1, true, ScaleArithmetic::Quotient);
-    let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true).with_reciprocal_activation_scale_above_rows(llama_reciprocal_above_rows());
+    let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true).with_reciprocal_activation_scale_above_rows(llama_reciprocal_above_rows()).with_activation_scale_arithmetic(llama_scale_arithmetic());
     let mut table: Vec<(Codec, bool, _, _)> = Vec::new();
     for codec in codecs {
         let layout = codec.block_layout().expect("a block codec");

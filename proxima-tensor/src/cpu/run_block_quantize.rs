@@ -434,4 +434,22 @@ mod tests {
         assert_eq!(tie_codes(&reciprocal, 0), UNIT_RECIPROCAL_CODES);
         assert_eq!(tie_codes(&reciprocal, 1), WIDE_RECIPROCAL_CODES);
     }
+
+    #[test]
+    fn with_no_configuration_the_interpreter_writes_the_layout_rule_codes_on_near_ties() {
+        let layout = BlockLayout::Q8_1;
+        let mut values = vec![0.0f32; (ROWS * row_width(&layout)) as usize];
+        values[0] = 1.0;
+        for (lane, bits) in UNIT_PEAK_TIES.iter().enumerate() {
+            values[1 + lane] = f32::from_bits(*bits);
+        }
+        let own = layout.encode_rule().expect("q8_1 has a rule").arithmetic;
+        let default = ScaleArithmetic::for_rows(u64::from(ROWS), proxima_numeric::NumericPolicy::bit_exact());
+        assert_eq!(default, own);
+        let rule = layout.encode_rule().expect("q8_1 has a rule");
+        let codec = proxima_numeric::FormatCodec::block_with_rule(&layout, rule).expect("q8_1 runs under an integer rule");
+        let mut want = vec![0u8; codec.packed_len(values.len()).expect("whole blocks")];
+        codec.encode(&values, &mut want).expect("the codec encodes the groups");
+        assert_eq!(encode_under(&layout, &values, default).expect("q8_1 encodes under the default"), want);
+    }
 }

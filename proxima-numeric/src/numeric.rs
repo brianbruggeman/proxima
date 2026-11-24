@@ -9,6 +9,7 @@
 //! must be classified with [`NumericRewrite`] and cleared through [`admit`]
 //! before it fires, instead of firing unconditionally.
 
+use crate::encode_rule::ScaleArithmetic;
 use crate::error::NumericError;
 
 /// Eight independent float-bit-changing permissions a bind (or GPU plan) may
@@ -118,11 +119,18 @@ pub struct NumericPolicy {
     pub flat_activation_blocks: bool,
     /// Quantizes an activation read by more rows than this the way llama.cpp's batched path does
     /// (`quantize_mmq_q8_1`: multiply by the reciprocal of the scale); an activation read by this many
-    /// rows or fewer divides by the scale (`quantize_q8_1`); see [`crate::encode_rule::ScaleArithmetic::for_rows`].
-    /// `None` divides at every row count. A serving TOML names the limit under `[numeric_policy]`.
+    /// rows or fewer uses [`Self::activation_scale_arithmetic`] (`quantize_q8_1` divides by the scale); see [`crate::encode_rule::ScaleArithmetic::for_rows`].
+    /// `None` uses it at every row count. A serving TOML names the limit under `[numeric_policy]`.
     #[cfg_attr(feature = "config", setting(default))]
     #[cfg_attr(feature = "config", serde(default))]
     pub reciprocal_activation_scale_above_rows: Option<usize>,
+    /// How an activation read by no more rows than the limit above (every activation when none is
+    /// named) forms its scale and codes; see [`crate::encode_rule::ScaleArithmetic`]. The default is
+    /// the layout rule's own arithmetic, so no backend departs from it unasked. An incumbent that
+    /// divides by the scale names `quotient` here.
+    #[cfg_attr(feature = "config", setting(default))]
+    #[cfg_attr(feature = "config", serde(default))]
+    pub activation_scale_arithmetic: ScaleArithmetic,
 }
 
 impl NumericPolicy {
@@ -152,6 +160,7 @@ impl NumericPolicy {
             accumulator_narrowing: false,
             flat_activation_blocks: false,
             reciprocal_activation_scale_above_rows: None,
+            activation_scale_arithmetic: ScaleArithmetic::InverseOfScale,
         }
     }
 
@@ -176,6 +185,7 @@ impl NumericPolicy {
             accumulator_narrowing: false,
             flat_activation_blocks: false,
             reciprocal_activation_scale_above_rows: None,
+            activation_scale_arithmetic: ScaleArithmetic::InverseOfScale,
         }
     }
 
@@ -196,6 +206,7 @@ impl NumericPolicy {
             accumulator_narrowing: false,
             flat_activation_blocks: false,
             reciprocal_activation_scale_above_rows: None,
+            activation_scale_arithmetic: ScaleArithmetic::InverseOfScale,
         }
     }
 
@@ -284,6 +295,12 @@ impl NumericPolicy {
     #[must_use]
     pub const fn with_reciprocal_activation_scale_above_rows(mut self, rows: Option<usize>) -> Self {
         self.reciprocal_activation_scale_above_rows = rows;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_activation_scale_arithmetic(mut self, arithmetic: ScaleArithmetic) -> Self {
+        self.activation_scale_arithmetic = arithmetic;
         self
     }
 }
@@ -603,6 +620,18 @@ mod tests {
         assert!(text.contains("epilogue_sources = true"));
         assert_eq!(restored, granted);
         assert!(restored.epilogue_sources);
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn the_activation_arithmetic_defaults_to_the_layout_rule_and_parses_by_name() {
+        let absent: NumericPolicy = toml::from_str("contraction = true\n").expect("a policy without the field parses");
+        assert_eq!(absent.activation_scale_arithmetic, ScaleArithmetic::InverseOfScale);
+
+        let named: NumericPolicy = toml::from_str("activation_scale_arithmetic = \"quotient\"\n").expect("a policy naming the arithmetic parses");
+        assert_eq!(named.activation_scale_arithmetic, ScaleArithmetic::Quotient);
+        let restored: NumericPolicy = toml::from_str(&toml::to_string(&named).expect("policy serializes")).expect("policy deserializes");
+        assert_eq!(restored, named);
     }
 
     #[cfg(feature = "config")]

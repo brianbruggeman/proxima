@@ -25,6 +25,7 @@
 
 use crate::block_layout::BlockLayout;
 use crate::block_codec::encode_rule_of;
+use crate::numeric::NumericPolicy;
 
 /// The statistic of a block's values the scale is fitted to.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -140,10 +141,12 @@ pub enum ScaleRounding {
 /// How a block's scale and a value's quotient over it are formed, for the integer codes. The
 /// arithmetics round differently where `value / scale` and `value * inverse` straddle a half; the
 /// tie itself stays [`CodeRounding`]'s job. `reach` is the rule's divisor, `stat` its statistic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ScaleArithmetic {
     /// `scale = stat / reach`, `inverse = 1 / scale` (zero for a zero scale), code from
     /// `value * inverse`: ggml CPU `quantize_row_q8_0`, and what every layout's rule is filled in with.
+    #[default]
     InverseOfScale,
     /// `scale = stat / reach`, code from `value / scale` (zero for a zero scale): llama.cpp's
     /// `quantize_q8_1` (`ggml-cuda/quantize.cu`), the path a single-row (matvec) product reads.
@@ -155,15 +158,40 @@ pub enum ScaleArithmetic {
 }
 
 impl ScaleArithmetic {
-    /// The arithmetic for an activation read by `rows` rows when the policy asks for the reciprocal
-    /// above `reciprocal_above_rows` rows (`NumericPolicy::reciprocal_activation_scale_above_rows`);
-    /// `Quotient` when it names no limit or `rows` is within it.
+    /// The arithmetic for an activation read by `rows` rows: the reciprocal when the policy names a
+    /// limit (`NumericPolicy::reciprocal_activation_scale_above_rows`) and `rows` exceeds it, else
+    /// the policy's `activation_scale_arithmetic`.
     #[must_use]
-    pub const fn for_rows(rows: u64, reciprocal_above_rows: Option<usize>) -> Self {
-        match reciprocal_above_rows {
+    pub const fn for_rows(rows: u64, policy: NumericPolicy) -> Self {
+        match policy.reciprocal_activation_scale_above_rows {
             Some(limit) if rows > limit as u64 => Self::ReciprocalMultiply,
-            _ => Self::Quotient,
+            _ => policy.activation_scale_arithmetic,
         }
+    }
+}
+
+/// The env spelling a [`ScaleArithmetic`] could not be resolved from.
+#[cfg(feature = "config")]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown scale arithmetic `{0}`; expected inverse_of_scale, quotient or reciprocal_multiply")]
+pub struct ScaleArithmeticParseError(pub std::string::String);
+
+/// An environment value is the variant's snake_case name, the spelling a TOML policy uses.
+#[cfg(feature = "config")]
+impl conflaguration::FromEnvStr for ScaleArithmetic {
+    type Err = ScaleArithmeticParseError;
+
+    fn from_env_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "inverse_of_scale" => Ok(Self::InverseOfScale),
+            "quotient" => Ok(Self::Quotient),
+            "reciprocal_multiply" => Ok(Self::ReciprocalMultiply),
+            other => Err(ScaleArithmeticParseError(other.into())),
+        }
+    }
+
+    fn type_name() -> &'static str {
+        "ScaleArithmetic"
     }
 }
 
