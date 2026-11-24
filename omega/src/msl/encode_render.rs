@@ -62,8 +62,8 @@ impl EncodeDialect for MslEncode {
         None
     }
 
-    fn kernel_open(&self, name: &str, storage: &str) -> String {
-        format!("kernel void {name}_kernel(device const float *input [[buffer(0)]], device {storage} *output [[buffer(1)]], uint gid [[thread_position_in_grid]]) {{\n")
+    fn kernel_open(&self, name: &str, input: &str, storage: &str) -> String {
+        format!("kernel void {name}_kernel(device const {input} *input [[buffer(0)]], device {storage} *output [[buffer(1)]], uint gid [[thread_position_in_grid]]) {{\n")
     }
 
     fn block_function(&self, layout: &BlockLayout, name: &str) -> Option<String> {

@@ -1004,7 +1004,7 @@ kernel void golden_encode_kernel(device const float *input [[buffer(0)]], device
     output[gid] = (uchar)golden_encode_store(input[gid]);
 }
 === Bf4E2M1
-refused the scalar code does not fill a whole byte, half-word or word
+refused the scalar code does not fill a whole number of bytes the dialect stores
 === Fp6E3M2
 entry golden_encode_kernel elements 32 bytes 26
 #include <metal_stdlib>

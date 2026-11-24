@@ -546,6 +546,11 @@ impl NumericFormat {
     pub const UNTAGGED: [(Self, &'static str); 2] =
         [(Self::Float32, "Float32"), (Self::Bool, "Bool")];
 
+    /// Every named format, wire-tagged first then untagged.
+    pub fn every() -> impl Iterator<Item = Self> {
+        Self::ALL.into_iter().chain(Self::UNTAGGED.into_iter().map(|(format, _)| format))
+    }
+
     /// The `Debug` spelling of a named format, wire-tagged or untagged; `None` for a layout this
     /// crate has no constant for.
     #[must_use]

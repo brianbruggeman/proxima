@@ -8,13 +8,9 @@ use super::encode_render::{encode_kernel_refusal, format_encode_kernel_msl};
 const GOLDEN: &str = include_str!("encode_golden.txt");
 const WRITE_VAR: &str = "PROXIMA_WRITE_ENCODE_GOLDEN";
 
-fn every_format() -> impl Iterator<Item = NumericFormat> {
-    NumericFormat::ALL.into_iter().chain(NumericFormat::UNTAGGED.into_iter().map(|(format, _)| format))
-}
-
 fn render_all() -> String {
     let mut text = String::new();
-    for format in every_format() {
+    for format in NumericFormat::every() {
         text.push_str(&format!("=== {format:?}\n"));
         match format_encode_kernel_msl(&format, "golden_encode") {
             Ok(rendered) => text.push_str(&format!(

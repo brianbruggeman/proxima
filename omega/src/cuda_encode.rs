@@ -26,7 +26,9 @@ pub struct CudaEncode {
 
 impl EncodeDialect for CudaEncode {
     fn prelude(&self) -> String {
-        format!("#include <{}>\n#include <{}>\n", self.target.fp16_header, self.target.bf16_header)
+        let mut source = String::new();
+        crate::cuda::preamble(self.target, &mut source, self.target.bfloat_type);
+        source
     }
 
     fn storage_token(&self, bytes: usize) -> Option<&'static str> {
@@ -48,9 +50,9 @@ impl EncodeDialect for CudaEncode {
             .map(|_| "the CUDA type mapping has no token for the layout")
     }
 
-    fn kernel_open(&self, name: &str, storage: &str) -> String {
+    fn kernel_open(&self, name: &str, input: &str, storage: &str) -> String {
         format!(
-            "extern \"C\" __global__ void {name}_kernel(const float *input, {storage} *output) {{\n    unsigned int gid = blockIdx.x * blockDim.x + threadIdx.x;\n"
+            "extern \"C\" __global__ void {name}_kernel(const {input} *input, {storage} *output) {{\n    unsigned int gid = blockIdx.x * blockDim.x + threadIdx.x;\n"
         )
     }
 
@@ -74,16 +76,12 @@ pub(crate) mod tests {
     use crate::encode_render::{encode_kernel_refusal, format_encode_kernel};
     use crate::msl::encode_render::MslEncode;
 
-    pub(crate) fn every_format() -> impl Iterator<Item = NumericFormat> {
-        NumericFormat::ALL.into_iter().chain(NumericFormat::UNTAGGED.into_iter().map(|(format, _)| format))
-    }
-
     #[test]
     fn cuda_refuses_exactly_the_block_formats_the_msl_dialect_renders() {
         let cuda = CudaEncode { target: Target::CUDA };
         let mut refused = Vec::new();
         let mut rendered = Vec::new();
-        for format in every_format() {
+        for format in NumericFormat::every() {
             let metal_renders = encode_kernel_refusal(&MslEncode, &format).is_ok();
             let outcome = format_encode_kernel(&cuda, &format, "probe_encode");
             let expect_refusal = !metal_renders || matches!(format, NumericFormat::Block(_));
@@ -103,7 +101,7 @@ pub(crate) mod tests {
     #[test]
     fn a_cuda_scalar_encode_names_no_metal_type() {
         let cuda = CudaEncode { target: Target::CUDA };
-        for format in every_format().filter(|format| matches!(format, NumericFormat::Scalar(_))) {
+        for format in NumericFormat::every().filter(|format| matches!(format, NumericFormat::Scalar(_))) {
             let Ok(rendered) = format_encode_kernel(&cuda, &format, "probe_encode") else { continue };
             for token in ["kernel void ", "thread_position_in_grid", "device ", " uchar", " ushort", " uint "] {
                 assert!(!rendered.source.contains(token), "{format:?} carries {token}:\n{}", rendered.source);

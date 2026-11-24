@@ -14,6 +14,8 @@ use proxima_numeric::encode_rule::{CodeRounding, EncodeRule, ScaleStatistic, Sto
 use proxima_numeric::float_layout::FloatLayout;
 use proxima_numeric::{FormatCodec, NumericFormat};
 
+use crate::msl::layout_render::hardware_type;
+
 const BYTE_BITS: u16 = u8::BITS as u16;
 
 /// The pieces of an encode kernel a backend spells.
@@ -27,8 +29,8 @@ pub trait EncodeDialect {
     /// Why the dialect cannot hold `layout` at all, `None` when it can.
     fn scalar_refusal(&self, layout: &FloatLayout) -> Option<&'static str>;
     /// The kernel signature through its opening brace and the declaration of `gid`, the thread's
-    /// index; the input is `input`, the output `output` of `storage` elements.
-    fn kernel_open(&self, name: &str, storage: &str) -> String;
+    /// index; the input is `input` of `input_token` elements, the output `output` of `storage` elements.
+    fn kernel_open(&self, name: &str, input: &str, storage: &str) -> String;
     /// The function `name` that encodes one block, `None` when the layout has no rule or the dialect no block rendering.
     fn block_function(&self, layout: &BlockLayout, name: &str) -> Option<String>;
     /// Why the dialect renders no block format, `None` when it renders them.
@@ -74,7 +76,7 @@ pub fn encode_kernel_refusal(dialect: &dyn EncodeDialect, format: &NumericFormat
 fn scalar_refusal(dialect: &dyn EncodeDialect, layout: &FloatLayout) -> Result<(), &'static str> {
     let width = u16::from(layout.width());
     if width % BYTE_BITS != 0 || dialect.storage_token(usize::from(width / BYTE_BITS)).is_none() {
-        return Err("the scalar code does not fill a whole byte, half-word or word");
+        return Err("the scalar code does not fill a whole number of bytes the dialect stores");
     }
     dialect.scalar_refusal(layout).map_or(Ok(()), Err)
 }
@@ -120,9 +122,17 @@ fn scalar_encode_kernel(dialect: &dyn EncodeDialect, layout: FloatLayout, name: 
     let storage = dialect.storage_token(bytes)?;
     let prelude = dialect.prelude();
     let store = dialect.scalar_store(layout, &format!("{name}_store"));
-    let open = dialect.kernel_open(name, storage);
+    let open = dialect.kernel_open(name, row_token()?, storage);
     let source = format!("{prelude}{store}\n{open}    output[gid] = ({storage}){name}_store(input[gid]);\n}}\n");
     Some(RenderedEncode { source, entry: format!("{name}_kernel"), elements_per_thread: 1, bytes_per_thread: bytes })
+}
+
+/// The token of one host row element: the binary32 layout is the one scalar format the hardware stores in a whole word.
+fn row_token() -> Option<&'static str> {
+    NumericFormat::every().find_map(|format| match format {
+        NumericFormat::Scalar(layout) if usize::from(layout.width()) == u32::BITS as usize => hardware_type(&layout),
+        _ => None,
+    })
 }
 
 /// The kernel that runs `function` (named `name`) over one block per thread.
@@ -132,7 +142,7 @@ pub fn wrap_block_kernel(dialect: &dyn EncodeDialect, layout: &BlockLayout, name
     let bytes = usize::from(layout.block_bytes);
     let prelude = dialect.prelude();
     let storage = dialect.storage_token(core::mem::size_of::<u8>())?;
-    let open = dialect.kernel_open(name, storage);
+    let open = dialect.kernel_open(name, row_token()?, storage);
     let source = format!("{prelude}{function}\n{open}    {name}(input + gid * {elements}u, output + gid * {bytes}u);\n}}\n");
     Some(RenderedEncode { source, entry: format!("{name}_kernel"), elements_per_thread: elements, bytes_per_thread: bytes })
 }

@@ -4840,7 +4840,7 @@ mod tests {
 
         let dialect = CudaEncode { target: Target::CUDA };
         let mut compiled = 0usize;
-        for format in crate::cuda_encode::tests::every_format() {
+        for format in proxima_numeric::NumericFormat::every() {
             let Ok(rendered) = format_encode_kernel(&dialect, &format, "probe_encode") else { continue };
             let header_dir = super::cuda_header_dir(&rendered.source).expect("a cuda include dir");
             super::compile_ptx_with_opts(&rendered.source, super::nvrtc_options(header_dir.as_deref()))
