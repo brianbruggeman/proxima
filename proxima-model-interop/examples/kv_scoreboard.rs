@@ -2778,14 +2778,21 @@ struct Session<'a> {
     prompts: &'a BTreeMap<Prompt, PromptData>,
     logs: PathBuf,
     llama_sha256: String,
-    /// llama's `-fa`, taken from the proxima arm's own report once its warm-up has run
+    /// llama's `-fa`, taken from the proxima arm's own report once one of its rows has run
     llama_flash: String,
+    /// why no proxima row has reported a `-fa` yet; names the refused row so the llama rows can cite it
+    flash_refusal: String,
 }
 
 struct Slot {
     round: usize,
     step: usize,
     port_index: usize,
+}
+
+/// llama has no `-fa` to run with until a proxima row reports one, so its row is recorded not run.
+fn llama_blocked(session: &Session, cell: &Cell) -> bool {
+    matches!(cell.engine, Engine::Llama) && session.llama_flash.is_empty()
 }
 
 fn measure(session: &Session, cell: &Cell, slot: Slot) -> Result<Row, HarnessError> {
@@ -2795,7 +2802,14 @@ fn measure(session: &Session, cell: &Cell, slot: Slot) -> Result<Row, HarnessErr
         Engine::Proxima { binary } | Engine::LlamaInproc { binary } => arm_identity(binary)?,
         Engine::Llama => ArmIdentity { sha256: session.llama_sha256.clone(), debug_build: false },
     };
-    let gate = if config.quiet_gate { wait_for_quiet(&config.gate) } else { GateOutcome::Skipped };
+    let blocked = llama_blocked(session, cell);
+    let gate = if blocked {
+        GateOutcome::Refused(format!("llama -fa comes from a proxima row that has not run: {}", session.flash_refusal))
+    } else if config.quiet_gate {
+        wait_for_quiet(&config.gate)
+    } else {
+        GateOutcome::Skipped
+    };
     let mut row = blank_row(slot.round, slot.step, cell, prompt, &identity, config, gate.clone());
     let context = RunContext {
         config,
@@ -2819,6 +2833,8 @@ fn measure(session: &Session, cell: &Cell, slot: Slot) -> Result<Row, HarnessErr
         if let Err(error) = outcome {
             row.note = format!("{}; {error}", row.note);
         }
+    } else if blocked {
+        row.note = format!("not run: {}", gate.text());
     } else {
         "not run: quiet gate refused".clone_into(&mut row.note);
     }
@@ -2826,27 +2842,39 @@ fn measure(session: &Session, cell: &Cell, slot: Slot) -> Result<Row, HarnessErr
     Ok(row)
 }
 
+/// A proxima row that reported its `-fa` unblocks the llama rows; one that did not run only names itself as the reason.
+fn adopt_flash(session: &mut Session, row: &Row) -> Result<(), HarnessError> {
+    if !matches!(row.cell.engine, Engine::Proxima { .. }) || !session.llama_flash.is_empty() {
+        return Ok(());
+    }
+    if !row.flash.is_empty() {
+        session.llama_flash.clone_from(&row.flash);
+        return Ok(());
+    }
+    if row.gate.may_run() && row.exit_code == 0 {
+        return Err(HarnessError::Server("the proxima run=start report names no attention arithmetic".to_owned()));
+    }
+    session.flash_refusal = format!("proxima {} {} {} {}", row.cell.label, row.cell.prompt.name(), row.cell.kv.name(), row.note);
+    Ok(())
+}
+
 /// One discarded process per arm before round 1, on the first (prompt, kv) group. The proxima
 /// warm-up runs first because its report decides the `-fa` the llama arm uses from then on.
-fn run_warmups(session: &mut Session, cells: &[Cell]) -> Result<Vec<Row>, HarnessError> {
+fn run_warmups(session: &mut Session, cells: &[Cell], sink: &mut RawSink) -> Result<Vec<Row>, HarnessError> {
     let first_group = cells.first().map(Cell::group);
     let mut warmups: Vec<Row> = Vec::new();
     for cell in cells.iter().take_while(|cell| Some(cell.group()) == first_group) {
         if warmups.iter().any(|row| row.cell.engine_name() == cell.engine_name()) {
             continue;
         }
-        if matches!(cell.engine, Engine::Llama) && session.llama_flash.is_empty() {
+        if matches!(cell.engine, Engine::Llama) && session.llama_flash.is_empty() && session.flash_refusal.is_empty() {
             return Err(HarnessError::MissingFlag("--prox"));
         }
         let port_index = PORT_SPAN - 1 - warmups.len();
         let mut row = measure(session, cell, Slot { round: 0, step: warmups.len(), port_index })?;
         row.warmup = true;
-        if matches!(cell.engine, Engine::Proxima { .. }) {
-            if row.flash.is_empty() {
-                return Err(HarnessError::Server("the proxima run=start report names no attention arithmetic".to_owned()));
-            }
-            session.llama_flash.clone_from(&row.flash);
-        }
+        sink.append(&row)?;
+        adopt_flash(session, &row)?;
         warmups.push(row);
     }
     Ok(warmups)
@@ -2873,16 +2901,8 @@ fn run(config: &Config) -> Result<(), HarnessError> {
     };
     let mut cells = cell_order(&config.proxima, config.llama_inproc.as_deref(), config.prompt_files.len());
     cells.retain(|cell| config.prompts.contains(&cell.prompt) && config.kvs.contains(&cell.kv));
-    let mut session = Session { config, prompts: &prompts, logs, llama_sha256: llama_identity.sha256, llama_flash: String::new() };
-    let mut warmups = run_warmups(&mut session, &cells)?;
-    let mut rows = Vec::new();
-    let session_id = format!("s-{}-{}", utc_text(session_start).replace(['-', ':', '.'], ""), std::process::id());
-    for (step, (round, index)) in round_plan(config.rounds, &group_sizes(&cells)).into_iter().enumerate() {
-        rows.push(measure(&session, &cells[index], Slot { round, step, port_index: step })?);
-    }
-    evaluate_all(&mut warmups, &facts);
-    evaluate_all(&mut rows, &facts);
     let model = config.model.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+    let session_id = format!("s-{}-{}", utc_text(session_start).replace(['-', ':', '.'], ""), std::process::id());
     let context = RecordContext {
         model,
         backend,
@@ -2892,7 +2912,50 @@ fn run(config: &Config) -> Result<(), HarnessError> {
         proxima_arm: contract_proxima_arm(&contract),
         host: host_facts(),
     };
+    let mut sink = RawSink::create(&config.out, &context, &facts)?;
+    let mut session = Session { config, prompts: &prompts, logs, llama_sha256: llama_identity.sha256, llama_flash: String::new(), flash_refusal: String::new() };
+    let mut warmups = run_warmups(&mut session, &cells, &mut sink)?;
+    let mut rows = Vec::new();
+    for (step, (round, index)) in round_plan(config.rounds, &group_sizes(&cells)).into_iter().enumerate() {
+        let row = measure(&session, &cells[index], Slot { round, step, port_index: step })?;
+        sink.append(&row)?;
+        adopt_flash(&mut session, &row)?;
+        rows.push(row);
+    }
+    evaluate_all(&mut warmups, &facts);
+    evaluate_all(&mut rows, &facts);
     write_outputs(config, &cells, &rows, &facts, &RawRecords { warmups: &warmups, context: &context, contract: &contract })
+}
+
+/// Appends each finished process to raw.jsonl and raw.tsv so a run that stops early keeps every
+/// earlier attempt. These are provisional (parity is not evaluated yet); write_outputs rewrites both.
+struct RawSink<'a> {
+    jsonl: PathBuf,
+    tsv: PathBuf,
+    next_index: usize,
+    context: &'a RecordContext,
+    facts: &'a Facts,
+}
+
+impl<'a> RawSink<'a> {
+    fn create(out: &Path, context: &'a RecordContext, facts: &'a Facts) -> Result<Self, HarnessError> {
+        let sink = RawSink { jsonl: out.join("raw.jsonl"), tsv: out.join("raw.tsv"), next_index: 0, context, facts };
+        fs::write(&sink.jsonl, "").map_err(io_error(&sink.jsonl))?;
+        fs::write(&sink.tsv, format!("{TSV_HEADER}\n")).map_err(io_error(&sink.tsv))?;
+        Ok(sink)
+    }
+
+    fn append(&mut self, row: &Row) -> Result<(), HarnessError> {
+        let records = run_records(row, self.context, self.next_index);
+        self.next_index += records.len();
+        append_text(&self.jsonl, &records.iter().map(|record| format!("{record}\n")).collect::<String>())?;
+        append_text(&self.tsv, &format!("{}\n", tsv_line(row, None, self.facts)))
+    }
+}
+
+fn append_text(path: &Path, text: &str) -> Result<(), HarnessError> {
+    let mut file = fs::OpenOptions::new().append(true).create(true).open(path).map_err(io_error(path))?;
+    file.write_all(text.as_bytes()).map_err(io_error(path))
 }
 
 struct RawRecords<'a> {
@@ -5506,6 +5569,81 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         assert_eq!(second, vec![4, 5, 6, 2, 3, 0, 1]);
     }
 
+
+    fn refused_proxima_row() -> Row {
+        let mut refused = row(Engine::Proxima { binary: PathBuf::from("/bin/a") }, Evidence::None);
+        refused.flash.clear();
+        refused.exit_code = -1;
+        refused.gate = GateOutcome::Refused("load".to_owned());
+        refused.note = "not run: quiet gate refused".to_owned();
+        refused
+    }
+
+    fn short_session<'a>(config: &'a Config, prompts: &'a BTreeMap<Prompt, PromptData>) -> Session<'a> {
+        Session { config, prompts, logs: std::env::temp_dir(), llama_sha256: "feed".to_owned(), llama_flash: String::new(), flash_refusal: String::new() }
+    }
+
+    fn short_prompts() -> BTreeMap<Prompt, PromptData> {
+        BTreeMap::from([(Prompt::Short, PromptData { label: "short-26".to_owned(), text: "q".to_owned(), ids: vec![1, 2, 3], capacity: 160 })])
+    }
+
+    fn short_config() -> Config {
+        parse_config(["--out", "o", "--model", "m", "--llama", "l", "--llama-commit", "c", "--prox", "new=/bin/a", "--prompts", "short"].map(str::to_owned)).expect("config parses")
+    }
+
+    #[test]
+    fn a_refused_proxima_row_records_the_llama_row_not_run_naming_it_and_the_next_cell_still_runs() {
+        let (config, prompts) = (short_config(), short_prompts());
+        let mut session = short_session(&config, &prompts);
+        let llama_cell = Cell { engine: Engine::Llama, label: "llama".to_owned(), prompt: Prompt::Short, kv: ALL_KV[0] };
+        adopt_flash(&mut session, &refused_proxima_row()).expect("a refused row is not an error");
+        assert!(llama_blocked(&session, &llama_cell));
+        let skipped = measure(&session, &llama_cell, Slot { round: 1, step: 0, port_index: 0 }).expect("a blocked llama row is recorded, not raised");
+        assert!(!skipped.gate.may_run());
+        assert_eq!(skipped.exit_code, -1);
+        assert!(skipped.note.starts_with("not run:") && skipped.note.contains("proxima new short") && skipped.note.contains("quiet gate refused"), "note: {}", skipped.note);
+        let contract = load_contract().expect("contract.json");
+        let records = run_records(&skipped, &fixture_context(&contract), 0);
+        assert!(!records.is_empty() && records.iter().all(|record| record["admitted"] == json!(false) && record["exit_status"] == json!(-1)));
+        adopt_flash(&mut session, &row(Engine::Proxima { binary: PathBuf::from("/bin/a") }, Evidence::None)).expect("a reporting row");
+        assert!(!llama_blocked(&session, &llama_cell), "the next proxima row that reports a flash unblocks llama");
+    }
+
+    #[test]
+    fn a_proxima_row_that_ran_clean_without_a_flash_report_is_still_an_error() {
+        let (config, prompts) = (short_config(), short_prompts());
+        let mut session = short_session(&config, &prompts);
+        let mut silent = row(Engine::Proxima { binary: PathBuf::from("/bin/a") }, Evidence::None);
+        silent.flash.clear();
+        let error = adopt_flash(&mut session, &silent).expect_err("ran, exit 0, reported nothing");
+        assert!(error.to_string().contains("names no attention arithmetic"));
+    }
+
+    #[test]
+    fn records_appended_before_an_error_are_on_disk_after_it() {
+        let dir = std::env::temp_dir().join(format!("kv_scoreboard_sink_{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("scratch dir");
+        let contract = load_contract().expect("contract.json");
+        let context = fixture_context(&contract);
+        let facts = facts();
+        let mut sink = RawSink::create(&dir, &context, &facts).expect("sink");
+        let rows = fixture_rows();
+        sink.append(&rows[0]).expect("first row");
+        sink.append(&rows[1]).expect("second row");
+        let (config, prompts) = (short_config(), short_prompts());
+        let mut session = short_session(&config, &prompts);
+        let mut silent = row(Engine::Proxima { binary: PathBuf::from("/bin/a") }, Evidence::None);
+        silent.flash.clear();
+        assert!(adopt_flash(&mut session, &silent).is_err());
+        let jsonl = fs::read_to_string(dir.join("raw.jsonl")).expect("raw.jsonl exists after the error");
+        let indices: Vec<u64> = jsonl.lines().map(|line| serde_json::from_str::<Value>(line).expect("record")["index"].as_u64().expect("index")).collect();
+        let expected: Vec<u64> = (0..u64::try_from(indices.len()).expect("count")).collect();
+        assert!(indices.len() >= 2, "one record per row at least");
+        assert_eq!(indices, expected, "contiguous across appends");
+        let tsv = fs::read_to_string(dir.join("raw.tsv")).expect("raw.tsv exists after the error");
+        assert_eq!(tsv.lines().count(), 1 + 2, "header and one line per row");
+        fs::remove_dir_all(&dir).ok();
+    }
     #[test]
     fn prompt_files_flag_repeats_and_each_file_is_one_more_input() {
         let config = parse_config(
