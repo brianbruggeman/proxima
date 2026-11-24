@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use proxima_model_interop::audio::wav;
 use proxima_model_interop::families::encoder_decoder_host::{Device, Model};
+use proxima_numeric::NumericPolicy;
 
 fn main() -> Result<()> {
     let mut wav_path: Option<PathBuf> = None;
@@ -26,7 +27,7 @@ fn main() -> Result<()> {
             "--device" => {
                 device = match args.next().context("--device wants cpu|metal")?.as_str() {
                     "cpu" => Device::Cpu,
-                    "metal" => Device::Metal,
+                    "metal" => Device::Metal(NumericPolicy::default()),
                     other => bail!("unknown device {other}"),
                 }
             }
@@ -62,19 +63,19 @@ fn main() -> Result<()> {
     }
 
     let load_start = std::time::Instant::now();
-    let model = Model::load(&model_path)?;
-    let load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
-    let transcript = model.transcribe_with(&samples, &language, device)?;
+    let model = Model::load(&model_path)?.with_device(device);
+    let load = load_start.elapsed();
+    let transcript = model.transcribe(&samples, &language)?;
     let ids: Vec<String> = transcript.tokens.iter().map(ToString::to_string).collect();
     println!("models=1 ids={} noise={noise} device={device:?}", ids.len());
     println!("ids={}", ids.join(","));
     println!("eot={}", transcript.ended_on_eot);
     println!(
-        "load_ms={load_ms:.3} mel_ms={:.3} encode_ms={:.3} decode_ms={:.3} decode_ms_per_token={:.3}",
-        transcript.mel_ms,
-        transcript.encode_ms,
-        transcript.decode_ms,
-        transcript.decode_ms / transcript.tokens.len() as f64,
+        "load={load:?} mel={:?} encode={:?} decode={:?} decode_per_token={:?}",
+        transcript.mel,
+        transcript.encode,
+        transcript.decode,
+        transcript.decode.checked_div(transcript.tokens.len().try_into()?).unwrap_or_default(),
     );
     println!("text={}", transcript.text);
     Ok(())

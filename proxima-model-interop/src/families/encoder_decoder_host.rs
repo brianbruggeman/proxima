@@ -386,7 +386,7 @@ impl Bound {
                     .collect()
             }
             #[cfg(all(feature = "metal", target_os = "macos"))]
-            Device::Metal => {
+            Device::Metal(policy) => {
                 let blocks: Vec<(&str, QuantizedBlock<'_>)> = named
                     .iter()
                     .map(|(name, data)| (*name, QuantizedBlock::Float32(data)))
@@ -396,7 +396,7 @@ impl Bound {
                     &[],
                     &blocks,
                     outputs,
-                    proxima_numeric::NumericPolicy::default(),
+                    policy,
                 )
                 .expect("metal plan");
                 let evaluated =
@@ -407,7 +407,7 @@ impl Bound {
                     .collect()
             }
             #[cfg(not(all(feature = "metal", target_os = "macos")))]
-            Device::Metal => panic!("the metal backend needs --features metal on macOS"),
+            Device::Metal(_) => panic!("the metal backend needs --features metal on macOS"),
         }
     }
 }
@@ -416,7 +416,7 @@ impl Bound {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Device {
     Cpu,
-    Metal,
+    Metal(proxima_numeric::NumericPolicy),
 }
 
 /// One transcription and the values the caller can check.
@@ -424,9 +424,9 @@ pub struct Transcript {
     pub tokens: Vec<u32>,
     pub text: String,
     pub ended_on_eot: bool,
-    pub mel_ms: f64,
-    pub encode_ms: f64,
-    pub decode_ms: f64,
+    pub mel: std::time::Duration,
+    pub encode: std::time::Duration,
+    pub decode: std::time::Duration,
 }
 
 /// A loaded checkpoint ready to transcribe.
@@ -436,6 +436,7 @@ pub struct Model {
     generation: Value,
     config: Value,
     dir: PathBuf,
+    device: Device,
 }
 
 impl Model {
@@ -455,6 +456,7 @@ impl Model {
             generation,
             config,
             dir: dir.to_path_buf(),
+            device: Device::Cpu,
         })
     }
 
@@ -462,16 +464,15 @@ impl Model {
         &self.shape
     }
 
-    pub fn transcribe(&self, wav: &[f32], language: &str) -> Result<Transcript> {
-        self.transcribe_with(wav, language, Device::Cpu)
+    /// Runs every stage on `device`; a Metal device carries the run's numeric policy.
+    #[must_use]
+    pub const fn with_device(mut self, device: Device) -> Self {
+        self.device = device;
+        self
     }
 
-    pub fn transcribe_with(
-        &self,
-        wav: &[f32],
-        language: &str,
-        device: Device,
-    ) -> Result<Transcript> {
+    pub fn transcribe(&self, wav: &[f32], language: &str) -> Result<Transcript> {
+        let device = self.device;
         let policy = DecodePolicy::from_checkpoint(
             &self.generation,
             &self.config,
@@ -525,7 +526,7 @@ impl Model {
             .insert(STFT_SIN_INPUT.into(), decode(&tables.sin));
         let mel_start = std::time::Instant::now();
         let mel_values = mel_bound.run(&[mel], device).remove(0);
-        let mel_ms = mel_start.elapsed().as_secs_f64() * 1000.0;
+        let mel = mel_start.elapsed();
         // The encoder consumes the first 2*source_positions frames.
         let needed = (self.shape.source_positions * 2) as usize;
         let mut mel_input = vec![0.0_f32; (self.shape.mels as usize) * needed];
@@ -574,7 +575,7 @@ impl Model {
         }
         let encode_start = std::time::Instant::now();
         let values = bound.run(&outputs, device);
-        let encode_ms = encode_start.elapsed().as_secs_f64() * 1000.0;
+        let encode = encode_start.elapsed();
         let cross_values: Vec<(Vec<f32>, Vec<f32>)> = (0..self.shape.decoder_layers)
             .map(|layer| (values[1 + layer * 2].clone(), values[2 + layer * 2].clone()))
             .collect();
@@ -645,16 +646,16 @@ impl Model {
                 break;
             }
         }
-        let decode_ms = decode_start.elapsed().as_secs_f64() * 1000.0;
+        let decode = decode_start.elapsed();
         let generated = &tokens[policy.prompt().len()..];
         let text = tokenizer_text(&self.dir, generated)?;
         Ok(Transcript {
             tokens: generated.to_vec(),
             text,
             ended_on_eot: ended,
-            mel_ms,
-            encode_ms,
-            decode_ms,
+            mel,
+            encode,
+            decode,
         })
     }
 }
