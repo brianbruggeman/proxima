@@ -29,19 +29,16 @@ mod bench {
     use std::time::{Duration, Instant};
 
     use criterion::{BenchmarkGroup, Criterion, measurement::WallTime};
-    use omega::config::DenseMmaInputLayout;
+    use conflaguration::Settings;
     use proxima_model_interop::diffusion::{
-        Checkpoint, ConvTaps, DitConfig, DitInputs, Graph as ModelGraph, VaeConfig, Weights,
-        build_conv3x3, build_dit, build_double_block, build_single_block, build_vae_decode,
-        load_weights, timestep_sinusoid,
+        Checkpoint, ConvTaps, Decoder, Denoiser, DiffusionSettings, DitConfig, DitInputs,
+        Graph as ModelGraph, VaeConfig, Weights, build_conv3x3, build_dit, build_double_block,
+        build_single_block, build_vae_decode, timestep_sinusoid,
     };
     use proxima_model_interop::{
-        ContextLength, GPU_LAYERS_ALL, LoadedModel, ServingConfig, architecture_from_hf_config,
-        parse_hf_config,
+        LoadedModel, ServingConfig, ServingSettings, architecture_from_hf_config, parse_hf_config,
     };
     use proxima_numeric::DType;
-    use proxima_numeric::codec::Codec;
-    use proxima_tensor::QuantizedBlock;
     use proxima_tensor::op::{NodeId, Op};
     use proxima_tensor::spec::{
         group_norm, nearest_upsample_x2, non_causal_attention_heads, unit_constant,
@@ -77,21 +74,41 @@ mod bench {
         model_dir().join("flux-2-klein-4b.safetensors")
     }
 
-    fn runtime() -> omega::config::RuntimeConfig {
-        runtime_with(DenseMmaInputLayout::default())
+    /// The serving settings every arm's stage runs under: the environment's
+    /// `PROXIMA_SERVING_*` values over the defaults.
+    fn serving_settings() -> ServingSettings {
+        ServingSettings::from_env().expect("serving settings")
     }
 
-    fn runtime_with(tiles: DenseMmaInputLayout) -> omega::config::RuntimeConfig {
-        let serving = ServingConfig::default();
-        omega::config::RuntimeConfig::builder()
-            .with_engine("gpu")
-            .with_gpu_driver("metal")
-            .with_allow_fusion(true)
-            .with_numeric(serving.numeric_policy)
-            .with_exact_activations(serving.exact_activations)
-            .with_dense_mma_input_layout(tiles)
-            .build()
-            .expect("metal runtime")
+    fn denoiser(
+        checkpoint: &Checkpoint,
+        graph: ModelGraph,
+        output: NodeId,
+        symbols: &[u64],
+        config: &ServingConfig<'_>,
+    ) -> Denoiser {
+        let weights = DiffusionSettings::resolved().dit_weights;
+        Denoiser::new(checkpoint, graph, output, symbols, weights, config).expect("dit stage")
+    }
+
+    fn decoder(
+        checkpoint: &Checkpoint,
+        graph: ModelGraph,
+        output: NodeId,
+        symbols: &[u64],
+        config: &ServingConfig<'_>,
+    ) -> Decoder {
+        let weights = DiffusionSettings::resolved().vae_weights;
+        Decoder::new(checkpoint, graph, output, symbols, weights, config).expect("vae stage")
+    }
+
+    /// A weightless program (attention, upsample) as a stage: no checkpoint
+    /// leaves to bind, its host leaves resident.
+    fn bare_weights() -> Weights {
+        Weights {
+            codec: DiffusionSettings::resolved().vae_weights,
+            entries: Vec::new(),
+        }
     }
 
     /// Deterministic non-zero activation values: denormals and an all-zero
@@ -228,23 +245,6 @@ mod bench {
             .sum()
     }
 
-    fn plan_and_run(
-        program: &[Op],
-        symbols: &[u64],
-        named: &[(&str, QuantizedBlock<'_>)],
-        output: NodeId,
-    ) -> omega::backend::Plan {
-        let (plan, _) =
-            omega::backend::plan_named_with_config(&runtime(), program, symbols, named, &[output])
-                .expect("metal plan");
-        plan
-    }
-
-    fn run_plan(plan: &mut omega::backend::Plan, named: &[(&str, QuantizedBlock<'_>)]) {
-        let evaluated = omega::backend::execute_plan_named(plan, named).expect("metal execute");
-        black_box(evaluated);
-    }
-
     // ---------------------------------------------------------------- text --
     fn read_vocab(dir: &Path) -> Vocab {
         let tokenizer = std::fs::read(dir.join("tokenizer/tokenizer.json")).expect("tokenizer");
@@ -307,10 +307,12 @@ mod bench {
             )
             .expect("load qwen");
             let roots = model.layer_residual_roots().to_vec();
-            let mut serving = ServingConfig::default();
-            serving.gpu_layers = GPU_LAYERS_ALL;
-            serving.context_length = ContextLength::Within(MIN_LENGTH as u32);
-            serving.model_path = Box::leak(dir.to_string_lossy().into_owned().into_boxed_str());
+            let mut settings = serving_settings();
+            settings.model_path = dir.to_string_lossy().into_owned();
+            settings.context_length = MIN_LENGTH as u32;
+            // leaked with the model, so the config can hold a 'static borrow
+            let settings: &'static ServingSettings = Box::leak(Box::new(settings));
+            let serving = settings.as_serving_config(&[]);
             Self {
                 model,
                 _checkpoint: checkpoint,
@@ -436,6 +438,8 @@ mod bench {
     }
 
     fn bench_dit_block(c: &mut Criterion, rows: &mut Vec<Row>, checkpoint: &Checkpoint) {
+        let settings = serving_settings();
+        let config = settings.as_serving_config(&[]);
         // --- one double block ---
         {
             let mut graph = ModelGraph::new(DType::FLOAT32);
@@ -477,15 +481,10 @@ mod bench {
                 text_mod,
             )
             .expect("double block");
-            let weights = load_weights(checkpoint, &graph.weights, Codec::Float16, false)
-                .expect("dit weights");
-            let integers = graph.int_buffers();
-            let mut named = weights.blocks();
-            named.extend(graph.host_blocks(&[], &integers));
             let symbols = [(MIN_LENGTH + IMAGE_TOKENS as usize) as u64];
             let macs = macs_of(&graph.program, &symbols);
             let bytes = dit_bytes(&graph.program, &symbols);
-            let mut plan = plan_and_run(&graph.program, &symbols, &named, image);
+            let mut stage = denoiser(checkpoint, graph, image, &symbols, &config);
             let mut group = c.benchmark_group("dit");
             group.sample_size(10);
             group.warm_up_time(Duration::from_millis(100));
@@ -497,7 +496,7 @@ mod bench {
                 macs,
                 bytes,
                 || {
-                    run_plan(&mut plan, &named);
+                    black_box(stage.evaluate(&[], &[]).expect("dit evaluate"));
                 },
             ));
             group.finish();
@@ -529,15 +528,10 @@ mod bench {
                 modulation,
             )
             .expect("single block");
-            let weights = load_weights(checkpoint, &graph.weights, Codec::Float16, false)
-                .expect("dit weights");
-            let integers = graph.int_buffers();
-            let mut named = weights.blocks();
-            named.extend(graph.host_blocks(&[], &integers));
             let symbols = [(MIN_LENGTH + IMAGE_TOKENS as usize) as u64];
             let macs = macs_of(&graph.program, &symbols);
             let bytes = dit_bytes(&graph.program, &symbols);
-            let mut plan = plan_and_run(&graph.program, &symbols, &named, output);
+            let mut stage = denoiser(checkpoint, graph, output, &symbols, &config);
             let mut group = c.benchmark_group("dit");
             group.sample_size(10);
             group.warm_up_time(Duration::from_millis(100));
@@ -549,7 +543,7 @@ mod bench {
                 macs,
                 bytes,
                 || {
-                    run_plan(&mut plan, &named);
+                    black_box(stage.evaluate(&[], &[]).expect("dit evaluate"));
                 },
             ));
             group.finish();
@@ -586,15 +580,12 @@ mod bench {
         let mut graph = ModelGraph::new(DType::FLOAT32);
         let (inputs, _, _) = base_inputs(&mut graph);
         let output = build_dit(&mut graph, &dit_config(5, 20), &inputs).expect("full dit");
-        let weights =
-            load_weights(checkpoint, &graph.weights, Codec::Float16, false).expect("dit weights");
-        let integers = graph.int_buffers();
-        let mut named = weights.blocks();
-        named.extend(graph.host_blocks(&[], &integers));
+        let settings = serving_settings();
+        let config = settings.as_serving_config(&[]);
         let symbols = [(MIN_LENGTH + IMAGE_TOKENS as usize) as u64];
         let macs = macs_of(&graph.program, &symbols);
         let bytes = dit_bytes(&graph.program, &symbols);
-        let mut plan = plan_and_run(&graph.program, &symbols, &named, output.velocity);
+        let mut stage = denoiser(checkpoint, graph, output.velocity, &symbols, &config);
         let mut group = c.benchmark_group("dit");
         group.sample_size(10);
         group.warm_up_time(Duration::from_millis(200));
@@ -606,7 +597,7 @@ mod bench {
             macs,
             bytes,
             || {
-                run_plan(&mut plan, &named);
+                black_box(stage.evaluate(&[], &[]).expect("dit evaluate"));
             },
         ));
         group.finish();
@@ -654,14 +645,16 @@ mod bench {
         let tokens = MIN_LENGTH as u32 + IMAGE_TOKENS;
         let mut graph = ModelGraph::new(DType::FLOAT32);
         let output = attention_program(&mut graph, tokens, HEADS, HEAD_DIM, 53);
-        let integers = graph.int_buffers();
-        let named = graph.host_blocks(&[], &integers);
         let symbols = [tokens as u64];
         let macs = macs_of(&graph.program, &symbols);
         let bytes = (tokens as f64 * HEADS as f64 * HEAD_DIM as f64 * 2.0
             + tokens as f64 * HEADS as f64 * (HEAD_DIM as f64 / 2.0) * 4.0)
             * 4.0;
-        let mut plan = plan_and_run(&graph.program, &symbols, &named, output);
+        let settings = serving_settings();
+        let config = settings.as_serving_config(&[]);
+        let mut stage =
+            Denoiser::with_weights(graph, output, &symbols, bare_weights(), &config)
+                .expect("attention stage");
         let mut group = c.benchmark_group("dit");
         group.sample_size(10);
         group.warm_up_time(Duration::from_millis(100));
@@ -672,7 +665,9 @@ mod bench {
             "attention_4608_score_mix",
             macs,
             bytes,
-            || run_plan(&mut plan, &named),
+            || {
+                black_box(stage.evaluate(&[], &[]).expect("attention evaluate"));
+            },
         ));
         group.finish();
     }
@@ -770,47 +765,36 @@ mod bench {
         (graph, output)
     }
 
-    fn conv_weights(checkpoint: &Checkpoint, graph: &ModelGraph) -> Weights {
-        load_weights(checkpoint, &graph.weights, Codec::Float16, true).expect("conv weights")
-    }
-
     fn bench_vae_conv(c: &mut Criterion, rows: &mut Vec<Row>, checkpoint: &Checkpoint) {
-        for case in &CONV_CASES {
-            let rows_n = case.side * case.side;
-            let (graph, output) = conv_graph(case);
-            let weights = conv_weights(checkpoint, &graph);
-            let integers = graph.int_buffers();
-            let mut named = weights.blocks();
-            named.extend(graph.host_blocks(&[], &integers));
+        let settings = serving_settings();
+        let config = settings.as_serving_config(&[]);
+        for case_spec in &CONV_CASES {
+            let rows_n = case_spec.side * case_spec.side;
+            let (graph, output) = conv_graph(case_spec);
             let symbols = [u64::from(rows_n)];
-            let (macs, bytes) = case_metrics(case);
-            let mut plan = plan_and_run(&graph.program, &symbols, &named, output);
+            let (macs, bytes) = case_metrics(case_spec);
+            let mut stage = decoder(checkpoint, graph, output, &symbols, &config);
             let mut group = c.benchmark_group("vae_conv");
             group.sample_size(10);
             group.warm_up_time(Duration::from_millis(100));
             group.measurement_time(Duration::from_secs(1));
-            rows.push(case_for(
-                &mut group, "vae_conv", case.label, macs, bytes, &mut plan, &named,
+            rows.push(case(
+                &mut group,
+                "vae_conv",
+                case_spec.label,
+                macs,
+                bytes,
+                || {
+                    black_box(stage.evaluate(&[]).expect("conv evaluate"));
+                },
             ));
             group.finish();
         }
     }
 
-    fn case_for(
-        group: &mut BenchmarkGroup<'_, WallTime>,
-        group_label: &str,
-        label: &str,
-        macs: f64,
-        bytes: f64,
-        plan: &mut omega::backend::Plan,
-        named: &[(&str, QuantizedBlock<'_>)],
-    ) -> Row {
-        case(group, group_label, label, macs, bytes, || {
-            run_plan(plan, named)
-        })
-    }
-
     fn bench_vae_norm_upsample(c: &mut Criterion, rows: &mut Vec<Row>, checkpoint: &Checkpoint) {
+        let settings = serving_settings();
+        let config = settings.as_serving_config(&[]);
         // group_norm: the mid block's 512 channels at 128x128, 32 groups.
         {
             let mut graph = ModelGraph::new(DType::FLOAT32);
@@ -841,26 +825,22 @@ mod bench {
                 1e-6,
             )
             .expect("group norm");
-            let weights = load_weights(checkpoint, &graph.weights, Codec::Float16, true)
-                .expect("norm weights");
-            let integers = graph.int_buffers();
-            let mut named = weights.blocks();
-            named.extend(graph.host_blocks(&[], &integers));
             let symbols = [u64::from(rows_n)];
             let bytes = (rows_n * channels * 2) as f64 * 4.0;
-            let mut plan = plan_and_run(&graph.program, &symbols, &named, output);
+            let mut stage = decoder(checkpoint, graph, output, &symbols, &config);
             let mut group = c.benchmark_group("vae");
             group.sample_size(10);
             group.warm_up_time(Duration::from_millis(100));
             group.measurement_time(Duration::from_secs(1));
-            rows.push(case_for(
+            rows.push(case(
                 &mut group,
                 "vae",
                 "group_norm_128sq",
                 0.0,
                 bytes,
-                &mut plan,
-                &named,
+                || {
+                    black_box(stage.evaluate(&[]).expect("norm evaluate"));
+                },
             ));
             group.finish();
         }
@@ -878,23 +858,23 @@ mod bench {
             );
             let index = graph.index_leaf("upsample.index", upsample_x2_index(height, width));
             let output = nearest_upsample_x2(&mut graph.program, x, index).expect("upsample");
-            let integers = graph.int_buffers();
-            let named = graph.host_blocks(&[], &integers);
             let symbols = [u64::from(height * width)];
             let bytes = (height * width * channels) as f64 * 4.0 * 2.0;
-            let mut plan = plan_and_run(&graph.program, &symbols, &named, output);
+            let mut stage = Decoder::with_weights(graph, output, &symbols, bare_weights(), &config)
+                .expect("upsample stage");
             let mut group = c.benchmark_group("vae");
             group.sample_size(10);
             group.warm_up_time(Duration::from_millis(100));
             group.measurement_time(Duration::from_secs(1));
-            rows.push(case_for(
+            rows.push(case(
                 &mut group,
                 "vae",
                 "nearest_x2_128sq",
                 0.0,
                 bytes,
-                &mut plan,
-                &named,
+                || {
+                    black_box(stage.evaluate(&[]).expect("upsample evaluate"));
+                },
             ));
             group.finish();
         }
@@ -906,24 +886,26 @@ mod bench {
         // One head of width 512 split as 32 channel groups of 16; the same
         // shape the decoder's mid attention builds from its 1x1 projections.
         let output = attention_program(&mut graph, tokens, 32, 32, 71);
-        let integers = graph.int_buffers();
-        let named = graph.host_blocks(&[], &integers);
         let symbols = [u64::from(tokens)];
         let macs = macs_of(&graph.program, &symbols);
         let bytes = (tokens as f64 * 512.0 * 2.0) * 4.0;
-        let mut plan = plan_and_run(&graph.program, &symbols, &named, output);
+        let settings = serving_settings();
+        let config = settings.as_serving_config(&[]);
+        let mut stage = Decoder::with_weights(graph, output, &symbols, bare_weights(), &config)
+            .expect("attention stage");
         let mut group = c.benchmark_group("vae");
         group.sample_size(10);
         group.warm_up_time(Duration::from_millis(100));
         group.measurement_time(Duration::from_secs(1));
-        rows.push(case_for(
+        rows.push(case(
             &mut group,
             "vae",
             "mid_attention_16384",
             macs,
             bytes,
-            &mut plan,
-            &named,
+            || {
+                black_box(stage.evaluate(&[]).expect("attention evaluate"));
+            },
         ));
         group.finish();
     }
@@ -938,27 +920,25 @@ mod bench {
             pseudo_random((tokens * LATENT_CHANNELS / 4) as usize, 301),
         );
         let output = build_vae_decode(&mut graph, &config, input).expect("vae decode");
-        let weights =
-            load_weights(checkpoint, &graph.weights, Codec::Float16, true).expect("vae weights");
-        let integers = graph.int_buffers();
-        let mut named = weights.blocks();
-        named.extend(graph.host_blocks(&[], &integers));
+        let settings = serving_settings();
+        let config = settings.as_serving_config(&[]);
         let symbols = [u64::from(tokens)];
         let macs = macs_of(&graph.program, &symbols);
         let bytes = 0.0;
-        let mut plan = plan_and_run(&graph.program, &symbols, &named, output.image);
+        let mut stage = decoder(checkpoint, graph, output.image, &symbols, &config);
         let mut group = c.benchmark_group("vae");
         group.sample_size(10);
         group.warm_up_time(Duration::from_millis(200));
         group.measurement_time(Duration::from_secs(2));
-        rows.push(case_for(
+        rows.push(case(
             &mut group,
             "vae",
             "full_decode",
             macs,
             bytes,
-            &mut plan,
-            &named,
+            || {
+                black_box(stage.evaluate(&[]).expect("decode evaluate"));
+            },
         ));
         group.finish();
     }
@@ -980,16 +960,16 @@ mod bench {
 
         use omega::config::{DenseMmaInputLayout, RuntimeConfig};
         use omega::metal::OpGpuTiming;
-        use proxima_model_interop::diffusion::{Checkpoint, Graph as ModelGraph, encode};
+        use proxima_model_interop::ServingConfig;
+        use proxima_model_interop::diffusion::{
+            Checkpoint, Decoder, DiffusionSettings, Graph as ModelGraph, WeightData, Weights,
+            encode,
+        };
         use proxima_numeric::DType;
         use proxima_numeric::codec::Codec;
-        use proxima_tensor::QuantizedBlock;
-        use proxima_tensor::op::{NodeId, Op};
         use proxima_tensor::spec::linear;
 
-        use super::{
-            CONV_CASES, ConvCase, conv_graph, conv_weights, pseudo_random, run_plan, runtime_with,
-        };
+        use super::{CONV_CASES, ConvCase, conv_graph, pseudo_random, serving_settings};
 
         const TAPS: u32 = 9;
         const CONTROL_ROWS: u32 = 4096;
@@ -999,12 +979,30 @@ mod bench {
         const WARMUP: usize = 2;
         const ITERATIONS: usize = 10;
 
+        /// Runs `body` under the serving config with `tiles` attached as the
+        /// omega runtime: the tile layout A/B is a config choice, not a second
+        /// planning path.
+        fn with_tiles<R>(
+            tiles: DenseMmaInputLayout,
+            body: impl FnOnce(&ServingConfig<'_>) -> R,
+        ) -> R {
+            let settings = serving_settings();
+            let base = settings.as_serving_config(&[]);
+            let runtime = RuntimeConfig::builder()
+                .with_engine("gpu")
+                .with_gpu_driver("metal")
+                .with_allow_fusion(true)
+                .with_numeric(base.numeric_policy)
+                .with_exact_activations(base.exact_activations)
+                .with_dense_mma_input_layout(tiles)
+                .build()
+                .expect("metal runtime");
+            body(&base.with_omega_runtime(&runtime))
+        }
+
         struct Arm<'a> {
             label: &'static str,
-            program: &'a [Op],
-            symbols: &'a [u64],
-            named: &'a [(&'a str, QuantizedBlock<'a>)],
-            output: NodeId,
+            stage: &'a mut Decoder,
             macs: u64,
         }
 
@@ -1072,38 +1070,26 @@ mod bench {
             }
         }
 
-        fn measure(arm: &Arm<'_>, tiles: DenseMmaInputLayout) {
+        fn measure(arm: &mut Arm<'_>, tiles: DenseMmaInputLayout) {
             let tile_label = if tiles.derive_from_operands {
                 "derived"
             } else {
                 "explicit"
             };
             let label = format!("{}__{tile_label}", arm.label);
-            let (mut plan, measurements) = omega::backend::plan_named_with_config(
-                &runtime_with(tiles),
-                arm.program,
-                arm.symbols,
-                arm.named,
-                &[arm.output],
-            )
-            .expect("metal plan");
-            for measurement in &measurements {
-                for (index, identity) in measurement.kernel_identities.iter().enumerate() {
-                    eprintln!("s0b_identity label={label} index={index} {identity}");
-                }
-            }
             let mut gemm_ns = Vec::new();
             let mut wall_ns = Vec::new();
             let mut timed_wall_ns = Vec::new();
             let mut gemm_kind = "";
             for pass in 0..WARMUP + ITERATIONS {
                 let started = Instant::now();
-                run_plan(&mut plan, arm.named);
+                black_box(arm.stage.evaluate(&[]).expect("stage evaluate"));
                 let wall = started.elapsed().as_nanos() as u64;
                 let timed_started = Instant::now();
-                let (evaluated, timings) =
-                    omega::backend::execute_plan_named_metal_op_timed(&plan, arm.named, None)
-                        .expect("metal op-timed execute");
+                let (evaluated, timings) = arm
+                    .stage
+                    .evaluate_op_timed(&[])
+                    .expect("stage op-timed evaluate");
                 let timed_wall = timed_started.elapsed().as_nanos() as u64;
                 black_box(evaluated);
                 if pass < WARMUP {
@@ -1141,22 +1127,28 @@ mod bench {
             tiles: DenseMmaInputLayout,
         ) -> (DType, Codec) {
             let (graph, output) = conv_graph(case);
-            let weights = conv_weights(checkpoint, &graph);
-            let integers = graph.int_buffers();
-            let mut named = weights.blocks();
-            named.extend(graph.host_blocks(&[], &integers));
-            measure(
-                &Arm {
-                    label: "a_factored_conv",
-                    program: &graph.program,
-                    symbols: &[u64::from(case.side * case.side)],
-                    named: &named,
+            let activation = graph.activation();
+            let codec = DiffusionSettings::resolved().vae_weights;
+            with_tiles(tiles, |config| {
+                let mut stage = Decoder::new(
+                    checkpoint,
+                    graph,
                     output,
-                    macs: conv_macs(case),
-                },
-                tiles,
-            );
-            (graph.activation(), weights.codec)
+                    &[u64::from(case.side * case.side)],
+                    codec,
+                    config,
+                )
+                .expect("conv stage");
+                measure(
+                    &mut Arm {
+                        label: "a_factored_conv",
+                        stage: &mut stage,
+                        macs: conv_macs(case),
+                    },
+                    tiles,
+                );
+            });
+            (activation, codec)
         }
 
         fn form_b(
@@ -1178,21 +1170,20 @@ mod bench {
                 &[case.out_channels, width],
             );
             let output = linear(&mut graph.program, staged, weight, None).expect("linear");
-            let weights = conv_weights(checkpoint, &graph);
-            let integers = graph.int_buffers();
-            let mut named = weights.blocks();
-            named.extend(graph.host_blocks(&[], &integers));
-            measure(
-                &Arm {
-                    label: "b_plain_gemm",
-                    program: &graph.program,
-                    symbols: &[u64::from(rows)],
-                    named: &named,
-                    output,
-                    macs: conv_macs(case),
-                },
-                tiles,
-            );
+            let codec = DiffusionSettings::resolved().vae_weights;
+            with_tiles(tiles, |config| {
+                let mut stage =
+                    Decoder::new(checkpoint, graph, output, &[u64::from(rows)], codec, config)
+                        .expect("gemm stage");
+                measure(
+                    &mut Arm {
+                        label: "b_plain_gemm",
+                        stage: &mut stage,
+                        macs: conv_macs(case),
+                    },
+                    tiles,
+                );
+            });
         }
 
         fn form_d(activation: DType, codec: Codec, tiles: DenseMmaInputLayout) {
@@ -1209,29 +1200,31 @@ mod bench {
                 codec,
             )
             .expect("control weight");
-            let integers = graph.int_buffers();
-            let mut named = graph.host_blocks(&[], &integers);
-            named.push((
-                "control.weight",
-                QuantizedBlock::Packed {
-                    codec,
-                    bytes: &bytes,
-                },
-            ));
-            measure(
-                &Arm {
-                    label: "d_dit_shaped_linear",
-                    program: &graph.program,
-                    // the arena cap scales with symbols[0], the plan's row count
-                    symbols: &[u64::from(CONTROL_ROWS)],
-                    named: &named,
+            let weights = Weights {
+                codec,
+                entries: vec![(String::from("control.weight"), WeightData::Packed(codec, bytes))],
+            };
+            with_tiles(tiles, |config| {
+                // the arena cap scales with symbols[0], the plan's row count
+                let mut stage = Decoder::with_weights(
+                    graph,
                     output,
-                    macs: u64::from(CONTROL_ROWS)
-                        * u64::from(CONTROL_DEPTH)
-                        * u64::from(CONTROL_COLUMNS),
-                },
-                tiles,
-            );
+                    &[u64::from(CONTROL_ROWS)],
+                    weights,
+                    config,
+                )
+                .expect("control stage");
+                measure(
+                    &mut Arm {
+                        label: "d_dit_shaped_linear",
+                        stage: &mut stage,
+                        macs: u64::from(CONTROL_ROWS)
+                            * u64::from(CONTROL_DEPTH)
+                            * u64::from(CONTROL_COLUMNS),
+                    },
+                    tiles,
+                );
+            });
         }
 
         pub fn run(checkpoint: &Checkpoint) {

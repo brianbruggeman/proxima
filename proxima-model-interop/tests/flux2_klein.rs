@@ -338,7 +338,7 @@ mod dit {
             velocity,
             &[JOINT as u64],
             diffusion.dit_weights,
-            &serving_settings()?,
+            &serving_settings()?.as_serving_config(&[]),
         )?;
         eprintln!("weights loaded in {:.1}s", loading.elapsed().as_secs_f64());
 
@@ -856,7 +856,7 @@ mod vae {
             image,
             &[TOKENS as u64],
             DiffusionSettings::resolved().vae_weights,
-            &serving_settings()?,
+            &serving_settings()?.as_serving_config(&[]),
         )?;
         eprintln!("vae weights loaded in {:.1}s", loading.elapsed().as_secs_f64());
 
@@ -1111,7 +1111,9 @@ mod vae_conv_probe {
             image,
             &[rows as u64],
             DiffusionSettings::resolved().vae_weights,
-            &ServingSettings::from_env().map_err(|why| why.to_string())?,
+            &ServingSettings::from_env()
+                .map_err(|why| why.to_string())?
+                .as_serving_config(&[]),
         )?;
         let evaluated = decoder
             .evaluate(&blocks)
@@ -1143,9 +1145,7 @@ mod reduce_split_axis {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    use conflaguration::Settings;
-    use proxima_model_interop::ServingSettings;
-    use proxima_model_interop::diffusion::{Decoder, DiffusionSettings, Graph, Weights};
+    use proxima_model_interop::diffusion::Graph;
     use proxima_numeric::DType;
     use proxima_tensor::QuantizedBlock;
     use proxima_tensor::spec::{
@@ -1367,18 +1367,25 @@ mod reduce_split_axis {
                     },
                 ));
             }
-            let diffusion = DiffusionSettings::resolved();
-            let outcome = diffusion.vae_activation_dtype().and_then(|activation| {
-                let mut graph = Graph::new(activation);
-                graph.program = program;
-                let weights = Weights {
-                    codec: diffusion.vae_weights,
-                    entries: Vec::new(),
-                };
-                let settings = ServingSettings::from_env().map_err(|why| why.to_string())?;
-                let mut decoder = Decoder::with_weights(graph, root, &[], weights, &settings)?;
-                decoder.evaluate(&bound)
-            });
+            // a raw program, not a stage: no crate-public way runs one on a
+            // `BackendRuntime`, so this reproduction keeps its own plan
+            let serving = proxima_model_interop::ServingConfig::default();
+            let runtime = omega::config::RuntimeConfig::builder()
+                .with_engine("gpu")
+                .with_gpu_driver("metal")
+                .with_allow_fusion(true)
+                .with_numeric(serving.numeric_policy)
+                .with_exact_activations(serving.exact_activations)
+                .build()
+                .expect("metal runtime");
+            let outcome = omega::backend::plan_named_with_config(
+                &runtime,
+                &program,
+                &[],
+                &bound,
+                &[root],
+            )
+            .and_then(|(mut plan, _)| omega::backend::execute_plan_named(&mut plan, &bound));
             let _ = sender.send(match outcome {
                 Ok(evaluated) => Ok(evaluated.get(root).map(|value| value.0.to_vec())),
                 Err(why) => Err(format!("{why}")),
@@ -1468,7 +1475,9 @@ mod vae_prefix {
             output.image,
             &[TOKENS as u64],
             DiffusionSettings::resolved().vae_weights,
-            &ServingSettings::from_env().map_err(|why| why.to_string())?,
+            &ServingSettings::from_env()
+                .map_err(|why| why.to_string())?
+                .as_serving_config(&[]),
         )?;
         for (name, node) in &output.trace {
             match decoder.evaluate_nodes(&blocks, &[*node]) {
@@ -1657,7 +1666,9 @@ type Outcome = Result<(), String>;
             output.image,
             &[(side * side) as u64],
             DiffusionSettings::resolved().vae_weights,
-            &ServingSettings::from_env().map_err(|why| why.to_string())?,
+            &ServingSettings::from_env()
+                .map_err(|why| why.to_string())?
+                .as_serving_config(&[]),
         )?;
         for (name, node) in &output.trace {
             let (capture, width, channels) = match *name {

@@ -1,7 +1,7 @@
 //! The two diffusion stages that run on the serving runtime: a [`Denoiser`]
 //! (transformer backbone, one evaluation per Euler step) and a [`Decoder`]
 //! (autoencoder decode). Each stage composes the same pieces the LLM decode
-//! path does: one [`BackendRuntime`] built from [`ServingSettings`], weight
+//! path does: one [`BackendRuntime`] built from a [`ServingConfig`], weight
 //! leaves named so the plan marks them resident, and one retained segment plan
 //! per program.
 //!
@@ -19,8 +19,8 @@ use proxima_numeric::codec::Codec;
 use proxima_tensor::op::NodeId;
 use proxima_tensor::{Evaluated, QuantizedBlock};
 
-use crate::ServingSettings;
 use crate::generate::BackendRuntime;
+use crate::{ContextLength, ServingConfig};
 
 use super::{Checkpoint, Graph, Weights, load_weights};
 
@@ -30,18 +30,19 @@ type Inputs<'a> = &'a [(&'a str, QuantizedBlock<'a>)];
 /// [`Decoder`] share.
 struct Stage {
     runtime: BackendRuntime,
-    settings: ServingSettings,
     graph: Graph,
     weights: Weights,
     integers: Vec<Vec<i32>>,
     symbols: Vec<u64>,
     output: NodeId,
+    /// Profile runs plan on runtimes of their own, built beside the stage's:
+    /// a one-command-buffer-per-op plan and a capture plan share the stage's
+    /// program key, so either in the stage's own cache would be served to a
+    /// plain evaluation.
     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-    profile: Option<BackendRuntime>,
-}
-
-fn runtime_for(settings: &ServingSettings) -> BackendRuntime {
-    BackendRuntime::new(&settings.as_serving_config(&[]))
+    profile: BackendRuntime,
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    capture: BackendRuntime,
 }
 
 /// Every name the plan may keep on the device: the weights, then the host
@@ -87,10 +88,10 @@ impl Stage {
         output: NodeId,
         symbols: &[u64],
         weights: (Codec, bool),
-        settings: &ServingSettings,
+        config: &ServingConfig<'_>,
     ) -> Result<Self, String> {
         let loaded = load_weights(checkpoint, &graph.weights, weights.0, weights.1)?;
-        Self::with_weights(graph, output, symbols, loaded, settings)
+        Self::with_weights(graph, output, symbols, loaded, config)
     }
 
     fn with_weights(
@@ -98,22 +99,25 @@ impl Stage {
         output: NodeId,
         symbols: &[u64],
         weights: Weights,
-        settings: &ServingSettings,
+        config: &ServingConfig<'_>,
     ) -> Result<Self, String> {
-        let mut staged = settings.clone();
-        if let Some(tokens) = symbols.first() {
-            staged.context_length = u32::try_from(*tokens).map_err(|why| why.to_string())?;
-        }
+        let tokens = symbols
+            .first()
+            .ok_or_else(|| String::from("a stage needs its token count as the first symbol"))?;
+        let mut staged = *config;
+        staged.context_length =
+            ContextLength::Within(u32::try_from(*tokens).map_err(|why| why.to_string())?);
         Ok(Self {
-            runtime: runtime_for(&staged),
-            settings: staged,
+            runtime: BackendRuntime::new(&staged),
             integers: graph.int_buffers(),
             graph,
             weights,
             symbols: symbols.to_vec(),
             output,
             #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-            profile: None,
+            profile: BackendRuntime::new(&staged),
+            #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+            capture: BackendRuntime::new(&staged),
         })
     }
 
@@ -132,13 +136,13 @@ impl Stage {
             .map_err(|why| why.to_string())
     }
 
-    /// The same program on a runtime of its own, planned afresh, so a capture
-    /// that reads the environment at plan time sees it.
+    /// The same program on the capture runtime, which plans on its first call,
+    /// so a capture that reads the environment at plan time sees it.
     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-    fn evaluate_fresh(&self, inputs: Inputs<'_>) -> Result<Evaluated, String> {
+    fn evaluate_fresh(&mut self, inputs: Inputs<'_>) -> Result<Evaluated, String> {
         let named = named_blocks(&self.weights, &self.graph, &self.integers, inputs);
         let resident = resident_of(&self.weights, &self.graph, inputs);
-        runtime_for(&self.settings)
+        self.capture
             .evaluate_segment(
                 &self.graph.program,
                 &self.symbols,
@@ -155,11 +159,9 @@ impl Stage {
         &mut self,
         inputs: Inputs<'_>,
     ) -> Result<(Evaluated, Vec<omega::metal::OpGpuTiming>), String> {
-        let settings = &self.settings;
-        let runtime = self.profile.get_or_insert_with(|| runtime_for(settings));
         let named = named_blocks(&self.weights, &self.graph, &self.integers, inputs);
         let resident = resident_of(&self.weights, &self.graph, inputs);
-        runtime
+        self.profile
             .evaluate_segment_op_timed(
                 &self.graph.program,
                 &self.symbols,
@@ -186,8 +188,9 @@ pub struct Denoiser {
 
 impl Denoiser {
     /// Binds `graph`'s weights from `checkpoint` at `weights` and opens the
-    /// stage's runtime from `settings`; `symbols[0]` is the stage's token
-    /// count, which becomes the runtime's `context_length`.
+    /// stage's runtime from `config` (a [`ServingConfig`], so a tile-layout A/B
+    /// attaches its omega runtime with `with_omega_runtime`); `symbols[0]` is
+    /// the stage's token count, which becomes the runtime's `context_length`.
     ///
     /// # Errors
     ///
@@ -198,9 +201,27 @@ impl Denoiser {
         velocity: NodeId,
         symbols: &[u64],
         weights: Codec,
-        settings: &ServingSettings,
+        config: &ServingConfig<'_>,
     ) -> Result<Self, String> {
-        let stage = Stage::open(checkpoint, graph, velocity, symbols, (weights, false), settings)?;
+        let stage = Stage::open(checkpoint, graph, velocity, symbols, (weights, false), config)?;
+        Ok(Self { stage })
+    }
+
+    /// A stage over weights the caller already holds, for a program whose
+    /// weights do not come from a checkpoint (a micro-benchmark's synthetic
+    /// leaf, or a graph with none). They are resident like a loaded stage's.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the missing token count.
+    pub fn with_weights(
+        graph: Graph,
+        velocity: NodeId,
+        symbols: &[u64],
+        weights: Weights,
+        config: &ServingConfig<'_>,
+    ) -> Result<Self, String> {
+        let stage = Stage::with_weights(graph, velocity, symbols, weights, config)?;
         Ok(Self { stage })
     }
 
@@ -263,7 +284,7 @@ pub struct Decoder {
 impl Decoder {
     /// Binds `graph`'s weights from `checkpoint` at `weights` (convolution
     /// kernels permuted to tap-inner order) and opens the stage's runtime from
-    /// `settings`; `symbols[0]` is the stage's row count.
+    /// `config`; `symbols[0]` is the stage's row count.
     ///
     /// # Errors
     ///
@@ -274,26 +295,26 @@ impl Decoder {
         image: NodeId,
         symbols: &[u64],
         weights: Codec,
-        settings: &ServingSettings,
+        config: &ServingConfig<'_>,
     ) -> Result<Self, String> {
-        let stage = Stage::open(checkpoint, graph, image, symbols, (weights, true), settings)?;
+        let stage = Stage::open(checkpoint, graph, image, symbols, (weights, true), config)?;
         Ok(Self { stage })
     }
 
-    /// A decoder over a program whose weights are already bound (a probe graph
-    /// whose leaves the caller supplies, or none). `symbols` may be empty.
+    /// A decoder over weights the caller already holds; see
+    /// [`Denoiser::with_weights`].
     ///
     /// # Errors
     ///
-    /// A message naming a token count that does not fit the runtime's context.
+    /// A message naming the missing row count.
     pub fn with_weights(
         graph: Graph,
         image: NodeId,
         symbols: &[u64],
         weights: Weights,
-        settings: &ServingSettings,
+        config: &ServingConfig<'_>,
     ) -> Result<Self, String> {
-        let stage = Stage::with_weights(graph, image, symbols, weights, settings)?;
+        let stage = Stage::with_weights(graph, image, symbols, weights, config)?;
         Ok(Self { stage })
     }
 
@@ -354,15 +375,15 @@ impl Decoder {
         self.stage.evaluate_op_timed(inputs)
     }
 
-    /// [`Self::evaluate`] on a fresh runtime that plans anew, for a capture
-    /// that reads the environment at plan time.
+    /// [`Self::evaluate`] on the capture runtime, which plans on its first
+    /// call, for a capture that reads the environment at plan time.
     ///
     /// # Errors
     ///
     /// A message naming the plan or execution failure.
     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
     pub fn evaluate_fresh(
-        &self,
+        &mut self,
         inputs: &[(&str, QuantizedBlock<'_>)],
     ) -> Result<Evaluated, String> {
         self.stage.evaluate_fresh(inputs)

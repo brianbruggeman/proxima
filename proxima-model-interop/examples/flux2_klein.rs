@@ -420,7 +420,7 @@ fn diffuse(
     dir: &Path,
     text: &[f32],
     seed: u64,
-    settings: &ServingSettings,
+    serving: &ServingConfig,
     diffusion: &DiffusionSettings,
 ) -> Result<(Vec<f32>, Vec<f64>, f64), String> {
     let checkpoint = Checkpoint::open(&dir.join("flux-2-klein-4b.safetensors"))?;
@@ -466,7 +466,7 @@ fn diffuse(
         output.velocity,
         &[rows],
         diffusion.dit_weights,
-        settings,
+        serving,
     )?;
     let dit_seconds_load = dit_load.elapsed().as_secs_f64();
     drop(checkpoint);
@@ -611,7 +611,7 @@ fn run() -> Result<(), String> {
             (token_major(&dump), Vec::new())
         }
         None => {
-            let (latent, seconds, _) = diffuse(&dir, &text, seed, &settings, &diffusion)?;
+            let (latent, seconds, _) = diffuse(&dir, &text, seed, &serving, &diffusion)?;
             (latent, seconds)
         }
     };
@@ -653,7 +653,7 @@ fn run() -> Result<(), String> {
         vae_output.image,
         &[u64::from(latent_shape[0])],
         diffusion.vae_weights,
-        &settings,
+        &serving,
     )?;
     eprintln!(
         "vae: {} ops, {} weights, load {:.1}s",
