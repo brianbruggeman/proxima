@@ -3,7 +3,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_tensor::{BoundOp, BoundOpKind};
+use proxima_numeric::float_layout::FloatLayout;
+use proxima_numeric::codec::Codec;
 use proxima_numeric::{DType, NumericPolicy};
+use proxima_tensor::NodeId;
+
+use crate::cuda_layout::layout_load_cuda;
+use crate::identity::description_fingerprint;
+use crate::msl::layout_render::readable_scalar_cache;
 
 use crate::cuda::mma_gemm::MMA_INSTRUCTION;
 use crate::cuda::{
@@ -26,6 +33,7 @@ pub(crate) fn cached_attention_entry_name(
     class: CudaAttentionClass,
     split_chunks: Option<u64>,
     numeric_policy: NumericPolicy,
+    quantized: &[Option<Codec>],
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
         kv_heads,
@@ -41,6 +49,7 @@ pub(crate) fn cached_attention_entry_name(
     else {
         return Err(kind_mismatch(resolved));
     };
+    let kv_token = kv_entry_token(&cached_attention_kv_reads(resolved.node, quantized)?);
     let rotary_token = if rotary_dim < head_dim {
         format!("_r{rotary_dim}")
     } else {
@@ -60,7 +69,7 @@ pub(crate) fn cached_attention_entry_name(
         )
     };
     Ok(format!(
-        "omega_cuda_cached_attention_{}_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}{tile_token}{split_token}_s{:08x}{bounds_token}",
+        "omega_cuda_cached_attention_{}_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}{kv_token}{tile_token}{split_token}_s{:08x}{bounds_token}",
         class_tag(class),
         scale.to_bits(),
     ))
@@ -70,13 +79,14 @@ pub(crate) fn render_cached_attention_cuda(
     resolved: &BoundOp,
     entry: &str,
     numeric_policy: NumericPolicy,
+    quantized: &[Option<Codec>],
 ) -> Result<String, EmitError> {
     let helpers = if cached_attention_uses_mma(&resolved.kind, numeric_policy) {
         format!("{MMA_INSTRUCTION}{MMA_ATTENTION_HELPERS}")
     } else {
         String::new()
     };
-    render_attention(resolved, entry, "", &unsplit_tail(resolved, numeric_policy), &helpers)
+    render_attention(resolved, entry, "", &unsplit_tail(resolved, numeric_policy), &helpers, quantized)
 }
 
 fn unsplit_tail(resolved: &BoundOp, numeric_policy: NumericPolicy) -> String {
@@ -93,6 +103,7 @@ pub(crate) fn render_attention(
     extra_param: &str,
     tail: &str,
     helpers: &str,
+    quantized: &[Option<Codec>],
 ) -> Result<String, EmitError> {
     let Some(class) = cuda_cached_attention_class(&resolved.kind) else {
         return Err(EmitError::CudaUnsupportedOpKind {
@@ -122,8 +133,16 @@ pub(crate) fn render_attention(
             kind: "cached_attention_non_f32",
         });
     }
+    let reads = cached_attention_kv_reads(resolved.node, quantized)?;
     let params: String = (0..operands.len())
-        .map(|index| format!("const float* __restrict__ in{index}"))
+        .map(|index| {
+            let element = match index {
+                2 | 3 => reads.key.element,
+                6 => reads.value.element,
+                _ => "float",
+            };
+            format!("const {element}* __restrict__ in{index}")
+        })
         .collect::<Vec<String>>()
         .join(",\n    ");
     let cached_rows_decl = match class {
@@ -155,6 +174,7 @@ pub(crate) fn render_attention(
     };
     let mut source = String::new();
     preamble(crate::cuda::target::Target::CUDA, &mut source, "float");
+    source.push_str(&cache_helpers(&reads));
     source.push_str(helpers);
     let runtime_bounds = cached_attention_runtime_bounds(&resolved.kind);
     let (uniform_fields, bounds_decl) = if runtime_bounds {
@@ -230,8 +250,8 @@ const CACHED_ATTENTION_BODY: &str = "\
         const long long vbase = key_row * (kv_heads * head_dim) + kv_head * head_dim;
         float partial = 0.0f;
         for (long long pair = (long long)lane; pair < pair_dim; pair += 32LL) {
-            partial += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);
-            partial += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);
+            partial += in0[qbase + pair] * (cached ? cached_key_at(in2, kbase + pair) : in4[kbase + pair]);
+            partial += in1[qbase + pair] * (cached ? cached_key_at(in3, kbase + pair) : in5[kbase + pair]);
         }
         for (long long column = (long long)lane; column < pass_dim; column += 32LL) {
             partial += pass_query[qpass + column] * (cached ? pass_cached_key[kpass + column] : pass_new_key[kpass + column]);
@@ -245,7 +265,7 @@ const CACHED_ATTENTION_BODY: &str = "\
         for (long long dimension = (long long)lane; dimension < head_dim; dimension += 32LL) {
             const long long local_dimension = dimension / 32LL;
             weighted[local_dimension] = weighted[local_dimension] * rescale
-                + weight * (cached ? in6[vbase + dimension] : in7[vbase + dimension]);
+                + weight * (cached ? cached_value_at(in6, vbase + dimension) : in7[vbase + dimension]);
         }
         maximum = next_max;
     }
@@ -297,4 +317,104 @@ fn signed_name_part(value: i64) -> String {
     } else {
         format!("{value}")
     }
+}
+
+const CACHED_KV_OPERANDS: [usize; 3] = [2, 3, 6];
+
+struct CacheRead {
+    element: &'static str,
+    layout: Option<FloatLayout>,
+}
+
+pub(crate) struct KvReads {
+    key: CacheRead,
+    value: CacheRead,
+}
+
+fn cache_read(format: Option<&Codec>) -> Option<CacheRead> {
+    let Some(format) = format else {
+        return Some(CacheRead { element: "float", layout: None });
+    };
+    readable_scalar_cache(format).map(|(layout, element)| CacheRead { element, layout: Some(layout) })
+}
+
+fn load_name(layout: &FloatLayout) -> String {
+    format!("omega_kv_scalar_{}", description_fingerprint(layout))
+}
+
+/// Whether the cached-attention render reads a K cache stored as `key` and a V cache stored as `value`.
+///
+/// # Errors
+/// A message naming the format the render cannot read.
+pub(crate) fn cached_attention_kv_admits(key: &Codec, value: &Codec) -> Result<(), String> {
+    [key, value].into_iter().try_for_each(|format| {
+        let plain = format.is_identity_of(&Codec::default());
+        if plain || readable_scalar_cache(format).is_some() {
+            Ok(())
+        } else {
+            Err(format!("a {format:?} cache is not a whole-byte scalar layout the typed load reads"))
+        }
+    })
+}
+
+pub(crate) fn cached_attention_kv_reads(
+    node: NodeId,
+    quantized: &[Option<Codec>],
+) -> Result<KvReads, EmitError> {
+    let packed_elsewhere = quantized
+        .iter()
+        .enumerate()
+        .any(|(index, format)| format.is_some() && !CACHED_KV_OPERANDS.contains(&index));
+    let [even, odd, value] = CACHED_KV_OPERANDS.map(|index| quantized.get(index).and_then(Option::as_ref));
+    let reads = (even == odd).then(|| Some(KvReads { key: cache_read(even)?, value: cache_read(value)? })).flatten();
+    match reads {
+        Some(reads) if !packed_elsewhere => Ok(reads),
+        _ => Err(EmitError::CachedAttentionKvCodecNotSupported {
+            node,
+            reason: "only the cached K even/odd planes and V rows (operands 2, 3, 6) may be packed, each as a whole-byte scalar layout",
+        }),
+    }
+}
+
+fn cache_helpers(reads: &KvReads) -> String {
+    let mut text = String::new();
+    let layouts: Vec<&FloatLayout> = [&reads.key, &reads.value].into_iter().filter_map(|read| read.layout.as_ref()).collect();
+    if !layouts.is_empty() {
+        text.push_str(&format!("#include <{}>\n", crate::cuda::target::Target::CUDA.bf16_header));
+        text.push_str("typedef unsigned char uchar;\ntypedef unsigned short ushort;\ntypedef unsigned int uint;\n");
+    }
+    let mut named: Vec<String> = Vec::new();
+    for layout in layouts {
+        let name = load_name(layout);
+        if !named.contains(&name) {
+            text.push_str(&layout_load_cuda(*layout, &name));
+            named.push(name);
+        }
+    }
+    text.push_str(&role_helpers("key", &reads.key));
+    text.push_str(&role_helpers("value", &reads.value));
+    text
+}
+
+fn role_helpers(role: &str, read: &CacheRead) -> String {
+    let element = read.element;
+    let (scalar, quad) = match &read.layout {
+        None => (String::from("p[i]"), String::from("*(const float4*)&p[i]")),
+        Some(layout) => {
+            let load = load_name(layout);
+            let at = |offset: &str| format!("{load}((unsigned int)p[i + {offset}])");
+            (at("0"), format!("make_float4({}, {}, {}, {})", at("0"), at("1"), at("2"), at("3")))
+        }
+    };
+    format!(
+        "__device__ __forceinline__ float cached_{role}_at(const {element}* p, long long i) {{ return {scalar}; }}\n\
+         __device__ __forceinline__ float4 cached_{role}_at4(const {element}* p, long long i) {{ return {quad}; }}\n"
+    )
+}
+
+fn kv_entry_token(reads: &KvReads) -> String {
+    let part = |tag: &str, read: &CacheRead| {
+        read.layout.as_ref().map_or_else(String::new, |layout| format!("_{tag}{}", description_fingerprint(layout)))
+    };
+    format!("{}{}", part("k", &reads.key), part("v", &reads.value))
 }

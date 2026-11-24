@@ -237,10 +237,14 @@ mod tests {
     #[cfg(feature = "gpu")]
     #[test]
     fn a_mixed_pair_is_refused_naming_both_types() {
-        let error = admit_pair(&NumericFormat::Float16, &NumericFormat::BFloat16).expect_err("mixed pair");
+        let (key, value) = NumericFormat::every()
+            .flat_map(|key| NumericFormat::every().map(move |value| (key, value)))
+            .find(|(key, value)| key != value && kernel_pair(key, value).is_err())
+            .expect("a mixed pair the active driver refuses exists");
+        let error = admit_pair(&key, &value).expect_err("mixed pair");
 
         let message = error.to_string();
-        assert!(message.contains("Float16") && message.contains("BFloat16"), "{message}");
+        assert!(message.contains(&format!("{key:?}")) && message.contains(&format!("{value:?}")), "{message}");
         assert!(message.contains("same type"), "{message}");
     }
 
@@ -270,15 +274,15 @@ mod tests {
 
     #[cfg(all(feature = "gpu", feature = "cuda", not(all(feature = "metal", target_os = "macos"))))]
     #[test]
-    fn a_cuda_build_admits_only_the_graph_output_format_and_defaults_to_it() {
-        for format in &NumericFormat::ALL {
+    fn a_cuda_build_admits_the_graph_output_and_every_scalar_the_render_reads() {
+        for format in NumericFormat::every() {
+            let format = &format;
             assert_eq!(
                 admit_pair(format, format).is_ok(),
-                stores_graph_output_format(format),
+                stores_graph_output_format(format) || omega::msl::layout_render::readable_scalar_cache(format).is_some(),
                 "{format:?}"
             );
         }
-        assert!(stores_graph_output_format(&default_cache_format()));
     }
 
     #[cfg(all(feature = "gpu", feature = "cuda", not(all(feature = "metal", target_os = "macos"))))]

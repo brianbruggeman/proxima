@@ -338,8 +338,8 @@ impl GpuDriver {
     }
 
     /// Whether this driver's cached attention reads a K cache stored as `key` and a V cache
-    /// stored as `value`. Metal answers with the MSL classifier its emitter runs; every other
-    /// driver's cached attention reads only the graph's own output format.
+    /// stored as `value`. Metal answers with the MSL classifier its emitter runs; CUDA and HIP answer
+    /// with the cached-attention render's own acceptance: the graph format or a whole-byte scalar layout.
     ///
     /// # Errors
     /// A message naming the driver and the format it does not read.
@@ -349,6 +349,10 @@ impl GpuDriver {
                 .map(|_| ())
                 .map_err(|error| error.to_string());
         }
+        #[cfg(feature = "cuda")]
+        return crate::cuda_cached_attention::cached_attention_kv_admits(key, value)
+            .map_err(|reason| format!("the {} driver's cached attention does not read this cache: {reason}", self.name()));
+        #[cfg(not(feature = "cuda"))]
         [key, value]
             .into_iter()
             .find(|format| !format.is_identity_of(&NumericFormat::default()))
@@ -2506,11 +2510,13 @@ mod tests {
 
     #[cfg(feature = "cuda-driver")]
     #[test]
-    fn cuda_and_hip_admit_only_the_graph_output_format_and_name_the_refusal() {
+    fn cuda_and_hip_admit_what_the_cached_attention_render_reads_and_name_the_refusal() {
         let hip = GpuDriver::Hip { wave: None, device: 0 };
         for driver in [GpuDriver::Cuda, hip] {
-            for format in &NumericFormat::ALL {
-                let reads = format.is_identity_of(&NumericFormat::default());
+            for format in NumericFormat::every() {
+                let reads = format.is_identity_of(&NumericFormat::default())
+                    || crate::msl::layout_render::readable_scalar_cache(&format).is_some();
+                let format = &format;
                 let answer = driver.admits_kv_cache(format, format);
                 assert_eq!(answer.is_ok(), reads, "{} {format:?}", driver.name());
                 if let Err(message) = answer {

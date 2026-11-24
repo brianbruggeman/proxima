@@ -294,7 +294,7 @@ pub(crate) fn emit_on_target(
     };
     let entry = match cuda_cached_attention_class(&resolved.kind) {
         Some(class) if target.card_asm => {
-            cached_attention_entry_name(resolved, class, attention_chunks, numeric_policy)?
+            cached_attention_entry_name(resolved, class, attention_chunks, numeric_policy, &quantized)?
         }
         _ => entry_name(target, resolved, packed_operands, &quantized, numeric_policy, device),
     };
@@ -319,12 +319,6 @@ pub(crate) fn emit_on_target(
                 kind: "cached_attention_sink",
             });
         }
-        BoundOpKind::CachedAttention { .. } if quantized.iter().any(Option::is_some) => {
-            return Err(EmitError::CudaUnsupportedOpKind {
-                node: resolved.node,
-                kind: "cached_attention_packed_operand",
-            });
-        }
         // the cached-attention bodies hardwire a 32-lane sub-warp
         // (`threadIdx.x & 31u`, four warps per block, a 16-step shuffle tree),
         // so `executes` grants the form only to a target whose wavefront that describes.
@@ -335,8 +329,8 @@ pub(crate) fn emit_on_target(
             });
         }
         BoundOpKind::CachedAttention { .. } => match attention_chunks {
-            Some(chunks) => render_combine(resolved, &entry, chunks)?,
-            None => render_cached_attention_cuda(resolved, &entry, numeric_policy)?,
+            Some(chunks) => render_combine(resolved, &entry, chunks, &quantized)?,
+            None => render_cached_attention_cuda(resolved, &entry, numeric_policy, &quantized)?,
         },
         BoundOpKind::MoeTopK { .. } => render_moe_topk(target, resolved, &entry)?,
         BoundOpKind::BlockQuantize { .. } if !target.card_asm => {
@@ -480,7 +474,7 @@ fn prologue_kernels(
         split_chunks(&resolved.kind, device),
     ) {
         (Some(plan), _) if plan.scratch => Ok(vec![staged_prepass(resolved, &plan, entry, source)?]),
-        (_, Some(chunks)) => Ok(vec![split_pass(resolved, entry, chunks)?]),
+        (_, Some(chunks)) => Ok(vec![split_pass(resolved, entry, chunks, quantized)?]),
         _ => Ok(Vec::new()),
     }
 }

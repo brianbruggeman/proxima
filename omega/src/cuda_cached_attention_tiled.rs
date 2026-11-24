@@ -109,8 +109,8 @@ pub(crate) const TILED_ATTENTION_BODY: &str = "\
                 const long long key_row = cached ? key : key - cached_key_rows;
                 const long long kbase = key_row * (kv_heads * pair_dim) + kv_head * pair_dim;
                 const long long kpass = key_row * (kv_heads * pass_dim) + kv_head * pass_dim;
-                key_value = dimension < pair_dim ? *(const float4*)&(cached ? in2 : in4)[kbase + dimension]
-                    : dimension < 2 * pair_dim ? *(const float4*)&(cached ? in3 : in5)[kbase + dimension - pair_dim]
+                key_value = dimension < pair_dim ? (cached ? cached_key_at4(in2, kbase + dimension) : *(const float4*)&in4[kbase + dimension])
+                    : dimension < 2 * pair_dim ? (cached ? cached_key_at4(in3, kbase + dimension - pair_dim) : *(const float4*)&in5[kbase + dimension - pair_dim])
                     : *(const float4*)&(cached ? pass_cached_key : pass_new_key)[kpass + dimension - rotary_dim];
             }
             *(float4*)&tile_stage[offset * key_stride + dimension] = key_value;
@@ -158,7 +158,7 @@ pub(crate) const TILED_ATTENTION_BODY: &str = "\
                 const bool cached = key_index < cached_key_rows;
                 const long long key_row = cached ? key_index : key_index - cached_key_rows;
                 const long long vbase = key_row * (kv_heads * head_dim) + kv_head * head_dim;
-                value_chunk = *(const float4*)&(cached ? in6 : in7)[vbase + dimension];
+                value_chunk = (cached ? cached_value_at4(in6, vbase + dimension) : *(const float4*)&in7[vbase + dimension]);
             }
             *(float4*)&tile_stage[offset * key_stride + dimension] = value_chunk;
         }

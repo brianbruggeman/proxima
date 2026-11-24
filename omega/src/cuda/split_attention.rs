@@ -2,6 +2,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use proxima_numeric::codec::Codec;
 use proxima_tensor::{BoundOp, BoundOpKind, NodeId};
 
 use super::{
@@ -63,6 +64,7 @@ pub(super) fn render_combine(
     resolved: &BoundOp,
     entry: &str,
     chunks: u64,
+    quantized: &[Option<Codec>],
 ) -> Result<String, EmitError> {
     let tail = format!("    constexpr long long chunks = {chunks}LL;\n{COMBINE_BODY}");
     render_attention(
@@ -71,6 +73,7 @@ pub(super) fn render_combine(
         ",\n    const float* __restrict__ partials",
         &tail,
         "",
+        quantized,
     )
 }
 
@@ -78,10 +81,11 @@ pub(super) fn split_pass(
     resolved: &BoundOp,
     entry: &str,
     chunks: u64,
+    quantized: &[Option<Codec>],
 ) -> Result<CudaKernel, EmitError> {
     let split_entry = format!("{entry}_split");
     let tail = format!("    constexpr long long chunks = {chunks}LL;\n{SPLIT_BODY}");
-    let source = render_attention(resolved, &split_entry, "", &tail, "")?;
+    let source = render_attention(resolved, &split_entry, "", &tail, "", quantized)?;
     let scratch = split_scratch_node(resolved.node);
     let bindings: Vec<Binding> = dispatch_bindings(resolved)
         .into_iter()
@@ -154,8 +158,8 @@ const SPLIT_BODY: &str = "\
         const long long vbase = key_row * (kv_heads * head_dim) + kv_head * head_dim;
         float partial = 0.0f;
         for (long long pair = (long long)lane; pair < pair_dim; pair += 32LL) {
-            partial += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);
-            partial += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);
+            partial += in0[qbase + pair] * (cached ? cached_key_at(in2, kbase + pair) : in4[kbase + pair]);
+            partial += in1[qbase + pair] * (cached ? cached_key_at(in3, kbase + pair) : in5[kbase + pair]);
         }
         for (long long column = (long long)lane; column < pass_dim; column += 32LL) {
             partial += pass_query[qpass + column] * (cached ? pass_cached_key[kpass + column] : pass_new_key[kpass + column]);
@@ -169,7 +173,7 @@ const SPLIT_BODY: &str = "\
         for (long long dimension = (long long)lane; dimension < head_dim; dimension += 32LL) {
             const long long local_dimension = dimension / 32LL;
             weighted[local_dimension] = weighted[local_dimension] * rescale
-                + weight * (cached ? in6[vbase + dimension] : in7[vbase + dimension]);
+                + weight * (cached ? cached_value_at(in6, vbase + dimension) : in7[vbase + dimension]);
         }
         maximum = next_max;
     }

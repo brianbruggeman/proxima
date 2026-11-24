@@ -106,10 +106,10 @@ pub(crate) const MMA_ATTENTION_BODY: &str = "\
                 const long long key_row = cached ? key : key - cached_key_rows;
                 const long long kbase = key_row * (kv_heads * pair_dim) + kv_head * pair_dim;
                 const long long kpass = key_row * (kv_heads * pass_dim) + kv_head * pass_dim;
-                key_value = dimension < pair_dim ? *(const float4*)&(cached ? in2 : in4)[kbase + dimension]
-                    : dimension < 2 * pair_dim ? *(const float4*)&(cached ? in3 : in5)[kbase + dimension - pair_dim]
+                key_value = dimension < pair_dim ? (cached ? cached_key_at4(in2, kbase + dimension) : *(const float4*)&in4[kbase + dimension])
+                    : dimension < 2 * pair_dim ? (cached ? cached_key_at4(in3, kbase + dimension - pair_dim) : *(const float4*)&in5[kbase + dimension - pair_dim])
                     : *(const float4*)&(cached ? pass_cached_key : pass_new_key)[kpass + dimension - rotary_dim];
-                value_value = *(const float4*)&(cached ? in6 : in7)[key_row * (kv_heads * head_dim) + kv_head * head_dim + dimension];
+                value_value = (cached ? cached_value_at4(in6, key_row * (kv_heads * head_dim) + kv_head * head_dim + dimension) : *(const float4*)&in7[key_row * (kv_heads * head_dim) + kv_head * head_dim + dimension]);
             }
             key_regs[load] = key_value;
             value_regs[load] = value_value;
