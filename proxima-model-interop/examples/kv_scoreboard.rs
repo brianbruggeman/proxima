@@ -1059,6 +1059,8 @@ struct Facts {
     load_limit: f64,
     /// commit the llama-server must report, e.g. `ba3c05f71` (the pinned incumbent)
     llama_commit: String,
+    /// sha256 of the llama-server binary, the incumbent's identity when its build line reports none
+    llama_sha256: String,
 }
 
 #[derive(Debug, Clone)]
@@ -1202,13 +1204,22 @@ fn evaluate(row: &Row, peer: Option<&Row>, facts: &Facts) -> Parity {
     });
     let i12 = on_pair(&|evidence| {
         Check::require(
-            evidence.log.build.as_ref().is_some_and(|(_, commit)| *commit == facts.llama_commit),
-            || format!("llama build {:?}, required commit {}", evidence.log.build, facts.llama_commit),
+            incumbent_identified(evidence.log.build.as_ref(), facts),
+            || format!("llama build {:?}, required commit {} or an unreported build with a binary sha256", evidence.log.build, facts.llama_commit),
         )
     });
     Parity {
         checks: [i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12],
     }
+}
+
+/// A server that reports no build (`build 0 (unknown)`) is the incumbent only by the pinned commit and its binary's sha256.
+fn build_unreported(build: Option<&(u32, String)>) -> bool {
+    build.is_some_and(|(number, commit)| *number == 0 && commit == UNKNOWN_BUILD)
+}
+
+fn incumbent_identified(build: Option<&(u32, String)>, facts: &Facts) -> bool {
+    build.is_some_and(|(_, commit)| *commit == facts.llama_commit) || (build_unreported(build) && !facts.llama_sha256.is_empty())
 }
 
 fn quiet_check(row: &Row, facts: &Facts) -> Check {
@@ -2372,10 +2383,19 @@ fn unreported() -> Value {
     json!({ "unreported": UNREPORTED_REASON })
 }
 
+fn llama_arm_version(row: &Row, context: &RecordContext) -> String {
+    let build = llama_evidence(Some(row)).and_then(|evidence| evidence.log.build.as_ref());
+    if build_unreported(build) {
+        format!("{}+sha256:{}", context.llama_commit, row.binary_sha256)
+    } else {
+        context.llama_commit.clone()
+    }
+}
+
 fn arm_of(row: &Row, context: &RecordContext) -> (String, String) {
     match row.cell.engine {
         Engine::Proxima { .. } => (context.proxima_arm.clone(), row.binary_sha256.clone()),
-        Engine::Llama => (LLAMA_ARM.to_owned(), context.llama_commit.clone()),
+        Engine::Llama => (LLAMA_ARM.to_owned(), llama_arm_version(row, context)),
         Engine::LlamaInproc { .. } => (LLAMA_INPROC_ARM.to_owned(), context.llama_commit.clone()),
     }
 }
@@ -2547,13 +2567,14 @@ fn run(config: &Config) -> Result<(), HarnessError> {
     let logs = config.out.join("logs");
     fs::create_dir_all(&logs).map_err(io_error(&logs))?;
     let (model_sha256, prompts) = load_prompts(config)?;
+    let llama_identity = arm_identity(&config.llama)?;
     let facts = Facts {
         model_path: config.model.display().to_string(),
         model_sha256,
         load_limit: config.gate.load_limit,
         llama_commit: config.llama_commit.clone(),
+        llama_sha256: llama_identity.sha256.clone(),
     };
-    let llama_identity = arm_identity(&config.llama)?;
     let mut cells = cell_order(&config.proxima, config.llama_inproc.as_deref());
     cells.retain(|cell| config.prompts.contains(&cell.prompt) && config.kvs.contains(&cell.kv));
     let mut rows = Vec::new();
@@ -4523,6 +4544,7 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
             model_sha256: "abc".to_owned(),
             load_limit: 4.0,
             llama_commit: "ba3c05f71".to_owned(),
+            llama_sha256: "feedface".to_owned(),
         }
     }
 
@@ -4726,6 +4748,20 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         assert_eq!(failing_names(&proxima, &llama, &facts()), vec!["I12"]);
     }
 
+    #[test]
+    fn i12_holds_for_an_unreported_build_identified_by_commit_and_server_sha256() {
+        let unknown = "0.00.100.000 I cmn  common_param: common_params_print_info: build 0 (unknown) with GNU 13.3.0 for Linux x86_64";
+        assert_eq!(parse_llama_log(unknown).build, Some((0, "unknown".to_owned())));
+        let (proxima, mut llama) = pair_rows();
+        if let Evidence::Llama(evidence) = &mut llama.evidence {
+            evidence.log.build = parse_llama_log(unknown).build;
+        }
+        assert!(failing_names(&proxima, &llama, &facts()).is_empty());
+        let unhashed = Facts { llama_sha256: String::new(), ..facts() };
+        assert_eq!(failing_names(&proxima, &llama, &unhashed), vec!["I12"]);
+        let context = fixture_context(&load_contract().expect("contract.json"));
+        assert_eq!(arm_of(&llama, &context).1, format!("ba3c05f71+sha256:{}", llama.binary_sha256));
+    }
     #[test]
     fn i8_fails_for_a_debug_binary_or_a_missing_binary_hash() {
         let (mut proxima, llama) = pair_rows();
