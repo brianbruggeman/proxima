@@ -55,12 +55,6 @@ fn reference_dir() -> PathBuf {
         })
 }
 
-fn safetensors_data_start(file_bytes: &[u8]) -> u64 {
-    let mut prefix = [0u8; 8];
-    prefix.copy_from_slice(&file_bytes[..8]);
-    8 + u64::from_le_bytes(prefix)
-}
-
 fn read_vocab(dir: &Path) -> Result<Vocab, String> {
     let tokenizer = std::fs::read(dir.join("tokenizer/tokenizer.json")).map_err(|why| why.to_string())?;
     let config_bytes = std::fs::read(dir.join("text_encoder/config.json")).map_err(|why| why.to_string())?;
@@ -117,9 +111,7 @@ fn encode_text(dir: &Path, vocab: &Vocab, ids: &[u32]) -> Result<Vec<f32>, Strin
     // Owned, not leaked: the taps are copied out into `joined` below, and the
     // 7.6 GB mapping must be gone before the DiT becomes resident, or the two
     // checkpoints' resident sets overlap for the whole image run.
-    let bytes = std::fs::read(&path).map_err(|why| why.to_string())?;
-    let manifest = proxima_safetensors::parse_complete(&bytes).map_err(|why| why.to_string())?;
-    let data_start = safetensors_data_start(&bytes);
+    let checkpoint = Checkpoint::open(&path)?;
     // `PROXIMA_FLUX2_KLEIN_NO_KEY_PAD` forces the mask off, so one binary can
     // A/B it (a mask that changes nothing is either a no-op or not in the graph).
     let key_pad = if std::env::var_os("PROXIMA_FLUX2_KLEIN_NO_KEY_PAD").is_some() {
@@ -129,14 +121,20 @@ fn encode_text(dir: &Path, vocab: &Vocab, ids: &[u32]) -> Result<Vec<f32>, Strin
     };
     let model = match key_pad {
         Some(pad) => LoadedModel::load_from_safetensors_with_key_pad(
-            &manifest,
-            &bytes,
-            data_start,
+            checkpoint.manifest(),
+            checkpoint.bytes(),
+            checkpoint.data_start(),
             architecture,
             vocab.clone(),
             pad,
         ),
-        None => LoadedModel::load_from_safetensors(&manifest, &bytes, data_start, architecture, vocab.clone()),
+        None => LoadedModel::load_from_safetensors(
+            checkpoint.manifest(),
+            checkpoint.bytes(),
+            checkpoint.data_start(),
+            architecture,
+            vocab.clone(),
+        ),
     }
     .map_err(|why| why.to_string())?;
     let roots = model.layer_residual_roots().to_vec();
@@ -160,8 +158,7 @@ fn encode_text(dir: &Path, vocab: &Vocab, ids: &[u32]) -> Result<Vec<f32>, Strin
     }
     drop(values);
     drop(model);
-    drop(manifest);
-    drop(bytes);
+    drop(checkpoint);
     Ok(joined)
 }
 

@@ -85,6 +85,24 @@ impl Checkpoint {
         })
     }
 
+    /// The tensor directory parsed from the file's header.
+    #[must_use]
+    pub fn manifest(&self) -> &proxima_safetensors::Manifest {
+        &self.manifest
+    }
+
+    /// The whole file's mapped bytes, the view a loader borrows weights from.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        self.mapping.bytes()
+    }
+
+    /// Where tensor data begins in [`Self::bytes`], past the length prefix and header.
+    #[must_use]
+    pub fn data_start(&self) -> u64 {
+        self.data_start as u64
+    }
+
     /// One tensor's `(dtype, shape, bytes)`, offsets already absolute.
     ///
     /// # Errors

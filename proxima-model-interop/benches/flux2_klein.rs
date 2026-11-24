@@ -278,8 +278,7 @@ mod bench {
 
     struct TextModel {
         model: LoadedModel<'static>,
-        _bytes: &'static [u8],
-        _manifest: &'static proxima_safetensors::Manifest,
+        _checkpoint: &'static Checkpoint,
         roots: Vec<NodeId>,
         ids: Vec<u32>,
         serving: ServingConfig<'static>,
@@ -297,23 +296,12 @@ mod bench {
             // The text encoder is one shot per image; the bench process owns it
             // for the whole text group and leaks the mapping deliberately so
             // the model can hold a 'static borrow. The image path frees it.
-            let bytes: &'static [u8] = Box::leak(
-                std::fs::read(&path)
-                    .expect("qwen checkpoint")
-                    .into_boxed_slice(),
-            );
-            let manifest: &'static proxima_safetensors::Manifest = Box::leak(Box::new(
-                proxima_safetensors::parse_complete(bytes).expect("manifest"),
-            ));
-            let data_start = {
-                let mut prefix = [0u8; 8];
-                prefix.copy_from_slice(&bytes[..8]);
-                8 + u64::from_le_bytes(prefix) as usize
-            };
+            let checkpoint: &'static Checkpoint =
+                Box::leak(Box::new(Checkpoint::open(&path).expect("qwen checkpoint")));
             let model = LoadedModel::load_from_safetensors(
-                manifest,
-                bytes,
-                data_start as u64,
+                checkpoint.manifest(),
+                checkpoint.bytes(),
+                checkpoint.data_start(),
                 architecture,
                 vocab.clone(),
             )
@@ -325,8 +313,7 @@ mod bench {
             serving.model_path = Box::leak(dir.to_string_lossy().into_owned().into_boxed_str());
             Self {
                 model,
-                _bytes: bytes,
-                _manifest: manifest,
+                _checkpoint: checkpoint,
                 roots,
                 ids,
                 serving,
