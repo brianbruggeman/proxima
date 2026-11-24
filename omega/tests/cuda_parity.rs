@@ -6199,86 +6199,80 @@ fn a_gathered_expert_product_under_activation_quantization_takes_the_int8_groupe
     assert!(failures.is_empty(), "int8 grouped kernel disagrees with the q8_1 oracle; failing rows (codec, planned_grouped, worst, magnitude): {failures:?}; whole table: {table:?}");
 }
 
-fn narrow_cache_formats() -> Vec<proxima_numeric::NumericFormat> {
-    proxima_numeric::NumericFormat::every()
-        .filter(|format| omega::msl::layout_render::readable_scalar_cache(format).is_some())
-        .filter(|format| !format.is_identity_of(&proxima_numeric::NumericFormat::default()))
-        .collect()
-}
-
-fn pack_cache_rows(format: &proxima_numeric::NumericFormat, values: &[f32]) -> (Vec<u8>, Vec<f32>) {
-    let codec = proxima_numeric::FormatCodec::for_format(format).expect("the format resolves a host codec");
-    let mut packed = vec![0u8; codec.packed_len(values.len()).expect("a whole number of codes")];
-    codec.encode(values, &mut packed).expect("the host encodes the cache rows");
-    let mut slots = vec![std::mem::MaybeUninit::<f32>::uninit(); values.len()];
-    codec.decode(&packed, &mut slots).expect("the host decodes the cache rows");
-    // decode returned Ok, which initialises every slot of its output
-    let decoded = slots.iter().map(|slot| unsafe { slot.assume_init() }).collect();
-    (packed, decoded)
-}
-
-fn narrow_cache_relative_error(format: &proxima_numeric::NumericFormat, cached_len: u64) -> Option<(f32, Vec<String>)> {
-    let (_, padded) = qwen3_gqa_qk_norm_padded_cache_fixture(cached_len, 64, 0.0);
-    let (program, symbols, roots, owned) = padded;
-    let mut decoded = owned.clone();
-    let mut packed_leaves: Vec<(String, Vec<u8>)> = Vec::new();
-    for (name, data) in decoded.iter_mut().filter(|(name, _)| name.starts_with("kv_cache.")) {
-        let (bytes, values) = pack_cache_rows(format, data);
-        *data = values;
-        packed_leaves.push((name.clone(), bytes));
-    }
-    assert!(!packed_leaves.is_empty(), "zero kv cache leaves would compare nothing");
-    let reference_named = as_named_blocks(&decoded);
-    let mut cpu_plan = plan_named(
-        Engine::Cpu,
-        None,
-        &program,
-        &symbols,
-        &reference_named,
-        &roots,
-        NumericPolicy::default().with_flash_narrowing(true),
-    )
-    .expect("omega::backend plans the decoded cache on cpu");
-    let cpu = execute_plan_named(&mut cpu_plan, &reference_named).expect("cpu runs the decoded cache");
-    let narrow_named: Vec<(&str, QuantizedBlock<'_>)> = owned
-        .iter()
-        .map(|(name, data)| match packed_leaves.iter().find(|(leaf, _)| leaf == name) {
-            Some((_, bytes)) => (name.as_str(), QuantizedBlock::Packed { codec: *format, bytes }),
-            None => (name.as_str(), QuantizedBlock::Float32(data.as_slice())),
-        })
-        .collect();
-    let mut cuda_plan = plan_named(
-        Engine::Gpu,
-        Some(GpuDriver::Cuda),
-        &program,
-        &symbols,
-        &narrow_named,
-        &roots,
-        NumericPolicy::bit_exact().with_reassociation(true),
-    )
-    .expect("omega::backend plans the narrow cache on cuda");
-    let identities = cuda_kernel_identities(&cuda_plan).expect("cuda plan exposes its kernels");
-    let cuda = match execute_plan_named(&mut cuda_plan, &narrow_named) {
-        Ok(run) => run,
-        Err(error) if format!("{error:?}").contains("unsupported input codec") => return None,
-        Err(error) => panic!("cuda runs the narrow cache: {error:?}"),
-    };
-    let max_diff = cpu.root().iter().zip(cuda.root()).fold(0.0f32, |worst, (want, got)| worst.max((want - got).abs()));
-    let magnitude = cpu.root().iter().fold(0.0f32, |worst, value| worst.max(value.abs()));
-    Some((max_diff / magnitude.max(f32::MIN_POSITIVE), identities))
-}
-
 #[test]
 fn cuda_cached_attention_reads_every_narrow_scalar_cache_like_the_cpu_over_its_decoded_rows() {
-    let formats = narrow_cache_formats();
+    use proxima_numeric::{FormatCodec, NumericFormat};
+
+    let formats: Vec<NumericFormat> = NumericFormat::every()
+        .filter(|format| omega::msl::layout_render::readable_scalar_cache(format).is_some())
+        .filter(|format| !format.is_identity_of(&NumericFormat::default()))
+        .collect();
     assert!(!formats.is_empty(), "zero readable narrow formats would compare nothing");
+    let pack = |format: &NumericFormat, values: &[_]| {
+        let codec = FormatCodec::for_format(format).expect("the format resolves a host codec");
+        let mut packed = vec![0u8; codec.packed_len(values.len()).expect("a whole number of codes")];
+        codec.encode(values, &mut packed).expect("the host encodes the cache rows");
+        let mut slots = vec![std::mem::MaybeUninit::uninit(); values.len()];
+        codec.decode(&packed, &mut slots).expect("the host decodes the cache rows");
+        // decode returned Ok, which initialises every slot of its output
+        let decoded: Vec<_> = slots.iter().map(|slot| unsafe { slot.assume_init() }).collect();
+        (packed, decoded)
+    };
     let mut compared = 0_usize;
     for format in &formats {
         for cached_len in [31_u64, 33] {
-            let Some((relative, identities)) = narrow_cache_relative_error(format, cached_len) else {
-                eprintln!("narrow cache {format:?} cached_len={cached_len}: the driver's input upload refuses this codec");
-                continue;
+            let (_, (program, symbols, roots, owned)) = qwen3_gqa_qk_norm_padded_cache_fixture(cached_len, 64, 0.0);
+            let mut decoded = owned.clone();
+            let mut packed_leaves: Vec<(String, Vec<u8>)> = Vec::new();
+            for (name, data) in decoded.iter_mut().filter(|(name, _)| name.starts_with("kv_cache.")) {
+                let (bytes, values) = pack(format, data);
+                *data = values;
+                packed_leaves.push((name.clone(), bytes));
+            }
+            assert!(!packed_leaves.is_empty(), "zero kv cache leaves would compare nothing");
+            let reference_named = as_named_blocks(&decoded);
+            let mut cpu_plan = plan_named(
+                Engine::Cpu,
+                None,
+                &program,
+                &symbols,
+                &reference_named,
+                &roots,
+                NumericPolicy::default().with_flash_narrowing(true),
+            )
+            .expect("omega::backend plans the decoded cache on cpu");
+            let cpu = execute_plan_named(&mut cpu_plan, &reference_named).expect("cpu runs the decoded cache");
+            let narrow_named: Vec<(&str, QuantizedBlock<'_>)> = owned
+                .iter()
+                .map(|(name, data)| match packed_leaves.iter().find(|(leaf, _)| leaf == name) {
+                    Some((_, bytes)) => (name.as_str(), QuantizedBlock::Packed { codec: *format, bytes }),
+                    None => (name.as_str(), QuantizedBlock::Float32(data.as_slice())),
+                })
+                .collect();
+            let mut cuda_plan = plan_named(
+                Engine::Gpu,
+                Some(GpuDriver::Cuda),
+                &program,
+                &symbols,
+                &narrow_named,
+                &roots,
+                NumericPolicy::bit_exact().with_reassociation(true),
+            )
+            .expect("omega::backend plans the narrow cache on cuda");
+            let identities = cuda_kernel_identities(&cuda_plan).expect("cuda plan exposes its kernels");
+            let cuda = match execute_plan_named(&mut cuda_plan, &narrow_named) {
+                Ok(run) => run,
+                Err(error) if format!("{error:?}").contains("unsupported input codec") => {
+                    eprintln!("narrow cache {format:?} cached_len={cached_len}: the driver's input upload refuses this codec");
+                    continue;
+                }
+                Err(error) => panic!("cuda runs the narrow cache: {error:?}"),
             };
+            let max_diff = cpu.root().iter().zip(cuda.root()).map(|(want, got)| (want - got).abs())
+                .fold(0.0, |worst, gap| if gap > worst { gap } else { worst });
+            let magnitude = cpu.root().iter().map(|value| value.abs()).fold(0.0, |worst, size| if size > worst { size } else { worst });
+            assert!(magnitude > 0.0, "an all-zero reference compares nothing");
+            let relative = max_diff / magnitude;
             compared += 1;
             eprintln!("narrow cache {format:?} cached_len={cached_len} relative={relative}");
             assert!(
