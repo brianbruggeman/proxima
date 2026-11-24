@@ -23,6 +23,7 @@ use crate::moe_expert_precision_settings::MoeExpertPrecisionSettings;
 use crate::memory_reclaim::ReclaimSettings;
 use crate::prompt_cache_settings::PromptCacheSettings;
 use crate::serving::{
+    serving_numeric_policy,
     ContextLength, DEFAULT_BATCH_SIZE, DEFAULT_GPU_LAYERS, DEFAULT_MODEL_PATH,
     DEFAULT_RESIDENT_KV_BYTES, DEFAULT_RESIDENT_PREFILL_PLAN_BYTES, DEFAULT_UBATCH_SIZE,
     GdnPrefillBackend, NamePattern, PrefillConfig, PromptCacheConfig, ServingConfig,
@@ -39,6 +40,26 @@ pub use levels::{
 
 fn from_json<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, serde_json::Error> {
     serde_json::from_str(raw)
+}
+
+fn overlay_policy(named: serde_json::Value) -> Result<NumericPolicy, serde_json::Error> {
+    let serde_json::Value::Object(fields) = named else {
+        return serde_json::from_value(named);
+    };
+    let mut merged = serde_json::to_value(serving_numeric_policy())?;
+    if let Some(base) = merged.as_object_mut() {
+        base.extend(fields);
+    }
+    serde_json::from_value(merged)
+}
+
+fn policy_from_json(raw: &str) -> Result<NumericPolicy, serde_json::Error> {
+    overlay_policy(serde_json::from_str(raw)?)
+}
+
+fn deserialize_policy<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<NumericPolicy, D::Error> {
+    use serde::de::Error as _;
+    overlay_policy(serde::Deserialize::deserialize(deserializer)?).map_err(D::Error::custom)
 }
 
 fn from_name<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, serde_json::Error> {
@@ -269,11 +290,9 @@ pub struct ServingSettings {
     #[builder(default = MathModeName::Relaxed)]
     pub math_mode: MathModeName,
     /// `ServingConfig::numeric_policy`: the rewrites the plan may apply, one permission per field.
-    #[setting(
-        resolve_with = "from_json",
-        default_str = "{\"contraction\":true,\"reassociation\":true,\"nan_assumptions\":false,\"signed_zero\":false,\"approx_functions\":false,\"epilogue_sources\":true}"
-    )]
-    #[builder(default = NumericPolicy::llama_relaxed().with_epilogue_sources(true))]
+    #[setting(resolve_with = "policy_from_json", default_str = "{}")]
+    #[serde(deserialize_with = "deserialize_policy")]
+    #[builder(default = serving_numeric_policy())]
     pub numeric_policy: NumericPolicy,
     /// `ServingConfig::exact_activations`: keep activations at full precision.
     #[setting(default = true)]
@@ -1045,6 +1064,28 @@ epilogue_sources = true
         );
         assert_eq!(defaults.kv_bucket_tokens, 32);
         assert_eq!(defaults, ServingSettings::default());
+    }
+
+    #[test]
+    fn a_policy_table_naming_some_fields_keeps_the_serving_default_for_the_rest() {
+        let expected = ServingConfig::default()
+            .numeric_policy
+            .with_activation_quantization(true);
+        let from_toml: ServingSettings = conflaguration::from_toml_str(
+            "[numeric_policy]\nactivation_quantization = true\n",
+        )
+        .expect("the partial policy toml parses");
+        assert_eq!(from_toml.as_serving_config(&[]).numeric_policy, expected);
+
+        let from_env = temp_env::with_vars(
+            [(
+                "PROXIMA_SERVING_NUMERIC_POLICY",
+                Some(r#"{"activation_quantization":true}"#),
+            )],
+            || ServingSettings::from_env().expect("the partial policy env parses"),
+        );
+        assert_eq!(from_env.as_serving_config(&[]).numeric_policy, expected);
+        assert_eq!(from_env, from_toml);
     }
 
     #[cfg(all(feature = "metal", target_os = "macos"))]

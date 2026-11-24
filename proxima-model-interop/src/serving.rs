@@ -1245,6 +1245,11 @@ impl<'model> ServingConfig<'model> {
     }
 }
 
+/// the one serving default policy; a partial `numeric_policy` table overlays it per field.
+pub(crate) const fn serving_numeric_policy() -> NumericPolicy {
+    NumericPolicy::llama_relaxed().with_epilogue_sources(true)
+}
+
 impl Default for ServingConfig<'static> {
     /// The repo owner's invocation (`-c 131072 -np 1 -ctk q8_0 -ctv q8_0 -fa
     /// on -b 32 -ub 32 -ngl all -fit off --no-kv-offload --no-mmproj
@@ -1302,7 +1307,7 @@ impl Default for ServingConfig<'static> {
             kv_bucket_tokens: 32,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: MathMode::Relaxed,
-            numeric_policy: NumericPolicy::llama_relaxed().with_epilogue_sources(true),
+            numeric_policy: serving_numeric_policy(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Serial,
             #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -2099,7 +2104,7 @@ mod tests {
             kv_bucket_tokens: 64,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: MathMode::Relaxed,
-            numeric_policy: NumericPolicy::llama_relaxed().with_epilogue_sources(true),
+            numeric_policy: serving_numeric_policy(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Serial,
             #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -2352,7 +2357,7 @@ mod tests {
             kv_bucket_tokens: 32,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: MathMode::Relaxed,
-            numeric_policy: NumericPolicy::llama_relaxed().with_epilogue_sources(true),
+            numeric_policy: serving_numeric_policy(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Serial,
             #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -2455,7 +2460,7 @@ mod tests {
             kv_bucket_tokens: 32,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: MathMode::Relaxed,
-            numeric_policy: NumericPolicy::llama_relaxed().with_epilogue_sources(true),
+            numeric_policy: serving_numeric_policy(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Serial,
             #[cfg(all(feature = "metal", target_os = "macos"))]
