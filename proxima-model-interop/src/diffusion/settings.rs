@@ -5,7 +5,7 @@
 use std::str::FromStr;
 
 use conflaguration::{Error, Settings, Validate, ValidationMessage};
-use proxima_numeric::{DType, NumericFormat, PackedRows};
+use proxima_numeric::{DType, FormatCodec, NumericFormat, PackedRows};
 use serde::{Deserialize, Serialize};
 
 use super::png::is_supported_sample;
@@ -49,8 +49,12 @@ pub struct DiffusionSettings {
     /// How the backbone's activations are stored between ops; `defaults.toml`
     /// states the default.
     pub dit_activation: NumericFormat,
-    /// How the backbone's checkpoint weights are packed for the backend.
-    pub dit_weights: NumericFormat,
+    /// The format the loader converts the backbone's matmul weights to and the
+    /// matmuls decode into; `defaults.toml` states the default.
+    pub dit_compute: NumericFormat,
+    /// The format the backbone's weights are stored in; unset means each
+    /// tensor's own header format.
+    pub dit_weights: Option<NumericFormat>,
     /// How the decoder's activations are stored between ops.
     pub vae_activation: NumericFormat,
     /// How the decoder's checkpoint weights are packed for the backend.
@@ -77,7 +81,7 @@ pub struct DiffusionSettings {
 #[serde(deny_unknown_fields)]
 struct FormatDefaults {
     dit_activation: NumericFormat,
-    dit_weights: NumericFormat,
+    dit_compute: NumericFormat,
     vae_activation: NumericFormat,
     vae_weights: NumericFormat,
     group_eps: String,
@@ -105,7 +109,8 @@ impl Default for DiffusionSettings {
             capture_nodes: String::new(),
             capture_auto: false,
             dit_activation: formats.dit_activation,
-            dit_weights: formats.dit_weights,
+            dit_compute: formats.dit_compute,
+            dit_weights: None,
             vae_activation: formats.vae_activation,
             vae_weights: formats.vae_weights,
             group_eps: formats.group_eps,
@@ -144,6 +149,24 @@ impl DiffusionSettings {
         self.dit_activation
             .to_dtype()
             .ok_or_else(|| String::from("dit_activation must be a scalar format"))
+    }
+
+    /// The backbone's compute format as the element type its matmuls decode into.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::dit_activation_dtype`].
+    pub fn dit_compute_dtype(&self) -> Result<DType, String> {
+        self.dit_compute
+            .to_dtype()
+            .ok_or_else(|| String::from("dit_compute must be a scalar format"))
+    }
+
+    fn dit_weights_coded(&self) -> Result<(), String> {
+        match self.dit_weights.as_ref().map(FormatCodec::for_format) {
+            Some(None) => Err(String::from("dit_weights has no codec")),
+            _ => Ok(()),
+        }
     }
 
     /// The decoder's activation format as the element type its graph is built in.
@@ -304,6 +327,8 @@ impl Validate for DiffusionSettings {
             .map_err(|why| why.to_string());
         let errors: Vec<ValidationMessage> = [
             ("dit_activation", self.dit_activation_dtype().map(drop)),
+            ("dit_compute", self.dit_compute_dtype().map(drop)),
+            ("dit_weights", self.dit_weights_coded()),
             ("vae_activation", self.vae_activation_dtype().map(drop)),
             ("gather_index", self.gather_index_dtype().map(drop)),
             ("reference_format", self.reference_format_dtype().map(drop)),
@@ -336,7 +361,7 @@ mod tests {
     #[test]
     fn an_unparseable_override_is_an_error_not_the_defaults() {
         let resolved = temp_env::with_vars(
-            [("PROXIMA_DIFFUSION_DIT_WEIGHTS", Some("not-a-format"))],
+            [("PROXIMA_DIFFUSION_DIT_COMPUTE", Some("not-a-format"))],
             DiffusionSettings::try_resolved,
         );
 
@@ -373,8 +398,43 @@ mod tests {
     fn the_shipped_data_file_parses_and_sets_weights_apart_from_activations() {
         let formats = FormatDefaults::shipped().expect("defaults.toml parses as format data");
 
-        assert_ne!(formats.dit_weights, formats.dit_activation);
+        assert_ne!(formats.dit_compute, formats.dit_activation);
         assert_ne!(formats.vae_weights, formats.vae_activation);
+    }
+
+    #[test]
+    fn unset_storage_is_none() {
+        let resolved = temp_env::with_vars(
+            [("PROXIMA_DIFFUSION_DIT_WEIGHTS", None::<&str>)],
+            DiffusionSettings::try_resolved,
+        )
+        .expect("the shipped defaults resolve");
+
+        assert_eq!(resolved.dit_weights, None);
+    }
+
+    #[test]
+    fn an_unknown_storage_name_is_an_error() {
+        let resolved = temp_env::with_vars(
+            [("PROXIMA_DIFFUSION_DIT_WEIGHTS", Some("not-a-format"))],
+            DiffusionSettings::try_resolved,
+        );
+
+        assert!(resolved.is_err(), "a mistyped storage name must fail");
+    }
+
+    #[test]
+    fn a_non_scalar_compute_is_rejected() {
+        let block = NumericFormat::ALL
+            .into_iter()
+            .find(|candidate| candidate.to_dtype().is_none())
+            .expect("a block layout exists");
+        let settings = DiffusionSettings {
+            dit_compute: block,
+            ..DiffusionSettings::default()
+        };
+
+        assert!(settings.validate().is_err());
     }
 
     #[test]
@@ -382,9 +442,11 @@ mod tests {
         let formats = FormatDefaults::shipped().expect("defaults.toml parses as format data");
         let settings = DiffusionSettings::default();
 
-        assert_eq!(settings.dit_weights, formats.dit_weights);
+        assert_eq!(settings.dit_compute, formats.dit_compute);
         assert_eq!(settings.vae_activation, formats.vae_activation);
         assert!(settings.dit_activation_dtype().is_ok());
+        assert!(settings.dit_compute_dtype().is_ok());
+        assert!(settings.validate().is_ok());
     }
 
     #[test]

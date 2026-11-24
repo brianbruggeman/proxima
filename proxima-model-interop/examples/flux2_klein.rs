@@ -514,7 +514,7 @@ fn diffuse(
         graph,
         output.velocity,
         &[rows],
-        diffusion.dit_weights,
+        diffusion.dit_compute,
         serving,
     )?;
     let dit_seconds_load = dit_load.elapsed();

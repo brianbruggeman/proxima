@@ -98,7 +98,7 @@ mod bench {
         symbols: &[u64],
         config: &ServingConfig<'_>,
     ) -> Outcome<Denoiser> {
-        let weights = diffusion_settings()?.dit_weights;
+        let weights = diffusion_settings()?.dit_compute;
         Denoiser::new(checkpoint, graph, output, symbols, weights, config)
             .map_err(context("dit stage"))
     }
@@ -517,7 +517,7 @@ mod bench {
     ) -> Outcome<()> {
         let settings = serving_settings()?;
         let config = settings.as_serving_config(&[]);
-        let weight = element_bytes(&diffusion_settings()?.dit_weights);
+        let weight = element_bytes(&diffusion_settings()?.dit_compute);
         // --- one double block ---
         {
             let mut graph = dit_graph()?;
@@ -667,7 +667,7 @@ mod bench {
     ) -> Outcome<()> {
         let mut graph = dit_graph()?;
         let element = element_bytes(graph.activation_format());
-        let weight = element_bytes(&diffusion_settings()?.dit_weights);
+        let weight = element_bytes(&diffusion_settings()?.dit_compute);
         let (inputs, _, _) = base_inputs(&mut graph)?;
         let output =
             build_dit(&mut graph, &dit_config(5, 20), &inputs).map_err(context("full dit"))?;

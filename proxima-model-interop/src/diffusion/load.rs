@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use proxima_numeric::codec::Codec;
-use proxima_numeric::{DType, FormatCodec, PackedRows};
+use proxima_numeric::{DType, FormatCodec, NumericFormat, PackedRows};
 
 use crate::CheckpointMapping;
 
@@ -100,6 +100,33 @@ impl Checkpoint {
             entry.shape.clone(),
             &self.mapping.bytes()[start..end],
         ))
+    }
+
+    /// The header format the bindings' tensors share, `None` for no bindings.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the tensor when it is missing, has no numeric format,
+    /// or disagrees with the first binding's.
+    pub fn stored_format(
+        &self,
+        bindings: &[WeightBinding],
+    ) -> Result<Option<NumericFormat>, String> {
+        let mut found: Option<NumericFormat> = None;
+        for binding in bindings {
+            let format = self
+                .tensor(&binding.tensor)?
+                .0
+                .format()
+                .ok_or_else(|| format!("{}: no numeric format", binding.tensor))?;
+            match found {
+                Some(first) if first != format => {
+                    return Err(format!("{}: stored format differs from {first:?}", binding.tensor));
+                }
+                _ => found = Some(format),
+            }
+        }
+        Ok(found)
     }
 
     /// The square window extent of a convolution weight stored `[out, in, kh, kw]`.
@@ -265,4 +292,49 @@ fn kernel_tap<T: Copy>(values: &[T], shape: &[u64], row: u32, column: u32) -> Ve
         tapped.extend_from_slice(&values[base..base + into]);
     }
     tapped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn binding(tensor: &str) -> WeightBinding {
+        WeightBinding {
+            leaf: tensor.into(),
+            tensor: tensor.into(),
+            rows: None,
+            columns: None,
+            tap: None,
+            taps: false,
+        }
+    }
+
+    fn open_header(dir: &Path, dtypes: [&str; 3]) -> Checkpoint {
+        let header = format!(
+            r#"{{"a":{{"dtype":"{}","shape":[1,2],"data_offsets":[0,2]}},"b":{{"dtype":"{}","shape":[1,2],"data_offsets":[2,4]}},"c":{{"dtype":"{}","shape":[1,2],"data_offsets":[4,6]}}}}"#,
+            dtypes[0], dtypes[1], dtypes[2]
+        );
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(&[0u8; 6]);
+        let path = dir.join("synthetic.safetensors");
+        std::fs::write(&path, bytes).expect("the synthetic checkpoint writes");
+        Checkpoint::open(&path).expect("the synthetic checkpoint opens")
+    }
+
+    #[test]
+    fn the_stored_header_is_reported_and_a_disagreement_is_an_error() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let checkpoint = open_header(dir.path(), ["I8", "I8", "U8"]);
+        let header = checkpoint.tensor("a").expect("a is declared").0.format();
+
+        let none = checkpoint.stored_format(&[]).expect("an empty list is fine");
+        let agreed = checkpoint.stored_format(&[binding("a"), binding("b")]);
+        let split = checkpoint.stored_format(&[binding("a"), binding("c")]);
+
+        assert_eq!(none, None);
+        assert!(header.is_some(), "the header dtype has a numeric format");
+        assert_eq!(agreed.expect("matching headers agree"), header);
+        assert!(split.is_err(), "differing headers must not pick one");
+    }
 }

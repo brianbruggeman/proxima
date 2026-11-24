@@ -492,7 +492,7 @@ mod dit {
             graph,
             velocity,
             &[JOINT as u64],
-            diffusion.dit_weights,
+            diffusion.dit_compute,
             &serving_settings()?.as_serving_config(&[]),
         )?;
         eprintln!("weights loaded in {:?}", loading.elapsed());

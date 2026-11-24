@@ -5,8 +5,10 @@
 dit_activation = "float32"
 vae_activation = "float32"
 
-# how each stage's checkpoint weights are packed for the backend
-dit_weights = "float16"
+# the format the loader converts the backbone's matmul weights to, and the matmuls decode into
+dit_compute = "float16"
+
+# how the decoder's checkpoint weights are packed for the backend
 vae_weights = "float16"
 
 # the norm epsilons, as decimal text parsed into the element type that consumes them
