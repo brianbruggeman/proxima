@@ -37,6 +37,7 @@
 use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use proxima_numeric::DType;
@@ -120,6 +121,10 @@ pub struct SafetensorsTensorView<'manifest, 'file> {
     /// Axes the lowered program declares for the leaf, e.g. `[1024, 16, 64]` for an
     /// attention query over a stored `[1024, 1024]` matrix.
     pub program_axes: Vec<u64>,
+    /// `(part, of)` when the leaf is one of `of` equal row groups of the stored
+    /// matrix: `bytes` then holds only that contiguous row range, while `shape`
+    /// stays the whole stored tensor's.
+    part: Option<(u32, u32)>,
 }
 
 /// Resolve program leaves through `binding`, validate their source layout and
@@ -210,8 +215,9 @@ fn collect_program_views<'manifest, 'file>(
             ranges_validated = true;
         }
         let entry = safetensors_source(manifest, binding, leaf, shape)?;
+        let part = dense_part(binding, leaf, entry);
         views.push(validated_view(
-            file_bytes, data_start, leaf, shape, role, entry,
+            file_bytes, data_start, leaf, shape, role, entry, part,
         )?);
     }
 
@@ -241,6 +247,7 @@ fn collect_program_views<'manifest, 'file>(
                 &shape,
                 Role::Native,
                 entry,
+                None,
             )?);
         }
     }
@@ -536,17 +543,11 @@ fn safetensors_source<'manifest>(
     }
     for (alias, prefix) in binding.aliases_for(leaf) {
         match alias {
-            TensorAlias::Rename { from, .. } => {
+            TensorAlias::Rename { from, .. } | TensorAlias::Part { from, .. } => {
                 let source = format!("{prefix}{from}");
                 if let Some(entry) = manifest.tensor(&source) {
                     return Ok(entry);
                 }
-            }
-            TensorAlias::Part { .. } => {
-                return Err(InteropError::SafetensorsBindingUnsupported {
-                    leaf: leaf.into(),
-                    feature: "part alias".into(),
-                });
             }
             TensorAlias::Join { .. } => {
                 return Err(InteropError::SafetensorsBindingUnsupported {
@@ -569,7 +570,9 @@ fn validated_view<'manifest, 'file>(
     shape: &[Extent],
     role: Role,
     entry: &'manifest TensorEntry,
+    part: Option<(u32, u32)>,
 ) -> Result<SafetensorsTensorView<'manifest, 'file>, InteropError> {
+    let part_shape = part_axes(leaf, entry, part)?;
     let mut program_axes = Vec::with_capacity(shape.len());
     for extent in shape {
         let Extent::Static(axis) = extent else {
@@ -581,8 +584,8 @@ fn validated_view<'manifest, 'file>(
         program_axes.push(u64::from(*axis));
     }
     let axes_match = match role {
-        Role::Native => native_view_matches(&entry.shape, &program_axes),
-        Role::InOut => inout_view_matches(&entry.shape, &program_axes),
+        Role::Native => native_view_matches(&part_shape, &program_axes),
+        Role::InOut => inout_view_matches(&part_shape, &program_axes),
         Role::Gathered => false,
     };
     if !axes_match {
@@ -590,7 +593,7 @@ fn validated_view<'manifest, 'file>(
             leaf: leaf.into(),
             tensor: entry.name.clone(),
             leaf_axes: program_axes,
-            tensor_axes: entry.shape.clone(),
+            tensor_axes: part_shape,
         });
     }
 
@@ -620,7 +623,8 @@ fn validated_view<'manifest, 'file>(
             actual,
         });
     }
-    let bytes = tensor_bytes(file_bytes, data_start, entry)?;
+    let whole = tensor_bytes(file_bytes, data_start, entry)?;
+    let bytes = part.map_or(whole, |(index, of)| part_range(whole, index, of));
     Ok(SafetensorsTensorView {
         leaf: leaf.into(),
         name: entry.name.as_str(),
@@ -629,7 +633,91 @@ fn validated_view<'manifest, 'file>(
         bytes,
         role,
         program_axes,
+        part,
     })
+}
+
+/// The axes the leaf's source occupies: the stored axes, or for row group
+/// `part` of `of` of a stored `[rows, columns]` matrix, `[rows / of, columns]`.
+/// A part of a non-matrix, `of == 0`, `part >= of`, or an `of` that does not
+/// divide the stored rows refuses naming the range.
+fn part_axes(
+    leaf: &str,
+    entry: &TensorEntry,
+    part: Option<(u32, u32)>,
+) -> Result<Vec<u64>, InteropError> {
+    let Some((index, of)) = part else {
+        return Ok(entry.shape.clone());
+    };
+    let refuse = |feature: String| InteropError::SafetensorsBindingUnsupported {
+        leaf: leaf.into(),
+        feature,
+    };
+    let [rows, columns] = entry.shape.as_slice() else {
+        return Err(refuse(format!(
+            "part {index} of {of} of non-matrix tensor {:?}",
+            entry.name
+        )));
+    };
+    if of == 0 || index >= of || rows % u64::from(of) != 0 {
+        return Err(refuse(format!(
+            "part {index} of {of} outside the {rows} stored rows of {:?}",
+            entry.name
+        )));
+    }
+    Ok(vec![rows / u64::from(of), *columns])
+}
+
+/// Row group `index` of `of` equal groups of a whole row-major tensor's bytes:
+/// one contiguous range. `index < of` and `of` dividing the rows are checked by
+/// [`part_axes`] first.
+fn part_range(whole: &[u8], index: u32, of: u32) -> &[u8] {
+    let part_len = whole.len() / of as usize;
+    let start = index as usize * part_len;
+    &whole[start..start + part_len]
+}
+
+impl SafetensorsTensorView<'_, '_> {
+    /// `(rows, columns)` of the stored matrix this leaf binds: the part's rows
+    /// for a row group, else the stored first two axes (`(0, 0)` below rank 2,
+    /// where no transpose reads it).
+    fn part_matrix(&self) -> (usize, usize) {
+        let [rows, columns] = *self.shape else {
+            return (0, 0);
+        };
+        let of = self.part.map_or(1, |(_, of)| u64::from(of));
+        ((rows / of) as usize, columns as usize)
+    }
+
+    /// The row group of a decoded whole tensor this leaf names; the decode
+    /// unchanged when the leaf is not a part.
+    fn part_of<T: Clone>(&self, decoded: Vec<T>) -> Vec<T> {
+        match self.part {
+            Some((index, of)) => {
+                let part_len = decoded.len() / of as usize;
+                let start = index as usize * part_len;
+                decoded[start..start + part_len].to_vec()
+            }
+            None => decoded,
+        }
+    }
+}
+
+/// The `(part, of)` of the first [`TensorAlias::Part`] of `binding` that names
+/// `entry` as `leaf`'s source; `None` when the leaf reads its own name or a
+/// rename.
+fn dense_part(binding: &BindingProfile, leaf: &str, entry: &TensorEntry) -> Option<(u32, u32)> {
+    if entry.name == leaf {
+        return None;
+    }
+    binding
+        .aliases_for(leaf)
+        .find_map(|(alias, prefix)| match alias {
+            TensorAlias::Part { from, part, of, .. } if format!("{prefix}{from}") == entry.name => {
+                Some((*part, *of))
+            }
+            _ => None,
+        })
 }
 
 /// An `[out, in]` file tensor viewed as the program's `[in axes.., out axes..]`
@@ -647,11 +735,17 @@ fn inout_view_matches(stored: &[u64], program_axes: &[u64]) -> bool {
     })
 }
 
-/// A stored tensor viewed as a program leaf of the same axes, or a one-element
-/// `[1]` tensor viewed as the program's rank-0 scalar (gemma4's
-/// `layer_scalar` is `[1]` in the file, GGUF `layer_output_scale.weight` the same).
+/// A stored tensor viewed as a program leaf holding the same element count: the
+/// same bytes re-viewed under other axes (`[hidden, hidden]` as
+/// `[hidden, heads, head_dim]`, `[channels]` as `[groups, width]`), as the GGUF
+/// binder's `check_elements` accepts. The one-element `[1]` over a rank-0 leaf
+/// (gemma4's `layer_scalar`) is the count-1 case.
 fn native_view_matches(stored: &[u64], program_axes: &[u64]) -> bool {
-    stored == program_axes || (program_axes.is_empty() && stored == [1])
+    let count = |axes: &[u64]| {
+        axes.iter()
+            .try_fold(1u64, |product, axis| product.checked_mul(*axis))
+    };
+    count(stored).is_some() && count(stored) == count(program_axes)
 }
 
 fn bind_safetensors_leaf<'file>(
@@ -666,15 +760,12 @@ fn bind_safetensors_leaf<'file>(
     let role = view.role;
     let bytes = view.bytes;
     let dtype = view.dtype;
+    let (rows, columns) = view.part_matrix();
     if binding.decodes_to_f32(leaf) {
         let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, view.name)?;
+        let decoded = view.part_of(decoded);
         let output = if role == Role::InOut {
-            transpose_out_in_to_in_out(
-                &decoded,
-                leaf,
-                view.shape[0] as usize,
-                view.shape[1] as usize,
-            )?
+            transpose_out_in_to_in_out(&decoded, leaf, rows, columns)?
         } else {
             decoded
         };
@@ -682,17 +773,16 @@ fn bind_safetensors_leaf<'file>(
         weights.owned.push((leaf.into(), output));
     } else if role == Role::InOut && dtype == DType::FLOAT32 {
         let decoded = reinterpret_f32(bytes);
-        let output = transpose_out_in_to_in_out(
-            &decoded,
-            leaf,
-            view.shape[0] as usize,
-            view.shape[1] as usize,
-        )?;
+        let output = transpose_out_in_to_in_out(&decoded, leaf, rows, columns)?;
         weights.resident_bytes += output.len() * core::mem::size_of::<f32>();
         weights.owned.push((leaf.into(), output));
     } else if role == Role::InOut {
-        let packed =
-            safetensors_tensor_as_packed_block(manifest, file_bytes, data_start, view.name)?;
+        let packed = match view.part {
+            Some(_) => packed_block_over(view.name, dtype, bytes)?,
+            None => {
+                safetensors_tensor_as_packed_block(manifest, file_bytes, data_start, view.name)?
+            }
+        };
         if matches!(packed, QuantizedBlock::Float32(_)) {
             return Err(InteropError::SafetensorsBindingUnsupported {
                 leaf: leaf.into(),
@@ -713,6 +803,7 @@ fn bind_safetensors_leaf<'file>(
         }
     } else {
         let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, view.name)?;
+        let decoded = view.part_of(decoded);
         weights.resident_bytes += decoded.len() * core::mem::size_of::<f32>();
         weights.owned.push((leaf.into(), decoded));
     }
@@ -741,26 +832,37 @@ pub(crate) fn safetensors_tensor_as_packed_block<'file>(
 ) -> Result<QuantizedBlock<'file>, InteropError> {
     let entry = find_entry(manifest, name)?;
     let bytes = tensor_bytes(file_bytes, data_start, entry)?;
-    if entry.dtype == DType::FLOAT32 {
+    packed_block_over(&entry.name, entry.dtype, bytes)
+}
+
+/// The packed block over `bytes` stored as `dtype`, borrowed from the caller's
+/// buffer: the body of [`safetensors_tensor_as_packed_block`] once the bytes are
+/// chosen, so a whole tensor and a row range of one build alike.
+fn packed_block_over<'file>(
+    tensor: &str,
+    dtype: DType,
+    bytes: &'file [u8],
+) -> Result<QuantizedBlock<'file>, InteropError> {
+    if dtype == DType::FLOAT32 {
         aligned_f32_view(bytes)
             .map(QuantizedBlock::Float32)
             .ok_or_else(|| InteropError::MisalignedFloat32Tensor {
-                tensor: entry.name.clone(),
+                tensor: tensor.into(),
             })
-    } else if entry.dtype == DType::FLOAT16 {
+    } else if dtype == DType::FLOAT16 {
         Ok(QuantizedBlock::Packed {
             codec: Codec::Float16,
             bytes,
         })
-    } else if entry.dtype == DType::BFLOAT16 {
+    } else if dtype == DType::BFLOAT16 {
         Ok(QuantizedBlock::Packed {
             codec: Codec::BFloat16,
             bytes,
         })
     } else {
         Err(InteropError::UndecodableSafetensorsDType {
-            tensor: entry.name.clone(),
-            dtype: entry.dtype,
+            tensor: tensor.into(),
+            dtype,
         })
     }
 }
@@ -1547,7 +1649,9 @@ mod rope_rows;
 mod tests {
     use alloc::vec;
 
-    use proxima_numeric::float_layout::{FloatLayout, NanPolicy, SignEncoding, Specials};
+    use proxima_numeric::float_layout::{
+        FloatLayout, NAMED_LAYOUTS, NanPolicy, SignEncoding, Specials,
+    };
     use proxima_safetensors::{SafetensorsModel, TensorPayload, write_complete};
 
     use super::*;
@@ -2041,6 +2145,162 @@ mod tests {
         // match an independent bf16 decode of the same bytes.
         assert!((state.owned[0].1[0] - 0.0).abs() < 1e-6);
         assert!((state.owned[0].1[1] - 0.5).abs() < 1e-6);
+    }
+
+    const FUSED_QKV: &str = "blk.0.attn_qkv.weight";
+    const PART_LEAF: &str = "blk.0.attn_q.weight";
+
+    /// The first named two-byte layout the packed binder serves, found by the
+    /// codec predicate rather than spelled.
+    fn two_byte_layout() -> FloatLayout {
+        NAMED_LAYOUTS
+            .iter()
+            .map(|(layout, _)| *layout)
+            .find(|layout| expert_stack_codec(DType::Layout(*layout)).is_some())
+            .expect("a named layout the packed binder serves exists")
+    }
+
+    /// The stored bit pattern of the whole number `value` (1..=255) in `layout`:
+    /// the biased exponent of its top bit, then the bits below it as mantissa.
+    fn whole_number_pattern(layout: FloatLayout, value: u32) -> u16 {
+        let exponent = 31 - value.leading_zeros();
+        let mantissa = (value - (1 << exponent)) << (u32::from(layout.mantissa_bits) - exponent);
+        let biased = (exponent as i16 + layout.bias()) as u32;
+        ((biased << layout.mantissa_bits) | mantissa) as u16
+    }
+
+    /// A two-byte `[rows, columns]` ramp `1.0, 2.0, ..` written as a real
+    /// one-tensor safetensors file, with its parsed manifest and data start.
+    fn ramp_checkpoint(name: &str, rows: u64, columns: u64) -> (Vec<u8>, Manifest, u64) {
+        let layout = two_byte_layout();
+        let bytes: Vec<u8> = (1..=(rows * columns) as u32)
+            .flat_map(|value| whole_number_pattern(layout, value).to_le_bytes())
+            .collect();
+        let file_bytes = write_complete(&SafetensorsModel {
+            tensors: vec![TensorPayload {
+                name: name.into(),
+                dtype: DType::Layout(layout),
+                shape: vec![rows, columns],
+                data: bytes.as_slice(),
+            }],
+            metadata: alloc::collections::BTreeMap::new(),
+        })
+        .expect("writes a real two-byte safetensors buffer");
+        let manifest = proxima_safetensors::parse_complete(&file_bytes)
+            .expect("parses real safetensors buffer");
+        let data_start = header_data_start(&file_bytes);
+        (file_bytes, manifest, data_start)
+    }
+
+    fn part_binding(part: u32, of: u32) -> BindingProfile {
+        BindingProfile {
+            aliases: vec![TensorAlias::Part {
+                leaf: "attn_q.weight".into(),
+                from: "attn_qkv.weight".into(),
+                part,
+                of,
+            }],
+            ..BindingProfile::default()
+        }
+    }
+
+    fn part_view<'file>(
+        file_bytes: &'file [u8],
+        manifest: &'file Manifest,
+        data_start: u64,
+        binding: &BindingProfile,
+        program: &[u32],
+        role: Role,
+    ) -> Result<SafetensorsTensorView<'file, 'file>, InteropError> {
+        let shape: Vec<Extent> = program.iter().copied().map(Extent::Static).collect();
+        let entry = safetensors_source(manifest, binding, PART_LEAF, &shape)?;
+        let part = dense_part(binding, PART_LEAF, entry);
+        validated_view(file_bytes, data_start, PART_LEAF, &shape, role, entry, part)
+    }
+
+    #[test]
+    fn dense_part_alias_binds_its_row_range_as_a_packed_view_over_the_file_bytes() {
+        let (file_bytes, manifest, data_start) = ramp_checkpoint(FUSED_QKV, 6, 4);
+        let binding = part_binding(1, 3);
+
+        let view = part_view(&file_bytes, &manifest, data_start, &binding, &[4, 2], Role::InOut)
+            .expect("rows 2..4 of the [6, 4] tensor are a [2, 4] part");
+        let mut weights = BoundWeights::new(&[]);
+        bind_safetensors_leaf(&manifest, &file_bytes, data_start, &binding, &view, &mut weights)
+            .expect("the part binds");
+
+        let row_bytes = 4 * 2;
+        let start = data_start as usize + 2 * row_bytes;
+        let source = &file_bytes[start..start + 2 * row_bytes];
+        let [(name, QuantizedBlock::Packed { codec, bytes })] = weights.packed.as_slice() else {
+            panic!("a two-byte part must bind as one packed block");
+        };
+        assert_eq!(name, PART_LEAF);
+        assert_eq!(Some(*codec), expert_stack_codec(DType::Layout(two_byte_layout())));
+        assert_eq!(bytes.len(), source.len());
+        assert!(core::ptr::eq(bytes.as_ptr(), source.as_ptr()));
+        assert!(weights.owned.is_empty());
+    }
+
+    #[test]
+    fn dense_part_alias_past_the_stored_rows_is_refused() {
+        let (file_bytes, manifest, data_start) = ramp_checkpoint(FUSED_QKV, 6, 4);
+        let binding = part_binding(3, 3);
+
+        let refused = part_view(&file_bytes, &manifest, data_start, &binding, &[4, 2], Role::InOut);
+
+        assert!(
+            matches!(
+                &refused,
+                Err(InteropError::SafetensorsBindingUnsupported { feature, .. })
+                    if feature.contains("part 3 of 3 outside the 6 stored rows")
+            ),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn native_re_view_with_equal_element_count_binds_the_whole_tensor_bytes() {
+        let (file_bytes, manifest, data_start) = ramp_checkpoint(PART_LEAF, 4, 4);
+        let binding = BindingProfile::default();
+
+        let view = part_view(&file_bytes, &manifest, data_start, &binding, &[4, 2, 2], Role::Native)
+            .expect("[4, 2, 2] re-views the stored [4, 4]");
+        let mut weights = BoundWeights::new(&[]);
+        bind_safetensors_leaf(&manifest, &file_bytes, data_start, &binding, &view, &mut weights)
+            .expect("the re-viewed leaf binds");
+
+        let whole = &file_bytes[data_start as usize..];
+        assert_eq!(view.bytes.len(), 4 * 4 * 2);
+        assert!(core::ptr::eq(view.bytes.as_ptr(), whole.as_ptr()));
+        assert_eq!(weights.owned.len(), 1);
+        assert_eq!(weights.owned[0].1.len(), 16);
+    }
+
+    #[test]
+    fn native_re_view_with_a_different_element_count_is_refused() {
+        let (file_bytes, manifest, data_start) = ramp_checkpoint(PART_LEAF, 4, 4);
+        let binding = BindingProfile::default();
+
+        let refused = part_view(&file_bytes, &manifest, data_start, &binding, &[4, 2, 3], Role::Native);
+
+        assert!(
+            matches!(&refused, Err(InteropError::SafetensorsAxesMismatch { .. })),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn inout_leaf_that_is_not_a_transpose_split_of_the_stored_axes_stays_refused() {
+        let (file_bytes, manifest, data_start) = ramp_checkpoint(PART_LEAF, 4, 4);
+        let binding = BindingProfile::default();
+
+        let refused = part_view(&file_bytes, &manifest, data_start, &binding, &[3, 2, 2], Role::InOut);
+
+        assert!(
+            matches!(&refused, Err(InteropError::SafetensorsAxesMismatch { .. })),
+            "{refused:?}"
+        );
     }
 
     /// A tied checkpoint (real SmolLM2-135M-Instruct's own shape: no

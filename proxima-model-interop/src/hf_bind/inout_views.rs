@@ -67,6 +67,7 @@ fn view_of<'file>(
         shape,
         Role::InOut,
         entry,
+        None,
     )
 }
 
