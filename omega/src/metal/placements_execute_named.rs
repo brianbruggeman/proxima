@@ -2555,7 +2555,7 @@ where
             .name()
             .ok_or(TensorError::UnnamedInput(*node))?;
         if let Some(block) = named.iter().find(|(candidate, _)| *candidate == name) {
-            blocks.push(block.1);
+            blocks.push(block.1.host_view());
         } else if is_placed(*node) {
             blocks.push(QuantizedBlock::Float32(&[]));
         } else {

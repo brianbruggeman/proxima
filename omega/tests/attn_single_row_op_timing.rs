@@ -15,7 +15,7 @@ mod sliding_global_rows_support;
 mod support;
 
 use sliding_global_rows_support::{Geometry, fixture_with};
-use support::{as_named_blocks, production_numeric_policy};
+use support::{as_packed_named_blocks, production_numeric_policy};
 
 fn attention_totals(timings: &[omega::metal::OpGpuTiming]) -> (u64, usize, u64) {
     let mut attention_ns = 0_u64;
@@ -45,7 +45,7 @@ fn largest_ops(timings: &[omega::metal::OpGpuTiming], count: usize) -> Vec<(Stri
 fn single_query_attention_arms_report_per_op_gpu_time() {
     let policy = production_numeric_policy();
     let fixture = fixture_with(1, 512, Geometry::ONE_KV_HEAD);
-    let named = as_named_blocks(&fixture.named);
+    let named = as_packed_named_blocks(&fixture.named);
     let roots = [fixture.logits];
 
     let legacy = omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)

@@ -14,7 +14,7 @@ mod sliding_global_rows_support;
 mod support;
 
 use sliding_global_rows_support::{Geometry, fixture_with};
-use support::{as_named_blocks, production_numeric_policy};
+use support::{as_packed_named_blocks, production_numeric_policy};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
@@ -42,7 +42,7 @@ fn warm_call_allocations(
 fn a_warm_single_query_shared_k_plan_allocates_like_the_decode_split() {
     let policy = production_numeric_policy();
     let fixture = fixture_with(1, 512, Geometry::ONE_KV_HEAD);
-    let named = as_named_blocks(&fixture.named);
+    let named = as_packed_named_blocks(&fixture.named);
     let roots = [fixture.logits];
 
     let legacy = omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)

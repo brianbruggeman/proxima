@@ -43,13 +43,14 @@ use proxima_primitives::pipe::Pipe;
 use proxima_tensor::bind::{READY_BATCH_CAPACITY, ReadyBatch};
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::{BFloat8, BoundOp, BoundOpKind, Interpreter, NodeId, Op, bind_with_fusion, block_node_ids, infer};
-use proxima_numeric::{NumericPolicy};
+use proxima_numeric::{NumericPolicy, PackedRows};
 
 mod sliding_global_rows_support;
 mod support;
 use sliding_global_rows_support::{Fixture, Geometry, bucket_for, fixture_with};
 use support::{
-    as_named_blocks, attention_probe_roots, production_numeric_policy, sampled_attention_against_device,
+    as_packed_named_blocks, attention_probe_roots, packed_named_block, production_numeric_policy,
+    sampled_attention_against_device,
 };
 
 const VERIFY_ROWS: [usize; 4] = [2, 5, 17, 49];
@@ -100,13 +101,15 @@ fn run_resolved_root_on_cpu(fixture: &Fixture, resolved: &[BoundOp], root: NodeI
         else {
             unreachable!("block_node_ids only returns named inputs");
         };
-        let data = fixture
+        let mut data = Vec::new();
+        fixture
             .named
             .iter()
             .find(|(candidate, _)| candidate == name)
             .unwrap_or_else(|| panic!("missing named input {name}"))
             .1
-            .clone();
+            .decode_all(&mut data)
+            .expect("the named input decodes");
         buffers[node.0 as usize] = Some(data);
     }
     let interpreter = Interpreter::new(&mut buffers);
@@ -128,7 +131,7 @@ fn run_resolved_root_on_cpu(fixture: &Fixture, resolved: &[BoundOp], root: NodeI
 fn one_cell(label: &str, geometry: Geometry, rows: usize, cached_len: usize) -> (f32, f32) {
     let policy = production_numeric_policy();
     let fixture = fixture_with(rows, cached_len, geometry);
-    let named = as_named_blocks(&fixture.named);
+    let named = as_packed_named_blocks(&fixture.named);
     let roots = [fixture.logits];
     let cell = format!(
         "{label}: rows {rows} cached_len {cached_len} bucket {}",
@@ -282,7 +285,7 @@ fn rows_under_one_fragment_of_a_two_group_head_hold_one_dispatch_parity_with_the
     let mut cells = 0_usize;
     for cached_len in [33_usize, 511] {
         let fixture = fixture_with(rows, cached_len, Geometry::TWO_QUERY_GROUPS);
-        let named = as_named_blocks(&fixture.named);
+        let named = as_packed_named_blocks(&fixture.named);
         let roots = [fixture.logits];
         let cell = format!("rows {rows} cached_len {cached_len}");
 
@@ -311,16 +314,24 @@ fn rows_under_one_fragment_of_a_two_group_head_hold_one_dispatch_parity_with_the
 
 fn bf16_cache_payload(fixture: &mut Fixture) -> Vec<(String, Vec<u8>)> {
     let shapes = infer(&fixture.program, &fixture.symbols).expect("the fixture shapes infer");
-    for (name, values) in &mut fixture.named {
+    for (name, rows) in &mut fixture.named {
         if name.contains(".attn_k.weight") || name.contains(".attn_v.weight") {
+            let mut values = Vec::new();
+            rows.decode_all(&mut values)
+                .expect("the weight block decodes");
             values.fill(0.0);
+            *rows = PackedRows::from_values(rows.format(), &values)
+                .expect("the weight block re-encodes");
         }
     }
     fixture
         .named
         .iter_mut()
         .filter(|(name, _)| name.starts_with("kv_cache."))
-        .map(|(name, values)| {
+        .map(|(name, rows)| {
+            let mut values = Vec::new();
+            rows.decode_all(&mut values)
+                .expect("the cache block decodes");
             let input_index = fixture
                 .program
                 .iter()
@@ -353,6 +364,8 @@ fn bf16_cache_payload(fixture: &mut Fixture) -> Vec<(String, Vec<u8>)> {
                     .iter()
                     .all(|value| bf16::from_f32(*value).to_f32() == *value)
             );
+            *rows = PackedRows::from_values(rows.format(), &values)
+                .expect("the cache block re-encodes");
             let bytes = values
                 .iter()
                 .flat_map(|value| bf16::from_f32(*value).to_bits().to_le_bytes())
@@ -381,11 +394,11 @@ fn card_10_bf16_row_matches_f32_cache_output_bits_with_f32_mma() {
         .expect("the fixture includes a global attention operation")
         .node;
     let roots = [root];
-    let f32_named = as_named_blocks(&fixture.named);
+    let f32_named = as_packed_named_blocks(&fixture.named);
     let bf16_named: Vec<(&str, QuantizedBlock<'_>)> = fixture
         .named
         .iter()
-        .map(|(name, values)| {
+        .map(|(name, rows)| {
             match packed_cache
                 .iter()
                 .find(|(packed_name, _)| packed_name == name)
@@ -397,7 +410,7 @@ fn card_10_bf16_row_matches_f32_cache_output_bits_with_f32_mma() {
                         bytes,
                     },
                 ),
-                None => (name.as_str(), QuantizedBlock::Float32(values)),
+                None => (name.as_str(), packed_named_block(name, rows)),
             }
         })
         .collect();
@@ -503,16 +516,24 @@ fn card_10_bf16_row_selects_the_bf16_source_and_declines_mixed_cache_codecs() {
 
 fn bf8_cache_payload(fixture: &mut Fixture) -> Vec<(String, Vec<u8>)> {
     let shapes = infer(&fixture.program, &fixture.symbols).expect("the fixture shapes infer");
-    for (name, values) in &mut fixture.named {
+    for (name, rows) in &mut fixture.named {
         if name.contains(".attn_k.weight") || name.contains(".attn_v.weight") {
+            let mut values = Vec::new();
+            rows.decode_all(&mut values)
+                .expect("the weight block decodes");
             values.fill(0.0);
+            *rows = PackedRows::from_values(rows.format(), &values)
+                .expect("the weight block re-encodes");
         }
     }
     fixture
         .named
         .iter_mut()
         .filter(|(name, _)| name.starts_with("kv_cache."))
-        .map(|(name, values)| {
+        .map(|(name, rows)| {
+            let mut values = Vec::new();
+            rows.decode_all(&mut values)
+                .expect("the cache block decodes");
             let input_index = fixture
                 .program
                 .iter()
@@ -547,6 +568,8 @@ fn bf8_cache_payload(fixture: &mut Fixture) -> Vec<(String, Vec<u8>)> {
                     "row {row} dimension {dimension} is exactly BF8"
                 );
             }
+            *rows = PackedRows::from_values(rows.format(), &values)
+                .expect("the cache block re-encodes");
             let bytes = values
                 .iter()
                 .map(|value| BFloat8::from_f32(*value).to_bits())
@@ -575,11 +598,11 @@ fn card_11_bf8_row_matches_f32_cache_output_bits_and_masks_the_padded_row() {
         .expect("the fixture includes a global attention operation")
         .node;
     let roots = [root];
-    let f32_named = as_named_blocks(&fixture.named);
+    let f32_named = as_packed_named_blocks(&fixture.named);
     let bf8_named: Vec<(&str, QuantizedBlock<'_>)> = fixture
         .named
         .iter()
-        .map(|(name, values)| {
+        .map(|(name, rows)| {
             match packed_cache
                 .iter()
                 .find(|(packed_name, _)| packed_name == name)
@@ -591,7 +614,7 @@ fn card_11_bf8_row_matches_f32_cache_output_bits_and_masks_the_padded_row() {
                         bytes,
                     },
                 ),
-                None => (name.as_str(), QuantizedBlock::Float32(values)),
+                None => (name.as_str(), packed_named_block(name, rows)),
             }
         })
         .collect();
@@ -650,7 +673,7 @@ fn card_11_bf8_row_matches_f32_cache_output_bits_and_masks_the_padded_row() {
     let infinity_named: Vec<(&str, QuantizedBlock<'_>)> = fixture
         .named
         .iter()
-        .map(|(name, values)| {
+        .map(|(name, rows)| {
             match invalid_row_infinity
                 .iter()
                 .find(|(packed_name, _)| packed_name == name)
@@ -662,7 +685,7 @@ fn card_11_bf8_row_matches_f32_cache_output_bits_and_masks_the_padded_row() {
                         bytes,
                     },
                 ),
-                None => (name.as_str(), QuantizedBlock::Float32(values)),
+                None => (name.as_str(), packed_named_block(name, rows)),
             }
         })
         .collect();
@@ -852,10 +875,13 @@ fn card_13_mma_precision_selects_f32_and_f16_for_each_cache_storage() {
 fn card_13_mma_precision_f16_exact_fixture_preserves_attention_output_bits() {
     let policy = production_numeric_policy();
     let mut fixture = fixture_with(8, 31, Geometry::ONE_KV_HEAD);
-    for (name, values) in &mut fixture.named {
+    for (name, rows) in &mut fixture.named {
         if name == "ids" {
             continue;
         }
+        let mut values = Vec::new();
+        rows.decode_all(&mut values)
+            .expect("the named input decodes");
         if name == "eps" {
             values.fill(0.0);
         } else if name == "token_embd.weight" {
@@ -882,6 +908,7 @@ fn card_13_mma_precision_f16_exact_fixture_preserves_attention_output_bits() {
         } else {
             values.fill(0.0);
         }
+        *rows = PackedRows::from_values(rows.format(), &values).expect("the named input re-encodes");
     }
     let attention = bound_attention(&fixture, policy)
         .into_iter()
@@ -892,7 +919,7 @@ fn card_13_mma_precision_f16_exact_fixture_preserves_attention_output_bits() {
         .expect("the fixture includes a global attention operation")
         .node;
     let roots = [root];
-    let named = as_named_blocks(&fixture.named);
+    let named = as_packed_named_blocks(&fixture.named);
     let mut f32_plan =
         omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
             .expect("the explicit F32 MMA plan builds");
@@ -958,13 +985,18 @@ fn card_15_v_reuse_device_keeps_query_rows_independent() {
     let policy = production_numeric_policy();
     let mut fixture = fixture_with(8, 31, Geometry::TWO_QUERY_GROUPS);
     let cache_bucket = bucket_for(31);
-    for (name, values) in &mut fixture.named {
+    for (name, rows) in &mut fixture.named {
         if name.starts_with("kv_cache.") && name.ends_with(".v") {
+            let mut values = Vec::new();
+            rows.decode_all(&mut values)
+                .expect("the cache block decodes");
             let row_width = values.len() / cache_bucket;
             for key_row in 0..cache_bucket {
                 let row_value = (key_row as f32 + 1.0) / 64.0;
                 values[key_row * row_width..(key_row + 1) * row_width].fill(row_value);
             }
+            *rows = PackedRows::from_values(rows.format(), &values)
+                .expect("the cache block re-encodes");
         }
     }
 
@@ -977,7 +1009,7 @@ fn card_15_v_reuse_device_keeps_query_rows_independent() {
         .expect("the fixture includes a global attention operation")
         .node;
     let roots = [root];
-    let named = as_named_blocks(&fixture.named);
+    let named = as_packed_named_blocks(&fixture.named);
     let mut legacy_plan =
         omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
             .expect("the legacy row-tiled plan builds");
@@ -1110,13 +1142,18 @@ fn card_15_v_reuse_device_keeps_query_rows_independent() {
     );
 
     let mut infinity_fixture_values = fixture.named.clone();
-    for (name, values) in &mut infinity_fixture_values {
+    for (name, rows) in &mut infinity_fixture_values {
         if name.starts_with("kv_cache.") && name.ends_with(".v") {
+            let mut values = Vec::new();
+            rows.decode_all(&mut values)
+                .expect("the cache block decodes");
             let row_width = values.len() / cache_bucket;
             values[(cache_bucket - 1) * row_width..].fill(f32::INFINITY);
+            *rows = PackedRows::from_values(rows.format(), &values)
+                .expect("the cache block re-encodes");
         }
     }
-    let infinity_named = as_named_blocks(&infinity_fixture_values);
+    let infinity_named = as_packed_named_blocks(&infinity_fixture_values);
     let infinity_output = omega::execute_plan_named(&shared_kv_plan, &infinity_named)
         .expect("the shared K/V plan executes with infinity in a padded V row");
     let infinity_values = infinity_output
@@ -1139,7 +1176,7 @@ fn card_16_tile_height_plan_dispatches_rows16_and_matches_cpu_payload() {
     let policy = production_numeric_policy();
     let fixture = fixture_with(16, 31, Geometry::TWO_QUERY_GROUPS);
     let expected = f32_oracle(&fixture, policy);
-    let named = as_named_blocks(&fixture.named);
+    let named = as_packed_named_blocks(&fixture.named);
     let roots = [fixture.logits];
     let legacy_plan = omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
         .expect("the legacy plan resolves");
@@ -1176,7 +1213,7 @@ fn card_17_query_parallelism_plan_preserves_shared_kv_and_matches_cpu_payload() 
     let policy = production_numeric_policy();
     let fixture = fixture_with(8, 31, Geometry::TWO_QUERY_GROUPS);
     let expected = f32_oracle(&fixture, policy);
-    let named = as_named_blocks(&fixture.named);
+    let named = as_packed_named_blocks(&fixture.named);
     let roots = [fixture.logits];
     let mut query_parallel_plan =
         omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
@@ -1210,7 +1247,7 @@ fn card_17_query_parallelism_plan_preserves_shared_kv_and_matches_cpu_payload() 
 fn card_18_prefetch_plan_executes_with_a_partial_live_cache_block() {
     let policy = production_numeric_policy();
     let fixture = fixture_with(8, 31, Geometry::TWO_QUERY_GROUPS);
-    let named = as_named_blocks(&fixture.named);
+    let named = as_packed_named_blocks(&fixture.named);
     let roots = [fixture.logits];
     let mut baseline_plan =
         omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
@@ -1263,7 +1300,7 @@ fn card_19_simd_topology_plans_match_cpu_and_keep_axes_fixed() {
     let policy = production_numeric_policy();
     let fixture = fixture_with(16, 31, Geometry::TWO_QUERY_GROUPS);
     let expected = f32_oracle(&fixture, policy);
-    let named = as_named_blocks(&fixture.named);
+    let named = as_packed_named_blocks(&fixture.named);
     let roots = [fixture.logits];
     let mut per_head_plan =
         omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)

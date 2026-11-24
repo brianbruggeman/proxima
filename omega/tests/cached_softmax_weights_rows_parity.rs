@@ -35,7 +35,7 @@ use proxima_numeric::{NumericPolicy};
 mod sliding_global_rows_support;
 mod support;
 use sliding_global_rows_support::{VOCAB, bucket_for, fixture};
-use support::as_named_blocks;
+use support::as_packed_named_blocks;
 
 const VERIFY_ROWS: [usize; 9] = [1, 2, 3, 4, 5, 8, 9, 17, 49];
 const CACHED_LENGTHS: [usize; 3] = [33, 511, 1099];
@@ -115,7 +115,7 @@ fn the_fused_k_row_softmax_weights_return_the_unfused_chains_bytes() {
     for rows in VERIFY_ROWS {
         for cached_len in CACHED_LENGTHS {
             let fixture = fixture(rows, cached_len);
-            let named = as_named_blocks(&fixture.named);
+            let named = as_packed_named_blocks(&fixture.named);
             let cell = format!(
                 "rows {rows} cached_len {cached_len} bucket {}",
                 bucket_for(cached_len)

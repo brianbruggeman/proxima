@@ -138,13 +138,15 @@ fn run_resolved_buffers(fixture: &Fixture, resolved: &[BoundOp]) -> Vec<Option<V
         else {
             unreachable!("block_node_ids only returns named inputs");
         };
-        let data = fixture
+        let mut data = Vec::new();
+        fixture
             .named
             .iter()
             .find(|(candidate, _)| candidate == name)
             .unwrap_or_else(|| panic!("missing named input {name}"))
             .1
-            .clone();
+            .decode_all(&mut data)
+            .expect("the named input decodes");
         buffers[node.0 as usize] = Some(data);
     }
     let interpreter = Interpreter::new(&mut buffers);

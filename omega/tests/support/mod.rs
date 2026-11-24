@@ -33,7 +33,7 @@ use core::task::{Context, Poll, Waker};
 use proxima_primitives::pipe::Pipe;
 use proxima_tensor::bind::ReadyBatch;
 use proxima_tensor::{BoundOp, BoundOpKind, CachedAttentionArithmetic, Interpreter, NodeId, Op, QuantizedBlock, block_node_ids, infer};
-use proxima_numeric::{NumericPolicy};
+use proxima_numeric::{NumericPolicy, PackedRows};
 
 /// The numeric policy production actually runs under --
 /// `proxima-model-interop/src/serving.rs:255`'s `ServingConfig::default()`
@@ -312,6 +312,30 @@ pub fn as_named_blocks(owned: &[(String, Vec<f32>)]) -> Vec<(&str, QuantizedBloc
     owned
         .iter()
         .map(|(name, data)| (name.as_str(), QuantizedBlock::Float32(data.as_slice())))
+        .collect()
+}
+
+/// The block a named input binds as: a host-element run viewed in place as decoded values, any
+/// other format as its packed bytes. A host-element run whose bytes cannot be viewed in place is
+/// a test error, never a silent codec-operand bind.
+pub fn packed_named_block<'a>(name: &str, rows: &'a PackedRows) -> QuantizedBlock<'a> {
+    let block = QuantizedBlock::Packed {
+        codec: *rows.format(),
+        bytes: rows.as_bytes(),
+    };
+    let viewed = block.host_view();
+    assert!(
+        !(rows.format().is_host_element() && matches!(viewed, QuantizedBlock::Packed { .. })),
+        "input {name}: its bytes cannot be viewed as the host element in place"
+    );
+    viewed
+}
+
+/// [`as_named_blocks`] over `(name, PackedRows)` pairs.
+pub fn as_packed_named_blocks(owned: &[(String, PackedRows)]) -> Vec<(&str, QuantizedBlock<'_>)> {
+    owned
+        .iter()
+        .map(|(name, rows)| (name.as_str(), packed_named_block(name, rows)))
         .collect()
 }
 

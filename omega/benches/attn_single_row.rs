@@ -68,12 +68,12 @@ const CACHED_CAPACITIES: [usize; 6] = [512, 4096, 16384, 32768, 65536, 131072];
 ))]
 fn bench_single_row_attention(criterion: &mut Criterion) {
     use sliding_global_rows_support::{Geometry, fixture_with};
-    use support::{as_named_blocks, production_numeric_policy};
+    use support::{as_packed_named_blocks, production_numeric_policy};
 
     let policy = production_numeric_policy();
     for cached_len in CACHED_CAPACITIES {
         let fixture = fixture_with(1, cached_len, Geometry::ONE_KV_HEAD);
-        let named = as_named_blocks(&fixture.named);
+        let named = as_packed_named_blocks(&fixture.named);
         let roots = [fixture.logits];
 
         let decode_split =

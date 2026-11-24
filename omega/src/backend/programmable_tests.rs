@@ -2,6 +2,7 @@ use super::*;
 use crate::config::ResourceConstraints;
 use proxima_numeric::DType;
 use proxima_numeric::codec::Codec;
+use proxima_numeric::packed_rows::PackedRows;
 use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::{Extent, ScalarOp, bind_unfused, bind_with_fusion, infer};
 #[cfg(any(
@@ -39,6 +40,53 @@ fn config_plan_cpu_executes_named_two_outputs() {
         &[11.0, 18.0, 33.0, 36.0],
         &[-11.0, -18.0, -33.0, -36.0],
     );
+}
+
+#[test]
+fn host_element_packed_input_matches_decoded_values_bit_for_bit() {
+    let (program, outputs) = fixture();
+    let input = [1.0, -2.0, 3.5, -4.25];
+    let bias = [10.0, 20.0, 30.0, 40.0];
+    let plain = named(&input, &bias);
+    let rows =
+        PackedRows::from_values(&Codec::host_element(), &input).expect("host element encodes");
+    let packed = [
+        (
+            "input",
+            QuantizedBlock::Packed {
+                codec: *rows.format(),
+                bytes: rows.as_bytes(),
+            },
+        ),
+        plain[1],
+    ];
+
+    let (mut plain_plan, _) =
+        plan_named_with_config(&RuntimeConfig::default(), &program, &[], &plain, &outputs)
+            .expect("plain fixture must plan");
+    let (mut packed_plan, _) =
+        plan_named_with_config(&RuntimeConfig::default(), &program, &[], &packed, &outputs)
+            .expect("host element fixture must plan");
+    let expected =
+        execute_plan_named(&mut plain_plan, &plain).expect("plain fixture must evaluate");
+    let observed =
+        execute_plan_named(&mut packed_plan, &packed).expect("host element fixture must evaluate");
+
+    let mut compared = 0;
+    for node in outputs {
+        let (want, _) = expected.get(node).expect("plain output must be present");
+        let (got, _) = observed
+            .get(node)
+            .expect("host element output must be present");
+        assert_eq!(want.len(), got.len());
+        assert!(
+            want.iter()
+                .zip(got)
+                .all(|(left, right)| left.to_bits() == right.to_bits())
+        );
+        compared += want.len();
+    }
+    assert!(compared > 0);
 }
 
 #[test]

@@ -16,6 +16,7 @@ use proxima_tensor::spec::{
     LayerKind, LayerSchedule, RopePairing, RopeTableSel, SharedExpertWidth, ValueSourceKind,
     scheduled_two_range_cached_forward_program_with_experts,
 };
+use proxima_numeric::{NumericFormat, PackedRows};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{NodeId, Op, infer};
 
@@ -29,14 +30,12 @@ pub const SLIDING_HEAD_DIM: u32 = 256;
 pub const GLOBAL_HEAD_DIM: u32 = 512;
 pub const SLIDING_WINDOW: u32 = 512;
 pub const KV_BUCKET_TOKENS: usize = 32;
-pub const SLIDING_ROPE_BASE: f32 = 10_000.0;
-pub const GLOBAL_ROPE_BASE: f32 = 1_000_000.0;
 
 pub struct Fixture {
     pub program: Vec<Op>,
     pub logits: NodeId,
     pub symbols: Vec<u64>,
-    pub named: Vec<(String, Vec<f32>)>,
+    pub named: Vec<(String, PackedRows)>,
 }
 
 /// The attention geometry of the two layers: query heads, kv heads, the head
@@ -146,24 +145,53 @@ pub fn bucket_for(cached_len: usize) -> usize {
     cached_len.div_ceil(KV_BUCKET_TOKENS) * KV_BUCKET_TOKENS
 }
 
-fn random_vec(seed: u64, count: usize) -> Vec<f32> {
+fn random_rows(seed: u64, count: usize) -> PackedRows {
     let mut lcg = Lcg(seed);
-    (0..count).map(|_| lcg.next_unit()).collect()
+    let values: Vec<_> = (0..count).map(|_| lcg.next_unit()).collect();
+    PackedRows::from_values(&NumericFormat::host_element(), &values)
+        .expect("random values encode in the host element")
 }
 
 /// RoPE angles for `rows` new positions starting at `first_position`:
-/// `[rows, pairs]` cosines and sines of `position * base^(-pair / pairs)`.
-fn rope_table(first_position: usize, rows: usize, pairs: usize, base: f32, sine: bool) -> Vec<f32> {
+/// `[rows, pairs]` cosines and sines of `position * base^(-pair / pairs)`,
+/// the base read from `rope.toml` under `base_key`.
+fn rope_table(
+    first_position: usize,
+    rows: usize,
+    pairs: usize,
+    base_key: &str,
+    sine: bool,
+) -> PackedRows {
+    let host = NumericFormat::host_element();
+    let decode = |values: &[_]| {
+        let mut decoded = Vec::new();
+        PackedRows::from_values(&host, values)
+            .expect("the host element encodes")
+            .decode_all(&mut decoded)
+            .expect("the host element decodes");
+        decoded
+    };
+    let bases: toml::Table = toml::from_str(include_str!("rope.toml")).expect("rope.toml parses");
+    let configured = bases[base_key]
+        .as_float()
+        .expect("each rope base is a number");
+    let base = decode(&[configured as _])[0];
+    let width = decode(&[pairs as _])[0];
+    let positions = decode(
+        &(0..rows)
+            .map(|row| (first_position + row) as _)
+            .collect::<Vec<_>>(),
+    );
+    let indices = decode(&(0..pairs).map(|pair| pair as _).collect::<Vec<_>>());
     let mut table = Vec::with_capacity(rows * pairs);
-    for row in 0..rows {
-        let position = (first_position + row) as f32;
-        for pair in 0..pairs {
-            let frequency = base.powf(-(pair as f32) / pairs as f32);
+    for position in &positions {
+        for pair in &indices {
+            let frequency = base.powf(-pair / width);
             let angle = position * frequency;
             table.push(if sine { angle.sin() } else { angle.cos() });
         }
     }
-    table
+    PackedRows::from_values(&host, &table).expect("the rope table encodes in the host element")
 }
 
 fn named_block(
@@ -173,33 +201,50 @@ fn named_block(
     rows: usize,
     cached_len: usize,
     seed: u64,
-) -> Vec<f32> {
+) -> PackedRows {
+    let host = NumericFormat::host_element();
+    let pack = |values: &[_]| {
+        PackedRows::from_values(&host, values).expect("the values encode in the host element")
+    };
+    let drawn = |len: usize| {
+        let mut values = Vec::new();
+        random_rows(seed, len)
+            .decode_all(&mut values)
+            .expect("the host element decodes");
+        values
+    };
     match name {
-        "ids" => (0..count)
-            .map(|index| ((index * 7 + 3) % VOCAB as usize) as f32)
-            .collect(),
-        "eps" => vec![1e-6; count],
-        "cached_len" => vec![cached_len as f32; count],
-        "rope_cos_swa" => rope_table(cached_len, rows, last_extent, SLIDING_ROPE_BASE, false),
-        "rope_sin_swa" => rope_table(cached_len, rows, last_extent, SLIDING_ROPE_BASE, true),
-        "rope_cos" => rope_table(cached_len, rows, last_extent, GLOBAL_ROPE_BASE, false),
-        "rope_sin" => rope_table(cached_len, rows, last_extent, GLOBAL_ROPE_BASE, true),
+        "ids" => pack(
+            &(0..count)
+                .map(|index| ((index * 7 + 3) % VOCAB as usize) as _)
+                .collect::<Vec<_>>(),
+        ),
+        "eps" => pack(&vec![1e-6; count]),
+        "cached_len" => pack(&vec![cached_len as _; count]),
+        "rope_cos_swa" => rope_table(cached_len, rows, last_extent, "sliding_base", false),
+        "rope_sin_swa" => rope_table(cached_len, rows, last_extent, "sliding_base", true),
+        "rope_cos" => rope_table(cached_len, rows, last_extent, "global_base", false),
+        "rope_sin" => rope_table(cached_len, rows, last_extent, "global_base", true),
         _ if name.starts_with("kv_cache.") => {
             let row_width = last_extent;
             let live = cached_len * row_width;
-            let mut data = random_vec(seed, live.min(count));
+            let mut data = drawn(live.min(count));
             data.resize(count, 0.0);
-            data
+            pack(&data)
         }
-        _ if name.ends_with("norm.weight") => random_vec(seed, count)
-            .into_iter()
-            .map(|value| 1.0 + 0.5 * value)
-            .collect(),
-        _ if name.ends_with("layer_output_scale.weight") => vec![1.0; count],
-        _ => random_vec(seed, count)
-            .into_iter()
-            .map(|value| 0.1 * value)
-            .collect(),
+        _ if name.ends_with("norm.weight") => pack(
+            &drawn(count)
+                .into_iter()
+                .map(|value| 1.0 + 0.5 * value)
+                .collect::<Vec<_>>(),
+        ),
+        _ if name.ends_with("layer_output_scale.weight") => pack(&vec![1.0; count]),
+        _ => pack(
+            &drawn(count)
+                .into_iter()
+                .map(|value| 0.1 * value)
+                .collect::<Vec<_>>(),
+        ),
     }
 }
 
