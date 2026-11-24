@@ -6085,7 +6085,7 @@ fn a_gathered_expert_product_above_the_grouped_minimum_takes_the_grouped_kernel_
         let (program, sum) = gathered_expert_program(experts.try_into().unwrap(), rows.try_into().unwrap(), depth.try_into().unwrap(), tokens.try_into().unwrap());
         let mut named = as_named_blocks(&inputs);
         named.push(("weight", QuantizedBlock::Packed { codec, bytes: &weight }));
-        let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), &program, &[], &named, &[sum], NumericPolicy::default())
+        let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), &program, &[], &named, &[sum], NumericPolicy::bit_exact().with_reassociation(true))
             .expect("the gathered expert product plans on cuda");
         let identities = cuda_kernel_identities(&plan).expect("a cuda plan");
         let entries: Vec<&str> = identities.iter().filter_map(|identity| identity.lines().next()).collect();
