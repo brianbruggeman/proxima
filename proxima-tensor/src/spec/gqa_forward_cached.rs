@@ -465,7 +465,30 @@ pub(super) enum QkvSource {
         node: NodeId,
         v_offset: u32,
         head_dim: u32,
+        kv_head_shape_ones: NodeId,
     },
+}
+
+/// The per-program nodes both cached attention bodies and the FFN read: the
+/// norm constants, rope tables, masks and residual scale one program declares
+/// once. `fused_qkv_shape` is `(head_shape_ones, kv_head_shape_ones,
+/// query_heads)` when the fused q/k/v reduce is on. It lets the attention and
+/// FFN bodies be called as separate steps.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CachedEmitContext {
+    pub(super) inv_dim: NodeId,
+    pub(super) eps: NodeId,
+    pub(super) ones: NodeId,
+    pub(super) inv_sqrt_head_dim: NodeId,
+    pub(super) cos_new: NodeId,
+    pub(super) sin_new: NodeId,
+    pub(super) group_ones: NodeId,
+    pub(super) is_future: NodeId,
+    pub(super) cached_window_mask: Option<(NodeId, NodeId)>,
+    pub(super) residual_scale: Option<NodeId>,
+    pub(super) group: u32,
+    pub(super) head_dim: u32,
+    pub(super) fused_qkv_shape: Option<(NodeId, NodeId, u32)>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -507,10 +530,89 @@ pub fn append_gqa_cached_layer(
     cached_window_mask: Option<(NodeId, NodeId)>,
     residual_scale: Option<NodeId>,
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
-    let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
-    let kv_heads = query_heads / group;
+    let context = CachedEmitContext {
+        inv_dim,
+        eps,
+        ones,
+        inv_sqrt_head_dim,
+        cos_new,
+        sin_new,
+        group_ones,
+        is_future,
+        cached_window_mask,
+        residual_scale,
+        group,
+        head_dim,
+        fused_qkv_shape: fused_qkv_reduce
+            .then_some((head_shape_ones, kv_head_shape_ones, query_heads)),
+    };
+    let (residual1, roots) = append_gqa_cached_attention(
+        program,
+        &context,
+        x,
+        attn_norm_weight,
+        (wq, wk, wv),
+        wo,
+        (k_even_cache, k_odd_cache, v_cache),
+        qk_norm,
+        (q_bias, k_bias, v_bias),
+        rope_pairing,
+    )?;
+    let x_next = append_cached_dense_ffn(
+        program,
+        &context,
+        residual1,
+        ffn_norm_weight,
+        w_gate,
+        w_up,
+        w_down,
+        paired_gate_up_reduce,
+    )?;
 
-    let (q_raw, k_new_raw, v_new_source): (NodeId, NodeId, QkvSource) = if fused_qkv_reduce {
+    Ok((x_next, roots))
+}
+
+/// The attention half of [`append_gqa_cached_layer`]: norm, q/k/v (split or
+/// fused, with optional bias and QK-norm), RoPE, the two-range attention and
+/// the output projection plus residual. Returns `(residual1, roots)`. Callable
+/// apart from the FFN so a layer can pair this mixer with either FFN.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn append_gqa_cached_attention(
+    program: &mut Vec<Op>,
+    context: &CachedEmitContext,
+    x: NodeId,
+    attn_norm_weight: NodeId,
+    (wq, wk, wv): (NodeId, NodeId, NodeId),
+    wo: NodeId,
+    (k_even_cache, k_odd_cache, v_cache): (NodeId, NodeId, NodeId),
+    qk_norm: Option<(NodeId, NodeId, NodeId)>,
+    (q_bias, k_bias, v_bias): (Option<NodeId>, Option<NodeId>, Option<NodeId>),
+    rope_pairing: RopePairing,
+) -> Result<(NodeId, CachedLayerRoots), TensorError> {
+    let CachedEmitContext {
+        inv_dim,
+        eps,
+        inv_sqrt_head_dim,
+        cos_new,
+        sin_new,
+        group_ones,
+        is_future,
+        cached_window_mask,
+        residual_scale,
+        group,
+        head_dim,
+        fused_qkv_shape,
+        ..
+    } = *context;
+    let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
+
+    let (q_raw, k_new_raw, v_new_source): (NodeId, NodeId, QkvSource) = if let Some((
+        head_shape_ones,
+        kv_head_shape_ones,
+        query_heads,
+    )) = fused_qkv_shape
+    {
+        let kv_heads = query_heads / group;
         let qkv_product = elementwise(
             program,
             DType::FLOAT32,
@@ -572,6 +674,7 @@ pub fn append_gqa_cached_layer(
                 node: qkv_reduced,
                 v_offset: (query_heads + kv_heads) * head_dim,
                 head_dim,
+                kv_head_shape_ones,
             },
         )
     } else {
@@ -642,6 +745,7 @@ pub fn append_gqa_cached_layer(
             node,
             v_offset,
             head_dim,
+            kv_head_shape_ones,
         } => {
             let v_raw = elementwise(
                 program,
@@ -781,6 +885,33 @@ pub fn append_gqa_cached_layer(
         &[(attn_out, "sd->sd"), (x, "sd->sd")],
     )?;
 
+    Ok((
+        residual1,
+        (rotated_k_new_even, rotated_k_new_odd, v_new),
+    ))
+}
+
+/// The SwiGLU half of [`append_gqa_cached_layer`]: norm, gate/up (paired or
+/// separate), silu, down, residual. Callable apart from the attention body
+/// so a layer can pair either mixer with this FFN.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn append_cached_dense_ffn(
+    program: &mut Vec<Op>,
+    context: &CachedEmitContext,
+    residual1: NodeId,
+    ffn_norm_weight: NodeId,
+    w_gate: NodeId,
+    w_up: NodeId,
+    w_down: NodeId,
+    paired_gate_up_reduce: bool,
+) -> Result<NodeId, TensorError> {
+    let CachedEmitContext {
+        inv_dim,
+        eps,
+        ones,
+        residual_scale,
+        ..
+    } = *context;
     let normed2 = rmsnorm(program, residual1, ffn_norm_weight, inv_dim, eps)?;
 
     // `paired_gate_up_reduce`: one `Op::Reduce` over `w_gate` (== `w_up`,
@@ -914,7 +1045,7 @@ pub fn append_gqa_cached_layer(
         &[(ffn_out, "sd->sd"), (residual1, "sd->sd")],
     )?;
 
-    Ok((x_next, (rotated_k_new_even, rotated_k_new_odd, v_new)))
+    Ok(x_next)
 }
 
 /// Hyper-connections replace a single residual stream with `hc` parallel

@@ -25549,3 +25549,158 @@ mod bounded_flag_matrix {
         std::println!("{} descriptors, {equal} equal", actual.len());
     }
 }
+
+mod cached_attention_bodies {
+    use super::forward_scales::descriptor as bounded_descriptor;
+    use super::*;
+
+    const EMBEDDING: u32 = 8;
+    const QUERY_HEADS: u32 = 2;
+    const GROUP: u32 = 2;
+    const HEAD_DIM: u32 = 4;
+    const PAIRS: u32 = 2;
+
+    struct Fixture {
+        program: Vec<Op>,
+        context: CachedEmitContext,
+        x: NodeId,
+        norm: NodeId,
+        projections: (NodeId, NodeId, NodeId),
+        wo: NodeId,
+        caches: (NodeId, NodeId, NodeId),
+    }
+
+    fn fixture() -> Fixture {
+        let dtype = bounded_descriptor(0, 0).activation_dtype();
+        let mut program = Vec::new();
+        let kv_heads = QUERY_HEADS / GROUP;
+        let inv_dim = count_constant(&mut program, EMBEDDING);
+        let mut leaf = |shape: Vec<Extent>, name: &str| input_leaf(&mut program, dtype, shape, name);
+        let eps = leaf(Vec::new(), "eps");
+        let ones = leaf(Vec::new(), "ones");
+        let inv_sqrt_head_dim = leaf(Vec::new(), "inv_sqrt_head_dim");
+        let rows = Extent::Symbolic(0);
+        let cos_new = leaf(vec![rows, Extent::Static(PAIRS)], "rope_cos");
+        let sin_new = leaf(vec![rows, Extent::Static(PAIRS)], "rope_sin");
+        let group_ones = leaf(
+            vec![Extent::Static(kv_heads), Extent::Static(GROUP)],
+            "group_ones",
+        );
+        let x = leaf(vec![rows, Extent::Static(EMBEDDING)], "x");
+        let norm = leaf(vec![Extent::Static(EMBEDDING)], "attn_norm");
+        let wq = leaf(
+            vec![
+                Extent::Static(EMBEDDING),
+                Extent::Static(QUERY_HEADS),
+                Extent::Static(HEAD_DIM),
+            ],
+            "wq",
+        );
+        let kv_shape = vec![
+            Extent::Static(EMBEDDING),
+            Extent::Static(kv_heads),
+            Extent::Static(HEAD_DIM),
+        ];
+        let wk = leaf(kv_shape.clone(), "wk");
+        let wv = leaf(kv_shape, "wv");
+        let wo = leaf(
+            vec![
+                Extent::Static(kv_heads),
+                Extent::Static(GROUP),
+                Extent::Static(HEAD_DIM),
+                Extent::Static(EMBEDDING),
+            ],
+            "wo",
+        );
+        let cache_rows = Extent::Symbolic(1);
+        let k_even = leaf(
+            vec![cache_rows, Extent::Static(kv_heads), Extent::Static(PAIRS)],
+            "k_even",
+        );
+        let k_odd = leaf(
+            vec![cache_rows, Extent::Static(kv_heads), Extent::Static(PAIRS)],
+            "k_odd",
+        );
+        let v_cache = leaf(
+            vec![cache_rows, Extent::Static(kv_heads), Extent::Static(HEAD_DIM)],
+            "v_cache",
+        );
+        let (is_future, _) = causal_mask(&mut program).expect("the causal mask lowers");
+        let context = CachedEmitContext {
+            inv_dim,
+            eps,
+            ones,
+            inv_sqrt_head_dim,
+            cos_new,
+            sin_new,
+            group_ones,
+            is_future,
+            cached_window_mask: None,
+            residual_scale: None,
+            group: GROUP,
+            head_dim: HEAD_DIM,
+            fused_qkv_shape: None,
+        };
+        Fixture {
+            program,
+            context,
+            x,
+            norm,
+            projections: (wq, wk, wv),
+            wo,
+            caches: (k_even, k_odd, v_cache),
+        }
+    }
+
+    /// The last `-inf` constant: the causal mask's own comes first in both
+    /// programs, so the attention body's is the one that moves.
+    fn negative_infinity_position(program: &[Op]) -> Option<usize> {
+        program.iter().rposition(
+            |op| matches!(op, Op::Constant { value, .. } if value.is_infinite() && value.is_sign_negative()),
+        )
+    }
+
+    /// The two bodies are the same lowering except for where the `-inf`
+    /// constant lands: the routed body asks `two_range_attention` to emit it
+    /// before the local scores, the dense body does not. Same op count, same
+    /// roots count, one constant moved.
+    #[test]
+    fn routed_attention_equals_dense_attention_at_split_no_bias() {
+        let mut dense = fixture();
+        let dense_out = append_gqa_cached_attention(
+            &mut dense.program,
+            &dense.context,
+            dense.x,
+            dense.norm,
+            dense.projections,
+            dense.wo,
+            dense.caches,
+            None,
+            (None, None, None),
+            RopePairing::Interleaved,
+        )
+        .expect("the dense attention body lowers");
+        let mut routed = fixture();
+        let routed_out = append_gqa_cached_routed_attention(
+            &mut routed.program,
+            &routed.context,
+            routed.x,
+            routed.norm,
+            routed.projections,
+            routed.wo,
+            routed.caches,
+            None,
+        )
+        .expect("the routed attention body lowers");
+
+        assert_eq!(dense.program.len(), routed.program.len());
+        assert_eq!(dense_out.0, routed_out.0, "both end at the same residual node");
+        assert_eq!(dense_out.1, routed_out.1, "both return the same cache roots");
+        let routed_position = negative_infinity_position(&routed.program);
+        assert!(routed_position.is_some(), "the routed body emits a -inf constant");
+        assert!(
+            routed_position < negative_infinity_position(&dense.program),
+            "the routed body emits the -inf constant first"
+        );
+    }
+}

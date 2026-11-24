@@ -1038,6 +1038,74 @@ pub fn append_gqa_cached_routed_layer(
     residual_scale: Option<NodeId>,
     cached_window_mask: Option<(NodeId, NodeId)>,
 ) -> Result<(NodeId, CachedLayerRoots, MoeSite), TensorError> {
+    let context = CachedEmitContext {
+        inv_dim,
+        eps,
+        ones,
+        inv_sqrt_head_dim,
+        cos_new,
+        sin_new,
+        group_ones,
+        is_future,
+        cached_window_mask,
+        residual_scale,
+        group,
+        head_dim,
+        fused_qkv_shape: None,
+    };
+    let (residual1, roots) = append_gqa_cached_routed_attention(
+        program,
+        &context,
+        x,
+        attn_norm_weight,
+        (wq, wk, wv),
+        wo,
+        (k_even_cache, k_odd_cache, v_cache),
+        qk_norm,
+    )?;
+    let (x_next, site) = append_cached_routed_ffn(
+        program,
+        &context,
+        layer,
+        residual1,
+        ffn_norm_weight,
+        gate_inp,
+        (expert_w_gate, expert_w_up, expert_w_down),
+        (expert_count, expert_used_count),
+    )?;
+
+    Ok((x_next, roots, site))
+}
+
+/// The attention half of [`append_gqa_cached_routed_layer`]: norm, q/k/v,
+/// optional QK-norm, RoPE, the two-range attention and the output projection
+/// plus residual. Returns `(residual1, roots)`. Callable apart from the
+/// routed FFN.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn append_gqa_cached_routed_attention(
+    program: &mut Vec<Op>,
+    context: &CachedEmitContext,
+    x: NodeId,
+    attn_norm_weight: NodeId,
+    (wq, wk, wv): (NodeId, NodeId, NodeId),
+    wo: NodeId,
+    (k_even_cache, k_odd_cache, v_cache): (NodeId, NodeId, NodeId),
+    qk_norm: Option<(NodeId, NodeId, NodeId)>,
+) -> Result<(NodeId, CachedLayerRoots), TensorError> {
+    let CachedEmitContext {
+        inv_dim,
+        eps,
+        inv_sqrt_head_dim,
+        cos_new,
+        sin_new,
+        group_ones,
+        is_future,
+        cached_window_mask,
+        residual_scale,
+        group,
+        head_dim,
+        ..
+    } = *context;
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
     let q_product = elementwise(
@@ -1194,6 +1262,33 @@ pub fn append_gqa_cached_routed_layer(
         &[(attn_out, "sd->sd"), (x, "sd->sd")],
     )?;
 
+    Ok((
+        residual1,
+        (rotated_k_new_even, rotated_k_new_odd, v_new),
+    ))
+}
+
+/// The routed FFN half of [`append_gqa_cached_routed_layer`]: norm, the
+/// expert mixture ([`append_moe_ffn`]), residual. Callable apart from the
+/// attention body.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn append_cached_routed_ffn(
+    program: &mut Vec<Op>,
+    context: &CachedEmitContext,
+    layer: u32,
+    residual1: NodeId,
+    ffn_norm_weight: NodeId,
+    gate_inp: NodeId,
+    (expert_w_gate, expert_w_up, expert_w_down): (NodeId, NodeId, NodeId),
+    (expert_count, expert_used_count): (u32, u32),
+) -> Result<(NodeId, MoeSite), TensorError> {
+    let CachedEmitContext {
+        inv_dim,
+        eps,
+        ones,
+        residual_scale,
+        ..
+    } = *context;
     let normed2 = rmsnorm(program, residual1, ffn_norm_weight, inv_dim, eps)?;
 
     let moe_spec = MoeFfnSpec {
@@ -1220,7 +1315,7 @@ pub fn append_gqa_cached_routed_layer(
         &[(ffn_out, "sd->sd"), (residual1, "sd->sd")],
     )?;
 
-    Ok((x_next, (rotated_k_new_even, rotated_k_new_odd, v_new), site))
+    Ok((x_next, site))
 }
 
 /// Which mixer one transformer block runs. The 8B-A1B short-conv checkpoint (`general.architecture
