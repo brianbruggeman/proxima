@@ -1287,14 +1287,6 @@ pub(crate) fn route_compaction_indirect_offset(
     Some(4 * (1 + 3 * slot as usize))
 }
 
-/// Words of the per-expert first-tile table and of the tile-to-expert table the
-/// prepass writes after the list: the GEMM's O(1) replacement for walking the
-/// per-expert tile counts.
-#[cfg(all(feature = "metal-grouped-gemm", any(test, all(feature = "metal", target_os = "macos"))))]
-fn grouped_tile_table_words(tokens: u64, experts: u64) -> u64 {
-    crate::route_compaction::tile_table_words(tokens, experts, GROUPED_TILE_TOKENS)
-}
-
 /// Threads of each prepass threadgroup: a simdgroup per expert,
 /// `GROUPED_PREPASS_THREADS / SIMD_WIDTH` experts at a time.
 #[cfg(all(

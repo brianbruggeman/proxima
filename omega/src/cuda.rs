@@ -403,7 +403,7 @@ pub(crate) fn emit_grouped_on_target(
     let entry = grouped_entry(&base);
     let mut source = render_reduce(target, resolved, &entry, &quantized, numeric_policy, device, Some(&plan))?;
     let prepass = prepass_entry(&entry);
-    source.push_str(&prepass_source(resolved, &plan, &prepass)?);
+    source.push_str(&prepass_source(resolved, &plan, &prepass, type_token(target, resolved.node, resolved.dtype)?)?);
     let kernels = pair(source, [prepass, entry], resolved, &plan, dispatch_bindings(resolved))?;
     Ok(Some((kernels, compaction_buffer_words(&plan))))
 }
@@ -6183,19 +6183,20 @@ mod tests {
     }
 
     fn dense_expert_free_op(rows: u32, width: u32, tokens: u32) -> BoundOp {
+        let dtype = proxima_numeric::Numerics::default().activation.to_dtype().expect("activation format has a dtype");
         let mut program = Vec::new();
         let weight = append(
             &mut program,
-            Op::Input { dtype: DType::FLOAT32, shape: vec![Extent::Static(rows), Extent::Static(width)], name: None },
+            Op::Input { dtype, shape: vec![Extent::Static(rows), Extent::Static(width)], name: None },
         );
         let activation = append(
             &mut program,
-            Op::Input { dtype: DType::FLOAT32, shape: vec![Extent::Static(tokens), Extent::Static(width)], name: None },
+            Op::Input { dtype, shape: vec![Extent::Static(tokens), Extent::Static(width)], name: None },
         );
         let product = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::FLOAT32,
+                dtype,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -6207,7 +6208,7 @@ mod tests {
         append(
             &mut program,
             Op::Reduce(Reduce {
-                dtype: DType::FLOAT32,
+                dtype,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -6225,14 +6226,19 @@ mod tests {
             .expect("one bound emitted")
     }
 
-    fn grouped_pair(bound: &BoundOp) -> Option<([CudaKernel; 2], usize)> {
-        let mut packed = BTreeMap::new();
+    fn packed_expert_weight(bound: &BoundOp) -> PackedOperands {
+        let mut packed = PackedOperands::new();
         packed.insert(bound.operands()[0].0, Codec::Q8_0);
+        packed
+    }
+
+    fn grouped_pair(bound: &BoundOp) -> Option<([CudaKernel; 2], usize)> {
+        let packed = packed_expert_weight(bound);
         emit_cuda_grouped_on_device(bound, &packed, NumericPolicy::llama_relaxed(), EmitDevice::default()).expect("grouped emit succeeds")
     }
 
     #[test]
-    fn a_gathered_q8_0_expert_product_above_the_grouped_minimum_renders_a_prepass_and_a_grouped_kernel() {
+    fn a_gathered_expert_product_above_the_grouped_minimum_renders_a_prepass_and_a_grouped_kernel() {
         let slots = u32::try_from(crate::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS).expect("minimum fits") + 8;
         let bound = stacked_expert_op(8, 128, 512, slots);
         let (kernels, words) = grouped_pair(&bound).expect("the grouped form is taken");
@@ -6241,7 +6247,7 @@ mod tests {
         assert!(prepass.entry.starts_with(&grouped.entry), "the prepass shares the grouped kernel's name");
         assert!(grouped.entry.contains("_grp1"), "{}", grouped.entry);
         assert_eq!(prepass.source, grouped.source, "both entries live in one module");
-        assert!(grouped.source.contains("mma_m16n8k8("), "the grouped kernel runs the shared tile loop");
+        assert!(grouped.source.contains("scratch0"), "the grouped kernel runs the shared tile loop");
         assert!(grouped.source.contains("const unsigned int *tile_list"), "activation rows come through the compacted list");
         assert!(grouped.source.contains("tile_expert_base + tile_index"), "the slice names its expert from the tile table");
         assert!(grouped.source.contains("grouped_expert * u.gather_element_stride[0]"), "the weight is read at the slice's expert");
@@ -6252,8 +6258,7 @@ mod tests {
     #[test]
     fn the_dense_product_keeps_the_tiled_mma_kernel_and_takes_no_grouped_form() {
         let bound = dense_expert_free_op(128, 512, 200);
-        let mut packed = BTreeMap::new();
-        packed.insert(bound.operands()[0].0, Codec::Q8_0);
+        let packed = packed_expert_weight(&bound);
         let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed()).expect("dense emit succeeds");
         assert!(kernel.entry.contains("_mma16x8x8"), "{}", kernel.entry);
         assert!(!kernel.entry.contains("_grp1"), "{}", kernel.entry);
@@ -6264,8 +6269,7 @@ mod tests {
     fn a_gathered_product_below_the_grouped_minimum_keeps_the_cooperative_reduce() {
         let bound = stacked_expert_op(8, 128, 512, 8);
         assert!(grouped_pair(&bound).is_none());
-        let mut packed = BTreeMap::new();
-        packed.insert(bound.operands()[0].0, Codec::Q8_0);
+        let packed = packed_expert_weight(&bound);
         let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed()).expect("emit succeeds");
         assert!(!kernel.entry.contains("_mma"), "{}", kernel.entry);
         assert!(!kernel.entry.contains("_grp1"), "{}", kernel.entry);

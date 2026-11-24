@@ -86,7 +86,7 @@ pub(super) fn push_grouped_tile_origin(source: &mut String, route: &GroupedRoute
 
 /// The prepass kernel: one block counts each expert's rows, prefix-sums them into offsets and
 /// tiles, then places the flat token ids expert-major in route order.
-pub(super) fn prepass_source(resolved: &BoundOp, plan: &GroupedGemm, entry: &str) -> Result<String, EmitError> {
+pub(super) fn prepass_source(resolved: &BoundOp, plan: &GroupedGemm, entry: &str, index_type: &str) -> Result<String, EmitError> {
     let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
         return Err(EmitError::RenderKindMismatch {
             node: resolved.node,
@@ -112,7 +112,7 @@ pub(super) fn prepass_source(resolved: &BoundOp, plan: &GroupedGemm, entry: &str
     ));
     let mut source = String::new();
     source.push_str(&format!(
-        "\nextern \"C\" __global__ void {entry}(\n    const float* __restrict__ gather_idx{slot},\n    const Uniforms* __restrict__ u_ptr,\n    unsigned int* __restrict__ fault,\n    unsigned int* __restrict__ route_compaction\n) {{\n    const Uniforms u = *u_ptr;\n    const int tid = (int)threadIdx.x;\n    const int warp = tid >> 5;\n    const int lane = tid & 31;\n    const int warps = (int)(blockDim.x >> 5);\n"
+        "\nextern \"C\" __global__ void {entry}(\n    const {index_type}* __restrict__ gather_idx{slot},\n    const Uniforms* __restrict__ u_ptr,\n    unsigned int* __restrict__ fault,\n    unsigned int* __restrict__ route_compaction\n) {{\n    const Uniforms u = *u_ptr;\n    const int tid = (int)threadIdx.x;\n    const int warp = tid >> 5;\n    const int lane = tid & 31;\n    const int warps = (int)(blockDim.x >> 5);\n"
     ));
     source.push_str("    long long tokens = 1;\n");
     for &position in &plan.gemm.token_positions {
@@ -123,9 +123,7 @@ pub(super) fn prepass_source(resolved: &BoundOp, plan: &GroupedGemm, entry: &str
     source.push_str(&format!(
         "    for (long long expert = warp; expert < experts; expert += warps) {{\n        unsigned int tally = 0u;\n        for (long long base = 0; base < tokens; base += 32) {{\n            const long long entry = base + lane;\n            const bool live = entry < tokens;\n{fetch}"
     ));
-    source.push_str(&format!(
-        "            if (expert == 0 && live) {{\n"
-    ));
+    source.push_str("            if (expert == 0 && live) {\n");
     push_fault(&mut source, weight, slot);
     source.push_str(&format!(
         "            }}\n            fetched{weight} = live ? max((long long)0, min(fetched{weight}, u.gather_extent[{slot}] - 1)) : -1ll;\n            tally += __popc(__ballot_sync(PROXIMA_ALL_LANES, fetched{weight} == expert));\n        }}\n        if (lane == 0) {{ route_compaction[{header}ll + expert] = tally; }}\n    }}\n    __syncthreads();\n"
