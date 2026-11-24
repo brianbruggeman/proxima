@@ -8,7 +8,7 @@
 //! cell alike. Every child runs under `/usr/bin/time` (`-l` on macOS, `-v` with GNU time on Linux); its `peak memory footprint` line (macOS only) and
 //! maximum resident set size are the RAM read.
 //!
-//! Llama arm: one `llama-server` process per (prompt, KV config, round) with `-fa on`, `-b`/`-ub`
+//! Llama arm: one `llama-server` process per (prompt, KV config, round) with `-fa` following the proxima arm's own `run=start` attention arithmetic, `-b`/`-ub`
 //! from the same `ServingSettings` as proxima (`proxima-model-interop/examples/llama_matched.toml`,
 //! overlaid by `PROXIMA_SERVING_*`), `-c` set
 //! from the same rule as proxima's `kv_extent` (`generate/load_model.rs`: positions needed =
@@ -1074,6 +1074,10 @@ struct Facts {
 struct Row {
     round: usize,
     cell: Cell,
+    /// a process run before round 1 whose record is discarded and never counts toward n
+    warmup: bool,
+    /// llama arm only: the `-fa` value this row ran with, derived from the proxima arm
+    flash: String,
     load1: f64,
     footprint_bytes: Option<u64>,
     metrics: Metrics,
@@ -1995,6 +1999,7 @@ impl TimedServer {
 
 struct RunContext<'a> {
     config: &'a Config,
+    llama_flash: &'a str,
     prompt: &'a PromptData,
     round: usize,
     port: u16,
@@ -2002,7 +2007,8 @@ struct RunContext<'a> {
 }
 
 fn run_llama(context: &RunContext, cell: &Cell, row: &mut Row) -> Result<(), HarnessError> {
-    let server = TimedServer::spawn(context.config, context.prompt.capacity, cell.kv, context.port, &context.log_path, "on")?;
+    let server = TimedServer::spawn(context.config, context.prompt.capacity, cell.kv, context.port, &context.log_path, context.llama_flash)?;
+    row.flash = context.llama_flash.to_owned();
     let outcome = (|| {
         if !TimedServer::wait_ready(context.port, 180) {
             return Err(HarnessError::Server("never became healthy".to_owned()));
@@ -2033,6 +2039,22 @@ fn run_llama(context: &RunContext, cell: &Cell, row: &mut Row) -> Result<(), Har
         log: parse_llama_log(&log_text),
     }));
     Ok(())
+}
+
+const FLASH_ON: &str = "on";
+const FLASH_OFF: &str = "off";
+
+fn flash_value(flash: bool) -> &'static str {
+    if flash { FLASH_ON } else { FLASH_OFF }
+}
+
+/// whether the proxima arm runs flash attention, read from its own `run=start` report: the serving
+/// config flag or an attention variant that decomposes to flash. a build that prints neither yields `None`.
+fn parse_attention_flash(text: &str) -> Option<bool> {
+    let line = text.lines().find(|line| line.contains("run=start"))?;
+    let configured = field_value(line, "flash_attention=")? == "true";
+    let variant = line.split_once("attention_variant=").is_some_and(|(_, tail)| tail.split(" context=").next().is_some_and(|text| text.contains("Flash")));
+    Some(configured || variant)
 }
 
 fn run_proxima(context: &RunContext, cell: &Cell, binary: &Path, row: &mut Row) -> Result<(), HarnessError> {
@@ -2068,6 +2090,7 @@ fn run_proxima(context: &RunContext, cell: &Cell, binary: &Path, row: &mut Row) 
     row.footprint_bytes = parse_footprint_bytes(&stderr).ok();
     row.process = parse_process_times(&stderr);
     row.run_facts = parse_run_facts(&combined);
+    row.flash = parse_attention_flash(&combined).map(flash_value).unwrap_or_default().to_owned();
     let legacy = parse_proxima(&combined)?;
     let span = parse_proxima_span(&combined, &legacy);
     row.span_metrics = span.is_some();
@@ -2130,6 +2153,8 @@ fn blank_row(round: usize, position: usize, cell: &Cell, prompt: &PromptData, id
     Row {
         round,
         cell: cell.clone(),
+        warmup: false,
+        flash: String::new(),
         load1: load1(),
         footprint_bytes: None,
         metrics: Metrics::default(),
@@ -2469,11 +2494,12 @@ fn unreported() -> Value {
 
 fn llama_arm_version(row: &Row, context: &RecordContext) -> String {
     let build = llama_evidence(Some(row)).and_then(|evidence| evidence.log.build.as_ref());
-    if build_unreported(build) {
+    let base = if build_unreported(build) {
         format!("{}+sha256:{}", context.llama_commit, row.binary_sha256)
     } else {
         context.llama_commit.clone()
-    }
+    };
+    format!("{base}+fa={}", row.flash)
 }
 
 fn arm_of(row: &Row, context: &RecordContext) -> (String, String) {
@@ -2560,7 +2586,7 @@ fn input_id(row: &Row) -> String {
 /// One record per repeat of the row, indices counted from `first_index`; every field of the contract's LLM record.
 fn run_records(row: &Row, context: &RecordContext, first_index: usize) -> Vec<Value> {
     let (arm, arm_version) = arm_of(row, context);
-    let admitted = row.gate.may_run() && row.exit_code == 0 && row.parity.valid();
+    let admitted = row.gate.may_run() && row.exit_code == 0 && row.parity.valid() && !row.warmup;
     repeats_of(row)
         .into_iter()
         .enumerate()
@@ -2583,7 +2609,7 @@ fn run_records(row: &Row, context: &RecordContext, first_index: usize) -> Vec<Va
                 "ended_at": utc_text(row.ended_at),
                 "exit_status": row.exit_code,
                 "admitted": admitted,
-                "discarded_warmup": false,
+                "discarded_warmup": row.warmup,
                 "host": {
                     "load1": row.load1,
                     "hw_model": context.host.hw_model,
@@ -2634,15 +2660,96 @@ fn not_run_records(contract: &Value, measured: &str) -> Vec<Value> {
 }
 
 /// The raw.jsonl text: every row's records with contiguous indices, then one not-run record per unmeasured backend.
-fn raw_jsonl(rows: &[Row], context: &RecordContext, contract: &Value) -> String {
+fn raw_jsonl(warmups: &[Row], rows: &[Row], context: &RecordContext, contract: &Value) -> String {
     let mut records: Vec<Value> = Vec::new();
-    for row in rows {
+    for row in warmups.iter().chain(rows) {
         let next = records.len();
         records.extend(run_records(row, context, next));
     }
     records.extend(not_run_records(contract, &context.backend));
     records.iter().map(|record| format!("{record}\n")).collect()
 }
+
+struct Session<'a> {
+    config: &'a Config,
+    prompts: &'a BTreeMap<Prompt, PromptData>,
+    logs: PathBuf,
+    llama_sha256: String,
+    /// llama's `-fa`, taken from the proxima arm's own report once its warm-up has run
+    llama_flash: String,
+}
+
+struct Slot {
+    round: usize,
+    step: usize,
+    port_index: usize,
+}
+
+fn measure(session: &Session, cell: &Cell, slot: Slot) -> Result<Row, HarnessError> {
+    let config = session.config;
+    let prompt = &session.prompts[&cell.prompt];
+    let identity = match &cell.engine {
+        Engine::Proxima { binary } | Engine::LlamaInproc { binary } => arm_identity(binary)?,
+        Engine::Llama => ArmIdentity { sha256: session.llama_sha256.clone(), debug_build: false },
+    };
+    let gate = if config.quiet_gate { wait_for_quiet(&config.gate) } else { GateOutcome::Skipped };
+    let mut row = blank_row(slot.round, slot.step, cell, prompt, &identity, config, gate.clone());
+    let context = RunContext {
+        config,
+        llama_flash: &session.llama_flash,
+        prompt,
+        round: slot.round,
+        port: BASE_PORT + u16::try_from(slot.port_index % PORT_SPAN).unwrap_or(0),
+        log_path: session.logs.join(format!("r{}-{}-{}-{}-{}.err", slot.round, cell.engine_name(), cell.label, cell.prompt.name(), cell.kv.name())),
+    };
+    if gate.may_run() {
+        row.started_at = SystemTime::now();
+        let outcome = match &cell.engine {
+            Engine::Proxima { binary } => run_proxima(&context, cell, binary, &mut row),
+            Engine::Llama => run_llama(&context, cell, &mut row),
+            Engine::LlamaInproc { binary } => {
+                row.note = format!("llama-arm bin sha256 {}", identity.sha256);
+                run_inproc(&context, cell, binary, &mut row)
+            }
+        };
+        row.ended_at = SystemTime::now();
+        if let Err(error) = outcome {
+            row.note = format!("{}; {error}", row.note);
+        }
+    } else {
+        "not run: quiet gate refused".clone_into(&mut row.note);
+    }
+    println!("round {} {} {} {} {} exit {} {}", context.round, cell.engine_name(), cell.label, cell.prompt.name(), cell.kv.name(), row.exit_code, row.note);
+    Ok(row)
+}
+
+/// One discarded process per arm before round 1, on the first (prompt, kv) group. The proxima
+/// warm-up runs first because its report decides the `-fa` the llama arm uses from then on.
+fn run_warmups(session: &mut Session, cells: &[Cell]) -> Result<Vec<Row>, HarnessError> {
+    let first_group = cells.first().map(Cell::group);
+    let mut warmups: Vec<Row> = Vec::new();
+    for cell in cells.iter().take_while(|cell| Some(cell.group()) == first_group) {
+        if warmups.iter().any(|row| row.cell.engine_name() == cell.engine_name()) {
+            continue;
+        }
+        if matches!(cell.engine, Engine::Llama) && session.llama_flash.is_empty() {
+            return Err(HarnessError::MissingFlag("--prox"));
+        }
+        let port_index = PORT_SPAN - 1 - warmups.len();
+        let mut row = measure(session, cell, Slot { round: 0, step: warmups.len(), port_index })?;
+        row.warmup = true;
+        if matches!(cell.engine, Engine::Proxima { .. }) {
+            if row.flash.is_empty() {
+                return Err(HarnessError::Server("the proxima run=start report names no attention arithmetic".to_owned()));
+            }
+            session.llama_flash.clone_from(&row.flash);
+        }
+        warmups.push(row);
+    }
+    Ok(warmups)
+}
+
+const PORT_SPAN: usize = 1000;
 
 fn run(config: &Config) -> Result<(), HarnessError> {
     let backend = config.backend.clone().ok_or(HarnessError::MissingFlag("--backend"))?;
@@ -2662,44 +2769,14 @@ fn run(config: &Config) -> Result<(), HarnessError> {
     };
     let mut cells = cell_order(&config.proxima, config.llama_inproc.as_deref());
     cells.retain(|cell| config.prompts.contains(&cell.prompt) && config.kvs.contains(&cell.kv));
+    let mut session = Session { config, prompts: &prompts, logs, llama_sha256: llama_identity.sha256, llama_flash: String::new() };
+    let mut warmups = run_warmups(&mut session, &cells)?;
     let mut rows = Vec::new();
     let session_id = format!("s-{}-{}", utc_text(SystemTime::now()).replace(['-', ':', '.'], ""), std::process::id());
     for (step, (round, index)) in round_plan(config.rounds, cells.len()).into_iter().enumerate() {
-        let cell = &cells[index];
-        let prompt = &prompts[&cell.prompt];
-        let identity = match &cell.engine {
-            Engine::Proxima { binary } | Engine::LlamaInproc { binary } => arm_identity(binary)?,
-            Engine::Llama => ArmIdentity { sha256: llama_identity.sha256.clone(), debug_build: false },
-        };
-        let gate = if config.quiet_gate { wait_for_quiet(&config.gate) } else { GateOutcome::Skipped };
-        let mut row = blank_row(round, step, cell, prompt, &identity, config, gate.clone());
-        let context = RunContext {
-            config,
-            prompt,
-            round,
-            port: BASE_PORT + u16::try_from(step % 1000).unwrap_or(0),
-            log_path: logs.join(format!("r{round}-{}-{}-{}-{}.err", cell.engine_name(), cell.label, cell.prompt.name(), cell.kv.name())),
-        };
-        if gate.may_run() {
-            row.started_at = SystemTime::now();
-            let outcome = match &cell.engine {
-                Engine::Proxima { binary } => run_proxima(&context, cell, binary, &mut row),
-                Engine::Llama => run_llama(&context, cell, &mut row),
-                Engine::LlamaInproc { binary } => {
-                    row.note = format!("llama-arm bin sha256 {}", identity.sha256);
-                    run_inproc(&context, cell, binary, &mut row)
-                }
-            };
-            row.ended_at = SystemTime::now();
-            if let Err(error) = outcome {
-                row.note = format!("{}; {error}", row.note);
-            }
-        } else {
-            "not run: quiet gate refused".clone_into(&mut row.note);
-        }
-        println!("round {} {} {} {} {} exit {} {}", context.round, cell.engine_name(), cell.label, cell.prompt.name(), cell.kv.name(), row.exit_code, row.note);
-        rows.push(row);
+        rows.push(measure(&session, &cells[index], Slot { round, step, port_index: step })?);
     }
+    evaluate_all(&mut warmups, &facts);
     evaluate_all(&mut rows, &facts);
     let model = config.model.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
     let context = RecordContext {
@@ -2711,10 +2788,11 @@ fn run(config: &Config) -> Result<(), HarnessError> {
         proxima_arm: contract_proxima_arm(&contract),
         host: host_facts(),
     };
-    write_outputs(config, &cells, &rows, &facts, &RawRecords { context: &context, contract: &contract })
+    write_outputs(config, &cells, &rows, &facts, &RawRecords { warmups: &warmups, context: &context, contract: &contract })
 }
 
 struct RawRecords<'a> {
+    warmups: &'a [Row],
     context: &'a RecordContext,
     contract: &'a Value,
 }
@@ -2727,7 +2805,7 @@ fn write_outputs(config: &Config, cells: &[Cell], rows: &[Row], facts: &Facts, r
     let tsv_path = config.out.join("raw.tsv");
     fs::write(&tsv_path, &tsv).map_err(io_error(&tsv_path))?;
     let raw_path = config.out.join("raw.jsonl");
-    fs::write(&raw_path, raw_jsonl(rows, raw.context, raw.contract)).map_err(io_error(&raw_path))?;
+    fs::write(&raw_path, raw_jsonl(raw.warmups, rows, raw.context, raw.contract)).map_err(io_error(&raw_path))?;
     let table_path = config.out.join("scoreboard.md");
     let table = scoreboard_markdown(rows, cells);
     fs::write(&table_path, &table).map_err(io_error(&table_path))?;
@@ -4704,6 +4782,8 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         Row {
             round: 1,
             cell: Cell { engine, label: label.to_owned(), prompt: Prompt::Short, kv: Kv::F16 },
+            warmup: false,
+            flash: "on".to_owned(),
             load1: 1.0,
             footprint_bytes: Some(355_363_520),
             metrics: parse_proxima(PROX_LOG).expect("real proxima log parses"),
@@ -4917,7 +4997,7 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         let unhashed = Facts { llama_sha256: String::new(), ..facts() };
         assert_eq!(failing_names(&proxima, &llama, &unhashed), vec!["I12"]);
         let context = fixture_context(&load_contract().expect("contract.json"));
-        assert_eq!(arm_of(&llama, &context).1, format!("ba3c05f71+sha256:{}", llama.binary_sha256));
+        assert_eq!(arm_of(&llama, &context).1, format!("ba3c05f71+sha256:{}+fa={}", llama.binary_sha256, llama.flash));
     }
     #[test]
     fn i8_fails_for_a_debug_binary_or_a_missing_binary_hash() {
@@ -5255,6 +5335,53 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         }
     }
 
+
+    #[test]
+    fn proxima_start_report_decides_flash_without_naming_a_backend() {
+        let cuda = "x run=start prompt=\"p\" flash_attention=false attention_variant=\"unavailable\" context=Native";
+        let metal = "x run=start flash_attention=false attention_variant=Some(AttentionVariant { decomposition: FlashWhereAdmitted }) context=Native";
+        let legacy = "x run=start flash_attention=false attention_variant=Some(AttentionVariant { decomposition: Legacy }) context=Native";
+        let flagged = "x run=start flash_attention=true attention_variant=\"unavailable\" context=Native";
+        assert_eq!(parse_attention_flash(cuda), Some(false));
+        assert_eq!(parse_attention_flash(metal), Some(true));
+        assert_eq!(parse_attention_flash(legacy), Some(false));
+        assert_eq!(parse_attention_flash(flagged), Some(true));
+        assert_eq!(parse_attention_flash("no report here"), None);
+        assert_eq!(flash_value(false), FLASH_OFF);
+        assert_eq!(flash_value(true), FLASH_ON);
+    }
+
+    #[test]
+    fn llama_arm_version_records_the_flash_it_ran_with() {
+        let contract = load_contract().expect("contract.json");
+        let mut row = llama_row(vec![1, 2, 3]);
+        row.flash = FLASH_OFF.to_owned();
+        let version = llama_arm_version(&row, &fixture_context(&contract));
+        assert!(version.ends_with("+fa=off"), "{version}");
+    }
+
+    #[test]
+    fn a_warmup_record_exists_per_arm_and_stays_out_of_n() {
+        let contract = load_contract().expect("contract.json");
+        let context = fixture_context(&contract);
+        let mut warmups = fixture_rows();
+        for row in &mut warmups {
+            row.warmup = true;
+            row.round = 0;
+        }
+        let lines: Vec<String> = raw_jsonl(&warmups, &fixture_rows(), &context, &contract).lines().map(str::to_owned).collect();
+        let records: Vec<Value> = lines.iter().map(|line| serde_json::from_str(line).expect("json")).collect();
+        let runs: Vec<&Value> = records.iter().filter(|record| record["record"] == "run").collect();
+        let discarded: Vec<&&Value> = runs.iter().filter(|record| record["discarded_warmup"] == true).collect();
+        let arms: BTreeSet<&str> = discarded.iter().filter_map(|record| record["arm"].as_str()).collect();
+        assert_eq!(arms.len(), 2);
+        assert!(discarded.iter().all(|record| record["admitted"] == false));
+        assert!(runs.iter().filter(|record| record["discarded_warmup"] == false).all(|record| record["admitted"] == true));
+        let problems = validate_lines("warmup", &lines);
+        assert!(!problems.iter().any(|line| line.contains("no discarded_warmup record")), "{problems:?}");
+        let counted = validate_lines("no_warmup", &raw_lines());
+        assert!(counted.iter().any(|line| line.contains("no discarded_warmup record")), "{counted:?}");
+    }
     #[test]
     fn cov_of_8_10_12_is_20_percent_mean_10() {
         let (center, cov) = sample_mean_cov(&[8.0, 10.0, 12.0]).expect("three values");
@@ -5588,7 +5715,7 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
 
     fn raw_lines() -> Vec<String> {
         let contract = load_contract().expect("contract.json");
-        raw_jsonl(&fixture_rows(), &fixture_context(&contract), &contract).lines().map(str::to_owned).collect()
+        raw_jsonl(&[], &fixture_rows(), &fixture_context(&contract), &contract).lines().map(str::to_owned).collect()
     }
 
     fn names_a_field_problem(line: &str) -> bool {
