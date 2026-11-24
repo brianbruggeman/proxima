@@ -1271,8 +1271,12 @@ fn evaluate(row: &Row, peer: Option<&Row>, facts: &Facts) -> Parity {
     let on_pair = |judge: &dyn Fn(&LlamaEvidence) -> Check| {
         if paired { llama.map_or_else(|| missing("llama evidence"), judge) } else { no_peer() }
     };
+    let derived_flash = llama_row.map(|found| found.flash.clone()).unwrap_or_default();
     let i6 = on_pair(&|evidence| {
-        Check::require(evidence.log.flash_attn == Some(true), || "llama flash_attn not enabled".to_owned())
+        let expected = derived_flash == FLASH_ON;
+        Check::require(!derived_flash.is_empty() && evidence.log.flash_attn == Some(expected), || {
+            format!("llama flash_attn {:?}, derived from the proxima arm {derived_flash:?}", evidence.log.flash_attn)
+        })
     });
     let i7 = on_pair(&|evidence| {
         let expected = llama_padded_capacity(row.capacity);
@@ -5017,12 +5021,37 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
     }
 
     #[test]
-    fn i6_fails_when_llama_flash_attention_is_off() {
+    fn i6_holds_when_llama_flash_matches_the_derived_on() {
+        let (proxima, llama) = pair_rows();
+        assert!(!failing_names(&proxima, &llama, &facts()).contains(&"I6".to_owned()));
+    }
+
+    #[test]
+    fn i6_holds_when_llama_flash_matches_the_derived_off() {
+        let (proxima, mut llama) = pair_rows();
+        llama.flash = FLASH_OFF.to_owned();
+        if let Evidence::Llama(evidence) = &mut llama.evidence {
+            evidence.log.flash_attn = Some(false);
+        }
+        assert!(!failing_names(&proxima, &llama, &facts()).contains(&"I6".to_owned()));
+    }
+
+    #[test]
+    fn i6_fails_naming_both_values_when_llama_flash_is_off_but_derived_on() {
         let (proxima, mut llama) = pair_rows();
         if let Evidence::Llama(evidence) = &mut llama.evidence {
             evidence.log.flash_attn = Some(false);
         }
-        assert_eq!(failing_names(&proxima, &llama, &facts()), vec!["I6"]);
+        let failing = evaluate(&proxima, Some(&llama), &facts()).failing();
+        assert!(failing.iter().any(|text| text.starts_with("I6 llama flash_attn Some(false), derived from the proxima arm \"on\"")));
+    }
+
+    #[test]
+    fn i6_fails_naming_both_values_when_llama_flash_is_on_but_derived_off() {
+        let (proxima, mut llama) = pair_rows();
+        llama.flash = FLASH_OFF.to_owned();
+        let failing = evaluate(&proxima, Some(&llama), &facts()).failing();
+        assert!(failing.iter().any(|text| text.starts_with("I6 llama flash_attn Some(true), derived from the proxima arm \"off\"")));
     }
 
     #[test]
