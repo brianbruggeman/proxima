@@ -1286,20 +1286,25 @@ kernel void omega_reduce_r4_o3_n2_multiply_add_zero(
             }
         }
     } else {
-    for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 2; ++j) {
-            simdgroup_store(acc[i * 2 + j], out_tile + (row_half * 4 + i) * 8 * 32 + (col_half * 2 + j) * 8, 32);
+    for (int col_part = 0; col_part < 2; ++col_part) {
+        if (col_half == col_part) {
+            #pragma clang loop unroll(full)
+            for (int i = 0; i < 4; ++i) {
+                #pragma clang loop unroll(full)
+                for (int j = 0; j < 2; ++j) {
+                    simdgroup_store(acc[i * 2 + j], out_tile + (row_half * 4 + i) * 8 * 16 + j * 8, 16);
+                }
+            }
         }
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     int coord[4];
     for (int d = 0; d < 4; ++d) { coord[d] = 0; }
     coord[2] = dense_batch_coord_2;
     int out_offset_base = ((int)u.out_base);
     out_offset_base += coord[2] * ((int)u.out_strides[2]);
-    for (int idx = tiitg; idx < 2048; idx += 128) {
-        int o_row = idx / 32;
-        int o_col = idx % 32;
+    for (int idx = tiitg; idx < 1024; idx += 128) {
+        int o_row = idx / 16;
+        int o_col = col_part * 16 + idx % 16;
         int o_feat = row_tile * 64 + o_row;
         int o_tok = col_tile * 32 + o_col;
         if (o_feat < feature_extent && o_tok < token_extent) {
@@ -1308,6 +1313,8 @@ kernel void omega_reduce_r4_o3_n2_multiply_add_zero(
             int out_offset = out_offset_base + o_feat * ((int)u.out_strides[1]) + o_tok * ((int)u.out_strides[0]);
             out[out_offset] = (float)out_tile[idx];
         }
+    }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     }
 }
