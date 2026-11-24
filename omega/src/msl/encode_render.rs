@@ -15,35 +15,64 @@
 //! the host. The arithmetic is guarded against reassociation and contraction with the Metal
 //! `math_mode(safe)` pragma and uses `precise::divide`, because the host divides and multiplies
 //! separately and the codes are a function of those exact roundings.
-
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_numeric::block_layout::BlockLayout;
-use proxima_numeric::encode_rule::{CodeClamp, CodeRounding, EncodeRule, ScaleRounding, ScaleStatistic, StoredMin};
+use proxima_numeric::encode_rule::{CodeClamp, CodeRounding, EncodeRule, ScaleRounding, ScaleStatistic};
 use proxima_numeric::float_layout::{FloatLayout, SignEncoding};
 use proxima_numeric::float_layout_codec;
 use proxima_numeric::{FormatCodec, NumericFormat};
 
 use super::layout_render::{layout_load_msl, layout_store_msl};
+pub use crate::encode_render::RenderedEncode;
+use crate::encode_render::{EncodeDialect, wrap_block_kernel};
 
 const F32_EXPONENT_MASK: u32 = 0x7f80_0000;
 const F32_MAGNITUDE_MASK: u32 = 0x7fff_ffff;
 const SUM_BYTES: usize = 2;
 
-/// A rendered encode: the source of one kernel and the shape it dispatches over.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RenderedEncode {
-    /// Metal source defining the kernel named `entry`: buffer 0 is the binary32 input, buffer 1 the
-    /// packed output; one thread encodes `elements_per_thread` values into `bytes_per_thread` bytes.
-    pub source: String,
-    /// The kernel function's name.
-    pub entry: String,
-    /// Elements one thread consumes: the block's element count, or one for a scalar.
-    pub elements_per_thread: usize,
-    /// Bytes one thread produces.
-    pub bytes_per_thread: usize,
+const BYTE: usize = core::mem::size_of::<u8>();
+const HALF_WORD: usize = core::mem::size_of::<u16>();
+const WORD: usize = core::mem::size_of::<u32>();
+
+/// The Metal spelling of the neutral encode render ([`crate::encode_render`]).
+pub struct MslEncode;
+
+impl EncodeDialect for MslEncode {
+    fn prelude(&self) -> String {
+        String::from("#include <metal_stdlib>\nusing namespace metal;\n")
+    }
+
+    fn storage_token(&self, bytes: usize) -> Option<&'static str> {
+        match bytes {
+            BYTE => Some("uchar"),
+            HALF_WORD => Some("ushort"),
+            WORD => Some("uint"),
+            _ => None,
+        }
+    }
+
+    fn scalar_store(&self, layout: FloatLayout, name: &str) -> String {
+        layout_store_msl(layout, name)
+    }
+
+    fn scalar_refusal(&self, _layout: &FloatLayout) -> Option<&'static str> {
+        None
+    }
+
+    fn kernel_open(&self, name: &str, storage: &str) -> String {
+        format!("kernel void {name}_kernel(device const float *input [[buffer(0)]], device {storage} *output [[buffer(1)]], uint gid [[thread_position_in_grid]]) {{\n")
+    }
+
+    fn block_function(&self, layout: &BlockLayout, name: &str) -> Option<String> {
+        block_encode_msl(layout, name)
+    }
+
+    fn block_refusal(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// Why `format` has no rendered encode: the property it lacks. Decided from the description alone.
@@ -52,42 +81,7 @@ pub struct RenderedEncode {
 /// The property of the format that makes it unrenderable.
 #[must_use = "the refusal names why a format has no rendered encode"]
 pub fn encode_kernel_refusal(format: &NumericFormat) -> Result<(), &'static str> {
-    let Some(codec) = FormatCodec::for_format(format) else {
-        return Err("no host codec resolves the format");
-    };
-    if !codec.can_encode() {
-        return Err("the host codec has no encode to match");
-    }
-    match format {
-        NumericFormat::Scalar(layout) => match layout.width() {
-            8 | 16 | 32 => Ok(()),
-            _ => Err("the scalar code does not fill a whole byte, half-word or word"),
-        },
-        NumericFormat::Block(layout) => match layout.encode_rule() {
-            Some(rule) => rule_refusal(layout, &rule),
-            None => Err("the layout has no encode rule"),
-        },
-        NumericFormat::Levels(_) => Err("a level format has no encode rule"),
-    }
-}
-
-/// Why a layout that has an [`EncodeRule`] still has no rendering: the fit the rule names that this
-/// emitter does not write (a searched or stored range, sub-block scales, ties to even), or the
-/// layout packs independent scale runs.
-fn rule_refusal(layout: &BlockLayout, rule: &EncodeRule) -> Result<(), &'static str> {
-    if layout.scale_runs.is_some() && !rule.is_float_code() {
-        return Err("the layout packs independent scale runs under an integer code");
-    }
-    if matches!(rule.statistic, ScaleStatistic::MinMax(_)) || rule.stored_min != StoredMin::Absent {
-        return Err("the layout fits a stored range, which the emitter does not render");
-    }
-    if rule.sub.is_some() {
-        return Err("the layout carries sub-block scales, which the emitter does not render");
-    }
-    if matches!(rule.rounding, CodeRounding::NearestEven) {
-        return Err("the layout rounds ties to even through a magic-number add, which the emitter does not render");
-    }
-    Ok(())
+    crate::encode_render::encode_kernel_refusal(&MslEncode, format)
 }
 
 /// Renders the encode kernel of `format`, entry point `{name}_kernel`.
@@ -96,55 +90,14 @@ fn rule_refusal(layout: &BlockLayout, rule: &EncodeRule) -> Result<(), &'static 
 /// [`encode_kernel_refusal`]'s reason.
 #[must_use = "the refusal names why a format has no rendered encode"]
 pub fn format_encode_kernel_msl(format: &NumericFormat, name: &str) -> Result<RenderedEncode, &'static str> {
-    encode_kernel_refusal(format)?;
-    match format {
-        NumericFormat::Scalar(layout) => Ok(scalar_encode_kernel(*layout, name)),
-        NumericFormat::Block(layout) => block_encode_kernel(layout, name).ok_or("the layout has no encode rule"),
-        NumericFormat::Levels(_) => Err("a level format has no encode rule"),
-    }
-}
-
-fn scalar_encode_kernel(layout: FloatLayout, name: &str) -> RenderedEncode {
-    let storage = match layout.width() {
-        8 => "uchar",
-        16 => "ushort",
-        _ => "uint",
-    };
-    let store = layout_store_msl(layout, &format!("{name}_store"));
-    let source = format!(
-        "#include <metal_stdlib>\nusing namespace metal;\n{store}\nkernel void {name}_kernel(device const float *input [[buffer(0)]], device {storage} *output [[buffer(1)]], uint gid [[thread_position_in_grid]]) {{\n    output[gid] = ({storage}){name}_store(input[gid]);\n}}\n"
-    );
-    RenderedEncode {
-        source,
-        entry: format!("{name}_kernel"),
-        elements_per_thread: 1,
-        bytes_per_thread: usize::from(layout.width()) / 8,
-    }
-}
-
-fn block_encode_kernel(layout: &BlockLayout, name: &str) -> Option<RenderedEncode> {
-    wrap_block_kernel(layout, name, block_encode_msl(layout, name)?)
+    crate::encode_render::format_encode_kernel(&MslEncode, format, name)
 }
 
 /// [`format_encode_kernel_msl`] for a block layout under `rule` instead of the layout's own rule;
 /// `None` when [`block_encode_msl_by_rule`] has no rendering.
 #[must_use]
 pub fn block_encode_kernel_by_rule(layout: &BlockLayout, rule: &EncodeRule, name: &str) -> Option<RenderedEncode> {
-    wrap_block_kernel(layout, name, block_encode_msl_by_rule(layout, rule, name)?)
-}
-
-fn wrap_block_kernel(layout: &BlockLayout, name: &str, function: String) -> Option<RenderedEncode> {
-    let elements = usize::from(layout.elements);
-    let bytes = usize::from(layout.block_bytes);
-    let source = format!(
-        "#include <metal_stdlib>\nusing namespace metal;\n{function}\nkernel void {name}_kernel(device const float *input [[buffer(0)]], device uchar *output [[buffer(1)]], uint gid [[thread_position_in_grid]]) {{\n    {name}(input + gid * {elements}u, output + gid * {bytes}u);\n}}\n"
-    );
-    Some(RenderedEncode {
-        source,
-        entry: format!("{name}_kernel"),
-        elements_per_thread: elements,
-        bytes_per_thread: bytes,
-    })
+    wrap_block_kernel(&MslEncode, layout, name, block_encode_msl_by_rule(layout, rule, name)?)
 }
 
 fn code_bits(layout: &BlockLayout) -> u32 {

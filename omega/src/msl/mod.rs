@@ -295,6 +295,8 @@ mod layout_int_tests;
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod encode_render_tests;
 #[cfg(test)]
+mod encode_golden_tests;
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod layout_render_tests;
 #[cfg(test)]

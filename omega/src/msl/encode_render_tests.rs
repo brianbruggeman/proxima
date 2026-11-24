@@ -34,6 +34,7 @@ use objc2_metal::{
 };
 
 const EMITTER_SOURCE: &str = include_str!("encode_render.rs");
+const NEUTRAL_SOURCE: &str = include_str!("../encode_render.rs");
 
 /// K/V-shaped rows: per-head magnitudes that differ by orders of magnitude, a few outlier channels,
 /// sign-symmetric spread, the shape of a projected and rotated attention row.
@@ -194,7 +195,7 @@ fn a_format_with_no_rule_or_an_odd_width_is_refused_naming_the_property() {
 fn the_encode_emitter_names_no_format() {
     for name in ["q8_0", "q4_0", "q8_1", "f16", "bf16", "bf8", "e5m2", "ggml", "llama"] {
         assert!(
-            !EMITTER_SOURCE.to_ascii_lowercase().replace("floatlayout::f16", "").lines().filter(|line| !line.trim_start().starts_with("//")).any(|line| line.contains(name)),
+            ![EMITTER_SOURCE, NEUTRAL_SOURCE].iter().any(|source| source.to_ascii_lowercase().replace("floatlayout::f16", "").lines().filter(|line| !line.trim_start().starts_with("//")).any(|line| line.contains(name))),
             "the emitter source names {name}"
         );
     }

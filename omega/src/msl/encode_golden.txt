@@ -1,0 +1,1180 @@
+=== Q2K
+refused no host codec resolves the format
+=== Q3K
+refused no host codec resolves the format
+=== Q4K
+refused no host codec resolves the format
+=== Q5K
+refused no host codec resolves the format
+=== Q6K
+refused no host codec resolves the format
+=== Q8_0
+entry golden_encode_kernel elements 32 bytes 34
+#include <metal_stdlib>
+using namespace metal;
+
+static inline uint golden_encode_scale_store(float value) {
+    return (uint)as_type<ushort>((half)value);
+}
+
+static inline float golden_encode_scale_load(uint code) {
+    return (float)as_type<half>((ushort)code);
+}
+
+static inline int golden_encode_to_int(float value) {
+    if ((as_type<uint>(value) & 0x7fffffffu) > 0x7f800000u) {
+        return 0;
+    }
+    if (value <= -2147483648.0f) {
+        return -2147483647 - 1;
+    }
+    if (value >= 2147483648.0f) {
+        return 2147483647;
+    }
+    return (int)value;
+}
+
+static inline void golden_encode(device const float *input, device uchar *block) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+    uint top = 0u;
+    for (uint index = 0u; index < 32u; ++index) {
+        top = max(top, as_type<uint>(input[index]) & 0x7fffffffu);
+    }
+    float peak = as_type<float>(top);
+    if (top > 0x7f800000u) {
+        peak = 0.0f;
+        for (uint index = 0u; index < 32u; ++index) {
+            float magnitude = as_type<float>(as_type<uint>(input[index]) & 0x7fffffffu);
+            peak = (peak > magnitude) ? peak : magnitude;
+        }
+    }
+    float scale = metal::precise::divide(peak, 127.0f);
+    float inverse = (scale == 0.0f) ? 0.0f : metal::precise::divide(1.0f, scale);
+    float stored = golden_encode_scale_load(golden_encode_scale_store(scale));
+    float stored_inverse = metal::precise::divide(1.0f, stored);
+    bool scale_is_finite = (as_type<uint>(scale) & 0x7f800000u) != 0x7f800000u;
+    bool inverse_is_finite = (as_type<uint>(stored_inverse) & 0x7f800000u) != 0x7f800000u;
+    bool degenerate = scale_is_finite && (stored == 0.0f || !inverse_is_finite);
+    uchar codes[32];
+    for (uint index = 0u; index < 32u; ++index) {
+        uint code = 0u;
+        if (!degenerate) {
+            int rounded = golden_encode_to_int(round(input[index] * inverse));
+            code = ((uint)clamp(rounded, -128, 127) & 0xffu) & 0xffu;
+        }
+        codes[index] = (uchar)code;
+    }
+    uchar bytes[34];
+    for (uint position = 0u; position < 34u; ++position) {
+        bytes[position] = 0;
+    }
+    bytes[2] |= (uchar)((((uint)codes[0] >> 0u) & 0xffu) << 0u);
+    bytes[3] |= (uchar)((((uint)codes[1] >> 0u) & 0xffu) << 0u);
+    bytes[4] |= (uchar)((((uint)codes[2] >> 0u) & 0xffu) << 0u);
+    bytes[5] |= (uchar)((((uint)codes[3] >> 0u) & 0xffu) << 0u);
+    bytes[6] |= (uchar)((((uint)codes[4] >> 0u) & 0xffu) << 0u);
+    bytes[7] |= (uchar)((((uint)codes[5] >> 0u) & 0xffu) << 0u);
+    bytes[8] |= (uchar)((((uint)codes[6] >> 0u) & 0xffu) << 0u);
+    bytes[9] |= (uchar)((((uint)codes[7] >> 0u) & 0xffu) << 0u);
+    bytes[10] |= (uchar)((((uint)codes[8] >> 0u) & 0xffu) << 0u);
+    bytes[11] |= (uchar)((((uint)codes[9] >> 0u) & 0xffu) << 0u);
+    bytes[12] |= (uchar)((((uint)codes[10] >> 0u) & 0xffu) << 0u);
+    bytes[13] |= (uchar)((((uint)codes[11] >> 0u) & 0xffu) << 0u);
+    bytes[14] |= (uchar)((((uint)codes[12] >> 0u) & 0xffu) << 0u);
+    bytes[15] |= (uchar)((((uint)codes[13] >> 0u) & 0xffu) << 0u);
+    bytes[16] |= (uchar)((((uint)codes[14] >> 0u) & 0xffu) << 0u);
+    bytes[17] |= (uchar)((((uint)codes[15] >> 0u) & 0xffu) << 0u);
+    bytes[18] |= (uchar)((((uint)codes[16] >> 0u) & 0xffu) << 0u);
+    bytes[19] |= (uchar)((((uint)codes[17] >> 0u) & 0xffu) << 0u);
+    bytes[20] |= (uchar)((((uint)codes[18] >> 0u) & 0xffu) << 0u);
+    bytes[21] |= (uchar)((((uint)codes[19] >> 0u) & 0xffu) << 0u);
+    bytes[22] |= (uchar)((((uint)codes[20] >> 0u) & 0xffu) << 0u);
+    bytes[23] |= (uchar)((((uint)codes[21] >> 0u) & 0xffu) << 0u);
+    bytes[24] |= (uchar)((((uint)codes[22] >> 0u) & 0xffu) << 0u);
+    bytes[25] |= (uchar)((((uint)codes[23] >> 0u) & 0xffu) << 0u);
+    bytes[26] |= (uchar)((((uint)codes[24] >> 0u) & 0xffu) << 0u);
+    bytes[27] |= (uchar)((((uint)codes[25] >> 0u) & 0xffu) << 0u);
+    bytes[28] |= (uchar)((((uint)codes[26] >> 0u) & 0xffu) << 0u);
+    bytes[29] |= (uchar)((((uint)codes[27] >> 0u) & 0xffu) << 0u);
+    bytes[30] |= (uchar)((((uint)codes[28] >> 0u) & 0xffu) << 0u);
+    bytes[31] |= (uchar)((((uint)codes[29] >> 0u) & 0xffu) << 0u);
+    bytes[32] |= (uchar)((((uint)codes[30] >> 0u) & 0xffu) << 0u);
+    bytes[33] |= (uchar)((((uint)codes[31] >> 0u) & 0xffu) << 0u);
+    uint scale_bits = golden_encode_scale_store(scale) & 0xffffu;
+    bytes[0] |= (uchar)((scale_bits >> 0u) & 0xffu);
+    bytes[1] |= (uchar)((scale_bits >> 8u) & 0xffu);
+    for (uint position = 0u; position < 34u; ++position) {
+        block[position] = bytes[position];
+    }
+}
+
+kernel void golden_encode_kernel(device const float *input [[buffer(0)]], device uchar *output [[buffer(1)]], uint gid [[thread_position_in_grid]]) {
+    golden_encode(input + gid * 32u, output + gid * 34u);
+}
+=== Q4_0
+entry golden_encode_kernel elements 32 bytes 18
+#include <metal_stdlib>
+using namespace metal;
+
+static inline uint golden_encode_scale_store(float value) {
+    return (uint)as_type<ushort>((half)value);
+}
+
+static inline float golden_encode_scale_load(uint code) {
+    return (float)as_type<half>((ushort)code);
+}
+
+static inline int golden_encode_to_int(float value) {
+    if ((as_type<uint>(value) & 0x7fffffffu) > 0x7f800000u) {
+        return 0;
+    }
+    if (value <= -2147483648.0f) {
+        return -2147483647 - 1;
+    }
+    if (value >= 2147483648.0f) {
+        return 2147483647;
+    }
+    return (int)value;
+}
+
+static inline void golden_encode(device const float *input, device uchar *block) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+    float peak_magnitude = 0.0f;
+    float peak_value = 0.0f;
+    for (uint index = 0u; index < 32u; ++index) {
+        float value = input[index];
+        float magnitude = as_type<float>(as_type<uint>(value) & 0x7fffffffu);
+        if (peak_magnitude < magnitude) {
+            peak_magnitude = magnitude;
+            peak_value = value;
+        }
+    }
+    float scale = metal::precise::divide(peak_value, -8.0f);
+    float inverse = (scale == 0.0f) ? 0.0f : metal::precise::divide(1.0f, scale);
+    float stored = golden_encode_scale_load(golden_encode_scale_store(scale));
+    float stored_inverse = metal::precise::divide(1.0f, stored);
+    bool scale_is_finite = (as_type<uint>(scale) & 0x7f800000u) != 0x7f800000u;
+    bool inverse_is_finite = (as_type<uint>(stored_inverse) & 0x7f800000u) != 0x7f800000u;
+    bool degenerate = scale_is_finite && (stored == 0.0f || !inverse_is_finite);
+    uchar codes[32];
+    for (uint index = 0u; index < 32u; ++index) {
+        uint code = 8u;
+        if (!degenerate) {
+            int raw = golden_encode_to_int(input[index] * inverse + 8.5f);
+            code = (uint)min(raw, 15) & 0xffu;
+        }
+        codes[index] = (uchar)code;
+    }
+    uchar bytes[18];
+    for (uint position = 0u; position < 18u; ++position) {
+        bytes[position] = 0;
+    }
+    bytes[2] |= (uchar)((((uint)codes[0] >> 0u) & 0xfu) << 0u);
+    bytes[3] |= (uchar)((((uint)codes[1] >> 0u) & 0xfu) << 0u);
+    bytes[4] |= (uchar)((((uint)codes[2] >> 0u) & 0xfu) << 0u);
+    bytes[5] |= (uchar)((((uint)codes[3] >> 0u) & 0xfu) << 0u);
+    bytes[6] |= (uchar)((((uint)codes[4] >> 0u) & 0xfu) << 0u);
+    bytes[7] |= (uchar)((((uint)codes[5] >> 0u) & 0xfu) << 0u);
+    bytes[8] |= (uchar)((((uint)codes[6] >> 0u) & 0xfu) << 0u);
+    bytes[9] |= (uchar)((((uint)codes[7] >> 0u) & 0xfu) << 0u);
+    bytes[10] |= (uchar)((((uint)codes[8] >> 0u) & 0xfu) << 0u);
+    bytes[11] |= (uchar)((((uint)codes[9] >> 0u) & 0xfu) << 0u);
+    bytes[12] |= (uchar)((((uint)codes[10] >> 0u) & 0xfu) << 0u);
+    bytes[13] |= (uchar)((((uint)codes[11] >> 0u) & 0xfu) << 0u);
+    bytes[14] |= (uchar)((((uint)codes[12] >> 0u) & 0xfu) << 0u);
+    bytes[15] |= (uchar)((((uint)codes[13] >> 0u) & 0xfu) << 0u);
+    bytes[16] |= (uchar)((((uint)codes[14] >> 0u) & 0xfu) << 0u);
+    bytes[17] |= (uchar)((((uint)codes[15] >> 0u) & 0xfu) << 0u);
+    bytes[2] |= (uchar)((((uint)codes[16] >> 0u) & 0xfu) << 4u);
+    bytes[3] |= (uchar)((((uint)codes[17] >> 0u) & 0xfu) << 4u);
+    bytes[4] |= (uchar)((((uint)codes[18] >> 0u) & 0xfu) << 4u);
+    bytes[5] |= (uchar)((((uint)codes[19] >> 0u) & 0xfu) << 4u);
+    bytes[6] |= (uchar)((((uint)codes[20] >> 0u) & 0xfu) << 4u);
+    bytes[7] |= (uchar)((((uint)codes[21] >> 0u) & 0xfu) << 4u);
+    bytes[8] |= (uchar)((((uint)codes[22] >> 0u) & 0xfu) << 4u);
+    bytes[9] |= (uchar)((((uint)codes[23] >> 0u) & 0xfu) << 4u);
+    bytes[10] |= (uchar)((((uint)codes[24] >> 0u) & 0xfu) << 4u);
+    bytes[11] |= (uchar)((((uint)codes[25] >> 0u) & 0xfu) << 4u);
+    bytes[12] |= (uchar)((((uint)codes[26] >> 0u) & 0xfu) << 4u);
+    bytes[13] |= (uchar)((((uint)codes[27] >> 0u) & 0xfu) << 4u);
+    bytes[14] |= (uchar)((((uint)codes[28] >> 0u) & 0xfu) << 4u);
+    bytes[15] |= (uchar)((((uint)codes[29] >> 0u) & 0xfu) << 4u);
+    bytes[16] |= (uchar)((((uint)codes[30] >> 0u) & 0xfu) << 4u);
+    bytes[17] |= (uchar)((((uint)codes[31] >> 0u) & 0xfu) << 4u);
+    uint scale_bits = golden_encode_scale_store(scale) & 0xffffu;
+    bytes[0] |= (uchar)((scale_bits >> 0u) & 0xffu);
+    bytes[1] |= (uchar)((scale_bits >> 8u) & 0xffu);
+    for (uint position = 0u; position < 18u; ++position) {
+        block[position] = bytes[position];
+    }
+}
+
+kernel void golden_encode_kernel(device const float *input [[buffer(0)]], device uchar *output [[buffer(1)]], uint gid [[thread_position_in_grid]]) {
+    golden_encode(input + gid * 32u, output + gid * 18u);
+}
+=== Float16
+entry golden_encode_kernel elements 1 bytes 2
+#include <metal_stdlib>
+using namespace metal;
+
+static inline uint golden_encode_store(float value) {
+    return (uint)as_type<ushort>((half)value);
+}
+
+kernel void golden_encode_kernel(device const float *input [[buffer(0)]], device ushort *output [[buffer(1)]], uint gid [[thread_position_in_grid]]) {
+    output[gid] = (ushort)golden_encode_store(input[gid]);
+}
+=== BFloat16
+entry golden_encode_kernel elements 1 bytes 2
+#include <metal_stdlib>
+using namespace metal;
+
+static inline uint golden_encode_store(float value) {
+    return (uint)as_type<ushort>((bfloat)value);
+}
+
+kernel void golden_encode_kernel(device const float *input [[buffer(0)]], device ushort *output [[buffer(1)]], uint gid [[thread_position_in_grid]]) {
+    output[gid] = (ushort)golden_encode_store(input[gid]);
+}
+=== Q5_1
+refused the layout fits a stored range, which the emitter does not render
+=== Q5_0
+entry golden_encode_kernel elements 32 bytes 22
+#include <metal_stdlib>
+using namespace metal;
+
+static inline uint golden_encode_scale_store(float value) {
+    return (uint)as_type<ushort>((half)value);
+}
+
+static inline float golden_encode_scale_load(uint code) {
+    return (float)as_type<half>((ushort)code);
+}
+
+static inline int golden_encode_to_int(float value) {
+    if ((as_type<uint>(value) & 0x7fffffffu) > 0x7f800000u) {
+        return 0;
+    }
+    if (value <= -2147483648.0f) {
+        return -2147483647 - 1;
+    }
+    if (value >= 2147483648.0f) {
+        return 2147483647;
+    }
+    return (int)value;
+}
+
+static inline void golden_encode(device const float *input, device uchar *block) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+    float peak_magnitude = 0.0f;
+    float peak_value = 0.0f;
+    for (uint index = 0u; index < 32u; ++index) {
+        float value = input[index];
+        float magnitude = as_type<float>(as_type<uint>(value) & 0x7fffffffu);
+        if (peak_magnitude < magnitude) {
+            peak_magnitude = magnitude;
+            peak_value = value;
+        }
+    }
+    float scale = metal::precise::divide(peak_value, -16.0f);
+    float inverse = (scale == 0.0f) ? 0.0f : metal::precise::divide(1.0f, scale);
+    float stored = golden_encode_scale_load(golden_encode_scale_store(scale));
+    float stored_inverse = metal::precise::divide(1.0f, stored);
+    bool scale_is_finite = (as_type<uint>(scale) & 0x7f800000u) != 0x7f800000u;
+    bool inverse_is_finite = (as_type<uint>(stored_inverse) & 0x7f800000u) != 0x7f800000u;
+    bool degenerate = scale_is_finite && (stored == 0.0f || !inverse_is_finite);
+    uchar codes[32];
+    for (uint index = 0u; index < 32u; ++index) {
+        uint code = 16u;
+        if (!degenerate) {
+            int raw = golden_encode_to_int(input[index] * inverse + 16.5f);
+            code = (uint)min(raw, 31) & 0xffu;
+        }
+        codes[index] = (uchar)code;
+    }
+    uchar bytes[22];
+    for (uint position = 0u; position < 22u; ++position) {
+        bytes[position] = 0;
+    }
+    bytes[6] |= (uchar)((((uint)codes[0] >> 0u) & 0xfu) << 0u);
+    bytes[2] |= (uchar)((((uint)codes[0] >> 4u) & 0x1u) << 0u);
+    bytes[7] |= (uchar)((((uint)codes[1] >> 0u) & 0xfu) << 0u);
+    bytes[2] |= (uchar)((((uint)codes[1] >> 4u) & 0x1u) << 1u);
+    bytes[8] |= (uchar)((((uint)codes[2] >> 0u) & 0xfu) << 0u);
+    bytes[2] |= (uchar)((((uint)codes[2] >> 4u) & 0x1u) << 2u);
+    bytes[9] |= (uchar)((((uint)codes[3] >> 0u) & 0xfu) << 0u);
+    bytes[2] |= (uchar)((((uint)codes[3] >> 4u) & 0x1u) << 3u);
+    bytes[10] |= (uchar)((((uint)codes[4] >> 0u) & 0xfu) << 0u);
+    bytes[2] |= (uchar)((((uint)codes[4] >> 4u) & 0x1u) << 4u);
+    bytes[11] |= (uchar)((((uint)codes[5] >> 0u) & 0xfu) << 0u);
+    bytes[2] |= (uchar)((((uint)codes[5] >> 4u) & 0x1u) << 5u);
+    bytes[12] |= (uchar)((((uint)codes[6] >> 0u) & 0xfu) << 0u);
+    bytes[2] |= (uchar)((((uint)codes[6] >> 4u) & 0x1u) << 6u);
+    bytes[13] |= (uchar)((((uint)codes[7] >> 0u) & 0xfu) << 0u);
+    bytes[2] |= (uchar)((((uint)codes[7] >> 4u) & 0x1u) << 7u);
+    bytes[14] |= (uchar)((((uint)codes[8] >> 0u) & 0xfu) << 0u);
+    bytes[3] |= (uchar)((((uint)codes[8] >> 4u) & 0x1u) << 0u);
+    bytes[15] |= (uchar)((((uint)codes[9] >> 0u) & 0xfu) << 0u);
+    bytes[3] |= (uchar)((((uint)codes[9] >> 4u) & 0x1u) << 1u);
+    bytes[16] |= (uchar)((((uint)codes[10] >> 0u) & 0xfu) << 0u);
+    bytes[3] |= (uchar)((((uint)codes[10] >> 4u) & 0x1u) << 2u);
+    bytes[17] |= (uchar)((((uint)codes[11] >> 0u) & 0xfu) << 0u);
+    bytes[3] |= (uchar)((((uint)codes[11] >> 4u) & 0x1u) << 3u);
+    bytes[18] |= (uchar)((((uint)codes[12] >> 0u) & 0xfu) << 0u);
+    bytes[3] |= (uchar)((((uint)codes[12] >> 4u) & 0x1u) << 4u);
+    bytes[19] |= (uchar)((((uint)codes[13] >> 0u) & 0xfu) << 0u);
+    bytes[3] |= (uchar)((((uint)codes[13] >> 4u) & 0x1u) << 5u);
+    bytes[20] |= (uchar)((((uint)codes[14] >> 0u) & 0xfu) << 0u);
+    bytes[3] |= (uchar)((((uint)codes[14] >> 4u) & 0x1u) << 6u);
+    bytes[21] |= (uchar)((((uint)codes[15] >> 0u) & 0xfu) << 0u);
+    bytes[3] |= (uchar)((((uint)codes[15] >> 4u) & 0x1u) << 7u);
+    bytes[6] |= (uchar)((((uint)codes[16] >> 0u) & 0xfu) << 4u);
+    bytes[4] |= (uchar)((((uint)codes[16] >> 4u) & 0x1u) << 0u);
+    bytes[7] |= (uchar)((((uint)codes[17] >> 0u) & 0xfu) << 4u);
+    bytes[4] |= (uchar)((((uint)codes[17] >> 4u) & 0x1u) << 1u);
+    bytes[8] |= (uchar)((((uint)codes[18] >> 0u) & 0xfu) << 4u);
+    bytes[4] |= (uchar)((((uint)codes[18] >> 4u) & 0x1u) << 2u);
+    bytes[9] |= (uchar)((((uint)codes[19] >> 0u) & 0xfu) << 4u);
+    bytes[4] |= (uchar)((((uint)codes[19] >> 4u) & 0x1u) << 3u);
+    bytes[10] |= (uchar)((((uint)codes[20] >> 0u) & 0xfu) << 4u);
+    bytes[4] |= (uchar)((((uint)codes[20] >> 4u) & 0x1u) << 4u);
+    bytes[11] |= (uchar)((((uint)codes[21] >> 0u) & 0xfu) << 4u);
+    bytes[4] |= (uchar)((((uint)codes[21] >> 4u) & 0x1u) << 5u);
+    bytes[12] |= (uchar)((((uint)codes[22] >> 0u) & 0xfu) << 4u);
+    bytes[4] |= (uchar)((((uint)codes[22] >> 4u) & 0x1u) << 6u);
+    bytes[13] |= (uchar)((((uint)codes[23] >> 0u) & 0xfu) << 4u);
+    bytes[4] |= (uchar)((((uint)codes[23] >> 4u) & 0x1u) << 7u);
+    bytes[14] |= (uchar)((((uint)codes[24] >> 0u) & 0xfu) << 4u);
+    bytes[5] |= (uchar)((((uint)codes[24] >> 4u) & 0x1u) << 0u);
+    bytes[15] |= (uchar)((((uint)codes[25] >> 0u) & 0xfu) << 4u);
+    bytes[5] |= (uchar)((((uint)codes[25] >> 4u) & 0x1u) << 1u);
+    bytes[16] |= (uchar)((((uint)codes[26] >> 0u) & 0xfu) << 4u);
+    bytes[5] |= (uchar)((((uint)codes[26] >> 4u) & 0x1u) << 2u);
+    bytes[17] |= (uchar)((((uint)codes[27] >> 0u) & 0xfu) << 4u);
+    bytes[5] |= (uchar)((((uint)codes[27] >> 4u) & 0x1u) << 3u);
+    bytes[18] |= (uchar)((((uint)codes[28] >> 0u) & 0xfu) << 4u);
+    bytes[5] |= (uchar)((((uint)codes[28] >> 4u) & 0x1u) << 4u);
+    bytes[19] |= (uchar)((((uint)codes[29] >> 0u) & 0xfu) << 4u);
+    bytes[5] |= (uchar)((((uint)codes[29] >> 4u) & 0x1u) << 5u);
+    bytes[20] |= (uchar)((((uint)codes[30] >> 0u) & 0xfu) << 4u);
+    bytes[5] |= (uchar)((((uint)codes[30] >> 4u) & 0x1u) << 6u);
+    bytes[21] |= (uchar)((((uint)codes[31] >> 0u) & 0xfu) << 4u);
+    bytes[5] |= (uchar)((((uint)codes[31] >> 4u) & 0x1u) << 7u);
+    uint scale_bits = golden_encode_scale_store(scale) & 0xffffu;
+    bytes[0] |= (uchar)((scale_bits >> 0u) & 0xffu);
+    bytes[1] |= (uchar)((scale_bits >> 8u) & 0xffu);
+    for (uint position = 0u; position < 22u; ++position) {
+        block[position] = bytes[position];
+    }
+}
+
+kernel void golden_encode_kernel(device const float *input [[buffer(0)]], device uchar *output [[buffer(1)]], uint gid [[thread_position_in_grid]]) {
+    golden_encode(input + gid * 32u, output + gid * 22u);
+}
+=== Q4_1
+refused the layout fits a stored range, which the emitter does not render
+=== Q8_1
+entry golden_encode_kernel elements 32 bytes 36
+#include <metal_stdlib>
+using namespace metal;
+
+static inline uint golden_encode_scale_store(float value) {
+    return (uint)as_type<ushort>((half)value);
+}
+
+static inline float golden_encode_scale_load(uint code) {
+    return (float)as_type<half>((ushort)code);
+}
+
+static inline uint golden_encode_sum_store(float value) {
+    return (uint)as_type<ushort>((half)value);
+}
+
+static inline int golden_encode_to_int(float value) {
+    if ((as_type<uint>(value) & 0x7fffffffu) > 0x7f800000u) {
+        return 0;
+    }
+    if (value <= -2147483648.0f) {
+        return -2147483647 - 1;
+    }
+    if (value >= 2147483648.0f) {
+        return 2147483647;
+    }
+    return (int)value;
+}
+
+static inline void golden_encode(device const float *input, device uchar *block) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+    uint top = 0u;
+    for (uint index = 0u; index < 32u; ++index) {
+        top = max(top, as_type<uint>(input[index]) & 0x7fffffffu);
+    }
+    float peak = as_type<float>(top);
+    if (top > 0x7f800000u) {
+        peak = 0.0f;
+        for (uint index = 0u; index < 32u; ++index) {
+            float magnitude = as_type<float>(as_type<uint>(input[index]) & 0x7fffffffu);
+            peak = (peak > magnitude) ? peak : magnitude;
+        }
+    }
+    float scale = metal::precise::divide(peak, 127.0f);
+    float inverse = (scale == 0.0f) ? 0.0f : metal::precise::divide(1.0f, scale);
+    float stored = golden_encode_scale_load(golden_encode_scale_store(scale));
+    float stored_inverse = metal::precise::divide(1.0f, stored);
+    bool scale_is_finite = (as_type<uint>(scale) & 0x7f800000u) != 0x7f800000u;
+    bool inverse_is_finite = (as_type<uint>(stored_inverse) & 0x7f800000u) != 0x7f800000u;
+    bool degenerate = scale_is_finite && (stored == 0.0f || !inverse_is_finite);
+    uchar codes[32];
+    for (uint index = 0u; index < 32u; ++index) {
+        uint code = 0u;
+        if (!degenerate) {
+            int rounded = golden_encode_to_int(round(input[index] * inverse));
+            code = ((uint)clamp(rounded, -128, 127) & 0xffu) & 0xffu;
+        }
+        codes[index] = (uchar)code;
+    }
+    uchar bytes[36];
+    for (uint position = 0u; position < 36u; ++position) {
+        bytes[position] = 0;
+    }
+    bytes[4] |= (uchar)((((uint)codes[0] >> 0u) & 0xffu) << 0u);
+    bytes[5] |= (uchar)((((uint)codes[1] >> 0u) & 0xffu) << 0u);
+    bytes[6] |= (uchar)((((uint)codes[2] >> 0u) & 0xffu) << 0u);
+    bytes[7] |= (uchar)((((uint)codes[3] >> 0u) & 0xffu) << 0u);
+    bytes[8] |= (uchar)((((uint)codes[4] >> 0u) & 0xffu) << 0u);
+    bytes[9] |= (uchar)((((uint)codes[5] >> 0u) & 0xffu) << 0u);
+    bytes[10] |= (uchar)((((uint)codes[6] >> 0u) & 0xffu) << 0u);
+    bytes[11] |= (uchar)((((uint)codes[7] >> 0u) & 0xffu) << 0u);
+    bytes[12] |= (uchar)((((uint)codes[8] >> 0u) & 0xffu) << 0u);
+    bytes[13] |= (uchar)((((uint)codes[9] >> 0u) & 0xffu) << 0u);
+    bytes[14] |= (uchar)((((uint)codes[10] >> 0u) & 0xffu) << 0u);
+    bytes[15] |= (uchar)((((uint)codes[11] >> 0u) & 0xffu) << 0u);
+    bytes[16] |= (uchar)((((uint)codes[12] >> 0u) & 0xffu) << 0u);
+    bytes[17] |= (uchar)((((uint)codes[13] >> 0u) & 0xffu) << 0u);
+    bytes[18] |= (uchar)((((uint)codes[14] >> 0u) & 0xffu) << 0u);
+    bytes[19] |= (uchar)((((uint)codes[15] >> 0u) & 0xffu) << 0u);
+    bytes[20] |= (uchar)((((uint)codes[16] >> 0u) & 0xffu) << 0u);
+    bytes[21] |= (uchar)((((uint)codes[17] >> 0u) & 0xffu) << 0u);
+    bytes[22] |= (uchar)((((uint)codes[18] >> 0u) & 0xffu) << 0u);
+    bytes[23] |= (uchar)((((uint)codes[19] >> 0u) & 0xffu) << 0u);
+    bytes[24] |= (uchar)((((uint)codes[20] >> 0u) & 0xffu) << 0u);
+    bytes[25] |= (uchar)((((uint)codes[21] >> 0u) & 0xffu) << 0u);
+    bytes[26] |= (uchar)((((uint)codes[22] >> 0u) & 0xffu) << 0u);
+    bytes[27] |= (uchar)((((uint)codes[23] >> 0u) & 0xffu) << 0u);
+    bytes[28] |= (uchar)((((uint)codes[24] >> 0u) & 0xffu) << 0u);
+    bytes[29] |= (uchar)((((uint)codes[25] >> 0u) & 0xffu) << 0u);
+    bytes[30] |= (uchar)((((uint)codes[26] >> 0u) & 0xffu) << 0u);
+    bytes[31] |= (uchar)((((uint)codes[27] >> 0u) & 0xffu) << 0u);
+    bytes[32] |= (uchar)((((uint)codes[28] >> 0u) & 0xffu) << 0u);
+    bytes[33] |= (uchar)((((uint)codes[29] >> 0u) & 0xffu) << 0u);
+    bytes[34] |= (uchar)((((uint)codes[30] >> 0u) & 0xffu) << 0u);
+    bytes[35] |= (uchar)((((uint)codes[31] >> 0u) & 0xffu) << 0u);
+    uint scale_bits = golden_encode_scale_store(scale) & 0xffffu;
+    bytes[0] |= (uchar)((scale_bits >> 0u) & 0xffu);
+    bytes[1] |= (uchar)((scale_bits >> 8u) & 0xffu);
+    int total_codes = 0;
+    for (uint index = 0u; index < 32u; ++index) {
+        total_codes += ((int)((uint)codes[index] << 24u)) >> 24u;
+    }
+    uint sum_bits = golden_encode_sum_store((float)total_codes * scale);
+    bytes[2] = (uchar)((sum_bits >> 0u) & 0xffu);
+    bytes[3] = (uchar)((sum_bits >> 8u) & 0xffu);
+    for (uint position = 0u; position < 36u; ++position) {
+        block[position] = bytes[position];
+    }
+}
+
+kernel void golden_encode_kernel(device const float *input [[buffer(0)]], device uchar *output [[buffer(1)]], uint gid [[thread_position_in_grid]]) {
+    golden_encode(input + gid * 32u, output + gid * 36u);
+}
+=== Q8K
+refused the host codec has no encode to match
+=== Iq1S
+refused no host codec resolves the format
+=== Iq1M
+refused no host codec resolves the format
+=== Iq2Xxs
+refused no host codec resolves the format
+=== Iq2Xs
+refused no host codec resolves the format
+=== Iq2S
+refused no host codec resolves the format
+=== Iq3Xxs
+refused no host codec resolves the format
+=== Iq3S
+refused no host codec resolves the format
+=== Iq4Nl
+refused no host codec resolves the format
+=== Iq4Xs
+refused no host codec resolves the format
+=== Tq10
+refused no host codec resolves the format
+=== Tq20
+refused a level format has no encode rule
+=== Mxfp4
+entry golden_encode_kernel elements 32 bytes 17
+#include <metal_stdlib>
+using namespace metal;
+
+static inline uint golden_encode_scale_store_round_shift(uint value, uint shift) {
+    if (shift == 0u) {
+        return value;
+    }
+    if (shift > 24u) {
+        return 0u;
+    }
+    uint quotient = value >> shift;
+    uint remainder = value & ((1u << shift) - 1u);
+    uint halfway = 1u << (shift - 1u);
+    return (remainder > halfway || (remainder == halfway && (quotient & 1u) == 1u)) ? quotient + 1u : quotient;
+}
+
+static inline uint golden_encode_scale_store(float value) {
+    uint bits = as_type<uint>(value);
+    uint sign = (bits >> 31u) << 8u;
+    uint abs_bits = bits & 0x7fffffffu;
+    if (abs_bits > 0x7f800000u) {
+        return sign | 0xffu | 0x0u;
+    }
+    if ((abs_bits >> 23u) == 0xffu) {
+        return sign | 0xfeu;
+    }
+    uint exponent_field = abs_bits >> 23u;
+    uint significand = exponent_field == 0u ? abs_bits : ((abs_bits & 0x7fffffu) | 0x800000u);
+    int source_exponent = exponent_field == 0u ? 1 : (int)exponent_field;
+    int target = source_exponent - 127 + (127);
+    if (target > 255) {
+        return sign | 0xfeu;
+    }
+    uint base_exponent = target < 1 ? 0u : (uint)(target - 1);
+    uint extra_shift = target < 1 ? (uint)(1 - target) : 0u;
+    uint code = (base_exponent << 0u) + golden_encode_scale_store_round_shift(significand, 23u + extra_shift);
+    return sign | min(code, 0xfeu);
+}
+
+static inline uint golden_encode_scale_load_scaled_bits(uint significand, int scale) {
+    if (significand == 0u) {
+        return 0u;
+    }
+    int lead = 31 - (int)clz(significand);
+    int biased = lead + scale + 127;
+    if (biased >= 255) {
+        return 0x7f800000u;
+    }
+    if (biased >= 1) {
+        return ((uint)biased << 23u) | ((significand << (uint)(23 - lead)) & 0x7fffffu);
+    }
+    int shift = scale + 149;
+    if (shift >= 0) {
+        return significand << (uint)shift;
+    }
+    return -shift >= 32 ? 0u : significand >> (uint)(-shift);
+}
+
+static inline float golden_encode_scale_load(uint code) {
+    uint mantissa = code & 0x0u;
+    uint exponent = (code >> 0u) & 0xffu;
+    uint sign = ((code >> 8u) & 1u) << 31u;
+    if (exponent == 0xffu && mantissa == 0x0u) {
+        return as_type<float>(sign | 0x7f800000u | 0x400000u | (mantissa << 23u));
+    }
+    uint significand = exponent == 0u ? 1u : (0x1u | mantissa);
+    int scale = exponent == 0u ? -127 : ((int)exponent - (127) - 0);
+    return as_type<float>(sign | golden_encode_scale_load_scaled_bits(significand, scale));
+}
+
+constant float golden_encode_grid[16] = { 0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f, -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f };
+
+static inline int golden_encode_floor_log2(uint bits) {
+    uint exponent = (bits >> 23u) & 0xffu;
+    if (exponent == 0u) {
+        return 31 - (int)clz(bits & 0x7fffffu) - 149;
+    }
+    return (int)exponent - 127;
+}
+
+static inline float golden_encode_power_of_two(int exponent) {
+    int clamped = clamp(exponent, -149, 127);
+    if (clamped >= -126) {
+        return as_type<float>((uint)(clamped + 127) << 23u);
+    }
+    return as_type<float>(1u << (uint)(clamped + 149));
+}
+
+static inline int golden_encode_ceil_log2(uint bits) {
+    uint fraction = bits & 0x7fffffu;
+    bool is_power = ((bits >> 23u) & 0xffu) == 0u ? ((fraction & (fraction - 1u)) == 0u) : (fraction == 0u);
+    return golden_encode_floor_log2(bits) + (is_power ? 0 : 1);
+}
+
+static inline void golden_encode(device const float *input, device uchar *block) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+    uchar bytes[17];
+    for (uint position = 0u; position < 17u; ++position) {
+        bytes[position] = 0;
+    }
+    uchar codes[32];
+    for (uint run = 0u; run < 1u; ++run) {
+        uint base = run * 32u;
+        float peak = 0.0f;
+        for (uint index = 0u; index < 32u; ++index) {
+            float magnitude = as_type<float>(as_type<uint>(input[base + index]) & 0x7fffffffu);
+            peak = (peak < magnitude) ? magnitude : peak;
+        }
+        float target = (peak > 0.0f) ? golden_encode_power_of_two(golden_encode_floor_log2(as_type<uint>(peak)) - 2) : 0.0f;
+        uint scale_bits = golden_encode_scale_store(target) & 0xffu;
+        float scale = golden_encode_scale_load(scale_bits);
+        bytes[0u + run * 0u + 0u] |= (uchar)((scale_bits >> 0u) & 0xffu);
+        for (uint index = 0u; index < 32u; ++index) {
+            float value = input[base + index];
+            uint best = 0u;
+            float best_error = fabs(golden_encode_grid[0] * scale - value);
+            for (uint code = 1u; code < 16u; ++code) {
+                float error = fabs(golden_encode_grid[code] * scale - value);
+                if (error < best_error) {
+                    best = code;
+                    best_error = error;
+                }
+            }
+            codes[base + index] = (uchar)best;
+        }
+    }
+    bytes[1] |= (uchar)((((uint)codes[0] >> 0u) & 0xfu) << 0u);
+    bytes[2] |= (uchar)((((uint)codes[1] >> 0u) & 0xfu) << 0u);
+    bytes[3] |= (uchar)((((uint)codes[2] >> 0u) & 0xfu) << 0u);
+    bytes[4] |= (uchar)((((uint)codes[3] >> 0u) & 0xfu) << 0u);
+    bytes[5] |= (uchar)((((uint)codes[4] >> 0u) & 0xfu) << 0u);
+    bytes[6] |= (uchar)((((uint)codes[5] >> 0u) & 0xfu) << 0u);
+    bytes[7] |= (uchar)((((uint)codes[6] >> 0u) & 0xfu) << 0u);
+    bytes[8] |= (uchar)((((uint)codes[7] >> 0u) & 0xfu) << 0u);
+    bytes[9] |= (uchar)((((uint)codes[8] >> 0u) & 0xfu) << 0u);
+    bytes[10] |= (uchar)((((uint)codes[9] >> 0u) & 0xfu) << 0u);
+    bytes[11] |= (uchar)((((uint)codes[10] >> 0u) & 0xfu) << 0u);
+    bytes[12] |= (uchar)((((uint)codes[11] >> 0u) & 0xfu) << 0u);
+    bytes[13] |= (uchar)((((uint)codes[12] >> 0u) & 0xfu) << 0u);
+    bytes[14] |= (uchar)((((uint)codes[13] >> 0u) & 0xfu) << 0u);
+    bytes[15] |= (uchar)((((uint)codes[14] >> 0u) & 0xfu) << 0u);
+    bytes[16] |= (uchar)((((uint)codes[15] >> 0u) & 0xfu) << 0u);
+    bytes[1] |= (uchar)((((uint)codes[16] >> 0u) & 0xfu) << 4u);
+    bytes[2] |= (uchar)((((uint)codes[17] >> 0u) & 0xfu) << 4u);
+    bytes[3] |= (uchar)((((uint)codes[18] >> 0u) & 0xfu) << 4u);
+    bytes[4] |= (uchar)((((uint)codes[19] >> 0u) & 0xfu) << 4u);
+    bytes[5] |= (uchar)((((uint)codes[20] >> 0u) & 0xfu) << 4u);
+    bytes[6] |= (uchar)((((uint)codes[21] >> 0u) & 0xfu) << 4u);
+    bytes[7] |= (uchar)((((uint)codes[22] >> 0u) & 0xfu) << 4u);
+    bytes[8] |= (uchar)((((uint)codes[23] >> 0u) & 0xfu) << 4u);
+    bytes[9] |= (uchar)((((uint)codes[24] >> 0u) & 0xfu) << 4u);
+    bytes[10] |= (uchar)((((uint)codes[25] >> 0u) & 0xfu) << 4u);
+    bytes[11] |= (uchar)((((uint)codes[26] >> 0u) & 0xfu) << 4u);
+    bytes[12] |= (uchar)((((uint)codes[27] >> 0u) & 0xfu) << 4u);
+    bytes[13] |= (uchar)((((uint)codes[28] >> 0u) & 0xfu) << 4u);
+    bytes[14] |= (uchar)((((uint)codes[29] >> 0u) & 0xfu) << 4u);
+    bytes[15] |= (uchar)((((uint)codes[30] >> 0u) & 0xfu) << 4u);
+    bytes[16] |= (uchar)((((uint)codes[31] >> 0u) & 0xfu) << 4u);
+    for (uint position = 0u; position < 17u; ++position) {
+        block[position] = bytes[position];
+    }
+}
+
+kernel void golden_encode_kernel(device const float *input [[buffer(0)]], device uchar *output [[buffer(1)]], uint gid [[thread_position_in_grid]]) {
+    golden_encode(input + gid * 32u, output + gid * 17u);
+}
+=== Nvfp4
+entry golden_encode_kernel elements 64 bytes 36
+#include <metal_stdlib>
+using namespace metal;
+
+static inline uint golden_encode_scale_store_round_shift(uint value, uint shift) {
+    if (shift == 0u) {
+        return value;
+    }
+    if (shift > 24u) {
+        return 0u;
+    }
+    uint quotient = value >> shift;
+    uint remainder = value & ((1u << shift) - 1u);
+    uint halfway = 1u << (shift - 1u);
+    return (remainder > halfway || (remainder == halfway && (quotient & 1u) == 1u)) ? quotient + 1u : quotient;
+}
+
+static inline uint golden_encode_scale_store(float value) {
+    uint bits = as_type<uint>(value);
+    uint sign = (bits >> 31u) << 7u;
+    uint abs_bits = bits & 0x7fffffffu;
+    if (abs_bits > 0x7f800000u) {
+        return sign | 0x78u | 0x7u;
+    }
+    if ((abs_bits >> 23u) == 0xffu) {
+        return sign | 0x7eu;
+    }
+    uint exponent_field = abs_bits >> 23u;
+    uint significand = exponent_field == 0u ? abs_bits : ((abs_bits & 0x7fffffu) | 0x800000u);
+    int source_exponent = exponent_field == 0u ? 1 : (int)exponent_field;
+    int target = source_exponent - 127 + (7);
+    if (target > 15) {
+        return sign | 0x7eu;
+    }
+    uint base_exponent = target < 1 ? 0u : (uint)(target - 1);
+    uint extra_shift = target < 1 ? (uint)(1 - target) : 0u;
+    uint code = (base_exponent << 3u) + golden_encode_scale_store_round_shift(significand, 20u + extra_shift);
+    return sign | min(code, 0x7eu);
+}
+
+static inline uint golden_encode_scale_load_scaled_bits(uint significand, int scale) {
+    if (significand == 0u) {
+        return 0u;
+    }
+    int lead = 31 - (int)clz(significand);
+    int biased = lead + scale + 127;
+    if (biased >= 255) {
+        return 0x7f800000u;
+    }
+    if (biased >= 1) {
+        return ((uint)biased << 23u) | ((significand << (uint)(23 - lead)) & 0x7fffffu);
+    }
+    int shift = scale + 149;
+    if (shift >= 0) {
+        return significand << (uint)shift;
+    }
+    return -shift >= 32 ? 0u : significand >> (uint)(-shift);
+}
+
+static inline float golden_encode_scale_load(uint code) {
+    uint mantissa = code & 0x7u;
+    uint exponent = (code >> 3u) & 0xfu;
+    uint sign = ((code >> 7u) & 1u) << 31u;
+    if (exponent == 0xfu && mantissa == 0x7u) {
+        return as_type<float>(sign | 0x7f800000u | 0x400000u | (mantissa << 20u));
+    }
+    uint significand = exponent == 0u ? mantissa : (0x8u | mantissa);
+    int scale = exponent == 0u ? (1 - (7) - 3) : ((int)exponent - (7) - 3);
+    return as_type<float>(sign | golden_encode_scale_load_scaled_bits(significand, scale));
+}
+
+static inline uint golden_encode_code_store_round_shift(uint value, uint shift) {
+    if (shift == 0u) {
+        return value;
+    }
+    if (shift > 24u) {
+        return 0u;
+    }
+    uint quotient = value >> shift;
+    uint remainder = value & ((1u << shift) - 1u);
+    uint halfway = 1u << (shift - 1u);
+    return (remainder > halfway || (remainder == halfway && (quotient & 1u) == 1u)) ? quotient + 1u : quotient;
+}
+
+static inline uint golden_encode_code_store(float value) {
+    uint bits = as_type<uint>(value);
+    uint sign = (bits >> 31u) << 3u;
+    uint abs_bits = bits & 0x7fffffffu;
+    if (abs_bits > 0x7f800000u) {
+        return 0x7u;
+    }
+    if ((abs_bits >> 23u) == 0xffu) {
+        return sign | 0x7u;
+    }
+    uint exponent_field = abs_bits >> 23u;
+    uint significand = exponent_field == 0u ? abs_bits : ((abs_bits & 0x7fffffu) | 0x800000u);
+    int source_exponent = exponent_field == 0u ? 1 : (int)exponent_field;
+    int target = source_exponent - 127 + (1);
+    if (target > 3) {
+        return sign | 0x7u;
+    }
+    uint base_exponent = target < 1 ? 0u : (uint)(target - 1);
+    uint extra_shift = target < 1 ? (uint)(1 - target) : 0u;
+    uint code = (base_exponent << 1u) + golden_encode_code_store_round_shift(significand, 22u + extra_shift);
+    return sign | min(code, 0x7u);
+}
+
+static inline int golden_encode_floor_log2(uint bits) {
+    uint exponent = (bits >> 23u) & 0xffu;
+    if (exponent == 0u) {
+        return 31 - (int)clz(bits & 0x7fffffu) - 149;
+    }
+    return (int)exponent - 127;
+}
+
+static inline float golden_encode_power_of_two(int exponent) {
+    int clamped = clamp(exponent, -149, 127);
+    if (clamped >= -126) {
+        return as_type<float>((uint)(clamped + 127) << 23u);
+    }
+    return as_type<float>(1u << (uint)(clamped + 149));
+}
+
+static inline int golden_encode_ceil_log2(uint bits) {
+    uint fraction = bits & 0x7fffffu;
+    bool is_power = ((bits >> 23u) & 0xffu) == 0u ? ((fraction & (fraction - 1u)) == 0u) : (fraction == 0u);
+    return golden_encode_floor_log2(bits) + (is_power ? 0 : 1);
+}
+
+static inline void golden_encode(device const float *input, device uchar *block) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+    uchar bytes[36];
+    for (uint position = 0u; position < 36u; ++position) {
+        bytes[position] = 0;
+    }
+    uchar codes[64];
+    for (uint run = 0u; run < 4u; ++run) {
+        uint base = run * 16u;
+        float peak = 0.0f;
+        for (uint index = 0u; index < 16u; ++index) {
+            float magnitude = as_type<float>(as_type<uint>(input[base + index]) & 0x7fffffffu);
+            peak = (peak < magnitude) ? magnitude : peak;
+        }
+        float target = metal::precise::divide(peak, 6.0f);
+        uint scale_bits = golden_encode_scale_store(target) & 0xffu;
+        float scale = golden_encode_scale_load(scale_bits);
+        bytes[0u + run * 1u + 0u] |= (uchar)((scale_bits >> 0u) & 0xffu);
+        for (uint index = 0u; index < 16u; ++index) {
+            float value = input[base + index];
+            float quotient = (scale == 0.0f) ? 0.0f : metal::precise::divide(value, scale);
+            codes[base + index] = (uchar)golden_encode_code_store(quotient);
+        }
+    }
+    bytes[4] |= (uchar)((((uint)codes[0] >> 0u) & 0xfu) << 0u);
+    bytes[5] |= (uchar)((((uint)codes[1] >> 0u) & 0xfu) << 0u);
+    bytes[6] |= (uchar)((((uint)codes[2] >> 0u) & 0xfu) << 0u);
+    bytes[7] |= (uchar)((((uint)codes[3] >> 0u) & 0xfu) << 0u);
+    bytes[8] |= (uchar)((((uint)codes[4] >> 0u) & 0xfu) << 0u);
+    bytes[9] |= (uchar)((((uint)codes[5] >> 0u) & 0xfu) << 0u);
+    bytes[10] |= (uchar)((((uint)codes[6] >> 0u) & 0xfu) << 0u);
+    bytes[11] |= (uchar)((((uint)codes[7] >> 0u) & 0xfu) << 0u);
+    bytes[4] |= (uchar)((((uint)codes[8] >> 0u) & 0xfu) << 4u);
+    bytes[5] |= (uchar)((((uint)codes[9] >> 0u) & 0xfu) << 4u);
+    bytes[6] |= (uchar)((((uint)codes[10] >> 0u) & 0xfu) << 4u);
+    bytes[7] |= (uchar)((((uint)codes[11] >> 0u) & 0xfu) << 4u);
+    bytes[8] |= (uchar)((((uint)codes[12] >> 0u) & 0xfu) << 4u);
+    bytes[9] |= (uchar)((((uint)codes[13] >> 0u) & 0xfu) << 4u);
+    bytes[10] |= (uchar)((((uint)codes[14] >> 0u) & 0xfu) << 4u);
+    bytes[11] |= (uchar)((((uint)codes[15] >> 0u) & 0xfu) << 4u);
+    bytes[12] |= (uchar)((((uint)codes[16] >> 0u) & 0xfu) << 0u);
+    bytes[13] |= (uchar)((((uint)codes[17] >> 0u) & 0xfu) << 0u);
+    bytes[14] |= (uchar)((((uint)codes[18] >> 0u) & 0xfu) << 0u);
+    bytes[15] |= (uchar)((((uint)codes[19] >> 0u) & 0xfu) << 0u);
+    bytes[16] |= (uchar)((((uint)codes[20] >> 0u) & 0xfu) << 0u);
+    bytes[17] |= (uchar)((((uint)codes[21] >> 0u) & 0xfu) << 0u);
+    bytes[18] |= (uchar)((((uint)codes[22] >> 0u) & 0xfu) << 0u);
+    bytes[19] |= (uchar)((((uint)codes[23] >> 0u) & 0xfu) << 0u);
+    bytes[12] |= (uchar)((((uint)codes[24] >> 0u) & 0xfu) << 4u);
+    bytes[13] |= (uchar)((((uint)codes[25] >> 0u) & 0xfu) << 4u);
+    bytes[14] |= (uchar)((((uint)codes[26] >> 0u) & 0xfu) << 4u);
+    bytes[15] |= (uchar)((((uint)codes[27] >> 0u) & 0xfu) << 4u);
+    bytes[16] |= (uchar)((((uint)codes[28] >> 0u) & 0xfu) << 4u);
+    bytes[17] |= (uchar)((((uint)codes[29] >> 0u) & 0xfu) << 4u);
+    bytes[18] |= (uchar)((((uint)codes[30] >> 0u) & 0xfu) << 4u);
+    bytes[19] |= (uchar)((((uint)codes[31] >> 0u) & 0xfu) << 4u);
+    bytes[20] |= (uchar)((((uint)codes[32] >> 0u) & 0xfu) << 0u);
+    bytes[21] |= (uchar)((((uint)codes[33] >> 0u) & 0xfu) << 0u);
+    bytes[22] |= (uchar)((((uint)codes[34] >> 0u) & 0xfu) << 0u);
+    bytes[23] |= (uchar)((((uint)codes[35] >> 0u) & 0xfu) << 0u);
+    bytes[24] |= (uchar)((((uint)codes[36] >> 0u) & 0xfu) << 0u);
+    bytes[25] |= (uchar)((((uint)codes[37] >> 0u) & 0xfu) << 0u);
+    bytes[26] |= (uchar)((((uint)codes[38] >> 0u) & 0xfu) << 0u);
+    bytes[27] |= (uchar)((((uint)codes[39] >> 0u) & 0xfu) << 0u);
+    bytes[20] |= (uchar)((((uint)codes[40] >> 0u) & 0xfu) << 4u);
+    bytes[21] |= (uchar)((((uint)codes[41] >> 0u) & 0xfu) << 4u);
+    bytes[22] |= (uchar)((((uint)codes[42] >> 0u) & 0xfu) << 4u);
+    bytes[23] |= (uchar)((((uint)codes[43] >> 0u) & 0xfu) << 4u);
+    bytes[24] |= (uchar)((((uint)codes[44] >> 0u) & 0xfu) << 4u);
+    bytes[25] |= (uchar)((((uint)codes[45] >> 0u) & 0xfu) << 4u);
+    bytes[26] |= (uchar)((((uint)codes[46] >> 0u) & 0xfu) << 4u);
+    bytes[27] |= (uchar)((((uint)codes[47] >> 0u) & 0xfu) << 4u);
+    bytes[28] |= (uchar)((((uint)codes[48] >> 0u) & 0xfu) << 0u);
+    bytes[29] |= (uchar)((((uint)codes[49] >> 0u) & 0xfu) << 0u);
+    bytes[30] |= (uchar)((((uint)codes[50] >> 0u) & 0xfu) << 0u);
+    bytes[31] |= (uchar)((((uint)codes[51] >> 0u) & 0xfu) << 0u);
+    bytes[32] |= (uchar)((((uint)codes[52] >> 0u) & 0xfu) << 0u);
+    bytes[33] |= (uchar)((((uint)codes[53] >> 0u) & 0xfu) << 0u);
+    bytes[34] |= (uchar)((((uint)codes[54] >> 0u) & 0xfu) << 0u);
+    bytes[35] |= (uchar)((((uint)codes[55] >> 0u) & 0xfu) << 0u);
+    bytes[28] |= (uchar)((((uint)codes[56] >> 0u) & 0xfu) << 4u);
+    bytes[29] |= (uchar)((((uint)codes[57] >> 0u) & 0xfu) << 4u);
+    bytes[30] |= (uchar)((((uint)codes[58] >> 0u) & 0xfu) << 4u);
+    bytes[31] |= (uchar)((((uint)codes[59] >> 0u) & 0xfu) << 4u);
+    bytes[32] |= (uchar)((((uint)codes[60] >> 0u) & 0xfu) << 4u);
+    bytes[33] |= (uchar)((((uint)codes[61] >> 0u) & 0xfu) << 4u);
+    bytes[34] |= (uchar)((((uint)codes[62] >> 0u) & 0xfu) << 4u);
+    bytes[35] |= (uchar)((((uint)codes[63] >> 0u) & 0xfu) << 4u);
+    for (uint position = 0u; position < 36u; ++position) {
+        block[position] = bytes[position];
+    }
+}
+
+kernel void golden_encode_kernel(device const float *input [[buffer(0)]], device uchar *output [[buffer(1)]], uint gid [[thread_position_in_grid]]) {
+    golden_encode(input + gid * 64u, output + gid * 36u);
+}
+=== Q1_0
+refused a level format has no encode rule
+=== Q2_0
+refused a level format has no encode rule
+=== BFloat8
+entry golden_encode_kernel elements 1 bytes 1
+#include <metal_stdlib>
+using namespace metal;
+
+static inline uint golden_encode_store_round_shift(uint value, uint shift) {
+    if (shift == 0u) {
+        return value;
+    }
+    if (shift > 24u) {
+        return 0u;
+    }
+    uint quotient = value >> shift;
+    uint remainder = value & ((1u << shift) - 1u);
+    uint halfway = 1u << (shift - 1u);
+    return (remainder > halfway || (remainder == halfway && (quotient & 1u) == 1u)) ? quotient + 1u : quotient;
+}
+
+static inline uint golden_encode_store(float value) {
+    uint bits = as_type<uint>(value);
+    uint sign = (bits >> 31u) << 7u;
+    uint abs_bits = bits & 0x7fffffffu;
+    if (abs_bits > 0x7f800000u) {
+        return sign | 0x7cu | (0x2u);
+    }
+    if ((abs_bits >> 23u) == 0xffu) {
+        return sign | 0x7cu;
+    }
+    uint exponent_field = abs_bits >> 23u;
+    uint significand = exponent_field == 0u ? abs_bits : ((abs_bits & 0x7fffffu) | 0x800000u);
+    int source_exponent = exponent_field == 0u ? 1 : (int)exponent_field;
+    int target = source_exponent - 127 + (15);
+    if (target > 31) {
+        return sign | 0x7cu;
+    }
+    uint base_exponent = target < 1 ? 0u : (uint)(target - 1);
+    uint extra_shift = target < 1 ? (uint)(1 - target) : 0u;
+    uint code = (base_exponent << 2u) + golden_encode_store_round_shift(significand, 21u + extra_shift);
+    return sign | min(code, 0x7cu);
+}
+
+kernel void golden_encode_kernel(device const float *input [[buffer(0)]], device uchar *output [[buffer(1)]], uint gid [[thread_position_in_grid]]) {
+    output[gid] = (uchar)golden_encode_store(input[gid]);
+}
+=== Bf8E5M2
+entry golden_encode_kernel elements 1 bytes 1
+#include <metal_stdlib>
+using namespace metal;
+
+static inline uint golden_encode_store_round_shift(uint value, uint shift) {
+    if (shift == 0u) {
+        return value;
+    }
+    if (shift > 24u) {
+        return 0u;
+    }
+    uint quotient = value >> shift;
+    uint remainder = value & ((1u << shift) - 1u);
+    uint halfway = 1u << (shift - 1u);
+    return (remainder > halfway || (remainder == halfway && (quotient & 1u) == 1u)) ? quotient + 1u : quotient;
+}
+
+static inline uint golden_encode_store(float value) {
+    uint bits = as_type<uint>(value);
+    uint sign = (bits >> 31u) << 7u;
+    uint abs_bits = bits & 0x7fffffffu;
+    if (abs_bits > 0x7f800000u) {
+        return sign | 0x7cu | (0x2u);
+    }
+    if ((abs_bits >> 23u) == 0xffu) {
+        return sign | 0x7bu;
+    }
+    uint exponent_field = abs_bits >> 23u;
+    uint significand = exponent_field == 0u ? abs_bits : ((abs_bits & 0x7fffffu) | 0x800000u);
+    int source_exponent = exponent_field == 0u ? 1 : (int)exponent_field;
+    int target = source_exponent - 127 + (15);
+    if (target > 31) {
+        return sign | 0x7bu;
+    }
+    uint base_exponent = target < 1 ? 0u : (uint)(target - 1);
+    uint extra_shift = target < 1 ? (uint)(1 - target) : 0u;
+    uint code = (base_exponent << 2u) + golden_encode_store_round_shift(significand, 21u + extra_shift);
+    return sign | min(code, 0x7bu);
+}
+
+kernel void golden_encode_kernel(device const float *input [[buffer(0)]], device uchar *output [[buffer(1)]], uint gid [[thread_position_in_grid]]) {
+    output[gid] = (uchar)golden_encode_store(input[gid]);
+}
+=== Bf4E2M1
+refused the scalar code does not fill a whole byte, half-word or word
+=== Fp6E3M2
+entry golden_encode_kernel elements 32 bytes 26
+#include <metal_stdlib>
+using namespace metal;
+
+static inline uint golden_encode_scale_store(float value) {
+    return (uint)as_type<ushort>((half)value);
+}
+
+static inline float golden_encode_scale_load(uint code) {
+    return (float)as_type<half>((ushort)code);
+}
+
+static inline uint golden_encode_code_store_round_shift(uint value, uint shift) {
+    if (shift == 0u) {
+        return value;
+    }
+    if (shift > 24u) {
+        return 0u;
+    }
+    uint quotient = value >> shift;
+    uint remainder = value & ((1u << shift) - 1u);
+    uint halfway = 1u << (shift - 1u);
+    return (remainder > halfway || (remainder == halfway && (quotient & 1u) == 1u)) ? quotient + 1u : quotient;
+}
+
+static inline uint golden_encode_code_store(float value) {
+    uint bits = as_type<uint>(value);
+    uint sign = (bits >> 31u) << 5u;
+    uint abs_bits = bits & 0x7fffffffu;
+    if (abs_bits > 0x7f800000u) {
+        return 0x1fu;
+    }
+    if ((abs_bits >> 23u) == 0xffu) {
+        return sign | 0x1fu;
+    }
+    uint exponent_field = abs_bits >> 23u;
+    uint significand = exponent_field == 0u ? abs_bits : ((abs_bits & 0x7fffffu) | 0x800000u);
+    int source_exponent = exponent_field == 0u ? 1 : (int)exponent_field;
+    int target = source_exponent - 127 + (3);
+    if (target > 7) {
+        return sign | 0x1fu;
+    }
+    uint base_exponent = target < 1 ? 0u : (uint)(target - 1);
+    uint extra_shift = target < 1 ? (uint)(1 - target) : 0u;
+    uint code = (base_exponent << 2u) + golden_encode_code_store_round_shift(significand, 21u + extra_shift);
+    return sign | min(code, 0x1fu);
+}
+
+static inline int golden_encode_floor_log2(uint bits) {
+    uint exponent = (bits >> 23u) & 0xffu;
+    if (exponent == 0u) {
+        return 31 - (int)clz(bits & 0x7fffffu) - 149;
+    }
+    return (int)exponent - 127;
+}
+
+static inline float golden_encode_power_of_two(int exponent) {
+    int clamped = clamp(exponent, -149, 127);
+    if (clamped >= -126) {
+        return as_type<float>((uint)(clamped + 127) << 23u);
+    }
+    return as_type<float>(1u << (uint)(clamped + 149));
+}
+
+static inline int golden_encode_ceil_log2(uint bits) {
+    uint fraction = bits & 0x7fffffu;
+    bool is_power = ((bits >> 23u) & 0xffu) == 0u ? ((fraction & (fraction - 1u)) == 0u) : (fraction == 0u);
+    return golden_encode_floor_log2(bits) + (is_power ? 0 : 1);
+}
+
+static inline void golden_encode(device const float *input, device uchar *block) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+    uchar bytes[26];
+    for (uint position = 0u; position < 26u; ++position) {
+        bytes[position] = 0;
+    }
+    uchar codes[32];
+    for (uint run = 0u; run < 1u; ++run) {
+        uint base = run * 32u;
+        float peak = 0.0f;
+        for (uint index = 0u; index < 32u; ++index) {
+            float magnitude = as_type<float>(as_type<uint>(input[base + index]) & 0x7fffffffu);
+            peak = (peak < magnitude) ? magnitude : peak;
+        }
+        float target = metal::precise::divide(peak, 28.0f);
+        uint scale_bits = golden_encode_scale_store(target) & 0xffffu;
+        float scale = golden_encode_scale_load(scale_bits);
+        bytes[0u + run * 0u + 0u] |= (uchar)((scale_bits >> 0u) & 0xffu);
+        bytes[0u + run * 0u + 1u] |= (uchar)((scale_bits >> 8u) & 0xffu);
+        for (uint index = 0u; index < 32u; ++index) {
+            float value = input[base + index];
+            float quotient = (scale == 0.0f) ? 0.0f : metal::precise::divide(value, scale);
+            codes[base + index] = (uchar)golden_encode_code_store(quotient);
+        }
+    }
+    bytes[2] |= (uchar)((((uint)codes[0] >> 0u) & 0x3fu) << 0u);
+    bytes[2] |= (uchar)((((uint)codes[1] >> 0u) & 0x3fu) << 6u);
+    bytes[3] |= (uchar)(((((uint)codes[1] >> 0u) & 0x3fu) << 6u) >> 8u);
+    bytes[3] |= (uchar)((((uint)codes[2] >> 0u) & 0x3fu) << 4u);
+    bytes[4] |= (uchar)(((((uint)codes[2] >> 0u) & 0x3fu) << 4u) >> 8u);
+    bytes[4] |= (uchar)((((uint)codes[3] >> 0u) & 0x3fu) << 2u);
+    bytes[5] |= (uchar)((((uint)codes[4] >> 0u) & 0x3fu) << 0u);
+    bytes[5] |= (uchar)((((uint)codes[5] >> 0u) & 0x3fu) << 6u);
+    bytes[6] |= (uchar)(((((uint)codes[5] >> 0u) & 0x3fu) << 6u) >> 8u);
+    bytes[6] |= (uchar)((((uint)codes[6] >> 0u) & 0x3fu) << 4u);
+    bytes[7] |= (uchar)(((((uint)codes[6] >> 0u) & 0x3fu) << 4u) >> 8u);
+    bytes[7] |= (uchar)((((uint)codes[7] >> 0u) & 0x3fu) << 2u);
+    bytes[8] |= (uchar)((((uint)codes[8] >> 0u) & 0x3fu) << 0u);
+    bytes[8] |= (uchar)((((uint)codes[9] >> 0u) & 0x3fu) << 6u);
+    bytes[9] |= (uchar)(((((uint)codes[9] >> 0u) & 0x3fu) << 6u) >> 8u);
+    bytes[9] |= (uchar)((((uint)codes[10] >> 0u) & 0x3fu) << 4u);
+    bytes[10] |= (uchar)(((((uint)codes[10] >> 0u) & 0x3fu) << 4u) >> 8u);
+    bytes[10] |= (uchar)((((uint)codes[11] >> 0u) & 0x3fu) << 2u);
+    bytes[11] |= (uchar)((((uint)codes[12] >> 0u) & 0x3fu) << 0u);
+    bytes[11] |= (uchar)((((uint)codes[13] >> 0u) & 0x3fu) << 6u);
+    bytes[12] |= (uchar)(((((uint)codes[13] >> 0u) & 0x3fu) << 6u) >> 8u);
+    bytes[12] |= (uchar)((((uint)codes[14] >> 0u) & 0x3fu) << 4u);
+    bytes[13] |= (uchar)(((((uint)codes[14] >> 0u) & 0x3fu) << 4u) >> 8u);
+    bytes[13] |= (uchar)((((uint)codes[15] >> 0u) & 0x3fu) << 2u);
+    bytes[14] |= (uchar)((((uint)codes[16] >> 0u) & 0x3fu) << 0u);
+    bytes[14] |= (uchar)((((uint)codes[17] >> 0u) & 0x3fu) << 6u);
+    bytes[15] |= (uchar)(((((uint)codes[17] >> 0u) & 0x3fu) << 6u) >> 8u);
+    bytes[15] |= (uchar)((((uint)codes[18] >> 0u) & 0x3fu) << 4u);
+    bytes[16] |= (uchar)(((((uint)codes[18] >> 0u) & 0x3fu) << 4u) >> 8u);
+    bytes[16] |= (uchar)((((uint)codes[19] >> 0u) & 0x3fu) << 2u);
+    bytes[17] |= (uchar)((((uint)codes[20] >> 0u) & 0x3fu) << 0u);
+    bytes[17] |= (uchar)((((uint)codes[21] >> 0u) & 0x3fu) << 6u);
+    bytes[18] |= (uchar)(((((uint)codes[21] >> 0u) & 0x3fu) << 6u) >> 8u);
+    bytes[18] |= (uchar)((((uint)codes[22] >> 0u) & 0x3fu) << 4u);
+    bytes[19] |= (uchar)(((((uint)codes[22] >> 0u) & 0x3fu) << 4u) >> 8u);
+    bytes[19] |= (uchar)((((uint)codes[23] >> 0u) & 0x3fu) << 2u);
+    bytes[20] |= (uchar)((((uint)codes[24] >> 0u) & 0x3fu) << 0u);
+    bytes[20] |= (uchar)((((uint)codes[25] >> 0u) & 0x3fu) << 6u);
+    bytes[21] |= (uchar)(((((uint)codes[25] >> 0u) & 0x3fu) << 6u) >> 8u);
+    bytes[21] |= (uchar)((((uint)codes[26] >> 0u) & 0x3fu) << 4u);
+    bytes[22] |= (uchar)(((((uint)codes[26] >> 0u) & 0x3fu) << 4u) >> 8u);
+    bytes[22] |= (uchar)((((uint)codes[27] >> 0u) & 0x3fu) << 2u);
+    bytes[23] |= (uchar)((((uint)codes[28] >> 0u) & 0x3fu) << 0u);
+    bytes[23] |= (uchar)((((uint)codes[29] >> 0u) & 0x3fu) << 6u);
+    bytes[24] |= (uchar)(((((uint)codes[29] >> 0u) & 0x3fu) << 6u) >> 8u);
+    bytes[24] |= (uchar)((((uint)codes[30] >> 0u) & 0x3fu) << 4u);
+    bytes[25] |= (uchar)(((((uint)codes[30] >> 0u) & 0x3fu) << 4u) >> 8u);
+    bytes[25] |= (uchar)((((uint)codes[31] >> 0u) & 0x3fu) << 2u);
+    for (uint position = 0u; position < 26u; ++position) {
+        block[position] = bytes[position];
+    }
+}
+
+kernel void golden_encode_kernel(device const float *input [[buffer(0)]], device uchar *output [[buffer(1)]], uint gid [[thread_position_in_grid]]) {
+    golden_encode(input + gid * 32u, output + gid * 26u);
+}
+=== Pq2_0
+refused a level format has no encode rule
+=== Ptq1_0
+refused no host codec resolves the format
+=== Q8_1Grouped
+refused no host codec resolves the format
+=== Float32
+entry golden_encode_kernel elements 1 bytes 4
+#include <metal_stdlib>
+using namespace metal;
+
+static inline uint golden_encode_store(float value) {
+    return as_type<uint>(value);
+}
+
+kernel void golden_encode_kernel(device const float *input [[buffer(0)]], device uint *output [[buffer(1)]], uint gid [[thread_position_in_grid]]) {
+    output[gid] = (uint)golden_encode_store(input[gid]);
+}
+=== Bool
+refused no host codec resolves the format

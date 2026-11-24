@@ -94,6 +94,8 @@ pub mod metal;
 #[cfg(proxima_mlx)]
 pub mod mlx;
 #[cfg(feature = "alloc")]
+pub mod encode_render;
+#[cfg(feature = "alloc")]
 pub mod msl;
 #[cfg(feature = "onnx-door")]
 pub mod onnx_door;
