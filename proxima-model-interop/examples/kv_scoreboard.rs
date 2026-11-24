@@ -4594,6 +4594,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proxima_numeric::ScaleArithmetic;
 
     const PROX_LOG: &str = "\
 2026-11-11T16:17:32.639669333Z INFO decode_gbps_baseline: step_time run_index=0 step=0 step_ms=337 step_ns=338091250 phase=prefill
@@ -6351,6 +6352,17 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         let policy = merged_settings("cuda").numeric_policy;
         assert!(policy.activation_quantization);
         assert_eq!(policy.reciprocal_activation_scale_above_rows, Some(8));
+        assert_eq!(policy.activation_scale_arithmetic, ScaleArithmetic::Quotient);
+    }
+
+    #[test]
+    fn the_merged_cuda_policy_quotients_at_few_rows_and_reciprocal_multiplies_above_the_limit() {
+        let settings = merged_settings("cuda");
+        let config = settings.as_serving_config(&[]);
+        let limit = config.numeric_policy.reciprocal_activation_scale_above_rows.expect("cuda names the row limit") as u64;
+        assert_eq!(ScaleArithmetic::for_rows(1, config.numeric_policy), ScaleArithmetic::Quotient);
+        assert_eq!(ScaleArithmetic::for_rows(limit, config.numeric_policy), ScaleArithmetic::Quotient);
+        assert_eq!(ScaleArithmetic::for_rows(limit + 1, config.numeric_policy), ScaleArithmetic::ReciprocalMultiply);
     }
 
     #[test]
@@ -6362,12 +6374,16 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         let metal: toml::Table = merged_serving_toml(SERVING_TOML, "metal").expect("merge").parse().expect("parse");
         assert_eq!(metal, metal_base);
         assert!(!merged_settings("metal").numeric_policy.activation_quantization);
+        assert_eq!(merged_settings("metal").numeric_policy.activation_scale_arithmetic, ScaleArithmetic::InverseOfScale);
     }
 
     #[test]
     fn cpu_overlay_merges_zero_gpu_layers_and_llama_gets_ngl_zero() {
         let cpu = merged_settings("cpu");
         assert_eq!(cpu.gpu_layers, 0);
+        assert!(cpu.numeric_policy.activation_quantization);
+        assert_eq!(cpu.numeric_policy.activation_scale_arithmetic, ScaleArithmetic::InverseOfScale);
+        assert_eq!(cpu.numeric_policy.reciprocal_activation_scale_above_rows, None);
         assert_eq!(llama_gpu_layers_args(cpu.gpu_layers), ["-ngl", "0"]);
     }
 

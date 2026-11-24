@@ -7,11 +7,17 @@ seed = 1
 ignore_eos = true
 gpu_layers = -1
 
-# llama.cpp quantizes activations for quantized weights on cuda only (ggml-cuda mmvq: x/d up to
+# llama.cpp quantizes activations for quantized weights on cuda (ggml-cuda mmvq divides by the scale up to
 # MMVQ_MAX_BATCH_SIZE rows, mmq above); its metal backend does not. selected by --backend, no other entry.
 [backend.cuda.numeric_policy]
 activation_quantization = true
+activation_scale_arithmetic = "quotient"
 reciprocal_activation_scale_above_rows = 8
+
+# llama.cpp cpu quantizes activations for quantized weights at every row count (the layout rule's own arithmetic).
+# selected by --backend.
+[backend.cpu.numeric_policy]
+activation_quantization = true
 
 # no layer is offloaded on cpu: llama gets -ngl 0 and proxima loads on the host. selected by --backend.
 [backend.cpu]
