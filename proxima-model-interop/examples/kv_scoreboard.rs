@@ -2886,8 +2886,12 @@ fn parse_run_walls(text: &str) -> BTreeMap<usize, f64> {
 
 /// The wall time line of `time`, in milliseconds.
 fn parse_real_ms(text: &str) -> Option<f64> {
-    let times = parse_process_times(text)?;
-    Some(Duration::from_micros(times.wall_us).as_secs_f64() * 1e3)
+    parse_process_times(text).and_then(real_ms)
+}
+
+fn real_ms(times: ProcessTimes) -> Option<f64> {
+    let nanos = u64::try_from(Duration::from_micros(times.wall_us).as_nanos()).ok()?;
+    Some(per_million(nanos))
 }
 
 fn parse_rss_bytes(text: &str) -> Option<u64> {
@@ -4238,7 +4242,7 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
             ttft_warm_ms: span.ttft_warm_ms.clone(),
             decode_ms: span.tok_s.iter().map(|rate| 1000.0 / rate).collect(),
             run_walls_ms: parse_run_walls(PROX_LOG),
-            process_real_ms: parse_process_times_bsd(PROX_LOG).map(|times| Duration::from_micros(times.wall_us).as_secs_f64() * 1e3),
+            process_real_ms: parse_process_times_bsd(PROX_LOG).and_then(real_ms),
             gpu_peak_bytes: span.gpu_peak_bytes,
             footprint_bytes: parse_footprint_bsd(PROX_LOG).ok(),
             rss_bytes: parse_rss_bsd(PROX_LOG),
