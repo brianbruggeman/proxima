@@ -49,5 +49,5 @@ const _: () = {
 
 /// Quantizes whole 128-element runs of `f32` into `PQ2_0` blocks.
 pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
-    quantize_by_rule(&BlockLayout::PQ2_0, CODEC, input, output)
+    quantize_by_rule(&BlockLayout::PQ2_0, CODEC, None, input, output)
 }

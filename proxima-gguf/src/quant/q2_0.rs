@@ -51,5 +51,5 @@ const _: () = {
 /// `round(w / scale) + 1` clamped to `0..=3`. The loop this replaced is frozen in
 /// `reference_encoders` as the byte oracle.
 pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
-    quantize_by_rule(&BlockLayout::Q2_0, CODEC, input, output)
+    quantize_by_rule(&BlockLayout::Q2_0, CODEC, None, input, output)
 }

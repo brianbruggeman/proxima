@@ -49,5 +49,5 @@ const _: () = {
 /// Quantizes whole 128-element runs of `f32` into `Q1_0` blocks by `BlockLayout::Q1_0`'s encode
 /// rule (PrismML's `quantize_row_q1_0_ref`): scale is the mean absolute value, each bit the sign.
 pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
-    quantize_by_rule(&BlockLayout::Q1_0, CODEC, input, output)
+    quantize_by_rule(&BlockLayout::Q1_0, CODEC, None, input, output)
 }

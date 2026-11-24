@@ -18,7 +18,7 @@ use proxima_numeric::error::NumericError;
 
 use crate::quant::QuantError;
 
-const CODEC: &str = "block_layout_encode";
+pub const CODEC: &str = "block_layout_encode";
 
 /// The largest value magnitude `layout` reaches on both sides of zero, in units of its scale: the
 /// divisor of the block maximum. Also the test of whether [`quantize`] encodes `layout` at all.
@@ -52,6 +52,10 @@ pub fn quantize(
 /// `quantize` of `q4_0`, `q5_0`, `q8_0`, `q1_0`, `q2_0` and `pq2_0` call, keeping their size checks
 /// and error values. `codec` names the format in [`QuantError::InputNotElementMultiple`].
 ///
+/// With `arithmetic` set, the rule's scale arithmetic is replaced by it (the bound fact a quantize
+/// step carries), a NaN or infinite element is [`QuantError::NonFiniteInput`], and a layout with no
+/// rule (the grouped runs) keeps the shared walker, which has the one arithmetic.
+///
 /// # Errors
 /// [`QuantError::UnsupportedBlockLayout`] for a layout with no rule,
 /// [`QuantError::InputNotElementMultiple`] if `input` is not whole blocks,
@@ -59,27 +63,16 @@ pub fn quantize(
 pub fn quantize_by_rule(
     layout: &proxima_numeric::BlockLayout,
     codec: &'static str,
+    arithmetic: Option<ScaleArithmetic>,
     input: &[f32],
     output: &mut [u8],
 ) -> Result<(), QuantError> {
-    let block_codec = FormatCodec::block(layout).ok_or(QuantError::UnsupportedBlockLayout {
-        reason: "the layout has no encode instantiation",
-    })?;
-    encode_whole_blocks(&block_codec, codec, input, output)
-}
-
-/// Encodes whole blocks of `f32` into `layout` by the layout's [`proxima_numeric::EncodeRule`] with
-/// its scale arithmetic replaced by `arithmetic`: the bound fact a quantize step carries. A layout
-/// with no rule (the grouped runs) keeps the shared walker, which has the one arithmetic.
-///
-/// # Errors
-/// As [`quantize`], and [`QuantError::NonFiniteInput`] for a NaN or infinite element.
-pub fn quantize_under(
-    layout: &proxima_numeric::BlockLayout,
-    arithmetic: ScaleArithmetic,
-    input: &[f32],
-    output: &mut [u8],
-) -> Result<(), QuantError> {
+    let Some(arithmetic) = arithmetic else {
+        let block_codec = FormatCodec::block(layout).ok_or(QuantError::UnsupportedBlockLayout {
+            reason: "the layout has no encode instantiation",
+        })?;
+        return encode_whole_blocks(&block_codec, codec, input.len(), output, |out| block_codec.encode(input, out));
+    };
     let Some(rule) = layout.encode_rule().filter(|rule| !rule.is_float_code()) else {
         return quantize(layout, input, output);
     };
@@ -89,31 +82,32 @@ pub fn quantize_under(
     if input.iter().any(|value| !value.is_finite()) {
         return Err(QuantError::NonFiniteInput { codec: CODEC });
     }
-    encode_whole_blocks(&block_codec, CODEC, input, output)
+    encode_whole_blocks(&block_codec, CODEC, input.len(), output, |out| block_codec.encode(input, out))
 }
 
 fn encode_whole_blocks(
     block_codec: &FormatCodec,
     codec: &'static str,
-    input: &[f32],
+    input_len: usize,
     output: &mut [u8],
+    encode: impl FnOnce(&mut [u8]) -> Result<usize, NumericError>,
 ) -> Result<(), QuantError> {
-    if !input.len().is_multiple_of(block_codec.elements()) {
+    if !input_len.is_multiple_of(block_codec.elements()) {
         return Err(QuantError::InputNotElementMultiple {
             codec,
             unit: "block",
-            found: input.len(),
+            found: input_len,
             block_elements: block_codec.elements(),
         });
     }
-    let expected = input.len() / block_codec.elements() * block_codec.block_bytes();
+    let expected = input_len / block_codec.elements() * block_codec.block_bytes();
     if output.len() != expected {
         return Err(QuantError::OutputSizeMismatch {
             found: output.len(),
             expected,
         });
     }
-    block_codec.encode(input, output).map(drop).map_err(map_error)
+    encode(output).map(drop).map_err(map_error)
 }
 
 fn map_error(error: NumericError) -> QuantError {

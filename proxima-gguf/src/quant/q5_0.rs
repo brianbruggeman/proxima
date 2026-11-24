@@ -91,7 +91,7 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
 /// rule (signed peak over `-16`), the result of llama.cpp's `quantize_row_q5_0_ref`; the loop this
 /// replaced is frozen in `reference_encoders` as the byte oracle.
 pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
-    quantize_by_rule(&BlockLayout::Q5_0, "q5_0", input, output)
+    quantize_by_rule(&BlockLayout::Q5_0, "q5_0", None, input, output)
 }
 
 #[cfg(test)]

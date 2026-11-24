@@ -146,7 +146,7 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
 /// multiple of [`QK4_0`]; [`QuantError::OutputSizeMismatch`] if
 /// `output.len()` does not exactly match the packed byte count.
 pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
-    quantize_by_rule(&BlockLayout::Q4_0, CODEC, input, output)
+    quantize_by_rule(&BlockLayout::Q4_0, CODEC, None, input, output)
 }
 
 #[cfg(test)]

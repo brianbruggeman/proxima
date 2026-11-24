@@ -16,7 +16,7 @@ pub(super) fn run_block_quantize<B: Deref<Target = [f32]> + Sync>(
     let (source_node, _, _) = operands.first().ok_or(TensorError::Empty)?;
     let source = buffer_of(buffers, *source_node)?;
     let mut packed = vec![0u8; output.len()];
-    block_layout_encode::quantize_under(layout, *arithmetic, source, &mut packed).map_err(|cause| {
+    block_layout_encode::quantize_by_rule(layout, block_layout_encode::CODEC, Some(*arithmetic), source, &mut packed).map_err(|cause| {
         TensorError::BlockQuantizeLayout {
             node: resolved.node,
             cause,
