@@ -447,14 +447,15 @@ fn run_attn_fuse_parity_probe(
     runtime: &BackendRuntime,
 ) -> Result<(), InteropError> {
     let shapes = proxima_tensor::infer(program, symbols)?;
-    let resolved = proxima_tensor::bind_with_fusion_for(
+    let resolved = omega::bind_plan::bind_plan(
         program,
         &shapes,
         roots,
-        true,
-        runtime.numeric_policy,
-        &omega::metal::executes(),
-    )?;
+        &omega::bind_plan::BindConfig::new(runtime.numeric_policy, true, &alloc::collections::BTreeMap::new())
+            .with_fused_cached_attention(true),
+        &runtime.bind_grant(),
+    )?
+    .resolved;
     let layers = attn_fuse_probe_layers(step, &resolved);
     let candidates: Vec<NodeId> = layers.iter().map(|(attended, _)| *attended).collect();
     debug!(
@@ -696,6 +697,7 @@ fn run_attn_fuse_parity_probe(
             named_blocks,
             &resolved,
             runtime.numeric_policy,
+            &runtime.bind_grant(),
             &metal_unfused_full,
             &metal_fused_full,
             &metal_unfused_logits_full,
@@ -728,6 +730,7 @@ fn write_attn_layer0_failure_report(
     named_blocks: &[(&str, QuantizedBlock<'_>)],
     fused_resolved: &[proxima_tensor::BoundOp],
     numeric_policy: proxima_numeric::NumericPolicy,
+    executes: &proxima_tensor::Executes,
     metal_unfused_full: &[u32],
     metal_fused_full: &[u32],
     metal_unfused_logits_full: &[u32],
@@ -812,14 +815,14 @@ fn write_attn_layer0_failure_report(
     // layer 0's score/softmax/weighted-sum chain without assuming a node
     // numbering.
     let shapes = proxima_tensor::infer(program, symbols)?;
-    let unfused_resolved = proxima_tensor::bind_with_fusion_for(
+    let unfused_resolved = omega::bind_plan::bind_plan(
         program,
         &shapes,
         &[attended_node],
-        false,
-        numeric_policy,
-        &omega::metal::executes(),
-    )?;
+        &omega::bind_plan::BindConfig::new(numeric_policy, false, &alloc::collections::BTreeMap::new()),
+        executes,
+    )?
+    .resolved;
     let by_node: alloc::collections::BTreeMap<NodeId, &proxima_tensor::BoundOp> = unfused_resolved
         .iter()
         .map(|bound| (bound.node, bound))

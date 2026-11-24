@@ -1,13 +1,11 @@
 //! The renderer's part of the quantized activation decision: whether a configured activation storage
 //! format has a CUDA producer and readers. Which readers get a `BlockQuantize` node is decided by
-//! `proxima_tensor::derive_activation_quantize`; [`derive_through_tensor_pass`] runs it for a plan.
+//! `proxima_tensor::derive_activation_quantize`; [`crate::bind_plan`] runs it for a plan.
 
-use proxima_numeric::{NumericFormat, NumericPolicy};
-use proxima_tensor::{BoundOp, Missing, Op, Shapes, derive_activation_quantize};
+use proxima_numeric::NumericFormat;
+use proxima_tensor::Missing;
 
-use crate::cuda::target::Target;
-use crate::cuda::{consumer_missing, executes, producer_missing};
-use crate::lowering::{Codec, PackedOperands};
+use crate::cuda::{consumer_missing, producer_missing};
 
 /// A configured activation storage format the plan cannot honour, and the render pieces it lacks.
 /// The plan refuses instead of quietly keeping the activation in binary32.
@@ -44,24 +42,6 @@ pub(crate) fn validate_storage(format: Option<NumericFormat>) -> Result<(), Box<
         Some(refusal) => Err(Box::new(refusal)),
         None => Ok(()),
     }
-}
-
-/// Binds the plan's quantized activations through the tensor pass against what CUDA executes, and
-/// records each held format in `packed`. Entries at or past `program.len()` are dropped first, so a
-/// refresh never sees the previous plan's derived nodes. The caller has passed `storage` through
-/// [`validate_storage`].
-pub(crate) fn derive_through_tensor_pass(
-    resolved: Vec<BoundOp>,
-    program: &[Op],
-    shapes: &Shapes,
-    packed: &mut PackedOperands,
-    policy: NumericPolicy,
-    storage: Option<Codec>,
-) -> Vec<BoundOp> {
-    packed.retain(|node, _| (node.0 as usize) < program.len());
-    let (bound, held) = derive_activation_quantize(resolved, program, shapes, packed, policy, &executes(&Target::CUDA), storage);
-    packed.extend(held);
-    bound
 }
 
 #[cfg(test)]

@@ -94,9 +94,7 @@ pub(super) fn prepare_with_options(
     // this driver binds with `accumulator_narrowing` (see below), so an f64
     // accumulation island never reaches a device buffer: narrow once here so
     // the dtype gate, the inferred shapes and the bind all read one program
-    let numeric_policy = numeric_policy
-        .with_accumulator_narrowing()
-        .with_flash_narrowing(true);
+    let numeric_policy = crate::bind_plan::binding_policy(numeric_policy, &executes());
     let narrowed = narrow_accumulations(program, numeric_policy);
     let program: &[Op] = &narrowed;
     #[cfg(feature = "instrument")]
@@ -232,18 +230,12 @@ fn prepare_bound(
     // admits only a bare weight-times-activation product, and a fused 3-operand body
     // (attn_output's softmax normalization) falls to the per-element generic reduce
     #[cfg(not(feature = "top-fraction-fusion"))]
-    let mut resolved = if allow_fusion {
-        bind_with_fusion_and_packed_leaves(
-            program,
-            &shapes,
-            &effective_outputs,
-            fuse_cached_attention,
-            numeric_policy,
-            &packed_operand_nodes,
-            &executes(),
-        )?
-    } else {
-        bind_unfused(program, &shapes, &effective_outputs, numeric_policy)?
+    let mut resolved = {
+        let no_codecs = crate::lowering::PackedOperands::new();
+        let bind_config = crate::bind_plan::BindConfig::new(numeric_policy, allow_fusion, &no_codecs)
+            .with_fused_cached_attention(fuse_cached_attention)
+            .with_packed_leaves(&packed_operand_nodes);
+        crate::bind_plan::bind_plan(program, &shapes, &effective_outputs, &bind_config, &executes())?.resolved
     };
     #[cfg(feature = "top-fraction-fusion")]
     let mut resolved = if allow_fusion {
@@ -2052,10 +2044,7 @@ pub(super) fn rebind_at(
     previous: &Prepared,
     context: &RebindContext,
 ) -> Result<Prepared, MetalError> {
-    let numeric_policy = context
-        .numeric_policy
-        .with_accumulator_narrowing()
-        .with_flash_narrowing(true);
+    let numeric_policy = crate::bind_plan::binding_policy(context.numeric_policy, &executes());
     let narrowed = narrow_accumulations(program, numeric_policy);
     let shapes = infer(&narrowed, symbols)?;
     prepare_bound(

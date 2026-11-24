@@ -10,7 +10,7 @@ use proxima_tensor::{BoundOp, BoundOpKind, Extent, IndexMap, Keep, NodeId, Op, R
 use proxima_numeric::{DType, NumericPolicy, ScaleArithmetic};
 
 use crate::cuda::emit_cuda_with_policy;
-use crate::derived_quantize::derive_through_tensor_pass;
+use crate::bind_plan::derive_through_tensor_pass;
 use crate::lowering::{Codec, PackedOperands};
 
 const ROWS: u32 = 8;
@@ -65,7 +65,7 @@ fn derived_ops(codec: Codec, tokens: u32, policy: NumericPolicy) -> (Vec<BoundOp
     let mut packed = PackedOperands::from([(weight, codec)]);
     let mut resolved = bind_with_fusion(&program, &shapes, &[sum], policy.reassociation, policy).expect("binds");
     correct_packed_matmul_layouts(&mut resolved, &packed.keys().copied().collect());
-    let derived = derive_through_tensor_pass(resolved, &program, &shapes, &mut packed, policy, None);
+    let derived = derive_through_tensor_pass(resolved, &program, &shapes, &mut packed, policy, None, &crate::cuda::executes(&crate::cuda::target::Target::CUDA));
     (derived, packed)
 }
 

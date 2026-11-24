@@ -3556,6 +3556,15 @@ impl BackendRuntime {
     }
 
     #[cfg(feature = "gpu")]
+    /// The grant of the driver this runtime binds for; the reference executor on cpu.
+    #[cfg(all(feature = "metal", feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) fn bind_grant(&self) -> proxima_tensor::Executes {
+        self.gpu_driver
+            .filter(|_| self.uses_gpu())
+            .map_or(proxima_tensor::Executes::CPU, omega::backend::GpuDriver::executes)
+    }
+
+    #[cfg(feature = "gpu")]
     pub(super) fn uses_gpu(&self) -> bool {
         matches!(self.engine, Engine::Gpu)
     }
@@ -3595,13 +3604,6 @@ impl BackendRuntime {
         let is_kv_input = |name: &str| name.starts_with(KV_CACHE_INPUT_PREFIX);
         let probed = if self.uses_gpu() {
             match self.gpu_driver {
-                // Metal renders every fused cached attention, so its plan is the probe:
-                // bind the bucket up front and let the post-plan check correct a graph
-                // that turns out unfused. Probing the unbound program here would bind
-                // exact on a conservative false and lose the padded plan for the call.
-                Some(driver) if driver.renders_fused_cached_attention() => {
-                    Ok(self.kv_padding.resolves(true))
-                }
                 Some(driver) => omega::backend::probe_pads_kv(
                     driver,
                     self.kv_padding,
@@ -3614,7 +3616,15 @@ impl BackendRuntime {
                 None => Ok(self.kv_padding.resolves(false)),
             }
         } else {
-            proxima_tensor::cpu::probe_kv_padding(program, symbols, &outputs(), is_kv_input)
+            let grant = proxima_tensor::Executes::CPU;
+            proxima_tensor::cpu::probe_kv_padding_for(
+                program,
+                symbols,
+                &outputs(),
+                omega::bind_plan::binding_policy(self.numeric_policy, &grant),
+                &grant,
+                is_kv_input,
+            )
                 .map(|pads| self.kv_padding.resolves(pads))
                 .map_err(Into::into)
         };
@@ -5733,6 +5743,11 @@ impl BackendRuntime {
     #[cfg(test)]
     pub(super) fn cpu_plan_binds(&self) -> u64 {
         self.cpu_plans.values().map(proxima_tensor::cpu::CpuStepPlan::binds).sum()
+    }
+
+    #[cfg(all(feature = "metal", feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) fn bind_grant(&self) -> proxima_tensor::Executes {
+        proxima_tensor::Executes::CPU
     }
 
     pub(super) fn uses_gpu(&self) -> bool {

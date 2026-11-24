@@ -334,7 +334,7 @@ impl GpuDriver {
     /// [`plan_pads_kv`] plus [`GpuDriver::executes`].
     #[must_use]
     pub fn renders_fused_cached_attention(self) -> bool {
-        matches!(self, GpuDriver::Metal)
+        self.executes().forms.contains(proxima_tensor::Form::CachedAttention)
     }
 
     /// Whether this driver's cached attention reads a K cache stored as `key` and a V cache
@@ -1085,31 +1085,6 @@ fn map_metal_configuration_error(error: MetalError) -> BackendError {
 // the identity a candidate reports is the graph its own driver binds: the gpu
 // drivers narrow f64 norm accumulations (`cuda_driver`, `wgpu_driver`, metal's
 // `prepare_uniforms_pack`), the cpu keeps them
-fn binding_policy(plan: &Plan, numeric: NumericPolicy) -> NumericPolicy {
-    match plan {
-        #[cfg(feature = "cpu")]
-        Plan::Cpu(_) => numeric,
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        Plan::Metal(_) => numeric.with_accumulator_narrowing().with_flash_narrowing(true),
-        #[cfg(feature = "wgpu-backend")]
-        Plan::Wgpu(_) => numeric.with_accumulator_narrowing().with_flash_narrowing(true),
-        #[cfg(feature = "cuda-driver")]
-        Plan::Cuda(_) => numeric.with_accumulator_narrowing().with_flash_narrowing(true),
-        #[cfg(feature = "cuda-driver")]
-        Plan::Rocm(_) => crate::cuda_driver::rocm::numeric_policy(numeric),
-        #[cfg(not(any(
-            feature = "cpu",
-            all(feature = "metal", target_os = "macos"),
-            feature = "wgpu-backend",
-            feature = "cuda-driver"
-        )))]
-        _ => {
-            let _ = numeric;
-            match *plan {}
-        }
-    }
-}
-
 // the forms a candidate's identity binds with are the forms its own driver binds with
 fn plan_executes(plan: &Plan) -> Executes {
     match plan {
@@ -1143,12 +1118,9 @@ fn fill_candidate_identity(
     measurement: &mut CandidateMeasurement,
 ) -> Result<(), BackendError> {
     let shapes = proxima_tensor::infer(program, symbols)?;
-    let numeric = binding_policy(plan, config.numeric);
-    let resolved = if config.allow_fusion {
-        proxima_tensor::bind_with_fusion_for(program, &shapes, outputs, true, numeric, &plan_executes(plan))?
-    } else {
-        proxima_tensor::bind_unfused(program, &shapes, outputs, numeric)?
-    };
+    let packed = crate::lowering::PackedOperands::new();
+    let bind_config = crate::bind_plan::BindConfig::new(config.numeric, config.allow_fusion, &packed);
+    let resolved = crate::bind_plan::bind_plan(program, &shapes, outputs, &bind_config, &plan_executes(plan))?.resolved;
     measurement.resolved_op_count = resolved.len();
     measurement.kernel_identities = resolved
         .iter()
@@ -1824,7 +1796,7 @@ pub fn probe_pads_kv(
             program,
             symbols,
             outputs,
-            numeric_policy,
+            crate::bind_plan::binding_policy(numeric_policy, &driver.executes()),
             &driver.executes(),
             is_kv_input,
         )?),
@@ -2602,15 +2574,23 @@ mod tests {
         assert!(cuda, "CUDA grants CachedAttention and the graph fuses");
     }
 
+
     #[test]
-    fn only_the_metal_driver_always_renders_the_fused_cached_attention_bound() {
-        assert!(GpuDriver::Metal.renders_fused_cached_attention());
-        assert!(!GpuDriver::Wgpu.renders_fused_cached_attention());
+    fn renders_fused_cached_attention_follows_the_grant_of_every_driver() {
+        let follows_grant = |driver: GpuDriver| {
+            assert_eq!(
+                driver.renders_fused_cached_attention(),
+                driver.executes().forms.contains(proxima_tensor::Form::CachedAttention),
+                "{driver:?}"
+            );
+        };
+        follows_grant(GpuDriver::Metal);
+        follows_grant(GpuDriver::Wgpu);
         #[cfg(feature = "cuda-driver")]
-        assert!(
-            !GpuDriver::Cuda.renders_fused_cached_attention(),
-            "cuda fuses per plan, decided by plan_pads_kv"
-        );
+        {
+            follows_grant(GpuDriver::Cuda);
+            assert!(GpuDriver::Cuda.renders_fused_cached_attention());
+        }
     }
 
     #[test]

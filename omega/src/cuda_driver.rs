@@ -41,7 +41,8 @@ use crate::cuda_kernel_cache::{
 };
 use crate::kernel_cache_config::KernelCacheConfig;
 use crate::cuda_ptx_store::PtxStore;
-use crate::derived_quantize::{ActivationRefusal, derive_through_tensor_pass, validate_storage};
+use crate::bind_plan::{BindConfig, bind_plan, finish_bound};
+use crate::derived_quantize::{ActivationRefusal, validate_storage};
 use proxima_numeric::NumericFormat;
 use crate::lowering::{Binding, Codec, PackedOperands, gather_count};
 use proxima_tensor::bind::{
@@ -50,7 +51,7 @@ use proxima_tensor::bind::{
     refresh_cached_attention, row_template, rows_enumerable, symbols_shapes_template,
     touched_positions, touches_changed,
 };
-use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Executes, NodeId, Op, QuantizedBlock, Shapes, bind_unfused, bind_with_fusion_for, block_node_ids, correct_packed_matmul_layouts, infer, prune_dead, resolve_named_blocks, underive_block_quantize};
+use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Executes, NodeId, Op, QuantizedBlock, Shapes, block_node_ids, infer, resolve_named_blocks, underive_block_quantize};
 use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
 
 /// Errors from CUDA initialization, NVRTC compilation, or execution.
@@ -2032,29 +2033,13 @@ fn bind_resolved(
     unfused: bool,
     activation_storage: Option<NumericFormat>,
 ) -> Result<(Vec<BoundOp>, PackedOperands, LowerMicros), CudaDriverError> {
-    // llama.cpp's cuda norms sum in float (`ggml-cuda/norm.cu:130-140`)
-    let numeric_policy = numeric_policy.with_accumulator_narrowing().with_flash_narrowing(true).with_flat_activation_blocks(true);
     let bind_started = Instant::now();
-    let bound = if unfused {
-        bind_unfused(program, shapes, outputs, numeric_policy)
-    } else {
-        bind_with_fusion_for(
-            program,
-            shapes,
-            outputs,
-            numeric_policy.reassociation,
-            numeric_policy,
-            &cuda_executes(&Target::CUDA),
-        )
-    }
-    .map_err(|_| CudaDriverError::UnsupportedGraph {
+    let config = BindConfig::new(numeric_policy, !unfused, packed_operands).with_activation_storage(activation_storage);
+    let bound = bind_plan(program, shapes, outputs, &config, &cuda_executes(&Target::CUDA)).map_err(|_| CudaDriverError::UnsupportedGraph {
         node: NodeId(0),
         reason: "graph binding failed",
     })?;
-    let mut resolved = prune_dead(bound, outputs);
-    correct_packed_matmul_layouts(&mut resolved, &packed_operands.keys().copied().collect());
-    let mut packed = packed_operands.clone();
-    let resolved = derive_through_tensor_pass(resolved, program, shapes, &mut packed, numeric_policy, activation_storage);
+    let (resolved, packed, numeric_policy) = (bound.resolved, bound.packed, bound.policy);
     validate_resolved(&resolved, numeric_policy)?;
     crate::lowering::reject_mixed_dtype_elementwise(program, &resolved, &packed, numeric_policy).map_err(|error| CudaDriverError::Emit {
         node: resolved.first().map_or(NodeId(0), |bound| bound.node),
@@ -2179,7 +2164,7 @@ fn refresh_bound_resolved(
         .map(|bound| u64::from(touches_changed(bound, program, &changed)))
         .collect();
     let touched = masks.iter().filter(|mask| **mask != 0).count();
-    let mut refreshed = refresh_bound_ops(
+    let refreshed = refresh_bound_ops(
         previous,
         program,
         outputs,
@@ -2188,10 +2173,9 @@ fn refresh_bound_resolved(
         1,
         numeric_policy,
     )?;
-    correct_packed_matmul_layouts(&mut refreshed, &packed_operands.keys().copied().collect());
-    let mut packed = packed_operands.clone();
-    let refreshed = derive_through_tensor_pass(refreshed, program, shapes, &mut packed, numeric_policy, activation_storage);
-    Ok((refreshed, packed, touched))
+    let config = BindConfig::new(numeric_policy, true, packed_operands).with_activation_storage(activation_storage);
+    let finished = finish_bound(refreshed, program, shapes, &config, &cuda_executes(&Target::CUDA));
+    Ok((finished.resolved, finished.packed, touched))
 }
 
 fn cuda_admits(executes: &Executes, bound: &BoundOp, numeric_policy: NumericPolicy) -> bool {
@@ -5169,7 +5153,7 @@ pub mod rocm {
     use crate::lowering::PackedOperands;
     use proxima_numeric::NumericPolicy;
     use proxima_tensor::bind::kv_read_only_by_fused_attention;
-    use proxima_tensor::{BoundOp, Evaluated, NodeId, Op, QuantizedBlock, Shapes, bind_unfused, block_node_ids, infer, prune_dead, resolve_named_blocks};
+    use proxima_tensor::{BoundOp, Evaluated, NodeId, Op, QuantizedBlock, Shapes, block_node_ids, infer, resolve_named_blocks};
     use crate::lowering::Binding;
 
     /// Shared objects the runtime half probes, in order. The versioned names come
@@ -5719,7 +5703,7 @@ pub mod rocm {
     /// with the accumulator and flash narrowing every GPU lane applies.
     #[must_use]
     pub fn numeric_policy(numeric: NumericPolicy) -> NumericPolicy {
-        numeric.with_accumulator_narrowing().with_flash_narrowing(true)
+        crate::bind_plan::binding_policy(numeric, &crate::cuda::executes(&crate::cuda::target::Target::HIP))
     }
 
     /// One ROCm device, resolved through the runtime API.
@@ -6328,10 +6312,12 @@ pub mod rocm {
                 .ok_or(HipDriverError::UnsupportedGraph { reason: "empty program" })?;
             let outputs = if outputs.is_empty() { vec![root] } else { outputs.to_vec() };
             let policy = numeric_policy(config.numeric);
-            let bound = bind_unfused(program, &shapes, &outputs, policy)
-                .map_err(|_| HipDriverError::UnsupportedGraph { reason: "graph binding failed" })?;
-            let resolved = prune_dead(bound, &outputs);
             let packed = PackedOperands::new();
+            let bind_config = crate::bind_plan::BindConfig::new(config.numeric, false, &packed);
+            let hip_grant = crate::cuda::executes(&crate::cuda::target::Target::hip_wave(wave.lanes()));
+            let resolved = crate::bind_plan::bind_plan(program, &shapes, &outputs, &bind_config, &hip_grant)
+                .map_err(|_| HipDriverError::UnsupportedGraph { reason: "graph binding failed" })?
+                .resolved;
             let kernels = resolved
                 .iter()
                 .map(|bound| {

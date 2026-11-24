@@ -50,6 +50,8 @@ pub mod command_buffer_plan;
 
 #[cfg(feature = "std")]
 pub mod backend;
+#[cfg(feature = "alloc")]
+pub mod bind_plan;
 #[cfg(feature = "std")]
 pub mod config;
 #[cfg(all(feature = "coreml-lane", target_os = "macos"))]
