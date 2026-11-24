@@ -30,6 +30,8 @@ use std::time::Instant;
 
 use conflaguration::Settings as _;
 use memmap2::{Mmap, MmapOptions};
+#[cfg(feature = "gpu")]
+use omega::backend::GpuDriver;
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{
     ContextLength, GPU_LAYERS_ALL, LoadedModel, Phase, PromptCacheConfig, ServingConfig,
@@ -176,14 +178,16 @@ fn model_path() -> String {
     std::env::var("PROXIMA_DECODE_MODEL_GGUF").unwrap_or_else(|_| MODEL_PATH.to_string())
 }
 
-/// Bytes Metal has allocated on the system device right now; zero where there
-/// is no Metal device. Sampled at every token, the maximum is the run's peak.
+/// Bytes the compiled driver's device has allocated right now; zero where it
+/// cannot report. Sampled at every token, the maximum is the run's peak.
 fn gpu_allocated_bytes() -> u64 {
-    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[cfg(feature = "gpu")]
     {
-        omega::metal::current_allocated_size().unwrap_or(0)
+        GpuDriver::for_target()
+            .and_then(GpuDriver::allocated_device_bytes)
+            .unwrap_or(0)
     }
-    #[cfg(not(all(feature = "metal", target_os = "macos")))]
+    #[cfg(not(feature = "gpu"))]
     {
         0
     }

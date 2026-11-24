@@ -270,6 +270,37 @@ impl GpuDriver {
         }
     }
 
+    /// Bytes this driver's device has allocated right now, `None` when the
+    /// driver cannot report. Metal reads its own device count; CUDA reads the
+    /// already-initialized shared driver's `total - free` and never opens a
+    /// context to answer, so it is `None` before the first plan binds.
+    #[must_use]
+    pub fn allocated_device_bytes(self) -> Option<u64> {
+        match self {
+            GpuDriver::Metal => {
+                #[cfg(all(feature = "metal", target_os = "macos"))]
+                {
+                    crate::metal::current_allocated_size()
+                }
+                #[cfg(not(all(feature = "metal", target_os = "macos")))]
+                {
+                    None
+                }
+            }
+            GpuDriver::Wgpu => None,
+            #[cfg(feature = "cuda-driver")]
+            GpuDriver::Cuda => match CUDA_DRIVER.get() {
+                Some(Ok(driver)) => driver
+                    .memory_info()
+                    .ok()
+                    .map(|(free, total)| total.saturating_sub(free) as u64),
+                _ => None,
+            },
+            #[cfg(feature = "cuda-driver")]
+            GpuDriver::Hip { .. } => None,
+        }
+    }
+
     /// The driver `config` names for its engine, `None` on `cpu`.
     ///
     /// # Errors
