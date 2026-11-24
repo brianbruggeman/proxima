@@ -79,7 +79,7 @@ mod tests {
 
     fn encode_under(layout: &BlockLayout, values: &[f32], arithmetic: ScaleArithmetic) -> Result<Vec<u8>, TensorError> {
         let op = bound(*layout, (values.len() / ROWS as usize) as u32, arithmetic);
-        let mut output = vec![0.0f32; op.extents.iter().product::<u64>() as usize];
+        let mut output = vec![0.0; op.extents.iter().product::<u64>() as usize];
         let buffers = [Some(values), None];
         run_block_quantize(&op, &buffers, &mut output)?;
         Ok(output.iter().map(|slot| *slot as u8).collect())
@@ -87,7 +87,7 @@ mod tests {
 
     fn decoded(layout: &BlockLayout, packed: &[u8]) -> Vec<f32> {
         let blocks = packed.len() / usize::from(layout.block_bytes);
-        let mut values = vec![0.0f32; blocks * usize::from(layout.elements)];
+        let mut values = vec![0.0; blocks * usize::from(layout.elements)];
         dequantize(layout, packed, &mut values).expect("the packed run is whole blocks");
         values
     }
@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn q8_1_block_matches_a_hand_computation() {
         let layout = BlockLayout::Q8_1;
-        let mut values = vec![0.0f32; (ROWS * row_width(&layout)) as usize];
+        let mut values = vec![0.0; (ROWS * row_width(&layout)) as usize];
         for (index, value) in values.iter_mut().take(32).enumerate() {
             *value = index as f32 - 16.0;
         }
@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn stored_min_layouts_quantize_and_decode_within_half_a_step_per_element() {
-        for (layout, levels) in [(BlockLayout::Q4_1, 15.0f32), (BlockLayout::Q5_1, 31.0f32)] {
+        for (layout, levels) in [(BlockLayout::Q4_1, 15.0), (BlockLayout::Q5_1, 31.0)] {
             let width = usize::from(layout.elements);
             let values = oracle_input(ROWS as usize * row_width(&layout) as usize);
             let packed = encode(&layout, &values).expect("a stored-min layout encodes from its description");
@@ -404,7 +404,6 @@ mod tests {
 
     const UNIT_PEAK_TIES: [u32; 6] = [0x3d11_2244, 0x3d31_62c5, 0x3d51_a346, 0x3d71_e3c7, 0x3f30_60c1, 0x3f50_a142];
     const WIDE_PEAK_TIES: [u32; 6] = [0x3d32_ff98, 0x3d95_2a54, 0x3dd0_d4dc, 0x3e06_3fb2, 0x3e24_14f6, 0x3e41_ea3a];
-    const WIDE_PEAK: f32 = 3.7;
     const UNIT_RECIPROCAL_CODES: [i8; 6] = [4, 5, 6, 7, 87, 103];
     const UNIT_QUOTIENT_CODES: [i8; 6] = [5, 6, 7, 8, 88, 104];
     const WIDE_RECIPROCAL_CODES: [i8; 6] = [2, 3, 4, 5, 6, 7];
@@ -418,14 +417,13 @@ mod tests {
     #[test]
     fn the_bound_arithmetic_picks_the_codes_the_interpreter_writes_on_near_ties() {
         let layout = BlockLayout::Q8_1;
-        let mut values = vec![0.0f32; (ROWS * row_width(&layout)) as usize];
+        let mut values = vec![0.0; (ROWS * row_width(&layout)) as usize];
         values[0] = 1.0;
-        values[32] = WIDE_PEAK;
-        for (lane, bits) in UNIT_PEAK_TIES.iter().enumerate() {
-            values[1 + lane] = f32::from_bits(*bits);
-        }
-        for (lane, bits) in WIDE_PEAK_TIES.iter().enumerate() {
-            values[33 + lane] = f32::from_bits(*bits);
+        values[32] = 3.7;
+        for (first, ties) in [(1, UNIT_PEAK_TIES), (33, WIDE_PEAK_TIES)] {
+            for (lane, bits) in ties.iter().enumerate() {
+                values[first + lane] = f32::from_bits(*bits);
+            }
         }
         let quotient = encode_under(&layout, &values, ScaleArithmetic::Quotient).expect("q8_1 encodes under the quotient");
         let reciprocal = encode_under(&layout, &values, ScaleArithmetic::ReciprocalMultiply).expect("q8_1 encodes under the reciprocal");
@@ -438,7 +436,7 @@ mod tests {
     #[test]
     fn with_no_configuration_the_interpreter_writes_the_layout_rule_codes_on_near_ties() {
         let layout = BlockLayout::Q8_1;
-        let mut values = vec![0.0f32; (ROWS * row_width(&layout)) as usize];
+        let mut values = vec![0.0; (ROWS * row_width(&layout)) as usize];
         values[0] = 1.0;
         for (lane, bits) in UNIT_PEAK_TIES.iter().enumerate() {
             values[1 + lane] = f32::from_bits(*bits);
