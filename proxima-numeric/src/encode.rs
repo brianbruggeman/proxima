@@ -1508,6 +1508,57 @@ mod tests {
         }
     }
 
+    /// Test-side port of llama.cpp `quantize_row_q8_1_ref` (ggml-quants.c): per 32 values `d =
+    /// amax / 127`, `id = 1 / d` (0 when `d` is 0), `q = roundf(x * id)`, `s = f16(sum(q) * d)`.
+    /// Returns one 36-byte flat block per 32 values: `d` and `s` little endian, then the codes.
+    fn llama_quantize_row_q8_1_ref(row: &[f32]) -> std::vec::Vec<u8> {
+        let half = |value: f32| (float_layout_codec::encode(value, FloatLayout::F16) as u16).to_le_bytes();
+        let mut out = std::vec::Vec::new();
+        for group in row.chunks(32) {
+            let amax = group.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+            let scale = amax / 127.0;
+            let inverse = if scale != 0.0 { 1.0 / scale } else { 0.0 };
+            let codes: std::vec::Vec<i8> = group.iter().map(|value| libm::roundf(value * inverse) as i8).collect();
+            let sum: i32 = codes.iter().map(|code| i32::from(*code)).sum();
+            out.extend_from_slice(&half(scale));
+            out.extend_from_slice(&half(sum as f32 * scale));
+            out.extend(codes.iter().map(|code| *code as u8));
+        }
+        out
+    }
+
+    fn near_tie_row() -> [f32; 128] {
+        let scale_zero = 1.0f32 + 5.0 / 16384.0;
+        let scale_one = 1.0f32 + 3.0 / 4096.0;
+        let mut input = [0.0f32; 128];
+        input[0] = 5.500_278;
+        input[1] = 127.0 * scale_zero;
+        input[32] = 127.0 * scale_one;
+        input[35] = -73.500_015 * scale_one;
+        input[96] = 2.5;
+        input[97] = -2.5;
+        input[98] = 127.0;
+        input
+    }
+
+    #[test]
+    fn flat_and_grouped_q8_1_equal_the_llama_row_reference_on_near_ties_and_a_real_row() {
+        let tie = near_tie_row();
+        let real = activation_row();
+        let swept = values(128 * 64, 0x51_71);
+        for (name, row) in [("near ties", &tie[..]), ("activation row", &real[..]), ("sweep", &swept[..])] {
+            let expected = llama_quantize_row_q8_1_ref(row);
+            assert_eq!(packed(&NumericFormat::Q8_1, row), expected, "{name}: flat q8_1");
+            let grouped = packed(&NumericFormat::Q8_1Grouped, row);
+            for (block, (group, runs)) in grouped.chunks(144).zip(expected.chunks(144)).enumerate() {
+                for (run, flat) in runs.chunks(36).enumerate() {
+                    assert_eq!(&group[run * 4..run * 4 + 4], &flat[..4], "{name} block {block} run {run} header");
+                    assert_eq!(&group[16 + run * 32..16 + run * 32 + 32], &flat[4..], "{name} block {block} run {run} codes");
+                }
+            }
+        }
+    }
+
     const FLINT_EXPERT_ROWS: &str =
         include_str!("../tests/fixtures/flint_blk46_expert_gated_activation_rows.txt");
 

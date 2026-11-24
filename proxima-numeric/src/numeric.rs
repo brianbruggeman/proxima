@@ -108,6 +108,14 @@ pub struct NumericPolicy {
     #[cfg_attr(feature = "config", setting(default = false))]
     #[cfg_attr(feature = "config", serde(default))]
     pub accumulator_narrowing: bool,
+    /// Holds the activation in the narrowest quantized-activation block (one scale per 32 values,
+    /// the flat `Q8_1` llama.cpp's `quantize_q8_1` and `quantize_row_q8_1_ref` write) whatever the
+    /// reduction depth, instead of the widest block the depth fills whole. The grouped block
+    /// (`Q8_1_GROUPED`) is llama's `block_q8_1_mmq`, a different arithmetic, so a plan that must
+    /// match the incumbent's single-token ids asks for the flat one.
+    #[cfg_attr(feature = "config", setting(default = false))]
+    #[cfg_attr(feature = "config", serde(default))]
+    pub flat_activation_blocks: bool,
 }
 
 impl NumericPolicy {
@@ -135,6 +143,7 @@ impl NumericPolicy {
             bf16_input_rounding: false,
             flash_narrowing: false,
             accumulator_narrowing: false,
+            flat_activation_blocks: false,
         }
     }
 
@@ -157,6 +166,7 @@ impl NumericPolicy {
             bf16_input_rounding: false,
             flash_narrowing: false,
             accumulator_narrowing: false,
+            flat_activation_blocks: false,
         }
     }
 
@@ -175,6 +185,7 @@ impl NumericPolicy {
             bf16_input_rounding: false,
             flash_narrowing: false,
             accumulator_narrowing: false,
+            flat_activation_blocks: false,
         }
     }
 
@@ -251,6 +262,12 @@ impl NumericPolicy {
     #[must_use]
     pub const fn with_flash_narrowing(mut self, flash_narrowing: bool) -> Self {
         self.flash_narrowing = flash_narrowing;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_flat_activation_blocks(mut self, flat_activation_blocks: bool) -> Self {
+        self.flat_activation_blocks = flat_activation_blocks;
         self
     }
 }

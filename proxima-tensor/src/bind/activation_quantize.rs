@@ -216,6 +216,7 @@ fn gemm_activation(
     weights: &BTreeMap<NodeId, NumericFormat>,
     limits: ActivationLimits,
     storage: Option<NumericFormat>,
+    flat: bool,
 ) -> Option<(NodeId, usize)> {
     let BoundOpKind::Reduce { keep: Keep::Reduce, reduce_op: ScalarOp::Add, init: ReduceInit::Zero, output_axes, operands, .. } =
         &bound.kind
@@ -231,7 +232,7 @@ fn gemm_activation(
     let (activation, layout, _) = operands.get(slot)?;
     let [tokens, depth] = collapsed_extent(shapes.of(*activation))?;
     let float_node = matches!(program.get(activation.0 as usize)?.dtype(), DType::FLOAT32);
-    let held = activation_codec(depth, storage).block_layout()?;
+    let held = activation_codec(depth, storage, flat).block_layout()?;
     let geometry = geometry(bound, output_axes);
     let in_device = tokens > 0
         && !geometry.dims.is_empty()
@@ -252,10 +253,11 @@ fn consumers_by_activation(
     weights: &BTreeMap<NodeId, NumericFormat>,
     limits: ActivationLimits,
     storage: Option<NumericFormat>,
+    flat: bool,
 ) -> BTreeMap<NodeId, Vec<Consumer>> {
     let mut by_activation: BTreeMap<NodeId, Vec<Consumer>> = BTreeMap::new();
     for (position, bound) in resolved.iter().enumerate() {
-        if let Some((activation, slot)) = gemm_activation(bound, program, shapes, weights, limits, storage) {
+        if let Some((activation, slot)) = gemm_activation(bound, program, shapes, weights, limits, storage, flat) {
             by_activation.entry(activation).or_default().push(Consumer { position, slot });
         }
     }
@@ -269,12 +271,16 @@ fn group_elements(storage: Option<NumericFormat>) -> u64 {
 }
 
 /// The format an activation of this depth is stored in: the configured one, else the quantized-activation
-/// format (`is_quantized_activation`) with the widest block the depth fills whole, else the narrowest.
-fn activation_codec(depth: u64, storage: Option<NumericFormat>) -> NumericFormat {
+/// format (`is_quantized_activation`) with the widest block the depth fills whole, else the narrowest;
+/// `flat` takes the narrowest at every depth.
+fn activation_codec(depth: u64, storage: Option<NumericFormat>, flat: bool) -> NumericFormat {
     if let Some(format) = storage {
         return format;
     }
     let quantized = || NumericFormat::ALL.into_iter().filter(NumericFormat::is_quantized_activation);
+    if flat {
+        return quantized().min_by_key(NumericFormat::elements_per_block).unwrap_or_default();
+    }
     quantized()
         .filter(|format| depth.is_multiple_of(u64::from(format.elements_per_block())))
         .max_by_key(NumericFormat::elements_per_block)
@@ -300,7 +306,7 @@ fn activation_codec(depth: u64, storage: Option<NumericFormat>) -> NumericFormat
 ///   `max_reduction` and the activation shared by every row or per gather slot, contiguous from
 ///   its origin.
 ///
-/// `storage` `None` holds Q8_1Grouped when `depth % 128 == 0`, else Q8_1. Teaching pointer: the
+/// `storage` `None` holds Q8_1Grouped when `depth % 128 == 0`, else Q8_1, unless `policy` sets `flat_activation_blocks`, which holds Q8_1 at every depth. Teaching pointer: the
 /// node is [`quantize_op`], readers are re-aimed with [`repoint`], and [`underive_block_quantize`]
 /// undoes it; the decision composes [`Executes`], [`admit`] and [`int8_dot_shape`].
 #[must_use]
@@ -317,7 +323,7 @@ pub fn derive_activation_quantize(
     let Some(limits) = granted_limits(policy, executes) else {
         return (resolved, held_formats);
     };
-    let activations = consumers_by_activation(&resolved, program, shapes, weights, limits, storage);
+    let activations = consumers_by_activation(&resolved, program, shapes, weights, limits, storage, policy.flat_activation_blocks);
     let ids: BTreeMap<NodeId, NodeId> = activations
         .keys()
         .enumerate()
@@ -330,7 +336,7 @@ pub fn derive_activation_quantize(
         let Some([tokens, depth]) = collapsed_extent(shapes.of(*activation)) else {
             continue;
         };
-        let held_codec = activation_codec(depth, storage);
+        let held_codec = activation_codec(depth, storage, policy.flat_activation_blocks);
         let Some(held) = held_codec.block_layout() else {
             continue;
         };
@@ -640,10 +646,17 @@ mod tests {
 
     #[test]
     fn depth_picks_the_aligned_grouped_layout_only_when_it_fills_whole_groups() {
-        assert_eq!(activation_codec(4096, None), NumericFormat::Q8_1Grouped);
-        assert_eq!(activation_codec(128, None), NumericFormat::Q8_1Grouped);
-        assert_eq!(activation_codec(96, None), NumericFormat::Q8_1);
-        assert_eq!(activation_codec(32, None), NumericFormat::Q8_1);
+        assert_eq!(activation_codec(4096, None, false), NumericFormat::Q8_1Grouped);
+        assert_eq!(activation_codec(128, None, false), NumericFormat::Q8_1Grouped);
+        assert_eq!(activation_codec(96, None, false), NumericFormat::Q8_1);
+        assert_eq!(activation_codec(32, None, false), NumericFormat::Q8_1);
+    }
+
+    #[test]
+    fn a_flat_activation_policy_holds_q8_1_at_a_depth_the_grouped_block_fills() {
+        assert_eq!(activation_codec(4096, None, true), NumericFormat::Q8_1);
+        assert_eq!(activation_codec(128, None, true), NumericFormat::Q8_1);
+        assert_eq!(activation_codec(4096, Some(NumericFormat::Q8_1Grouped), true), NumericFormat::Q8_1Grouped);
     }
 
     #[test]
