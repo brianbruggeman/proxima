@@ -6,15 +6,9 @@ use core::arch::x86_64::{
     _mm_cvtss_f32, _mm_loadu_si128, _mm_movehdup_ps, _mm_movehl_ps, _mm_mul_ss, _mm_set1_epi8,
     _mm_shuffle_ps, _mm_srli_epi16, _mm256_and_si256, _mm256_andnot_si256, _mm256_castps256_ps128,
     _mm256_castsi128_si256, _mm256_cmpeq_epi8, _mm256_cvtepi32_ps, _mm256_extractf128_ps,
-    _mm256_fmadd_ps, _mm256_inserti128_si256, _mm256_loadu_si256, _mm256_madd_epi16,
+    _mm256_fmadd_ps, _mm256_add_epi32, _mm256_cvtepi8_epi16, _mm_add_epi32, _mm_cvtsi128_si32, _mm_shuffle_epi32, _mm_unpackhi_epi64, _mm256_castsi256_si128, _mm256_extracti128_si256, _mm256_inserti128_si256, _mm256_loadu_si256, _mm256_madd_epi16,
     _mm256_maddubs_epi16, _mm256_set1_epi8, _mm256_set1_epi16, _mm256_set1_epi32, _mm256_set1_ps,
     _mm256_setr_epi8, _mm256_setzero_ps, _mm256_shuffle_epi8, _mm256_storeu_si256, _mm256_loadu_ps, _mm256_andnot_ps, _mm256_max_ps, _mm256_cvtps_epi32, _mm256_packs_epi16, _mm256_packs_epi32, _mm256_permutevar8x32_epi32, _mm256_setr_epi32, _mm_max_ps, _mm_max_ss, _mm256_sign_epi8, _mm256_sub_epi8, _mm256_mul_ps,
-};
-
-#[cfg(all(test, target_arch = "x86_64"))]
-use core::arch::x86_64::{
-    _mm_add_epi32, _mm_cvtsi128_si32, _mm_shuffle_epi32, _mm_unpackhi_epi64,
-    _mm256_castsi256_si128, _mm256_extracti128_si256,
 };
 
 use proxima_gguf::quant::{q5_0, q8_0};
@@ -141,6 +135,50 @@ pub(super) fn block_sum_q8_0_scalar(weight_block: &[u8], activation_block: &[u8]
         })
         .sum()
 }
+/// Signed-byte dot of two 32-code chunks as an exact int32. The widening multiply keeps every
+/// code pair exact (unlike the sign-trick `signed_dot`, which mis-signs a -128 activation), so the
+/// result equals the scalar sum for any bytes.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn exact_code_sum_avx2(weight_codes: &[u8], activation_codes: &[u8]) -> i32 {
+    let weights = weight_codes.as_ptr();
+    let activations = activation_codes.as_ptr();
+    // SAFETY: the caller passes two slices of BLOCK_ELEMENTS bytes; loadu needs no alignment.
+    unsafe {
+        let low = _mm256_madd_epi16(
+            _mm256_cvtepi8_epi16(_mm_loadu_si128(weights.cast())),
+            _mm256_cvtepi8_epi16(_mm_loadu_si128(activations.cast())),
+        );
+        let high = _mm256_madd_epi16(
+            _mm256_cvtepi8_epi16(_mm_loadu_si128(weights.add(BLOCK_ELEMENTS / 2).cast())),
+            _mm256_cvtepi8_epi16(_mm_loadu_si128(activations.add(BLOCK_ELEMENTS / 2).cast())),
+        );
+        horizontal_sum(_mm256_add_epi32(low, high))
+    }
+}
+
+pub(super) fn scalar_code_sum(weight_codes: &[u8], activation_codes: &[u8]) -> i32 {
+    weight_codes
+        .iter()
+        .zip(activation_codes)
+        .map(|(&weight, &activation)| i32::from(weight.cast_signed()) * i32::from(activation.cast_signed()))
+        .sum()
+}
+
+/// Int32 dot of one 32-code chunk of signed-byte weights and activations, on avx2 when the cpu
+/// has it. `None` unless both slices are exactly one chunk.
+pub(super) fn code_sum(weight_codes: &[u8], activation_codes: &[u8]) -> Option<i32> {
+    if weight_codes.len() != BLOCK_ELEMENTS || activation_codes.len() != BLOCK_ELEMENTS {
+        return None;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("avx2") {
+        // SAFETY: avx2 was detected at runtime and both slices are exactly one chunk.
+        return Some(unsafe { exact_code_sum_avx2(weight_codes, activation_codes) });
+    }
+    Some(scalar_code_sum(weight_codes, activation_codes))
+}
+
 
 pub(super) fn block_sum_q5_0_scalar(weight_block: &[u8], activation_block: &[u8]) -> i32 {
     let high_bits = u32::from_le_bytes([
@@ -164,7 +202,7 @@ pub(super) fn block_sum_q5_0_scalar(weight_block: &[u8], activation_block: &[u8]
     low_sum + high_sum
 }
 
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn horizontal_sum(widened: __m256i) -> i32 {
     let sum128 = _mm_add_epi32(

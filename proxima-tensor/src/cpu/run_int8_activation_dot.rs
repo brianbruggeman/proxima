@@ -50,17 +50,19 @@ fn half_at(bytes: &[u8], at: usize) -> Option<f32> {
 
 /// One output element: sum over 32-element chunks of `(weight_scale * activation_scale) * sum(weight_code * activation_code)`,
 /// the int32 chunk sum exact and the fold in f32, as omega's int8 gemm folds it. `None` when a row is short.
+/// `chunk_sum` is the int32 chunk dot; every implementation returns the same exact integer.
 fn int8_dot(
     weight: &BlockLayout,
     weight_row: &[u8],
     activation: &BlockLayout,
     activation_row: &[u8],
     depth: usize,
+    chunk_sum: fn(&[u8], &[u8]) -> Option<i32>,
 ) -> Option<f32> {
     let weight_codes = weight.contiguous_byte_codes()?;
     let weight_elements = usize::from(weight.elements);
     let runs = usize::from(activation.runs());
-    let mut accumulator = 0.0f32;
+    let mut accumulator = 0.0;
     for chunk in 0..depth / DOT_ELEMENTS {
         let element = chunk * DOT_ELEMENTS;
         let weight_block = weight_row.get(element / weight_elements * usize::from(weight.block_bytes)..)?;
@@ -72,28 +74,48 @@ fn int8_dot(
         let activation_scale = half_at(activation_block, activation.run_scale_byte(run))?;
         let activation_start = activation.run_code_byte(run);
         let activation_chunk = activation_block.get(activation_start..activation_start + DOT_ELEMENTS)?;
-        let sum: i32 = weight_chunk
-            .iter()
-            .zip(activation_chunk)
-            .map(|(weight_code, activation_code)| i32::from(*weight_code as i8) * i32::from(*activation_code as i8))
-            .sum();
-        accumulator += (weight_scale * activation_scale) * sum as f32;
+        accumulator += (weight_scale * activation_scale) * chunk_sum(weight_chunk, activation_chunk)? as f32;
     }
     Some(accumulator)
 }
 
-/// `[tokens, rows]` product of packed weight rows against the rows of a `BlockQuantize` output,
-/// computed as the int8 dot over the stored codes and scales. Refuses a weight codec without a
-/// byte-code int8 dot rather than dequantizing it.
-pub(super) fn matmul_int8_activation(
+/// The packed-product geometry both the production path and the test oracle walk.
+struct Int8Product<'a> {
+    weight: BlockLayout,
+    activation: &'a BlockLayout,
+    rows: usize,
+    tokens: usize,
+    depth: usize,
+    weight_row_bytes: usize,
+    activation_row_bytes: usize,
+}
+
+impl Int8Product<'_> {
+    fn dot(
+        &self,
+        node: NodeId,
+        weight_bytes: &[u8],
+        activation_bytes: &[u8],
+        (row, token): (usize, usize),
+        chunk_sum: fn(&[u8], &[u8]) -> Option<i32>,
+    ) -> Result<f32, TensorError> {
+        let weight_row = &weight_bytes[row * self.weight_row_bytes..][..self.weight_row_bytes];
+        let activation_row = &activation_bytes[token * self.activation_row_bytes..][..self.activation_row_bytes];
+        int8_dot(&self.weight, weight_row, self.activation, activation_row, self.depth, chunk_sum).ok_or(
+            TensorError::NotLowerable { node, reason: "int8 activation product ran past a packed row" },
+        )
+    }
+}
+
+fn int8_product<'a>(
     node: NodeId,
     weight_codec: Codec,
-    weight_bytes: &[u8],
-    activation: &BlockLayout,
-    activation_bytes: &[u8],
+    weight_len: usize,
+    activation: &'a BlockLayout,
+    activation_len: usize,
     depth: usize,
-    output: &mut [f32],
-) -> Result<(), TensorError> {
+    output_len: Option<usize>,
+) -> Result<Int8Product<'a>, TensorError> {
     let weight = weight_codec
         .block_layout()
         .filter(weight_has_byte_code_dot)
@@ -112,23 +134,84 @@ pub(super) fn matmul_int8_activation(
     if !aligned || weight_row_bytes == 0 || activation_row_bytes == 0 {
         return Err(shape_error);
     }
-    let rows = weight_bytes.len() / weight_row_bytes;
-    let tokens = activation_bytes.len() / activation_row_bytes;
-    if output.len() != rows * tokens {
+    let rows = weight_len / weight_row_bytes;
+    let tokens = activation_len / activation_row_bytes;
+    if output_len.is_some_and(|len| len != rows * tokens) {
         return Err(shape_error);
     }
-    for (token, token_output) in output.chunks_mut(rows).enumerate() {
-        let activation_row = &activation_bytes[token * activation_row_bytes..][..activation_row_bytes];
-        for (row, slot) in token_output.iter_mut().enumerate() {
-            let weight_row = &weight_bytes[row * weight_row_bytes..][..weight_row_bytes];
-            *slot = int8_dot(&weight, weight_row, activation, activation_row, depth)
-                .ok_or(TensorError::NotLowerable {
-                    node,
-                    reason: "int8 activation product ran past a packed row",
-                })?;
+    Ok(Int8Product { weight, activation, rows, tokens, depth, weight_row_bytes, activation_row_bytes })
+}
+
+/// Workers the product splits over: the interpreter's shared matmul policy, so a product below
+/// its parallel threshold, or with fewer weight rows than workers, stays on the calling thread.
+fn product_workers(rows: usize, tokens: usize, depth: usize) -> Option<usize> {
+    quantized_matmul_workers(rows, tokens.saturating_mul(depth))
+}
+
+/// `[tokens, rows]` product of packed weight rows against the rows of a `BlockQuantize` output,
+/// computed as the int8 dot over the stored codes and scales. Refuses a weight codec without a
+/// byte-code int8 dot rather than dequantizing it. Past the interpreter's parallel threshold the
+/// weight rows split into `UNIT_ROWS` units over its worker pool, each unit owning a disjoint
+/// `[row, token]` slot that is then scattered into the `[token, row]` output; every element is
+/// the same chunk-ordered fold as the serial loop, so the split never changes a result.
+pub(super) fn matmul_int8_activation(
+    node: NodeId,
+    weight_codec: Codec,
+    weight_bytes: &[u8],
+    activation: &BlockLayout,
+    activation_bytes: &[u8],
+    depth: usize,
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    let product = int8_product(node, weight_codec, weight_bytes.len(), activation, activation_bytes.len(), depth, Some(output.len()))?;
+    let (rows, tokens) = (product.rows, product.tokens);
+    let Some(workers) = product_workers(rows, tokens, depth) else {
+        for (token, token_output) in output.chunks_mut(rows).enumerate() {
+            for (row, slot) in token_output.iter_mut().enumerate() {
+                *slot = product.dot(node, weight_bytes, activation_bytes, (row, token), code_sum)?;
+            }
+        }
+        return Ok(());
+    };
+    let by_unit = matmul_rows_threaded(rows.div_ceil(UNIT_ROWS), UNIT_ROWS * tokens, workers, None, depth, |unit, slot| {
+        let first_row = unit * UNIT_ROWS;
+        for (offset, row_slots) in slot.chunks_mut(tokens).take(UNIT_ROWS.min(rows - first_row)).enumerate() {
+            for (token, value) in row_slots.iter_mut().enumerate() {
+                *value = product.dot(node, weight_bytes, activation_bytes, (first_row + offset, token), code_sum)?;
+            }
+        }
+        Ok(())
+    })?;
+    for (row, row_values) in by_unit.chunks(tokens).take(rows).enumerate() {
+        for (token, value) in row_values.iter().enumerate() {
+            output[token * rows + row] = *value;
         }
     }
     Ok(())
+}
+
+/// The pre-threading product: one scalar `token / row` loop, returning each element's bits in
+/// `[token, row]` order. Test oracle for the threaded path.
+#[cfg(test)]
+fn matmul_int8_activation_serial(
+    node: NodeId,
+    weight_codec: Codec,
+    weight_bytes: &[u8],
+    activation: &BlockLayout,
+    activation_bytes: &[u8],
+    depth: usize,
+) -> Result<Vec<u32>, TensorError> {
+    let product = int8_product(node, weight_codec, weight_bytes.len(), activation, activation_bytes.len(), depth, None)?;
+    let mut bits = Vec::new();
+    for token in 0..product.tokens {
+        for row in 0..product.rows {
+            let value = product.dot(node, weight_bytes, activation_bytes, (row, token), |weight, activation| {
+                Some(scalar_code_sum(weight, activation))
+            })?;
+            bits.push(value.to_bits());
+        }
+    }
+    Ok(bits)
 }
 
 struct ProductShape {
@@ -333,7 +416,7 @@ mod tests {
         block_layout_encode::quantize(&BlockLayout::Q8_1, &activation, &mut encoded).expect("q8_1 encodes");
         assert_eq!(encoded, block);
         let mut output = [0.0f32];
-        matmul_int8_activation(NODE, Codec::Q8_0, &weight, &BlockLayout::Q8_1, &block, 32, &mut output)
+        matmul_int8_activation(NODE, q8_0(), &weight, &BlockLayout::Q8_1, &block, 32, &mut output)
             .expect("q8_0 has a byte-code int8 dot");
         assert_eq!(output[0], 2_662_641.0 / 4_194_304.0);
     }
@@ -398,7 +481,7 @@ mod tests {
         let values = activations(&mut random, tokens, depth);
         let packed = quantize(&BlockLayout::Q8_1, &values, tokens, depth);
         let mut output = vec![0.0f32; rows * tokens];
-        matmul_int8_activation(NODE, Codec::Q8_0, &weight, &BlockLayout::Q8_1, &packed, depth, &mut output)
+        matmul_int8_activation(NODE, q8_0(), &weight, &BlockLayout::Q8_1, &packed, depth, &mut output)
             .expect("q8_0 dots against q8_1");
         let (expected, magnitudes) = oracle(&weight, &values, rows, tokens, depth);
         for ((got, want), magnitude) in output.iter().zip(&expected).zip(&magnitudes) {
@@ -432,8 +515,8 @@ mod tests {
         let mut grouped = vec![0.0f32; rows * tokens];
         let single = quantize(&BlockLayout::Q8_1, &values, tokens, depth);
         let together = regroup(&single);
-        matmul_int8_activation(NODE, Codec::Q8_0, &weight, &BlockLayout::Q8_1, &single, depth, &mut flat).expect("flat");
-        matmul_int8_activation(NODE, Codec::Q8_0, &weight, &BlockLayout::Q8_1_GROUPED, &together, depth, &mut grouped)
+        matmul_int8_activation(NODE, q8_0(), &weight, &BlockLayout::Q8_1, &single, depth, &mut flat).expect("flat");
+        matmul_int8_activation(NODE, q8_0(), &weight, &BlockLayout::Q8_1_GROUPED, &together, depth, &mut grouped)
             .expect("grouped");
         assert_eq!(flat, grouped);
     }
@@ -513,7 +596,7 @@ mod tests {
         let resolved = reduce(wiring);
         let buffers: Vec<Option<Cow<'_, [f32]>>> =
             vec![None, Some(Cow::Borrowed(data.activation.as_slice())), None];
-        let weights = BTreeMap::from([(NodeId(0), QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &data.weight })]);
+        let weights = BTreeMap::from([(NodeId(0), QuantizedBlock::Packed { codec: q8_0(), bytes: &data.weight })]);
         let layouts = BTreeMap::from([(NodeId(1), BlockLayout::Q8_1)]);
         let mut output = vec![0.0f32; TOKENS * ROWS];
         let handled = run_if_int8_activation(&resolved, &buffers, &weights, None, &layouts, &mut output);
@@ -524,7 +607,7 @@ mod tests {
     fn int8_activation_reduce_in_token_row_order_runs_as_the_int8_dot() {
         let data = product();
         let mut expected = vec![0.0f32; TOKENS * ROWS];
-        matmul_int8_activation(NODE, Codec::Q8_0, &data.weight, &BlockLayout::Q8_1, &data.packed, DEPTH, &mut expected)
+        matmul_int8_activation(NODE, q8_0(), &data.weight, &BlockLayout::Q8_1, &data.packed, DEPTH, &mut expected)
             .expect("q8_0 dots against q8_1");
         let (handled, output, _) = run(&token_row_wiring());
         assert!(handled.expect("dense product runs"));
@@ -645,5 +728,97 @@ mod tests {
             error,
             TensorError::ActivationQuantizedWeightCodec { codec: "q4_0", .. }
         ));
+    }
+
+    macro_rules! bits {
+        ($values:expr) => {
+            $values.iter().map(|value| value.to_bits()).collect::<Vec<u32>>()
+        };
+    }
+
+    fn q8_0() -> Codec {
+        Codec::Q8_0
+    }
+
+    fn both_paths(weight: &[u8], packed: &[u8], rows: usize, tokens: usize, depth: usize) -> (Vec<u32>, Vec<u32>) {
+        let mut new = vec![0.0; rows * tokens];
+        let old = matmul_int8_activation_serial(NODE, q8_0(), weight, &BlockLayout::Q8_1, packed, depth).expect("serial oracle");
+        matmul_int8_activation(NODE, q8_0(), weight, &BlockLayout::Q8_1, packed, depth, &mut new).expect("product");
+        (old, bits!(new))
+    }
+
+    #[test]
+    fn threaded_product_equals_the_serial_scalar_oracle_bit_for_bit_across_the_parallel_threshold() {
+        let shapes = [(3, 1, 32), (5, 3, 64), (17, 1, 128), (40, 5, 256), (64, 7, 512), (130, 9, 1024), (257, 3, 2048), (33, 1, 4096)];
+        let mut above = 0;
+        for (index, (rows, tokens, depth)) in shapes.into_iter().enumerate() {
+            let mut random = Lcg(0x696 + index as u64);
+            let weight = q8_0_rows(&mut random, rows, depth);
+            let values = activations(&mut random, tokens, depth);
+            let packed = quantize(&BlockLayout::Q8_1, &values, tokens, depth);
+            let (old, new) = both_paths(&weight, &packed, rows, tokens, depth);
+            assert_eq!(old, new, "rows {rows} tokens {tokens} depth {depth}");
+            above += usize::from(rows * tokens * depth >= PARALLEL_THRESHOLD);
+        }
+        assert!(above >= 4, "only {above} shapes reached the threaded split");
+    }
+
+    #[test]
+    fn full_range_codes_including_the_most_negative_byte_keep_the_simd_sum_exact() {
+        let (rows, tokens, depth) = (48, 5, 512);
+        let mut random = Lcg(0x6961);
+        let layout = BlockLayout::Q8_1;
+        let mut weight = q8_0_rows(&mut random, rows, depth);
+        let weight_layout = q8_0().block_layout().expect("q8_0 is a block layout");
+        for block in weight.chunks_mut(usize::from(weight_layout.block_bytes)) {
+            block[weight_layout.contiguous_byte_codes().expect("byte codes").base_byte..].iter_mut().for_each(|code| {
+                *code = (random.next_unit() * 128.0) as i8 as u8;
+            });
+        }
+        let values = activations(&mut random, tokens, depth);
+        let mut packed = quantize(&layout, &values, tokens, depth);
+        for block in packed.chunks_mut(usize::from(layout.block_bytes)) {
+            block[layout.run_code_byte(0)..].iter_mut().enumerate().for_each(|(slot, code)| {
+                *code = if slot % 3 == 0 { 0x80 } else { (random.next_unit() * 128.0) as i8 as u8 };
+            });
+        }
+        let (old, new) = both_paths(&weight, &packed, rows, tokens, depth);
+        assert_eq!(old, new);
+    }
+
+    #[test]
+    fn products_past_the_threshold_split_over_the_shared_worker_pool() {
+        let configured = std::env::var_os("PROXIMA_MATMUL_WORKERS").is_some();
+        let parallel = std::thread::available_parallelism().map_or(1, |count| count.get()) > 1;
+        let (rows, tokens, depth) = (1024, 64, 1024);
+        let workers = product_workers(rows, tokens, depth);
+        assert_eq!(workers.is_some(), matmul_worker_count() > 1);
+        if parallel && !configured {
+            assert!(workers.is_some_and(|count| count > 1), "workers {workers:?}");
+        }
+        assert_eq!(product_workers(1, 1, 32), None);
+        assert_eq!(product_workers(2, 1, PARALLEL_THRESHOLD / 4), None);
+    }
+
+    #[test]
+    #[ignore = "micro-measure, run with --ignored --nocapture"]
+    fn micro_measure_threaded_against_serial_scalar_product() {
+        let (rows, tokens, depth) = (1024, 512, 1024);
+        let mut random = Lcg(0x6962);
+        let weight = q8_0_rows(&mut random, rows, depth);
+        let values = activations(&mut random, tokens, depth);
+        let packed = quantize(&BlockLayout::Q8_1, &values, tokens, depth);
+        let mut new = vec![0.0; rows * tokens];
+        let started = std::time::Instant::now();
+        let old = matmul_int8_activation_serial(NODE, q8_0(), &weight, &BlockLayout::Q8_1, &packed, depth).expect("old");
+        let old_wall = started.elapsed();
+        let started = std::time::Instant::now();
+        matmul_int8_activation(NODE, q8_0(), &weight, &BlockLayout::Q8_1, &packed, depth, &mut new).expect("new");
+        let new_wall = started.elapsed();
+        println!(
+            "int8 product tokens {tokens} depth {depth} rows {rows}: old serial scalar {old_wall:?}, new {new_wall:?}, workers {:?}",
+            product_workers(rows, tokens, depth)
+        );
+        assert_eq!(old, bits!(new));
     }
 }
