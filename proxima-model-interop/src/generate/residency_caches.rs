@@ -4286,7 +4286,7 @@ impl BackendRuntime {
     /// per-expert source substitutions, changing only command-buffer
     /// granularity so the caller can attribute GPU time to bound ops.
     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-    pub(super) fn evaluate_segment_op_timed(
+    pub(crate) fn evaluate_segment_op_timed(
         &mut self,
         program: &[Op],
         symbols: &[u64],

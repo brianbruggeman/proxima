@@ -14,12 +14,14 @@ use proxima_tensor::op::{Extent, NodeId, Op};
 use proxima_tensor::spec::input_leaf;
 
 mod dit;
+mod host;
 mod load;
 pub mod png;
 mod settings;
 mod vae;
 
 pub use dit::{DitConfig, DitInputs, DitOutput, build_dit, build_double_block, build_single_block};
+pub use host::{Decoder, Denoiser};
 pub use load::{Checkpoint, WeightData, Weights, encode, load_weights};
 pub use png::{PngImage, read_png, write_png};
 pub use settings::DiffusionSettings;
