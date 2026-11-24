@@ -461,12 +461,17 @@ impl TimeFormat {
     }
 }
 
-/// Peak memory footprint in bytes; GNU time has no such line, so on Linux it is absent.
+/// Peak memory footprint in bytes; GNU time has no footprint line, so on Linux the peak resident set stands in.
 fn parse_footprint_bytes(text: &str) -> Result<u64, HarnessError> {
     match TimeFormat::current() {
         TimeFormat::Bsd => parse_footprint_bsd(text),
-        TimeFormat::Gnu => Err(HarnessError::MissingLine("peak memory footprint line")),
+        TimeFormat::Gnu => parse_footprint_gnu(text),
     }
+}
+
+/// Reads GNU `time -v`'s `Maximum resident set size (kbytes)` line as bytes.
+fn parse_footprint_gnu(text: &str) -> Result<u64, HarnessError> {
+    parse_rss_gnu(text).ok_or(HarnessError::MissingLine("maximum resident set size line"))
 }
 
 /// Reads `/usr/bin/time -l`'s `peak memory footprint` line (bytes).
@@ -4442,6 +4447,12 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         assert_eq!(TimeFormat::for_os("linux"), TimeFormat::Gnu);
         assert_eq!(TimeFormat::Bsd.flag(), "-l");
         assert_eq!(TimeFormat::Gnu.flag(), "-v");
+    }
+
+    #[test]
+    fn gnu_footprint_is_the_peak_resident_set_in_bytes() {
+        assert_eq!(parse_footprint_gnu(GNU_TIME).expect("footprint"), 3_792_928_768);
+        assert!(parse_footprint_gnu(PROX_LOG).is_err());
     }
 
     #[test]
