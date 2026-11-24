@@ -3692,6 +3692,7 @@ pub fn recurrent_interval_forward_program_with_last_row(
         loopcd: LoopCdConfig::default(),
         network: None,
         activation: DType::FLOAT32.numeric_format(),
+        dialect: Dialect::gguf(),
     };
     let ForwardProgram {
         program,

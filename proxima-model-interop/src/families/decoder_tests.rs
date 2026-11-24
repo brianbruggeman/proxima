@@ -8,6 +8,14 @@ use serde_json::json;
 use super::*;
 
 #[test]
+fn the_baked_gguf_dialect_equals_the_one_the_family_toml_parses_to() {
+    let family = DecoderFamily::builtin().expect("embedded family parses");
+
+    assert_eq!(family.dialects["gguf"], Dialect::gguf());
+    assert_eq!(family.dialects["gguf"].globals["embedding"], "token_embd.weight");
+}
+
+#[test]
 fn hf_dialect_reads_qk_norm_and_shared_expert_from_names_and_activation_from_config() {
     let family = DecoderFamily::builtin().expect("embedded family parses");
     let templates = family.templates().expect("templates expand");

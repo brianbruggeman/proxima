@@ -344,6 +344,13 @@ pub struct ModelDescriptor {
     #[cfg_attr(feature = "config", builder(default = default_activation()))]
     #[serde(default = "default_activation")]
     pub activation: NumericFormat,
+    /// The checkpoint dialect's tensor names: the per-layer leaf suffixes and
+    /// the whole-model names the program declares. Absent means the `gguf`
+    /// dialect, which spells every leaf the Bounded program writes today.
+    #[cfg_attr(feature = "config", setting(skip))]
+    #[cfg_attr(feature = "config", builder(default = Dialect::gguf()))]
+    #[serde(default = "Dialect::gguf", skip_serializing_if = "Dialect::is_gguf")]
+    pub dialect: Dialect,
 }
 
 const fn default_activation() -> NumericFormat {
@@ -788,6 +795,7 @@ pub fn gqa_descriptor_from_shape(
         loopcd: LoopCdConfig::default(),
         network: None,
         activation: default_activation(),
+        dialect: Dialect::gguf(),
     }
 }
 

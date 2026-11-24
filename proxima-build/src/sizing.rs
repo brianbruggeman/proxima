@@ -128,6 +128,13 @@ impl SizingSource {
         })
     }
 
+    /// The parsed TOML root, for a build step that bakes a whole table (a
+    /// data file's dialect) rather than resolving one scalar.
+    #[must_use]
+    pub fn root(&self) -> &Value {
+        &self.table
+    }
+
     fn env_name(&self, section: &str, key: &str) -> String {
         format!(
             "{prefix}_{section}_{key}",

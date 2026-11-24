@@ -21,7 +21,7 @@
 //! `LoadedModel::load_with_descriptor`) with no Rust change.
 
 use proxima_tensor::spec::{
-    CacheMask, CacheStrategy, ForwardProgram, ForwardRoots, KeySourceKind, LayerAttentionConfig,
+    CacheMask, CacheStrategy, Dialect, ForwardProgram, ForwardRoots, KeySourceKind, LayerAttentionConfig,
     LayerCacheRoots, LayerKind, LayerSchedule, LoopCdConfig, ModelDescriptor, MoeSites,
     RopeTableSel, ValueSourceKind, build_forward,
 };
@@ -137,6 +137,7 @@ pub fn descriptor_from_architecture(
         gated_attention: true,
         recurrence: None,
         loopcd: LoopCdConfig::default(),
+        dialect: Dialect::gguf(),
     })
 }
 

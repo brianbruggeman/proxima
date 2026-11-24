@@ -21,7 +21,7 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{
-    CacheMask, CacheStrategy, FamilyProfile, ForwardProgram, KeySourceKind, LayerAttentionConfig,
+    CacheMask, CacheStrategy, Dialect, FamilyProfile, ForwardProgram, KeySourceKind, LayerAttentionConfig,
     LayerKind, LayerSchedule, LoopCdConfig, ModelDescriptor, RopeTableSel, ValueSourceKind, build_forward,
 };
 
@@ -462,6 +462,7 @@ pub fn descriptor_from_architecture(
         gated_attention: true,
         recurrence: None,
         loopcd: LoopCdConfig::default(),
+        dialect: Dialect::gguf(),
     })
 }
 

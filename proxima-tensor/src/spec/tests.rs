@@ -17282,6 +17282,7 @@ mod gemma4_synthetic_parity {
             loopcd: LoopCdConfig::default(),
             network: None,
             activation: DType::FLOAT32.numeric_format(),
+            dialect: Dialect::gguf(),
         };
 
         let ForwardProgram {
@@ -20039,6 +20040,7 @@ mod head_repeats {
             loopcd: LoopCdConfig::default(),
             network: None,
             activation: DType::FLOAT32.numeric_format(),
+            dialect: Dialect::gguf(),
         }
     }
 
@@ -21847,6 +21849,7 @@ mod hybrid_dense_descriptor {
             loopcd: LoopCdConfig::default(),
             network: None,
             activation: DType::FLOAT32.numeric_format(),
+            dialect: Dialect::gguf(),
         }
     }
 
@@ -22147,6 +22150,7 @@ mod hybrid_routed_descriptor {
             loopcd: LoopCdConfig::default(),
             network: None,
             activation: DType::FLOAT32.numeric_format(),
+            dialect: Dialect::gguf(),
         }
     }
 

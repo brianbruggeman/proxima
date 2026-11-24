@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_tensor::spec::{
-    Activation, EmbeddingScale, ExpertGatingFunc, FfnCombination, ParallelDenseMoeConfig,
+    Activation, DECODER_ONLY_TOML, EmbeddingScale, ExpertGatingFunc, FfnCombination, ParallelDenseMoeConfig,
     RecurrenceProfile, RopeLayout, ScheduleSource, expert_gating_func,
 };
 use serde::Deserialize;
@@ -35,37 +35,7 @@ use super::template::{FamilyTemplate, Probe, Stack, TemplateError, Value};
 
 const ROLE: &str = "block";
 
-/// A role's tensor suffix: one spelling, or several that name the same function.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(untagged)]
-pub enum Spellings {
-    One(String),
-    Many(Vec<String>),
-}
-
-impl Spellings {
-    fn all(&self) -> &[String] {
-        match self {
-            Self::One(single) => core::slice::from_ref(single),
-            Self::Many(several) => several,
-        }
-    }
-}
-
-/// One checkpoint format's spelling of the family: where the layer stack lives,
-/// the non-layer tensors it carries, and its role and metadata names.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-pub struct Dialect {
-    pub layer: Pattern,
-    #[serde(default)]
-    pub claims: Vec<String>,
-    #[serde(default)]
-    pub claim_prefixes: Vec<String>,
-    #[serde(default)]
-    pub roles: BTreeMap<String, Spellings>,
-    #[serde(default)]
-    pub metadata: BTreeMap<String, String>,
-}
+pub use proxima_tensor::spec::{Dialect, Spellings};
 
 /// The decoder-only family as data: shared identity plus a table of dialects.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -186,7 +156,7 @@ impl DecoderFamily {
     #[cfg(feature = "toml")]
     #[must_use = "a refused family must be handled"]
     pub fn builtin() -> Result<Self, TemplateError> {
-        toml::from_str(include_str!("decoder_only.toml")).map_err(|error| TemplateError::Parse {
+        toml::from_str(DECODER_ONLY_TOML).map_err(|error| TemplateError::Parse {
             reason: error.to_string(),
         })
     }

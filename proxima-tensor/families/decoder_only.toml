@@ -43,6 +43,35 @@ shexp_down = "ffn_down_shexp.weight"
 shexp_router = "ffn_gate_inp_shexp.weight"
 ssm_state = "ssm_a"
 
+# the per-layer tensor names the Bounded program declares, as suffixes of `layer`
+[dialects.gguf.leaves]
+attn_norm = "attn_norm.weight"
+ffn_norm = "ffn_norm.weight"
+attn_qkv = "attn_qkv.weight"
+attn_q = "attn_q.weight"
+attn_k = "attn_k.weight"
+attn_v = "attn_v.weight"
+attn_q_bias = "attn_q.bias"
+attn_k_bias = "attn_k.bias"
+attn_v_bias = "attn_v.bias"
+attn_output = "attn_output.weight"
+attn_q_norm = "attn_q_norm.weight"
+attn_k_norm = "attn_k_norm.weight"
+ffn_gate = "ffn_gate.weight"
+ffn_up = "ffn_up.weight"
+ffn_gate_up = "ffn_gate_up.weight"
+ffn_down = "ffn_down.weight"
+ffn_gate_inp = "ffn_gate_inp.weight"
+ffn_gate_exps = "ffn_gate_exps.weight"
+ffn_up_exps = "ffn_up_exps.weight"
+ffn_down_exps = "ffn_down_exps.weight"
+
+# the whole-model tensor names, spelled in full
+[dialects.gguf.globals]
+embedding = "token_embd.weight"
+output_norm = "output_norm.weight"
+output = "output.weight"
+
 # metadata keys, spelled without the `{arch}.` prefix the loader strips
 [dialects.gguf.metadata]
 embedding_scale = "embedding_scale"

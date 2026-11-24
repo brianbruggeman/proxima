@@ -312,6 +312,7 @@ pub fn sliding_pattern_descriptor_from_gguf(
         loopcd: LoopCdConfig::default(),
         network: None,
         activation: DType::FLOAT32.numeric_format(),
+        dialect: Dialect::gguf(),
     })
 }
 
