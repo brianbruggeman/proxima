@@ -1573,6 +1573,10 @@ fn arbitrary_blocks(layout: &BlockLayout, blocks: usize, seed: u64) -> Vec<u8> {
     for block in bytes.chunks_exact_mut(block_bytes) {
         let exponent = 9 + (lcg.next_unit() * 4.0) as u16;
         block[scale_at..scale_at + 2].copy_from_slice(&(exponent << 10).to_le_bytes());
+        if let Some(min) = layout.min {
+            let min_at = usize::from(min.byte_offset);
+            block[min_at..min_at + 2].copy_from_slice(&((9 + (lcg.next_unit() * 4.0) as u16) << 10).to_le_bytes());
+        }
     }
     bytes
 }
@@ -6065,9 +6069,9 @@ fn an_out_of_range_stacked_q8_0_expert_route_faults_on_the_staged_gathered_dp4a(
 
 /// Every codec the tensor-core gemm decodes and `arbitrary_blocks` can fill: a gathered expert
 /// product with at least the grouped minimum of token rows takes the route prepass and the grouped
-/// kernel, and equals the cpu engine over the same packed blocks.
+/// kernel, and equals the decode oracle over the same packed blocks.
 #[test]
-fn a_gathered_expert_product_above_the_grouped_minimum_takes_the_grouped_kernel_and_matches_cpu_on_cuda() {
+fn a_gathered_expert_product_above_the_grouped_minimum_takes_the_grouped_kernel_and_matches_the_decode_oracle_on_cuda() {
     let (experts, rows, depth) = (8, 128, 512);
     let tokens = usize::try_from(omega::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS).expect("the minimum fits a count") + 16;
     let route: Vec<_> = (0..tokens).map(|token| ((token * 5 + token / 3) % experts) as _).collect();
@@ -6079,6 +6083,9 @@ fn a_gathered_expert_product_above_the_grouped_minimum_takes_the_grouped_kernel_
         .filter(|codec| codec.block_layout().is_some_and(|layout| depth % usize::from(layout.elements) == 0))
         .collect();
     assert!(!codecs.is_empty(), "the decode table accepts block codecs");
+    let route = &inputs[0].1;
+    let activation = &inputs[1].1;
+    let mut table: Vec<(Codec, bool, _, _)> = Vec::new();
     for codec in codecs {
         let layout = codec.block_layout().expect("a block codec");
         let weight = arbitrary_blocks(&layout, experts * rows * depth / usize::from(layout.elements), 733);
@@ -6089,16 +6096,27 @@ fn a_gathered_expert_product_above_the_grouped_minimum_takes_the_grouped_kernel_
             .expect("the gathered expert product plans on cuda");
         let identities = cuda_kernel_identities(&plan).expect("a cuda plan");
         let entries: Vec<&str> = identities.iter().filter_map(|identity| identity.lines().next()).collect();
-        assert!(entries.iter().any(|entry| entry.contains("_grp1") && !entry.ends_with("_route_prepass")), "{codec:?}: no grouped kernel planned: {entries:?}");
-        assert!(entries.iter().any(|entry| entry.contains("_grp1") && entry.ends_with("_route_prepass")), "{codec:?}: no route prepass planned: {entries:?}");
+        let planned_grouped = entries.iter().any(|entry| entry.contains("_grp1") && !entry.ends_with("_route_prepass"))
+            && entries.iter().any(|entry| entry.contains("_grp1") && entry.ends_with("_route_prepass"));
         let actual = execute_plan_named(&mut plan, &named).expect("the grouped product runs on cuda");
-        let mut reference_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[sum], NumericPolicy::default())
-            .expect("the gathered expert product plans on cpu");
-        let expected = execute_plan_named(&mut reference_plan, &named).expect("the reference runs on cpu");
         assert_eq!(actual.root().len(), tokens * rows, "{codec:?}: one output per (token, row)");
-        let magnitude = expected.root().iter().map(|value| value.abs()).reduce(|largest, value| largest.max(value)).unwrap_or_default();
-        assert!(magnitude > 0.0, "{codec:?}: an all-zero reference would make parity vacuous");
-        let worst = actual.root().iter().zip(expected.root()).map(|(got, want)| (got - want).abs()).reduce(|largest, value| largest.max(value)).unwrap_or_default();
-        assert!(worst / magnitude < 1e-5, "{codec:?}: grouped kernel disagrees with cpu: worst={worst} magnitude={magnitude}");
+        let mut decoded = vec![Default::default(); experts * rows * depth];
+        block_layout::dequantize(&layout, &weight, &mut decoded).expect("whole blocks");
+        let exact_at = |token: usize, row: usize| {
+            let start = (route[token] as usize * rows + row) * depth;
+            (0..depth).map(|index| decoded[start + index] * activation[token * depth + index]).reduce(|sum, term| sum + term).unwrap_or_default()
+        };
+        let (mut worst, mut magnitude) = (Default::default(), Default::default());
+        for (slot, got) in actual.root().iter().enumerate() {
+            let exact = exact_at(slot / rows, slot % rows);
+            worst = (got - exact).abs().max(worst);
+            magnitude = exact.abs().max(magnitude);
+        }
+        table.push((codec, planned_grouped, worst, magnitude));
     }
+    let failures: Vec<_> = table
+        .iter()
+        .filter(|(_, planned_grouped, worst, magnitude)| !planned_grouped || *magnitude <= 0.0 || worst / magnitude >= 1e-5)
+        .collect();
+    assert!(failures.is_empty(), "grouped kernel disagrees with the decode oracle; failing rows (codec, planned_grouped, worst, magnitude): {failures:?}; whole table: {table:?}");
 }
