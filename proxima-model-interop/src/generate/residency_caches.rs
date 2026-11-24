@@ -290,6 +290,108 @@ mod configured_runtime_tests {
         })
     }
 
+    fn negate_declared(
+        runtime: &mut BackendRuntime,
+        program: &[Op],
+        values: QuantizedBlock<'_>,
+    ) -> (Evaluated, u64) {
+        let declared = BTreeSet::from(["values"]);
+        let _ = omega::backend::stage_totals();
+        let evaluated = runtime
+            .evaluate_segment(
+                program,
+                &[1, 1],
+                &[("values", values)],
+                &[NodeId(1)],
+                &declared,
+                None,
+            )
+            .expect("negate segment evaluates");
+        (evaluated, omega::backend::stage_totals().block_copied_bytes)
+    }
+
+    fn wide_negate_program() -> Vec<Op> {
+        let mut program = negate_program();
+        if let Some(Op::Input { shape, .. }) = program.first_mut() {
+            *shape = vec![Extent::Static(1000)];
+        }
+        program
+    }
+
+    fn device_runtime() -> BackendRuntime {
+        BackendRuntime::new(&ServingConfig {
+            gpu_layers: crate::GPU_LAYERS_ALL,
+            ..ServingConfig::default()
+        })
+    }
+
+    #[test]
+    fn declared_resident_input_uploads_once_across_calls() {
+        let program = wide_negate_program();
+        let mut runtime = device_runtime();
+        let values: Vec<_> = (0..1000).map(|index| index as _).collect();
+        let mut copied_per_call = Vec::new();
+
+        for call in 0..8 {
+            let block = QuantizedBlock::from(values.as_slice());
+            let (evaluated, copied) = negate_declared(&mut runtime, &program, block);
+            copied_per_call.push(copied);
+            let output = evaluated.get(NodeId(1)).expect("negated output").0;
+            let follows = output
+                .iter()
+                .zip(&values)
+                .all(|(out, input)| *out == -*input);
+            assert!(follows, "call {call}");
+        }
+
+        let first_call = u64::from(runtime.uses_gpu());
+        let later: u64 = copied_per_call[1..].iter().sum();
+        assert!(
+            copied_per_call[0] >= first_call,
+            "first call: {copied_per_call:?}"
+        );
+        assert_eq!(later, 0, "later calls rebind: {copied_per_call:?}");
+        runtime.release_call_residents(&["values"]);
+    }
+
+    #[test]
+    fn released_resident_name_accepts_a_new_buffer() {
+        let program = wide_negate_program();
+        let mut runtime = device_runtime();
+        let first: Vec<_> = (0..1000).map(|index| index as _).collect();
+        let mut settled = 0;
+        for _ in 0..3 {
+            let block = QuantizedBlock::from(first.as_slice());
+            settled = negate_declared(&mut runtime, &program, block).1;
+        }
+        assert_eq!(settled, 0, "resident before the release");
+
+        runtime.release_call_residents(&["values"]);
+        let second: Vec<_> = first.iter().map(|value| *value + 0.5).collect();
+        let mut copied_per_call = Vec::new();
+        for _ in 0..2 {
+            let block = QuantizedBlock::from(second.as_slice());
+            let (evaluated, copied) = negate_declared(&mut runtime, &program, block);
+            copied_per_call.push(copied);
+            let output = evaluated.get(NodeId(1)).expect("negated output").0;
+            let follows = output
+                .iter()
+                .zip(&second)
+                .all(|(out, input)| *out == -*input);
+            assert!(follows, "output follows the new data");
+        }
+        let uploads_again = u64::from(runtime.uses_gpu());
+        let [uploaded, rebound] = copied_per_call[..] else {
+            panic!("two calls recorded")
+        };
+        assert!(
+            uploaded >= uploads_again,
+            "a new buffer uploads: {uploaded}"
+        );
+        assert_eq!(rebound, 0, "the new buffer stays resident: {rebound}");
+        runtime.release_call_residents(&["values"]);
+    }
+
     #[cfg(all(feature = "cuda", not(target_os = "macos")))]
     #[test]
     fn a_cuda_prefill_binds_an_empty_cached_range_not_the_bucket() {
@@ -3666,6 +3768,26 @@ impl BackendRuntime {
         self.warm_up.launched()
     }
 
+    /// Ends the residency of names a caller declared in `resident_names` for
+    /// the span of one call sequence (a decoder's cross-attention K/V, say) so
+    /// a later sequence may bind new buffers under the same names.
+    ///
+    /// Composes `omega::backend::release_resident_names`, which evicts the
+    /// backend's name-keyed device buffers (`NOCOPY_BUFFERS`/`RESIDENT_BUFFERS`
+    /// on Metal, the resident store on CUDA) but does not touch a cached
+    /// plan's own `device_buffers`/`block_identity`, which would rebind a new
+    /// buffer at a recycled address to the old device copy. This method drops
+    /// the partition plans too, so the next call rebuilds them. Declare with
+    /// `evaluate_segment`'s `resident_names`; release when the sequence ends,
+    /// on the error path as well.
+    #[cfg(any(test, all(feature = "std", feature = "proxima-autograd")))]
+    pub(crate) fn release_call_residents(&mut self, names: &[&str]) {
+        omega::backend::release_resident_names(names.iter().copied());
+        self.segment_plans.clear();
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        self.placed_segment_plans.clear();
+    }
+
     /// Bytes the selected device has allocated; `None` when this runtime runs on
     /// the host. The device query lives here so callers name no backend.
     #[cfg(feature = "proxima-autograd")]
@@ -5876,6 +5998,10 @@ impl BackendRuntime {
     pub(crate) fn uses_gpu(&self) -> bool {
         false
     }
+
+    /// The host runtime keeps no device residency, so there is nothing to end.
+    #[cfg(all(feature = "std", feature = "proxima-autograd"))]
+    pub(crate) fn release_call_residents(&mut self, _names: &[&str]) {}
 
     /// Bytes the selected device has allocated; always `None` on the host runtime.
     #[cfg(feature = "proxima-autograd")]

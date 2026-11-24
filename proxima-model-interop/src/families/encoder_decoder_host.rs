@@ -139,6 +139,11 @@ struct Bound<'a> {
     weights: LeasedWeights<'a, 'a>,
     /// leaves the host feeds each run; every other named leaf is a checkpoint tensor
     runtime_inputs: Vec<String>,
+    /// runtime inputs constant across every run of this program, declared
+    /// resident beside the weights and released by the owner when the runs end
+    call_resident: Vec<String>,
+    /// leaves an earlier segment's outputs fill, in the order those outputs arrive
+    carried_inputs: Vec<NodeId>,
     shape: Shape,
 }
 
@@ -149,8 +154,24 @@ impl<'a> Bound<'a> {
             named: BTreeMap::new(),
             weights: LeasedWeights::detached(),
             runtime_inputs: Vec::new(),
+            call_resident: Vec::new(),
+            carried_inputs: Vec::new(),
             shape,
         }
+    }
+
+    /// Names the leaf `input`, which an earlier segment's output fills. That
+    /// value is constant for every run of this program, so the name is
+    /// declared resident for the call; the owner releases it when the runs end.
+    fn carry(&mut self, input: NodeId) -> Result<String> {
+        let Some(Op::Input {
+            name: Some(name), ..
+        }) = self.program.get(input.0 as usize)
+        else {
+            bail!("node {input:?} is not a named input leaf");
+        };
+        self.call_resident.push(name.clone());
+        Ok(name.clone())
     }
 
     fn leaf(&mut self, name: &str, shape: &[u32]) -> NodeId {
@@ -195,14 +216,17 @@ impl<'a> Bound<'a> {
             self.shape.decoder_heads,
             self.shape.decoder_head_dim,
         ];
-        (0..self.shape.decoder_layers)
+        let leaves: Vec<_> = (0..self.shape.decoder_layers)
             .map(|layer| {
                 (
                     self.leaf(&format!("cross_k_{layer}"), &dims),
                     self.leaf(&format!("cross_v_{layer}"), &dims),
                 )
             })
-            .collect()
+            .collect();
+        self.carried_inputs
+            .extend(leaves.iter().flat_map(|(first, second)| [*first, *second]));
+        leaves
     }
 
     fn cache_leaves(&mut self) -> Vec<CachedLayerRoots> {
@@ -487,7 +511,8 @@ impl<'a> Bound<'a> {
             .map(|(name, data)| (name.as_str(), QuantizedBlock::from(data.as_slice())))
             .chain(self.weights.blocks()?)
             .collect();
-        let resident: BTreeSet<&str> = self.weights.names();
+        let mut resident: BTreeSet<&str> = self.weights.names();
+        resident.extend(self.call_resident.iter().map(String::as_str));
         let evaluated = runtime
             .evaluate_segment(&self.program, symbols, &named, outputs, &resident, None)
             .map_err(|error| anyhow::anyhow!("{stage} segment does not evaluate: {error:?}"))?;
@@ -764,11 +789,10 @@ impl Model {
 
         let mut decoder = Bound::new(self.shape.clone());
         let step_outputs = decoder.decoder_graph()?;
-        for layer in 0..self.shape.decoder_layers {
-            let k = std::mem::take(&mut values[1 + layer * 2]);
-            let v = std::mem::take(&mut values[2 + layer * 2]);
-            decoder.named.insert(format!("cross_k_{layer}"), k);
-            decoder.named.insert(format!("cross_v_{layer}"), v);
+        let carried = decoder.carried_inputs.clone();
+        for (input, value) in carried.into_iter().zip(values.drain(1..)) {
+            let name = decoder.carry(input)?;
+            decoder.named.insert(name, value);
         }
         decoder.bind(self)?;
         let program_hash = program_hash(&decoder.program);
@@ -780,42 +804,49 @@ impl Model {
         let mut first_token = Duration::ZERO;
         let mut last_token = Duration::ZERO;
         let decode_start = Instant::now();
-        for step in 0..policy.step_cap() as usize {
-            let step_start = Instant::now();
-            let fresh = &tokens[cached..];
-            decoder.stage_step(fresh, cached);
-            let extent = self.cache_extent(
-                &mut runtime,
-                &decoder,
-                &step_outputs,
-                (program_hash, cached, fresh.len()),
-            );
-            decoder.fit_cache(extent);
-            let symbols = [fresh.len() as u64, extent as u64];
-            let mut rows = decoder.run("decode", &step_outputs, &symbols, &mut runtime)?;
-            let flat = rows.remove(0);
-            decoder.trim_cache(cached);
-            for (name, added) in cache_names(self.shape.decoder_layers).zip(rows) {
-                if let Some(plane) = decoder.named.get_mut(&name) {
-                    plane.extend(added);
+        let mut decode_steps = || -> Result<()> {
+            for step in 0..policy.step_cap() as usize {
+                let step_start = Instant::now();
+                let fresh = &tokens[cached..];
+                decoder.stage_step(fresh, cached);
+                let extent = self.cache_extent(
+                    &mut runtime,
+                    &decoder,
+                    &step_outputs,
+                    (program_hash, cached, fresh.len()),
+                );
+                decoder.fit_cache(extent);
+                let symbols = [fresh.len() as u64, extent as u64];
+                let mut rows = decoder.run("decode", &step_outputs, &symbols, &mut runtime)?;
+                let flat = rows.remove(0);
+                decoder.trim_cache(cached);
+                for (name, added) in cache_names(self.shape.decoder_layers).zip(rows) {
+                    if let Some(plane) = decoder.named.get_mut(&name) {
+                        plane.extend(added);
+                    }
+                }
+                cached = tokens.len();
+                let vocab = self.shape.vocab as usize;
+                let mut row = flat[flat.len() - vocab..].to_vec();
+                let chosen = policy.pick(&mut row, step)?;
+                tokens.push(chosen);
+                sample_peak(&mut gpu_peak, &runtime);
+                step_times.push(step_start.elapsed());
+                last_token = start.elapsed();
+                if step == 0 {
+                    first_token = last_token;
+                }
+                if chosen == policy.end_token() {
+                    ended = true;
+                    break;
                 }
             }
-            cached = tokens.len();
-            let vocab = self.shape.vocab as usize;
-            let mut row = flat[flat.len() - vocab..].to_vec();
-            let chosen = policy.pick(&mut row, step)?;
-            tokens.push(chosen);
-            sample_peak(&mut gpu_peak, &runtime);
-            step_times.push(step_start.elapsed());
-            last_token = start.elapsed();
-            if step == 0 {
-                first_token = last_token;
-            }
-            if chosen == policy.end_token() {
-                ended = true;
-                break;
-            }
-        }
+            Ok(())
+        };
+        let outcome = decode_steps();
+        let held: Vec<&str> = decoder.call_resident.iter().map(String::as_str).collect();
+        runtime.release_call_residents(&held);
+        outcome?;
         let decode = decode_start.elapsed();
         let generated = &tokens[policy.prompt().len()..];
         let text = tokenizer_text(&self.dir, generated)?;
