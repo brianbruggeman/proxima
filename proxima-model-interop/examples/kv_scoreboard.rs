@@ -125,18 +125,65 @@ const BASE_PORT: u16 = 18_200;
 const UNKNOWN_BUILD: &str = "unknown";
 const BUSY_PROGRAMS: [&str; 5] = ["cargo", "cargo-nextest", "rustc", "kv_scoreboard", "llama-server"];
 
-/// The benchmark's serving configuration: the checked-in granite/llama-matched
-/// TOML, overlaid by `PROXIMA_SERVING_*` when the caller sets one.
-fn llama_matched_settings() -> ServingSettings {
-    let path = std::env::var("PROXIMA_SERVING_CONFIG")
-        .unwrap_or_else(|_| "proxima-model-interop/examples/llama_matched.toml".to_owned());
-    if Path::new(&path).is_file() {
-        conflaguration::from_file_then_env(Path::new(&path))
-            .unwrap_or_else(|error| panic!("load {path}: {error}"))
+/// the benchmark's serving configuration: the resolved serving TOML (backend overlay already
+/// merged by `with_merged_serving`), overlaid by `PROXIMA_SERVING_*` when the caller sets one.
+fn llama_matched_settings(config: &Config) -> ServingSettings {
+    let path = serving_config_path(config);
+    if path.is_file() {
+        conflaguration::from_file_then_env(&path)
+            .unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
     } else {
         conflaguration::from_toml_str(include_str!("llama_matched.toml"))
             .unwrap_or_else(|error| panic!("parse llama_matched.toml: {error}"))
     }
+}
+
+const BACKEND_TABLE: &str = "backend";
+
+fn merge_tables(base: &mut toml::Table, overlay: toml::Table) {
+    for (key, value) in overlay {
+        match (base.get_mut(&key), value) {
+            (Some(toml::Value::Table(inner)), toml::Value::Table(over)) => merge_tables(inner, over),
+            (_, value) => {
+                base.insert(key, value);
+            }
+        }
+    }
+}
+
+/// the serving TOML with `backend.<name>` merged over the base and the `backend` table removed;
+/// a name with no table yields the base unchanged.
+fn merged_serving_toml(base_text: &str, backend: &str) -> Result<String, HarnessError> {
+    let mut table: toml::Table = base_text
+        .parse()
+        .map_err(|source| HarnessError::BadResponse(format!("serving toml: {source}")))?;
+    let overlays = table.remove(BACKEND_TABLE);
+    if let Some(toml::Value::Table(mut named)) = overlays
+        && let Some(toml::Value::Table(overlay)) = named.remove(backend)
+    {
+        merge_tables(&mut table, overlay);
+    }
+    toml::to_string(&table).map_err(|source| HarnessError::BadResponse(format!("serving toml: {source}")))
+}
+
+/// writes `<out>/serving.toml` for the measured backend and points the config at it, so the
+/// proxima child and llama's spawn arguments read the same merged settings.
+fn with_merged_serving(mut config: Config) -> Result<Config, HarnessError> {
+    let Some(backend) = config.backend.clone() else {
+        return Ok(config);
+    };
+    let source = serving_config_path(&config);
+    let text = if source.is_file() {
+        fs::read_to_string(&source).map_err(io_error(&source))?
+    } else {
+        include_str!("llama_matched.toml").to_owned()
+    };
+    let merged = merged_serving_toml(&text, &backend)?;
+    fs::create_dir_all(&config.out).map_err(io_error(&config.out))?;
+    let target = config.out.join("serving.toml");
+    fs::write(&target, merged).map_err(io_error(&target))?;
+    config.serving_config = Some(target);
+    Ok(config)
 }
 
 fn serving_config_path(config: &Config) -> PathBuf {
@@ -1970,7 +2017,7 @@ impl TimedServer {
         flash: &str,
     ) -> Result<Self, HarnessError> {
         let (key, value) = kv.llama_types().ok_or_else(|| HarnessError::Server("no llama arm for this KV".to_owned()))?;
-        let settings = llama_matched_settings();
+        let settings = llama_matched_settings(config);
         let base = settings.as_serving_config(&[]);
         let batch = base.batch_size.to_string();
         let ubatch = base.ubatch_size.to_string();
@@ -4318,7 +4365,7 @@ fn main() {
         }
         return;
     }
-    let outcome = parse_config(arguments).and_then(|config| match &config.stages {
+    let outcome = parse_config(arguments).and_then(with_merged_serving).and_then(|config| match &config.stages {
         Some(directory) => run_stages(&config, directory),
         None => run(&config),
     });
@@ -5954,5 +6001,33 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         arguments.extend(["--backend", "cuda", "--commit", "2364281a8"].map(str::to_owned));
         let config = parse_config(arguments).expect("known backend");
         assert_eq!((config.backend.as_deref(), config.commit.as_deref()), (Some("cuda"), Some("2364281a8")));
+    }
+    const SERVING_TOML: &str = include_str!("llama_matched.toml");
+
+    fn base_serving_table() -> toml::Table {
+        let mut table: toml::Table = SERVING_TOML.parse().expect("checked-in toml parses");
+        table.remove(BACKEND_TABLE);
+        table
+    }
+
+    fn merged_settings(backend: &str) -> ServingSettings {
+        let text = merged_serving_toml(SERVING_TOML, backend).expect("merge");
+        conflaguration::from_toml_str(&text).expect("merged toml loads as serving settings")
+    }
+
+    #[test]
+    fn cuda_overlay_carries_both_llama_activation_policy_fields() {
+        let policy = merged_settings("cuda").numeric_policy;
+        assert!(policy.activation_quantization);
+        assert_eq!(policy.reciprocal_activation_scale_above_rows, Some(8));
+    }
+
+    #[test]
+    fn metal_and_unknown_backends_merge_to_the_base() {
+        for backend in ["metal", "not-a-backend"] {
+            let merged: toml::Table = merged_serving_toml(SERVING_TOML, backend).expect("merge").parse().expect("parse");
+            assert_eq!(merged, base_serving_table(), "{backend}");
+        }
+        assert!(!merged_settings("metal").numeric_policy.activation_quantization);
     }
 }

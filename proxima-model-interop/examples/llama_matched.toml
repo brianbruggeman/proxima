@@ -6,3 +6,9 @@ attention_decomposition = "flash_where_admitted"
 seed = 1
 ignore_eos = true
 gpu_layers = -1
+
+# llama.cpp quantizes activations for quantized weights on cuda only (ggml-cuda mmvq: x/d up to
+# MMVQ_MAX_BATCH_SIZE rows, mmq above); its metal backend does not. selected by --backend, no other entry.
+[backend.cuda.numeric_policy]
+activation_quantization = true
+reciprocal_activation_scale_above_rows = 8
