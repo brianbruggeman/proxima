@@ -7,12 +7,10 @@ use std::collections::BTreeMap;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use proxima_numeric::decode_blocks;
-use proxima_safetensors::{Manifest, SafetensorsParser, TensorEntry};
+use proxima_safetensors::{Manifest, SafetensorsParser};
 use proxima_tensor::cpu::{Evaluated, QuantizedBlock, evaluate_quantized_named};
 use proxima_tensor::op::{Extent, NodeId, Op};
 use proxima_tensor::spec::{
@@ -21,16 +19,18 @@ use proxima_tensor::spec::{
 };
 use serde_json::Value;
 
-use crate::bind::transpose_out_in_to_in_out;
+use crate::bind::{BoundWeights, retarget_recoded_leaves};
 use crate::decode_policy::{DecodeConfig, DecodePolicy};
 use crate::families::encoder_decoder::{
     DecoderLayer, DecoderStem, EncoderLayer, EncoderStem, Linear, encoder,
 };
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use crate::generate::{BackendRuntime, kv_extent};
-use crate::hf_bind::safetensors_tensor_as_packed_block;
+use crate::hf_bind::bind_safetensors_program_leaves;
+use crate::profiles::BindingProfile;
 use crate::serving::{ServingConfig, apply_serving_config};
 use crate::serving_settings::ServingSettings;
+use crate::source::CheckpointMapping;
 
 /// The dimensions a checkpoint states, read from its `config.json`.
 #[derive(Debug, Clone)]
@@ -93,9 +93,6 @@ impl Shape {
     }
 }
 
-/// suffix of the cache key holding a stored `[out, in]` matrix as `[in, out]`
-const FLIPPED: &str = "#flipped";
-
 const CACHE_PLANES: [&str; 3] = ["first", "second", "value"];
 
 fn cache_plane_name(plane: &str, layer: usize) -> String {
@@ -106,88 +103,37 @@ fn cache_names(layers: usize) -> impl Iterator<Item = String> {
     (0..layers).flat_map(|layer| CACHE_PLANES.map(|part| cache_plane_name(part, layer)))
 }
 
-/// The checkpoint's tensors, in the layout the builders read.
-pub struct Tensors {
-    bytes: Vec<u8>,
-    manifest: Manifest,
-    data_start: u64,
-    /// stored half-width leaves a builder reads decoded, filled on first use and kept across decode steps
-    decoded: BTreeMap<String, OnceLock<Vec<f32>>>,
+/// What `Model` keeps of a checkpoint file: its mapping, which the shared
+/// binder borrows weights from in place, the tensor directory, and where the
+/// tensor data starts.
+type Checkpoint = (CheckpointMapping, Manifest, u64);
+
+/// Maps a safetensors file read-only through the same [`CheckpointMapping`] the
+/// diffusion loader opens its checkpoints with, then parses its header.
+fn read_checkpoint(path: &Path) -> Result<Checkpoint> {
+    let mapping = CheckpointMapping::open_file(path).with_context(|| path.display().to_string())?;
+    let (manifest, data_start) = parse_checkpoint(mapping.bytes())?;
+    Ok((mapping, manifest, data_start))
 }
 
-impl Tensors {
-    pub fn load(path: &Path) -> Result<Self> {
-        let bytes = std::fs::read(path).with_context(|| path.display().to_string())?;
-        let prefix: [u8; 8] = bytes
-            .get(..8)
-            .and_then(|head| head.try_into().ok())
-            .context("safetensors file is shorter than its length prefix")?;
-        let header_len = u64::from_le_bytes(prefix) as usize;
-        let header = bytes
-            .get(..8 + header_len)
-            .context("safetensors header runs past the end of the file")?;
-        let mut parser = SafetensorsParser::new();
-        parser.feed(header);
-        parser
-            .poll()
-            .map_err(|error| anyhow::anyhow!("safetensors header does not parse: {error:?}"))?;
-        let SafetensorsParser::TensorData { manifest, .. } = parser else {
-            return Err(anyhow::anyhow!("safetensors header did not complete"));
-        };
-        let decoded = manifest
-            .tensors
-            .iter()
-            .flat_map(|entry| [entry.name.clone(), format!("{}{FLIPPED}", entry.name)])
-            .map(|key| (key, OnceLock::new()))
-            .collect();
-        Ok(Self {
-            bytes,
-            manifest,
-            data_start: (8 + header_len) as u64,
-            decoded,
-        })
-    }
-
-    fn block(&self, name: &str) -> QuantizedBlock<'_> {
-        safetensors_tensor_as_packed_block(&self.manifest, &self.bytes, self.data_start, name)
-            .unwrap_or_else(|error| panic!("{name} binds in its stored format: {error}"))
-    }
-
-    fn entry(&self, name: &str) -> &TensorEntry {
-        self.manifest
-            .tensors
-            .iter()
-            .find(|entry| entry.name == name)
-            .unwrap_or_else(|| panic!("no tensor {name}"))
-    }
-
-    fn decoded(&self, name: &str) -> &[f32] {
-        self.decoded
-            .get(name)
-            .unwrap_or_else(|| panic!("no tensor {name}"))
-            .get_or_init(|| {
-                let entry = self.entry(name);
-                let (start, end) = entry.data_offsets;
-                let raw = &self.bytes
-                    [(self.data_start + start) as usize..(self.data_start + end) as usize];
-                let format = entry
-                    .dtype
-                    .format()
-                    .unwrap_or_else(|| panic!("{name} has no numeric format ({:?})", entry.dtype));
-                let mut tensor = vec![0.0; entry.shape.iter().product::<u64>() as usize];
-                decode_blocks(&format, raw, &mut tensor)
-                    .unwrap_or_else(|error| panic!("decoding {name} as {format:?}: {error}"));
-                tensor
-            })
-    }
-
-    fn dims(&self, name: &str) -> Vec<usize> {
-        self.entry(name)
-            .shape
-            .iter()
-            .map(|&dim| dim as usize)
-            .collect()
-    }
+fn parse_checkpoint(bytes: &[u8]) -> Result<(Manifest, u64)> {
+    let prefix: [u8; 8] = bytes
+        .get(..8)
+        .and_then(|head| head.try_into().ok())
+        .context("safetensors file is shorter than its length prefix")?;
+    let header_len = u64::from_le_bytes(prefix) as usize;
+    let header = bytes
+        .get(..8 + header_len)
+        .context("safetensors header runs past the end of the file")?;
+    let mut parser = SafetensorsParser::new();
+    parser.feed(header);
+    parser
+        .poll()
+        .map_err(|error| anyhow::anyhow!("safetensors header does not parse: {error:?}"))?;
+    let SafetensorsParser::TensorData { manifest, .. } = parser else {
+        return Err(anyhow::anyhow!("safetensors header did not complete"));
+    };
+    Ok((manifest, (8 + header_len) as u64))
 }
 
 /// the serving runtime every Metal stage plans and executes through
@@ -209,7 +155,9 @@ fn open_runtime(_config: &ServingConfig<'_>) -> Runtime {
 struct Bound<'a> {
     program: Vec<Op>,
     named: BTreeMap<String, Vec<f32>>,
-    blocks: Vec<(String, QuantizedBlock<'a>)>,
+    weights: BoundWeights<'a>,
+    /// leaves the host feeds each run; every other named leaf is a checkpoint tensor
+    runtime_inputs: Vec<String>,
     shape: Shape,
 }
 
@@ -218,16 +166,40 @@ impl<'a> Bound<'a> {
         Self {
             program: Vec::new(),
             named: BTreeMap::new(),
-            blocks: Vec::new(),
+            weights: BoundWeights::new(&[]),
+            runtime_inputs: Vec::new(),
             shape,
         }
     }
 
     fn leaf(&mut self, name: &str, shape: &[u32]) -> NodeId {
+        self.runtime_inputs.push(name.into());
         super::encoder_decoder::leaf(&mut self.program, shape, name)
     }
 
+    fn weight(&mut self, name: &str, shape: &[u32]) -> NodeId {
+        super::encoder_decoder::leaf(&mut self.program, shape, name)
+    }
+
+    /// Binds every checkpoint leaf the program names through the shared
+    /// safetensors binder, then retargets the leaves a precision rule recoded.
+    fn bind(&mut self, model: &'a Model) -> Result<()> {
+        let rules = model.settings.weight_precision_rules()?;
+        self.weights = bind_safetensors_program_leaves(
+            &model.manifest,
+            model.mapping.bytes(),
+            model.data_start,
+            &self.program,
+            &BindingProfile::default(),
+            &self.runtime_inputs,
+            &rules,
+        )?;
+        retarget_recoded_leaves(&mut self.program, &self.weights);
+        Ok(())
+    }
+
     fn symbolic_leaf(&mut self, name: &str) -> NodeId {
+        self.runtime_inputs.push(name.into());
         input_leaf(
             &mut self.program,
             super::encoder_decoder::ACTIVATION,
@@ -258,6 +230,7 @@ impl<'a> Bound<'a> {
         let full = self.shape.decoder_head_dim;
         let plane = |this: &mut Self, name: String, width: u32| {
             this.named.insert(name.clone(), Vec::new());
+            this.runtime_inputs.push(name.clone());
             let extents = vec![
                 Extent::Symbolic(1),
                 Extent::Static(heads),
@@ -283,6 +256,7 @@ impl<'a> Bound<'a> {
     }
 
     fn cached_len_leaf(&mut self) -> NodeId {
+        self.runtime_inputs.push("cached_len".into());
         input_leaf(
             &mut self.program,
             super::encoder_decoder::ACTIVATION,
@@ -325,165 +299,122 @@ impl<'a> Bound<'a> {
         self.named.insert("cached_len".into(), live);
     }
 
-    fn weight(&mut self, name: &str, shape: &[u32], stored: &str, tensors: &'a Tensors) -> NodeId {
-        let node = self.leaf(name, shape);
-        let block = tensors.block(stored);
-        if block.packed_bytes().is_some() {
-            self.blocks.push((name.into(), block));
-        } else {
-            let flipped = tensors
-                .decoded
-                .get(&format!("{stored}{FLIPPED}"))
-                .unwrap_or_else(|| panic!("no tensor {stored}"))
-                .get_or_init(|| {
-                    let dims = tensors.dims(stored);
-                    transpose_out_in_to_in_out(tensors.decoded(stored), stored, dims[0], dims[1])
-                        .unwrap_or_else(|error| panic!("{stored} transposes: {error}"))
-                });
-            self.blocks
-                .push((name.into(), QuantizedBlock::from(flipped.as_slice())));
-        }
-        node
-    }
-
-    fn plain(&mut self, name: &str, shape: &[u32], tensors: &'a Tensors) -> NodeId {
-        let node = self.leaf(name, shape);
-        let block = tensors.block(name);
-        let block = if block.packed_bytes().is_some() {
-            QuantizedBlock::from(tensors.decoded(name))
-        } else {
-            block
-        };
-        self.blocks.push((name.into(), block));
-        node
-    }
-
-    fn matrix(&mut self, name: &str, input: u32, output: u32, tensors: &'a Tensors) -> Linear {
-        let weight_name = format!("{name}.weight");
-        let weight = self.weight(&weight_name, &[input, output], &weight_name, tensors);
-        let bias = self.plain(&format!("{name}.bias"), &[output], tensors);
+    fn matrix(&mut self, name: &str, input: u32, output: u32) -> Linear {
+        let weight = self.weight(&format!("{name}.weight"), &[output, input]);
+        let bias = self.weight(&format!("{name}.bias"), &[output]);
         Linear {
             weight,
             bias: Some(bias),
         }
     }
 
-    fn heads(&mut self, name: &str, tensors: &'a Tensors, bias: bool) -> Linear {
-        let weight_name = format!("{name}.weight");
+    /// A head-major input projection over the stored `[heads*head_dim, width]`
+    /// matrix, read in the stored order.
+    fn heads(&mut self, name: &str, bias: bool) -> Linear {
+        let (heads, head_dim) = (self.shape.encoder_heads, self.shape.encoder_head_dim);
         let weight = self.weight(
-            &weight_name,
-            &[
-                self.shape.width,
-                self.shape.encoder_heads,
-                self.shape.encoder_head_dim,
-            ],
-            &weight_name,
-            tensors,
+            &format!("{name}.weight"),
+            &[heads, head_dim, self.shape.width],
         );
-        let bias = bias.then(|| {
-            self.plain(
-                &format!("{name}.bias"),
-                &[self.shape.encoder_heads, self.shape.encoder_head_dim],
-                tensors,
-            )
-        });
+        let bias = bias.then(|| self.weight(&format!("{name}.bias"), &[heads, head_dim]));
         Linear { weight, bias }
     }
 
-    fn heads_out(&mut self, name: &str, tensors: &'a Tensors) -> Linear {
-        let weight_name = format!("{name}.weight");
+    /// The cross-attention K and V projections `cross_kv` reads `[width, heads,
+    /// head_dim]`, a contraction-first order the binder reads as `InOut`.
+    fn memory_heads(&mut self, name: &str, bias: bool) -> Linear {
+        let (heads, head_dim) = (self.shape.encoder_heads, self.shape.encoder_head_dim);
         let weight = self.weight(
-            &weight_name,
-            &[
-                self.shape.encoder_heads,
-                self.shape.encoder_head_dim,
-                self.shape.width,
-            ],
-            &weight_name,
-            tensors,
+            &format!("{name}.weight"),
+            &[self.shape.width, heads, head_dim],
         );
-        let bias = self.plain(&format!("{name}.bias"), &[self.shape.width], tensors);
+        let bias = bias.then(|| self.weight(&format!("{name}.bias"), &[heads, head_dim]));
+        Linear { weight, bias }
+    }
+
+    fn heads_out(&mut self, name: &str) -> Linear {
+        let (heads, head_dim) = (self.shape.encoder_heads, self.shape.encoder_head_dim);
+        let weight = self.weight(
+            &format!("{name}.weight"),
+            &[self.shape.width, heads, head_dim],
+        );
+        let bias = self.weight(&format!("{name}.bias"), &[self.shape.width]);
         Linear {
             weight,
             bias: Some(bias),
         }
     }
 
-    fn norm(&mut self, name: &str, tensors: &'a Tensors) -> Linear {
-        let weight = self.plain(&format!("{name}.weight"), &[self.shape.width], tensors);
-        let bias = self.plain(&format!("{name}.bias"), &[self.shape.width], tensors);
+    fn norm(&mut self, name: &str) -> Linear {
+        let weight = self.weight(&format!("{name}.weight"), &[self.shape.width]);
+        let bias = self.weight(&format!("{name}.bias"), &[self.shape.width]);
         Linear {
             weight,
             bias: Some(bias),
         }
     }
 
-    fn encoder_layer(&mut self, layer: usize, tensors: &'a Tensors) -> EncoderLayer {
+    fn encoder_layer(&mut self, layer: usize) -> EncoderLayer {
         let prefix = format!("model.encoder.layers.{layer}");
         EncoderLayer {
-            attn_ln: self.norm(&format!("{prefix}.self_attn_layer_norm"), tensors),
+            attn_ln: self.norm(&format!("{prefix}.self_attn_layer_norm")),
             attn: super::encoder_decoder::Attention {
-                q: self.heads(&format!("{prefix}.self_attn.q_proj"), tensors, true),
-                k: self.heads(&format!("{prefix}.self_attn.k_proj"), tensors, false),
-                v: self.heads(&format!("{prefix}.self_attn.v_proj"), tensors, true),
-                out: self.heads_out(&format!("{prefix}.self_attn.out_proj"), tensors),
+                q: self.heads(&format!("{prefix}.self_attn.q_proj"), true),
+                k: self.heads(&format!("{prefix}.self_attn.k_proj"), false),
+                v: self.heads(&format!("{prefix}.self_attn.v_proj"), true),
+                out: self.heads_out(&format!("{prefix}.self_attn.out_proj")),
             },
-            mlp_ln: self.norm(&format!("{prefix}.final_layer_norm"), tensors),
+            mlp_ln: self.norm(&format!("{prefix}.final_layer_norm")),
             fc1: self.matrix(
                 &format!("{prefix}.fc1"),
                 self.shape.width,
                 self.shape.encoder_ffn,
-                tensors,
             ),
             fc2: self.matrix(
                 &format!("{prefix}.fc2"),
                 self.shape.encoder_ffn,
                 self.shape.width,
-                tensors,
             ),
         }
     }
 
-    fn decoder_layer(&mut self, layer: usize, tensors: &'a Tensors) -> DecoderLayer {
+    fn decoder_layer(&mut self, layer: usize) -> DecoderLayer {
         let prefix = format!("model.decoder.layers.{layer}");
         DecoderLayer {
-            self_ln: self.norm(&format!("{prefix}.self_attn_layer_norm"), tensors),
+            self_ln: self.norm(&format!("{prefix}.self_attn_layer_norm")),
             self_attn: super::encoder_decoder::Attention {
-                q: self.heads(&format!("{prefix}.self_attn.q_proj"), tensors, true),
-                k: self.heads(&format!("{prefix}.self_attn.k_proj"), tensors, false),
-                v: self.heads(&format!("{prefix}.self_attn.v_proj"), tensors, true),
-                out: self.heads_out(&format!("{prefix}.self_attn.out_proj"), tensors),
+                q: self.heads(&format!("{prefix}.self_attn.q_proj"), true),
+                k: self.heads(&format!("{prefix}.self_attn.k_proj"), false),
+                v: self.heads(&format!("{prefix}.self_attn.v_proj"), true),
+                out: self.heads_out(&format!("{prefix}.self_attn.out_proj")),
             },
-            cross_ln: self.norm(&format!("{prefix}.encoder_attn_layer_norm"), tensors),
-            cross_q: self.heads(&format!("{prefix}.encoder_attn.q_proj"), tensors, true),
-            cross_out: self.heads_out(&format!("{prefix}.encoder_attn.out_proj"), tensors),
-            mlp_ln: self.norm(&format!("{prefix}.final_layer_norm"), tensors),
+            cross_ln: self.norm(&format!("{prefix}.encoder_attn_layer_norm")),
+            cross_q: self.heads(&format!("{prefix}.encoder_attn.q_proj"), true),
+            cross_out: self.heads_out(&format!("{prefix}.encoder_attn.out_proj")),
+            mlp_ln: self.norm(&format!("{prefix}.final_layer_norm")),
             fc1: self.matrix(
                 &format!("{prefix}.fc1"),
                 self.shape.width,
                 self.shape.decoder_ffn,
-                tensors,
             ),
             fc2: self.matrix(
                 &format!("{prefix}.fc2"),
                 self.shape.decoder_ffn,
                 self.shape.width,
-                tensors,
             ),
         }
     }
 
-    fn encoder_stem(&mut self, tensors: &'a Tensors) -> EncoderStem {
+    fn encoder_stem(&mut self) -> EncoderStem {
         let width = self.shape.width;
         let mels = self.shape.mels;
-        let conv1 = self.plain("model.encoder.conv1.weight", &[width, mels, 3], tensors);
-        let conv1_bias = self.plain("model.encoder.conv1.bias", &[width], tensors);
-        let conv2 = self.plain("model.encoder.conv2.weight", &[width, width, 3], tensors);
-        let conv2_bias = self.plain("model.encoder.conv2.bias", &[width], tensors);
-        let position = self.plain(
+        let conv1 = self.weight("model.encoder.conv1.weight", &[width, mels, 3]);
+        let conv1_bias = self.weight("model.encoder.conv1.bias", &[width]);
+        let conv2 = self.weight("model.encoder.conv2.weight", &[width, width, 3]);
+        let conv2_bias = self.weight("model.encoder.conv2.bias", &[width]);
+        let position = self.weight(
             "model.encoder.embed_positions.weight",
             &[self.shape.source_positions, width],
-            tensors,
         );
         EncoderStem {
             conv1: Linear {
@@ -495,33 +426,62 @@ impl<'a> Bound<'a> {
                 bias: Some(conv2_bias),
             },
             position,
-            layer_norm: self.norm("model.encoder.layer_norm", tensors),
+            layer_norm: self.norm("model.encoder.layer_norm"),
         }
     }
 
-    fn decoder_stem(&mut self, tensors: &'a Tensors) -> DecoderStem {
-        let tokens_name = "model.decoder.embed_tokens.weight";
-        let tokens = self.plain(tokens_name, &[self.shape.vocab, self.shape.width], tensors);
-        let position = self.plain(
+    /// The tied head reads the embedding leaf itself: one node, one bound buffer.
+    fn decoder_stem(&mut self) -> DecoderStem {
+        let tokens = self.weight(
+            "model.decoder.embed_tokens.weight",
+            &[self.shape.vocab, self.shape.width],
+        );
+        let position = self.weight(
             "model.decoder.embed_positions.weight",
             &[self.shape.target_positions, self.shape.width],
-            tensors,
-        );
-        let head = self.weight(
-            "lm_head",
-            &[self.shape.width, self.shape.vocab],
-            tokens_name,
-            tensors,
         );
         DecoderStem {
             tokens,
             position,
-            layer_norm: self.norm("model.decoder.layer_norm", tensors),
+            layer_norm: self.norm("model.decoder.layer_norm"),
             head: Linear {
-                weight: head,
+                weight: tokens,
                 bias: None,
             },
         }
+    }
+
+    /// The cached one-step decoder program; returns the logits followed by the
+    /// appended cache planes, the outputs every step reads.
+    fn decoder_graph(&mut self) -> Result<Vec<NodeId>> {
+        let token_leaf = self.symbolic_leaf("tokens");
+        let positions = self.symbolic_leaf("positions");
+        let stem = self.decoder_stem();
+        let layers: Vec<_> = (0..self.shape.decoder_layers)
+            .map(|layer| self.decoder_layer(layer))
+            .collect();
+        let cross_nodes = self.cross_leaves();
+        let cache_leaves = self.cache_leaves();
+        self.cached_len_leaf();
+        let (logits, appended) = super::encoder_decoder::decoder(
+            &mut self.program,
+            token_leaf,
+            positions,
+            &stem,
+            &layers,
+            &cross_nodes,
+            Some(&cache_leaves),
+            self.shape.decoder_heads,
+            self.shape.decoder_head_dim,
+            self.shape.eps,
+        )?;
+        let mut outputs = vec![logits];
+        outputs.extend(
+            appended
+                .iter()
+                .flat_map(|(first, second, value)| [*first, *second, *value]),
+        );
+        Ok(outputs)
     }
 
     fn run(
@@ -534,16 +494,11 @@ impl<'a> Bound<'a> {
             .named
             .iter()
             .map(|(name, data)| (name.as_str(), QuantizedBlock::from(data.as_slice())))
-            .chain(
-                self.blocks
-                    .iter()
-                    .map(|(name, block)| (name.as_str(), *block)),
-            )
+            .chain(self.weights.blocks()?)
             .collect();
         #[cfg(all(feature = "metal", target_os = "macos"))]
         if runtime.is_metal() {
-            let resident: BTreeSet<&str> =
-                self.blocks.iter().map(|(name, _)| name.as_str()).collect();
+            let resident: BTreeSet<&str> = self.weights.names();
             let evaluated = runtime
                 .evaluate_segment(&self.program, symbols, &named, outputs, &resident, None)
                 .map_err(|error| anyhow::anyhow!("metal segment: {error:?}"))?;
@@ -608,7 +563,10 @@ fn sample_peak(peak: &mut Option<u64>, runtime: &Runtime) {
 
 /// A loaded checkpoint ready to transcribe.
 pub struct Model {
-    tensors: Tensors,
+    /// the mapped checkpoint file; every bound weight borrows from it in place
+    mapping: CheckpointMapping,
+    manifest: Manifest,
+    data_start: u64,
     shape: Shape,
     generation: Value,
     config: Value,
@@ -626,19 +584,21 @@ impl Model {
                 .context("generation_config.json")?,
         )?;
         let shape = Shape::from_config(&config)?;
-        let tensors = Tensors::load(&dir.join("model.safetensors"))?;
-        Ok(Self::from_parts(tensors, shape, generation, config, dir))
+        let checkpoint = read_checkpoint(&dir.join("model.safetensors"))?;
+        Ok(Self::from_parts(checkpoint, shape, generation, config, dir))
     }
 
     fn from_parts(
-        tensors: Tensors,
+        (mapping, manifest, data_start): Checkpoint,
         shape: Shape,
         generation: Value,
         config: Value,
         dir: &Path,
     ) -> Self {
         Self {
-            tensors,
+            mapping,
+            manifest,
+            data_start,
             shape,
             generation,
             config,
@@ -763,9 +723,9 @@ impl Model {
         let mut bound = Bound::new(self.shape.clone());
         let mel_leaf = bound.leaf("mel", &[1, self.shape.mels, needed as u32]);
         bound.named.insert("mel".into(), mel_input);
-        let stem = bound.encoder_stem(&self.tensors);
+        let stem = bound.encoder_stem();
         let layers: Vec<_> = (0..self.shape.encoder_layers)
-            .map(|layer| bound.encoder_layer(layer, &self.tensors))
+            .map(|layer| bound.encoder_layer(layer))
             .collect();
         let memory = encoder(
             &mut bound.program,
@@ -781,8 +741,8 @@ impl Model {
         let mut cross = Vec::new();
         for layer in 0..self.shape.decoder_layers {
             let prefix = format!("model.decoder.layers.{layer}.encoder_attn");
-            let k = bound.heads(&format!("{prefix}.k_proj"), &self.tensors, false);
-            let v = bound.heads(&format!("{prefix}.v_proj"), &self.tensors, true);
+            let k = bound.memory_heads(&format!("{prefix}.k_proj"), false);
+            let v = bound.memory_heads(&format!("{prefix}.v_proj"), true);
             let (k, v) = cross_kv(
                 &mut bound.program,
                 memory,
@@ -798,45 +758,21 @@ impl Model {
             outputs.push(*k);
             outputs.push(*v);
         }
+        bound.bind(self)?;
         let encode_start = std::time::Instant::now();
         let mut values = bound.run(&outputs, &[], &mut runtime)?;
         let encode = encode_start.elapsed();
         sample_peak(&mut gpu_peak, &runtime);
 
         let mut decoder = Bound::new(self.shape.clone());
-        let token_leaf = decoder.symbolic_leaf("tokens");
-        let positions = decoder.symbolic_leaf("positions");
-        let stem = decoder.decoder_stem(&self.tensors);
-        let layers: Vec<_> = (0..self.shape.decoder_layers)
-            .map(|layer| decoder.decoder_layer(layer, &self.tensors))
-            .collect();
-        let cross_nodes = decoder.cross_leaves();
+        let step_outputs = decoder.decoder_graph()?;
         for layer in 0..self.shape.decoder_layers {
             let k = std::mem::take(&mut values[1 + layer * 2]);
             let v = std::mem::take(&mut values[2 + layer * 2]);
             decoder.named.insert(format!("cross_k_{layer}"), k);
             decoder.named.insert(format!("cross_v_{layer}"), v);
         }
-        let cache_leaves = decoder.cache_leaves();
-        decoder.cached_len_leaf();
-        let (logits, appended) = super::encoder_decoder::decoder(
-            &mut decoder.program,
-            token_leaf,
-            positions,
-            &stem,
-            &layers,
-            &cross_nodes,
-            Some(&cache_leaves),
-            self.shape.decoder_heads,
-            self.shape.decoder_head_dim,
-            self.shape.eps,
-        )?;
-        let mut step_outputs = vec![logits];
-        step_outputs.extend(
-            appended
-                .iter()
-                .flat_map(|(first, second, value)| [*first, *second, *value]),
-        );
+        decoder.bind(self)?;
 
         let mut tokens: Vec<u32> = policy.prompt().to_vec();
         let mut cached = 0;
@@ -968,19 +904,179 @@ fn pad(wav: &[f32]) -> Result<Vec<f32>> {
 #[cfg(test)]
 mod tests {
     use conflaguration::Settings;
-    use proxima_numeric::NumericPolicy;
+    use proxima_numeric::{NumericPolicy, decode_blocks, encode_blocks};
+    use proxima_safetensors::{SafetensorsModel, TensorPayload, write_complete};
 
     use super::*;
 
     const BIT_EXACT_JSON: &str = r#"{"contraction":false,"reassociation":false,"nan_assumptions":false,"signed_zero":false,"approx_functions":false,"epilogue_sources":false}"#;
 
-    fn empty_model() -> Model {
-        let tensors = Tensors {
-            bytes: Vec::new(),
-            manifest: Manifest::default(),
-            data_start: 0,
-            decoded: BTreeMap::new(),
+    const EMBEDDING: &str = "model.decoder.embed_tokens.weight";
+
+    fn decoder_tensor_shapes() -> Vec<(String, Vec<u64>)> {
+        let layer = "model.decoder.layers.0";
+        let matrix = vec![4, 4];
+        let vector = vec![4];
+        let attention = |name: &str| {
+            [
+                (format!("{layer}.{name}.q_proj.weight"), matrix.clone()),
+                (format!("{layer}.{name}.q_proj.bias"), vector.clone()),
+                (format!("{layer}.{name}.out_proj.weight"), matrix.clone()),
+                (format!("{layer}.{name}.out_proj.bias"), vector.clone()),
+            ]
         };
+        let norm = |name: &str| {
+            [
+                (format!("{name}.weight"), vector.clone()),
+                (format!("{name}.bias"), vector.clone()),
+            ]
+        };
+        let mut shapes = vec![
+            (EMBEDDING.to_string(), vec![6, 4]),
+            (
+                "model.decoder.embed_positions.weight".to_string(),
+                vec![3, 4],
+            ),
+            (format!("{layer}.self_attn.k_proj.weight"), matrix.clone()),
+            (format!("{layer}.self_attn.v_proj.weight"), matrix.clone()),
+            (format!("{layer}.self_attn.v_proj.bias"), vector.clone()),
+            (format!("{layer}.fc1.weight"), vec![8, 4]),
+            (format!("{layer}.fc1.bias"), vec![8]),
+            (format!("{layer}.fc2.weight"), vec![4, 8]),
+            (format!("{layer}.fc2.bias"), vec![4]),
+        ];
+        shapes.extend(attention("self_attn"));
+        shapes.extend(attention("encoder_attn"));
+        shapes.extend(norm(&format!("{layer}.self_attn_layer_norm")));
+        shapes.extend(norm(&format!("{layer}.encoder_attn_layer_norm")));
+        shapes.extend(norm(&format!("{layer}.final_layer_norm")));
+        shapes.extend(norm("model.decoder.layer_norm"));
+        shapes
+    }
+
+    /// a real safetensors file holding every tensor the decoder program reads,
+    /// each element distinct from every other tensor's
+    fn decoder_checkpoint() -> Checkpoint {
+        let dtype = super::super::encoder_decoder::ACTIVATION;
+        let format = dtype
+            .format()
+            .expect("the activation dtype has a numeric format");
+        let payloads: Vec<(String, Vec<u64>, Vec<u8>)> = decoder_tensor_shapes()
+            .into_iter()
+            .enumerate()
+            .map(|(index, (name, shape))| {
+                let count = shape.iter().product::<u64>() as usize;
+                let values: Vec<_> = (0..count)
+                    .map(|element| (index * 1000 + element) as _)
+                    .collect();
+                let mut data = vec![0; count * format.size_bytes()];
+                encode_blocks(&format, values.as_slice(), &mut data).expect("encodes the tensor");
+                (name, shape, data)
+            })
+            .collect();
+        let file = write_complete(&SafetensorsModel {
+            tensors: payloads
+                .iter()
+                .map(|(name, shape, data)| TensorPayload {
+                    name: name.clone(),
+                    dtype,
+                    shape: shape.clone(),
+                    data,
+                })
+                .collect(),
+            metadata: BTreeMap::new(),
+        })
+        .expect("writes a real safetensors buffer");
+        let (manifest, data_start) = parse_checkpoint(&file).expect("the written header parses");
+        (mapped(&file), manifest, data_start)
+    }
+
+    /// maps `bytes` through a real file, as `Model::load` maps a checkpoint; the
+    /// mapping outlives the unlinked file on unix
+    fn mapped(bytes: &[u8]) -> CheckpointMapping {
+        let directory = tempfile::tempdir().expect("creates a checkpoint directory");
+        let path = directory.path().join("model.safetensors");
+        std::fs::write(&path, bytes).expect("writes the checkpoint file");
+        CheckpointMapping::open_file(&path).expect("maps the checkpoint file")
+    }
+
+    fn decoder_model() -> Model {
+        let config = serde_json::json!({
+            "encoder_layers": 1, "decoder_layers": 1,
+            "encoder_attention_heads": 2, "decoder_attention_heads": 2,
+            "d_model": 4, "num_mel_bins": 2, "encoder_ffn_dim": 8, "decoder_ffn_dim": 8,
+            "max_source_positions": 2, "max_target_positions": 3, "vocab_size": 6,
+        });
+        let shape = Shape::from_config(&config).expect("the decoder config is complete");
+        Model::from_parts(
+            decoder_checkpoint(),
+            shape,
+            Value::Null,
+            config,
+            Path::new(""),
+        )
+    }
+
+    fn bound_decoder(model: &Model) -> Bound<'_> {
+        let mut decoder = Bound::new(model.shape.clone());
+        decoder.decoder_graph().expect("the decoder graph builds");
+        decoder
+            .bind(model)
+            .expect("the shared binder binds the decoder");
+        decoder
+    }
+
+    #[test]
+    fn decoder_binds_with_no_flipped_names_and_no_decoded_copies() {
+        let model = decoder_model();
+
+        let decoder = bound_decoder(&model);
+
+        let flipped = decoder
+            .weights
+            .names()
+            .into_iter()
+            .filter(|name| name.contains("#flipped"))
+            .count();
+        assert_eq!(flipped, 0, "a stored-order leaf binds under its own name");
+        assert_eq!(
+            decoder.weights.owned().len(),
+            0,
+            "no weight is decoded into a copy"
+        );
+    }
+
+    #[test]
+    fn tied_head_binds_the_embedding_as_one_buffer() {
+        let model = decoder_model();
+        let entry = model
+            .manifest
+            .tensor(EMBEDDING)
+            .expect("the embedding is stored");
+        let (start, end) = entry.data_offsets;
+        let file = model.mapping.bytes();
+        let raw = &file[(model.data_start + start) as usize..(model.data_start + end) as usize];
+        let format = entry
+            .dtype
+            .format()
+            .expect("the embedding has a numeric format");
+        let mut values = vec![0.0; entry.shape.iter().product::<u64>() as usize];
+        decode_blocks(&format, raw, &mut values).expect("decodes the embedding");
+        let embedding = format!("{:?}", QuantizedBlock::from(values.as_slice()));
+
+        let decoder = bound_decoder(&model);
+
+        let blocks = decoder.weights.blocks().expect("the bound blocks resolve");
+        let carrying = blocks
+            .iter()
+            .filter(|(_, block)| format!("{block:?}") == embedding)
+            .count();
+        assert_eq!(carrying, 1, "the head reads the embedding leaf, not a copy");
+        assert!(!decoder.weights.names().contains("lm_head"));
+    }
+
+    fn empty_model() -> Model {
+        let tensors = (mapped(b"-"), Manifest::default(), 0);
         let config = serde_json::json!({
             "encoder_layers": 1, "decoder_layers": 1,
             "encoder_attention_heads": 1, "decoder_attention_heads": 1,

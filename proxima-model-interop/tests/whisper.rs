@@ -682,9 +682,11 @@ mod golden {
             bias: bool,
         ) -> Linear {
             let weight_name = format!("{name}.weight");
-            let weight = self.leaf(&weight_name, &[input, output]);
-            self.named
-                .insert(weight_name, tensors.matrix(&format!("{name}.weight")));
+            let weight = self.leaf(&weight_name, &[output, input]);
+            self.named.insert(
+                weight_name,
+                tensors.data(&format!("{name}.weight")).to_vec(),
+            );
             let bias = bias.then(|| {
                 let bias_name = format!("{name}.bias");
                 let node = self.leaf(&bias_name, &[output]);
@@ -699,9 +701,31 @@ mod golden {
 
         pub fn heads(&mut self, name: &str, tensors: &Tensors, bias: bool) -> Linear {
             let weight_name = format!("{name}.weight");
+            let weight = self.leaf(&weight_name, &[HEADS, HEAD_DIM, WIDTH]);
+            self.named.insert(
+                weight_name,
+                tensors.data(&format!("{name}.weight")).to_vec(),
+            );
+            self.head_bias(name, tensors, weight, bias)
+        }
+
+        /// The cross-attention K and V weights `cross_kv` reads `[width, heads,
+        /// head_dim]`, so the stored matrix is transposed for them.
+        pub fn memory_heads(&mut self, name: &str, tensors: &Tensors, bias: bool) -> Linear {
+            let weight_name = format!("{name}.weight");
             let weight = self.leaf(&weight_name, &[WIDTH, HEADS, HEAD_DIM]);
             self.named
                 .insert(weight_name, tensors.matrix(&format!("{name}.weight")));
+            self.head_bias(name, tensors, weight, bias)
+        }
+
+        fn head_bias(
+            &mut self,
+            name: &str,
+            tensors: &Tensors,
+            weight: NodeId,
+            bias: bool,
+        ) -> Linear {
             let bias = bias.then(|| {
                 let bias_name = format!("{name}.bias");
                 let node = self.leaf(&bias_name, &[HEADS, HEAD_DIM]);
@@ -716,9 +740,11 @@ mod golden {
 
         pub fn heads_out(&mut self, name: &str, tensors: &Tensors) -> Linear {
             let weight_name = format!("{name}.weight");
-            let weight = self.leaf(&weight_name, &[HEADS, HEAD_DIM, WIDTH]);
-            self.named
-                .insert(weight_name, tensors.matrix(&format!("{name}.weight")));
+            let weight = self.leaf(&weight_name, &[WIDTH, HEADS, HEAD_DIM]);
+            self.named.insert(
+                weight_name,
+                tensors.data(&format!("{name}.weight")).to_vec(),
+            );
             let bias_name = format!("{name}.bias");
             let bias = self.leaf(&bias_name, &[WIDTH]);
             self.named.insert(
@@ -1051,8 +1077,8 @@ mod encoder {
         let mut cross = Vec::new();
         for layer in 0..LAYERS as usize {
             let prefix = format!("model.decoder.layers.{layer}.encoder_attn");
-            let k = bound.heads(&format!("{prefix}.k_proj"), &tensors, false);
-            let v = bound.heads(&format!("{prefix}.v_proj"), &tensors, true);
+            let k = bound.memory_heads(&format!("{prefix}.k_proj"), &tensors, false);
+            let v = bound.memory_heads(&format!("{prefix}.v_proj"), &tensors, true);
             let (k, v) = proxima_tensor::spec::cross_kv(
                 &mut bound.program,
                 encoded,

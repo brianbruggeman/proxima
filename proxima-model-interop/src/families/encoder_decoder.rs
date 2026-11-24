@@ -130,7 +130,9 @@ fn binary(
     )
 }
 
-/// `[s, in] @ [in, out] -> [s, out]`, with an optional `[out]` bias.
+/// `[s, in] @ [out, in]^T -> [s, out]`, with an optional `[out]` bias. The
+/// weight leaf is declared in the stored `[out, in]` order, so a safetensors
+/// file binds it as a borrowed view with no transposed copy.
 ///
 /// # Errors
 ///
@@ -140,7 +142,7 @@ pub fn linear(program: &mut Vec<Op>, x: NodeId, w: Linear) -> Result<NodeId, Ten
         program,
         ACTIVATION,
         ScalarOp::Multiply,
-        &[(x, "si->sio"), (w.weight, "io->sio")],
+        &[(x, "si->sio"), (w.weight, "oi->sio")],
     )?;
     let out = reduce(
         program,
@@ -162,7 +164,8 @@ pub fn linear(program: &mut Vec<Op>, x: NodeId, w: Linear) -> Result<NodeId, Ten
     }
 }
 
-/// `[s, in] @ [in, heads*head_dim] -> [s, heads, head_dim]`.
+/// `[s, in] @ [heads, head_dim, in]^T -> [s, heads, head_dim]`; the weight
+/// leaf is the stored `[heads*head_dim, in]` matrix viewed head-major.
 ///
 /// # Errors
 ///
@@ -177,7 +180,7 @@ pub fn linear_heads(
         program,
         ACTIVATION,
         ScalarOp::Multiply,
-        &[(x, "s,i->shji"), (w.weight, "ihj->shji")],
+        &[(x, "s,i->shji"), (w.weight, "hji->shji")],
     )?;
     let out = reduce(
         program,
@@ -260,8 +263,9 @@ pub fn flatten_heads(
     )
 }
 
-/// `[s, heads, head_dim] @ [heads, head_dim, out] -> [s, out]`, the
-/// head-major output projection over an attention result. `attended` is the
+/// `[s, heads, head_dim] @ [out, heads, head_dim]^T -> [s, out]`, the
+/// head-major output projection over an attention result; the weight leaf is
+/// the stored `[out, heads*head_dim]` matrix viewed head-major. `attended` is the
 /// letter run of `x`'s axes: `"sud"` for [`non_causal_attention_heads`]'s
 /// `[s, u, d]`, `"sugd"` for the mixer's `[s, u, 1, d]`. A reduce over the
 /// head, group and channel axes is a merge with no separate flatten node.
@@ -282,7 +286,7 @@ pub fn project_heads(
         ScalarOp::Multiply,
         &[
             (x, format!("{attended}->{space}").as_str()),
-            (w.weight, format!("udo->{space}").as_str()),
+            (w.weight, format!("oud->{space}").as_str()),
         ],
     )?;
     let out = reduce(
@@ -847,21 +851,21 @@ mod tests {
 
         fn projection(&mut self, name: &str, input: u32, output: u32) -> Linear {
             Linear {
-                weight: self.leaf(&format!("{name}.weight"), &[input, output]),
+                weight: self.leaf(&format!("{name}.weight"), &[output, input]),
                 bias: Some(self.leaf(&format!("{name}.bias"), &[output])),
             }
         }
 
         fn heads(&mut self, name: &str, bias: bool) -> Linear {
             Linear {
-                weight: self.leaf(&format!("{name}.weight"), &[WIDTH, HEADS, HEAD_DIM]),
+                weight: self.leaf(&format!("{name}.weight"), &[HEADS, HEAD_DIM, WIDTH]),
                 bias: bias.then(|| self.leaf(&format!("{name}.bias"), &[HEADS, HEAD_DIM])),
             }
         }
 
         fn heads_out(&mut self, name: &str) -> Linear {
             Linear {
-                weight: self.leaf(&format!("{name}.weight"), &[HEADS, HEAD_DIM, WIDTH]),
+                weight: self.leaf(&format!("{name}.weight"), &[WIDTH, HEADS, HEAD_DIM]),
                 bias: Some(self.leaf(&format!("{name}.bias"), &[WIDTH])),
             }
         }
@@ -891,7 +895,7 @@ mod tests {
                 position: self.leaf("position_table", &[POSITIONS, WIDTH]),
                 layer_norm: self.norm("final_ln"),
                 head: Linear {
-                    weight: self.leaf("head.weight", &[WIDTH, VOCAB]),
+                    weight: self.leaf("head.weight", &[VOCAB, WIDTH]),
                     bias: None,
                 },
             }
