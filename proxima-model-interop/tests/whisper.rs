@@ -511,6 +511,15 @@ mod golden {
     pub fn fixture(name: &str) -> Result<PathBuf> {
         let dir = std::env::var("PROXIMA_WHISPER_REF")
             .context("PROXIMA_WHISPER_REF must name the oracle directory")?;
+        let has_conv1 = fs::read_dir(&dir)
+            .with_context(|| dir.clone())?
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("conv1."));
+        if !has_conv1 {
+            bail!(
+                "PROXIMA_WHISPER_REF={dir} has no conv1 dump: it is not the full-precision oracle whose conv ceiling these tests assert"
+            );
+        }
         Ok(Path::new(&dir).join(name))
     }
 
@@ -1083,9 +1092,6 @@ mod encoder {
         println!(
             "enc maxabs_rel={enc_error:.3e} rms={enc_rms:.3e} cosine={enc_cosine:.8} ceiling=8.8e-5"
         );
-        // The reference conv path quantizes im2col to F16, so the measured
-        // encoder floor is 1.595 maxabs_rel at cosine 0.99975; the transcript
-        // is the exact check and this row records the arithmetic.
         println!("enc cosine={enc_cosine:.8} maxabs_rel={enc_error:.3e}");
         assert!(enc_cosine >= 0.9997, "encoder cosine {enc_cosine}");
         assert!(enc_error <= 2.0, "encoder maxabs_rel {enc_error:.3e}");
