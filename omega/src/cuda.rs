@@ -236,7 +236,7 @@ pub fn emit_cuda_for_program(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
 ) -> Result<CudaKernel, EmitError> {
-    reject_mixed_dtype_elementwise(program, core::slice::from_ref(resolved), packed_operands)?;
+    reject_mixed_dtype_elementwise(program, core::slice::from_ref(resolved), packed_operands, numeric_policy)?;
     emit_cuda_with_policy(resolved, packed_operands, numeric_policy)
 }
 

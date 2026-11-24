@@ -1878,11 +1878,11 @@ fn bind_resolved(
     correct_packed_matmul_layouts(&mut resolved, &packed_operands.keys().copied().collect());
     let mut packed = packed_operands.clone();
     let resolved = derive_through_tensor_pass(resolved, program, shapes, &mut packed, numeric_policy, activation_storage);
-    crate::lowering::reject_mixed_dtype_elementwise(program, &resolved, &packed).map_err(|error| CudaDriverError::Emit {
+    validate_resolved(&resolved, numeric_policy)?;
+    crate::lowering::reject_mixed_dtype_elementwise(program, &resolved, &packed, numeric_policy).map_err(|error| CudaDriverError::Emit {
         node: resolved.first().map_or(NodeId(0), |bound| bound.node),
         error: error.to_string(),
     })?;
-    validate_resolved(&resolved, numeric_policy)?;
     let micros = LowerMicros {
         bind: bind_started.elapsed().as_micros() as u64,
         ..LowerMicros::default()

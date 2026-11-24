@@ -4,6 +4,10 @@ use alloc::vec::Vec;
 pub use proxima_numeric::codec::Codec;
 use proxima_tensor::{BoundOp, NodeId, ScalarOp};
 #[cfg(any(feature = "cuda", feature = "wgpu-backend"))]
+use proxima_numeric::NumericPolicy;
+#[cfg(any(feature = "cuda", feature = "wgpu-backend"))]
+use proxima_tensor::bind::narrow_accumulations;
+#[cfg(any(feature = "cuda", feature = "wgpu-backend"))]
 use proxima_tensor::{BoundOpKind, Op};
 
 #[cfg(any(feature = "cuda", feature = "wgpu-backend"))]
@@ -172,6 +176,7 @@ pub fn dispatch_bindings(resolved: &BoundOp) -> Vec<Binding> {
 /// the op's dtype and have no table, so a mixed read there would reinterpret the buffer's bits
 /// silently. A packed operand is read through its codec and is exempt. `program` is the node
 /// list `resolved` was bound from: it names the dtype each producing node wrote.
+/// Dtypes are read from `narrow_accumulations(program, numeric_policy)`, the program the bind ran on.
 ///
 /// # Errors
 /// [`EmitError::MixedDTypeOperand`] naming the op, the operand, and both dtypes.
@@ -179,7 +184,9 @@ pub fn reject_mixed_dtype_elementwise(
     program: &[Op],
     resolved: &[BoundOp],
     packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
 ) -> Result<(), EmitError> {
+    let program = narrow_accumulations(program, numeric_policy);
     for bound in resolved {
         if !matches!(
             bound.kind,
