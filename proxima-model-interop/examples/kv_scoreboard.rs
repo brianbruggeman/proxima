@@ -90,14 +90,14 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{CString, c_char, c_void};
-use std::fmt::Write as _;
+use std::fmt::{Display, Write as _};
 use std::fs::{self, File};
 use std::io::{Read, Write as _};
 use std::net::{SocketAddr, TcpStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use memmap2::MmapOptions;
 use proxima_gguf::parse_complete;
@@ -1019,6 +1019,11 @@ struct Row {
     features: String,
     gate: GateOutcome,
     parity: Parity,
+    started_at: SystemTime,
+    ended_at: SystemTime,
+    position: usize,
+    process: Option<ProcessTimes>,
+    run_facts: Vec<RunFacts>,
 }
 
 fn first_divergence(left: &[u64], right: &[u64]) -> Option<usize> {
@@ -1437,6 +1442,10 @@ struct Config {
     kv_bucket: usize,
     features: String,
     llama_commit: String,
+    /// measured backend, one of contract.json `backends`; required by `run`
+    backend: Option<String>,
+    /// the proxima tree measured; required by `run`
+    commit: Option<String>,
     /// path of the `llama-arm` `inproc_arm` bin; adds the llama-inproc arm
     llama_inproc: Option<PathBuf>,
     prompts: Vec<Prompt>,
@@ -1459,7 +1468,9 @@ struct Config {
     serving_config: Option<PathBuf>,
 }
 
-const VALUE_FLAGS: [&str; 21] = [
+const VALUE_FLAGS: [&str; 23] = [
+    "--backend",
+    "--commit",
     "--incumbent-cache",
     "--stages",
     "--stage-kv",
@@ -1595,6 +1606,8 @@ fn parse_config(arguments: impl IntoIterator<Item = String>) -> Result<Config, H
         },
         context_length: parse_value(&values, "--context-length", "tokens", DEFAULT_CONTEXT_LENGTH)?,
         kv_bucket: DEFAULT_KV_BUCKET,
+        backend: values.get("--backend").map(|name| checked_backend(name)).transpose()?,
+        commit: values.get("--commit").cloned(),
         llama_commit: values
             .get("--llama-commit")
             .cloned()
@@ -1880,6 +1893,7 @@ fn run_llama(context: &RunContext, cell: &Cell, row: &mut Row) -> Result<(), Har
     let (cold, warm) = outcome?;
     let log_text = fs::read_to_string(&context.log_path).map_err(io_error(&context.log_path))?;
     row.footprint_bytes = parse_footprint_bytes(&log_text).ok();
+    row.process = parse_process_times(&log_text);
     row.metrics = Metrics {
         ttft_cold_ms: Some(cold.prompt_ms),
         ttft_warm_ms: vec![warm.prompt_ms],
@@ -1926,6 +1940,8 @@ fn run_proxima(context: &RunContext, cell: &Cell, binary: &Path, row: &mut Row) 
     let combined = format!("{}\n{stderr}", String::from_utf8_lossy(&output.stdout));
     fs::write(&context.log_path, &combined).map_err(io_error(&context.log_path))?;
     row.footprint_bytes = parse_footprint_bytes(&stderr).ok();
+    row.process = parse_process_times(&stderr);
+    row.run_facts = parse_run_facts(&combined);
     let legacy = parse_proxima(&combined)?;
     let span = parse_proxima_span(&combined, &legacy);
     row.span_metrics = span.is_some();
@@ -1960,6 +1976,8 @@ fn run_inproc(context: &RunContext, cell: &Cell, binary: &Path, row: &mut Row) -
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     fs::write(&context.log_path, &stderr).map_err(io_error(&context.log_path))?;
     row.footprint_bytes = parse_footprint_bytes(&stderr).ok();
+    row.process = parse_process_times(&stderr);
+    row.run_facts = parse_run_facts(&stderr);
     let gate = parse_inproc_gate(&stderr).ok_or(HarnessError::MissingLine("llama_arm gate line"))?;
     row.binary_sha256.clone_from(&gate.sha256);
     let metrics = parse_inproc_span(&stderr);
@@ -1982,7 +2000,7 @@ fn arm_identity(path: &Path) -> Result<ArmIdentity, HarnessError> {
     })
 }
 
-fn blank_row(round: usize, cell: &Cell, prompt: &PromptData, identity: &ArmIdentity, config: &Config, gate: GateOutcome) -> Row {
+fn blank_row(round: usize, position: usize, cell: &Cell, prompt: &PromptData, identity: &ArmIdentity, config: &Config, gate: GateOutcome) -> Row {
     Row {
         round,
         cell: cell.clone(),
@@ -2001,6 +2019,11 @@ fn blank_row(round: usize, cell: &Cell, prompt: &PromptData, identity: &ArmIdent
         features: config.features.clone(),
         gate,
         parity: Parity::unevaluated(),
+        started_at: SystemTime::now(),
+        ended_at: SystemTime::now(),
+        position,
+        process: None,
+        run_facts: Vec::new(),
     }
 }
 
@@ -2025,7 +2048,405 @@ fn load_prompts(config: &Config) -> Result<(String, BTreeMap<Prompt, PromptData>
     Ok((model_sha256, prompts))
 }
 
+
+// ---- contract raw records: raw.jsonl, one record per attempted repeat per arm ----
+
+const CONTRACT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/scoreboard/contract.json");
+const UNREPORTED_REASON: &str = "incumbent-does-not-report";
+const NOT_RUN_REASON: &str = "unexercised";
+const LLM_MODALITY: &str = "llm";
+const LLAMA_ARM: &str = "llama.cpp";
+const LLAMA_INPROC_ARM: &str = "llama.cpp-inproc";
+const MICROS_PER_SECOND_DIGITS: usize = 6;
+const MICROS_PER_MILLI_DIGITS: usize = 3;
+const BYTES_PER_KIBIBYTE: u64 = 1024;
+const SECONDS_PER_DAY: u64 = 86_400;
+const SECONDS_PER_HOUR: u64 = 3_600;
+const SECONDS_PER_MINUTE: u64 = 60;
+
+fn load_contract() -> Result<Value, HarnessError> {
+    let path = Path::new(CONTRACT_PATH);
+    let text = fs::read_to_string(path).map_err(io_error(path))?;
+    serde_json::from_str(&text).map_err(|source| HarnessError::BadResponse(format!("contract.json: {source}")))
+}
+
+fn contract_backends(contract: &Value) -> Vec<String> {
+    contract
+        .get("backends")
+        .and_then(Value::as_array)
+        .map(|names| names.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+fn contract_proxima_arm(contract: &Value) -> String {
+    contract.get("proxima_arm").and_then(Value::as_str).unwrap_or_default().to_owned()
+}
+
+fn checked_backend(name: &str) -> Result<String, HarnessError> {
+    let backends = contract_backends(&load_contract()?);
+    if backends.iter().any(|known| known == name) {
+        return Ok(name.to_owned());
+    }
+    Err(HarnessError::BadValue { flag: "--backend", expected: "a backend in contract.json", got: name.to_owned() })
+}
+
+fn micros_from_millis(millis: impl Display) -> Option<u64> {
+    micros_from_scaled_text(&millis.to_string(), MICROS_PER_MILLI_DIGITS)
+}
+
+fn micros_from_nanos(nanos: u64) -> u64 {
+    u64::try_from(Duration::from_nanos(nanos).as_micros()).unwrap_or(u64::MAX)
+}
+
+/// `7.53` to 7_530_000 without a float, so the time line's digits survive exactly.
+fn micros_from_seconds_text(text: &str) -> Option<u64> {
+    micros_from_scaled_text(text, MICROS_PER_SECOND_DIGITS)
+}
+
+fn micros_from_scaled_text(text: &str, digits: usize) -> Option<u64> {
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    let padded: String = fraction.chars().chain(std::iter::repeat('0')).take(digits).collect();
+    let units: u64 = whole.parse().ok()?;
+    let micros: u64 = padded.parse().ok()?;
+    Some(units * 10_u64.pow(u32::try_from(digits).ok()?) + micros)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessTimes {
+    wall_us: u64,
+    user_us: u64,
+    sys_us: u64,
+}
+
+/// `/usr/bin/time -l` first line, `7.53 real 2.90 user 1.85 sys`, in integer microseconds.
+fn parse_process_times(text: &str) -> Option<ProcessTimes> {
+    let line = text.lines().find(|line| line.contains(" real ") && line.contains(" user "))?;
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let before = |unit: &str| {
+        let at = tokens.iter().position(|token| *token == unit)?;
+        micros_from_seconds_text(tokens.get(at.checked_sub(1)?)?)
+    };
+    Some(ProcessTimes { wall_us: before("real")?, user_us: before("user")?, sys_us: before("sys")? })
+}
+
+/// `2026-11-23T14:00:05.000000Z`, the contract's timestamp shape, from days-since-epoch civil arithmetic.
+fn utc_text(time: SystemTime) -> String {
+    let since = time.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let seconds = since.as_secs();
+    let (year, month, day) = civil_from_days(i64::try_from(seconds / SECONDS_PER_DAY).unwrap_or(0));
+    let in_day = seconds % SECONDS_PER_DAY;
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:06}Z",
+        in_day / SECONDS_PER_HOUR,
+        in_day % SECONDS_PER_HOUR / SECONDS_PER_MINUTE,
+        in_day % SECONDS_PER_MINUTE,
+        since.subsec_micros()
+    )
+}
+
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted.rem_euclid(146_097);
+    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    (year, month, day)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct HostFacts {
+    hw_model: Option<String>,
+    chip: Option<String>,
+    memory_bytes: Option<u64>,
+    os_build: Option<String>,
+    power_source: Option<String>,
+}
+
+fn command_text(program: &str, arguments: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(arguments).output().ok().filter(|output| output.status.success())?;
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+fn file_text(path: &str) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?.trim().to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+fn power_source_from_pmset(text: &str) -> Option<String> {
+    let first = text.lines().next()?;
+    if first.contains("AC Power") {
+        Some("AC".to_owned())
+    } else {
+        first.contains("Battery Power").then(|| "battery".to_owned())
+    }
+}
+
+fn memory_bytes_from_meminfo(text: &str) -> Option<u64> {
+    let line = text.lines().find(|line| line.starts_with("MemTotal:"))?;
+    let kibibytes: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kibibytes * BYTES_PER_KIBIBYTE)
+}
+
+fn model_name_from_cpuinfo(text: &str) -> Option<String> {
+    let line = text.lines().find(|line| line.starts_with("model name"))?;
+    Some(line.split_once(':')?.1.trim().to_owned())
+}
+
+fn linux_power_source() -> Option<String> {
+    let entries = fs::read_dir("/sys/class/power_supply").ok()?;
+    let online: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| file_text(&entry.path().join("online").display().to_string()))
+        .collect();
+    if online.is_empty() {
+        return None;
+    }
+    Some(if online.iter().any(|state| state == "1") { "AC" } else { "battery" }.to_owned())
+}
+
+fn host_facts() -> HostFacts {
+    if cfg!(target_os = "macos") {
+        HostFacts {
+            hw_model: command_text("sysctl", &["-n", "hw.model"]),
+            chip: command_text("sysctl", &["-n", "machdep.cpu.brand_string"]),
+            memory_bytes: command_text("sysctl", &["-n", "hw.memsize"]).and_then(|text| text.parse().ok()),
+            os_build: command_text("sw_vers", &["-buildVersion"]),
+            power_source: command_text("pmset", &["-g", "ps"]).and_then(|text| power_source_from_pmset(&text)),
+        }
+    } else {
+        HostFacts {
+            hw_model: file_text("/sys/devices/virtual/dmi/id/product_name"),
+            chip: file_text("/proc/cpuinfo").and_then(|text| model_name_from_cpuinfo(&text)),
+            memory_bytes: file_text("/proc/meminfo").and_then(|text| memory_bytes_from_meminfo(&text)),
+            os_build: command_text("uname", &["-r"]),
+            power_source: linux_power_source(),
+        }
+    }
+}
+
+/// What a proxima child prints for one run: its `run=done` line and the `step_time` records.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct RunFacts {
+    wall_us: Option<u64>,
+    tokens_generated: Option<u64>,
+    steady_rss_bytes: Option<u64>,
+    gpu_peak_bytes: Option<u64>,
+    prefill_ns: Option<u64>,
+    decode_step_ns: Vec<u64>,
+}
+
+fn parse_run_facts(text: &str) -> Vec<RunFacts> {
+    let mut runs: BTreeMap<usize, RunFacts> = BTreeMap::new();
+    for line in text.lines().filter(|line| line.contains("run=done")) {
+        let Some(run) = run_index_of(line) else {
+            continue;
+        };
+        let facts = runs.entry(run).or_default();
+        facts.wall_us = field_value(line, "wall_ms=").and_then(micros_from_millis);
+        facts.tokens_generated = field_value(line, "tokens_generated=").and_then(|value| value.parse().ok());
+        facts.steady_rss_bytes = field_value(line, "steady_rss_bytes=").and_then(|value| value.parse().ok());
+        facts.gpu_peak_bytes = field_value(line, "gpu_peak_bytes=").and_then(|value| value.parse().ok());
+    }
+    for (run, records) in parse_token_records(text) {
+        let facts = runs.entry(run).or_default();
+        facts.prefill_ns = records.iter().find(|record| record.phase == SpanPhase::Prefill).map(|record| record.elapsed_ns);
+        facts.decode_step_ns = records.iter().filter(|record| record.phase == SpanPhase::Decode).map(|record| record.elapsed_ns).collect();
+    }
+    runs.into_values().collect()
+}
+
+/// Run-wide facts every record carries.
+struct RecordContext {
+    model: String,
+    backend: String,
+    commit: String,
+    session_id: String,
+    llama_commit: String,
+    proxima_arm: String,
+    host: HostFacts,
+}
+
+fn unreported() -> Value {
+    json!({ "unreported": UNREPORTED_REASON })
+}
+
+fn arm_of(row: &Row, context: &RecordContext) -> (String, String) {
+    match row.cell.engine {
+        Engine::Proxima { .. } => (context.proxima_arm.clone(), row.binary_sha256.clone()),
+        Engine::Llama => (LLAMA_ARM.to_owned(), context.llama_commit.clone()),
+        Engine::LlamaInproc { .. } => (LLAMA_INPROC_ARM.to_owned(), context.llama_commit.clone()),
+    }
+}
+
+/// The measurements of one repeat before the run-wide fields are put around them.
+#[derive(Default)]
+struct RepeatFacts {
+    prompt_tokens: Value,
+    generated_tokens: Value,
+    ttft_us: Value,
+    ttlt_us: Value,
+    load_us: Value,
+    prefill_us: Value,
+    decode_us: Value,
+    step_us: Value,
+    steady_rss_bytes: Value,
+    gpu_allocated_peak_bytes: Value,
+}
+
+fn proxima_repeats(row: &Row, detail: &ProximaDetail) -> Vec<RepeatFacts> {
+    let walls: u64 = row.run_facts.iter().filter_map(|facts| facts.wall_us).sum();
+    let load = row.process.and_then(|times| times.wall_us.checked_sub(walls));
+    row.run_facts
+        .iter()
+        .enumerate()
+        .map(|(repeat, facts)| {
+            let ttft_ms = match repeat {
+                0 => row.metrics.ttft_cold_ms,
+                _ => row.metrics.ttft_warm_ms.get(repeat - 1).copied(),
+            };
+            let span: Vec<u64> = facts.decode_step_ns.iter().skip(1).copied().collect();
+            RepeatFacts {
+                prompt_tokens: json!(detail.prompt_token_count),
+                generated_tokens: json!(facts.tokens_generated),
+                ttft_us: json!(ttft_ms.and_then(micros_from_millis)),
+                ttlt_us: json!(facts.wall_us),
+                load_us: json!(if repeat == 0 { load } else { Some(0) }),
+                prefill_us: json!(facts.prefill_ns.map(micros_from_nanos)),
+                decode_us: json!((!span.is_empty()).then(|| span.iter().map(|nanos| micros_from_nanos(*nanos)).sum::<u64>())),
+                step_us: json!(facts.decode_step_ns.iter().map(|nanos| micros_from_nanos(*nanos)).collect::<Vec<_>>()),
+                steady_rss_bytes: json!(facts.steady_rss_bytes),
+                gpu_allocated_peak_bytes: json!(facts.gpu_peak_bytes),
+            }
+        })
+        .collect()
+}
+
+fn llama_repeat(response: &LlamaResponse) -> RepeatFacts {
+    let prefill = micros_from_millis(response.prompt_ms);
+    let decode = micros_from_millis(response.predicted_ms);
+    RepeatFacts {
+        prompt_tokens: json!(response.prompt_n),
+        generated_tokens: json!(response.predicted_n),
+        ttft_us: json!(prefill),
+        ttlt_us: json!(prefill.zip(decode).map(|(first, second)| first + second)),
+        load_us: unreported(),
+        prefill_us: json!(prefill),
+        decode_us: json!(decode),
+        step_us: unreported(),
+        steady_rss_bytes: unreported(),
+        gpu_allocated_peak_bytes: unreported(),
+    }
+}
+
+fn repeats_of(row: &Row) -> Vec<RepeatFacts> {
+    match &row.evidence {
+        Evidence::Proxima(detail) => proxima_repeats(row, detail),
+        Evidence::Llama(evidence) => vec![llama_repeat(&evidence.cold), llama_repeat(&evidence.warm)],
+        Evidence::Inproc(evidence) => proxima_repeats(row, &evidence.detail),
+        Evidence::None => vec![RepeatFacts::default()],
+    }
+}
+
+fn input_id(row: &Row) -> String {
+    format!("{}-{}", row.cell.prompt.name(), row.cell.kv.name())
+}
+
+/// One record per repeat of the row, indices counted from `first_index`; every field of the contract's LLM record.
+fn run_records(row: &Row, context: &RecordContext, first_index: usize) -> Vec<Value> {
+    let (arm, arm_version) = arm_of(row, context);
+    let admitted = row.gate.may_run() && row.exit_code == 0 && row.parity.valid();
+    repeats_of(row)
+        .into_iter()
+        .enumerate()
+        .map(|(repeat, facts)| {
+            let times = row.process;
+            json!({
+                "record": "run",
+                "model": context.model,
+                "modality": LLM_MODALITY,
+                "backend": context.backend,
+                "arm": arm,
+                "arm_version": arm_version,
+                "commit": context.commit,
+                "session_id": context.session_id,
+                "index": first_index + repeat,
+                "round": row.round,
+                "position": row.position,
+                "repeat": repeat,
+                "started_at": utc_text(row.started_at),
+                "ended_at": utc_text(row.ended_at),
+                "exit_status": row.exit_code,
+                "admitted": admitted,
+                "discarded_warmup": false,
+                "host": {
+                    "load1": row.load1,
+                    "hw_model": context.host.hw_model,
+                    "chip": context.host.chip,
+                    "memory_bytes": context.host.memory_bytes,
+                    "os_build": context.host.os_build,
+                    "power_source": context.host.power_source,
+                },
+                "input": { "id": input_id(row) },
+                "prompt_tokens": facts.prompt_tokens,
+                "generated_tokens": facts.generated_tokens,
+                "timings": {
+                    "ttft_us": facts.ttft_us,
+                    "ttlt_us": facts.ttlt_us,
+                    "load_us": facts.load_us,
+                    "decode_us": facts.decode_us,
+                    "step_us": facts.step_us,
+                    "prefill_us": facts.prefill_us,
+                },
+                "resources": {
+                    "footprint_peak_bytes": row.footprint_bytes,
+                    "steady_rss_bytes": facts.steady_rss_bytes,
+                    "gpu_allocated_peak_bytes": facts.gpu_allocated_peak_bytes,
+                    "cpu_user_us": times.map(|process| process.user_us),
+                    "cpu_sys_us": times.map(|process| process.sys_us),
+                    "wall_us": times.map(|process| process.wall_us),
+                },
+                "quality": { "match": row.parity.valid(), "match_incumbent": row.parity.valid() },
+            })
+        })
+        .collect()
+}
+
+
+fn not_run_records(contract: &Value, measured: &str) -> Vec<Value> {
+    contract_backends(contract)
+        .into_iter()
+        .filter(|backend| backend != measured)
+        .map(|backend| {
+            json!({
+                "record": "not-run",
+                "backend": backend,
+                "reason": NOT_RUN_REASON,
+                "detail": format!("this run measured {measured} only"),
+            })
+        })
+        .collect()
+}
+
+/// The raw.jsonl text: every row's records with contiguous indices, then one not-run record per unmeasured backend.
+fn raw_jsonl(rows: &[Row], context: &RecordContext, contract: &Value) -> String {
+    let mut records: Vec<Value> = Vec::new();
+    for row in rows {
+        let next = records.len();
+        records.extend(run_records(row, context, next));
+    }
+    records.extend(not_run_records(contract, &context.backend));
+    records.iter().map(|record| format!("{record}\n")).collect()
+}
+
 fn run(config: &Config) -> Result<(), HarnessError> {
+    let backend = config.backend.clone().ok_or(HarnessError::MissingFlag("--backend"))?;
+    let commit = config.commit.clone().ok_or(HarnessError::MissingFlag("--commit"))?;
+    let contract = load_contract()?;
     let logs = config.out.join("logs");
     fs::create_dir_all(&logs).map_err(io_error(&logs))?;
     let (model_sha256, prompts) = load_prompts(config)?;
@@ -2039,6 +2460,7 @@ fn run(config: &Config) -> Result<(), HarnessError> {
     let mut cells = cell_order(&config.proxima, config.llama_inproc.as_deref());
     cells.retain(|cell| config.prompts.contains(&cell.prompt) && config.kvs.contains(&cell.kv));
     let mut rows = Vec::new();
+    let session_id = format!("s-{}-{}", utc_text(SystemTime::now()).replace(['-', ':', '.'], ""), std::process::id());
     for (step, (round, index)) in round_plan(config.rounds, cells.len()).into_iter().enumerate() {
         let cell = &cells[index];
         let prompt = &prompts[&cell.prompt];
@@ -2047,7 +2469,7 @@ fn run(config: &Config) -> Result<(), HarnessError> {
             Engine::Llama => ArmIdentity { sha256: llama_identity.sha256.clone(), debug_build: false },
         };
         let gate = if config.quiet_gate { wait_for_quiet(&config.gate) } else { GateOutcome::Skipped };
-        let mut row = blank_row(round, cell, prompt, &identity, config, gate.clone());
+        let mut row = blank_row(round, step, cell, prompt, &identity, config, gate.clone());
         let context = RunContext {
             config,
             prompt,
@@ -2056,6 +2478,7 @@ fn run(config: &Config) -> Result<(), HarnessError> {
             log_path: logs.join(format!("r{round}-{}-{}-{}-{}.err", cell.engine_name(), cell.label, cell.prompt.name(), cell.kv.name())),
         };
         if gate.may_run() {
+            row.started_at = SystemTime::now();
             let outcome = match &cell.engine {
                 Engine::Proxima { binary } => run_proxima(&context, cell, binary, &mut row),
                 Engine::Llama => run_llama(&context, cell, &mut row),
@@ -2064,6 +2487,7 @@ fn run(config: &Config) -> Result<(), HarnessError> {
                     run_inproc(&context, cell, binary, &mut row)
                 }
             };
+            row.ended_at = SystemTime::now();
             if let Err(error) = outcome {
                 row.note = format!("{}; {error}", row.note);
             }
@@ -2074,16 +2498,33 @@ fn run(config: &Config) -> Result<(), HarnessError> {
         rows.push(row);
     }
     evaluate_all(&mut rows, &facts);
-    write_outputs(config, &cells, &rows, &facts)
+    let model = config.model.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+    let context = RecordContext {
+        model,
+        backend,
+        commit,
+        session_id,
+        llama_commit: config.llama_commit.clone(),
+        proxima_arm: contract_proxima_arm(&contract),
+        host: host_facts(),
+    };
+    write_outputs(config, &cells, &rows, &facts, &RawRecords { context: &context, contract: &contract })
 }
 
-fn write_outputs(config: &Config, cells: &[Cell], rows: &[Row], facts: &Facts) -> Result<(), HarnessError> {
+struct RawRecords<'a> {
+    context: &'a RecordContext,
+    contract: &'a Value,
+}
+
+fn write_outputs(config: &Config, cells: &[Cell], rows: &[Row], facts: &Facts, raw: &RawRecords) -> Result<(), HarnessError> {
     let mut tsv = format!("{TSV_HEADER}\n");
     for row in rows {
         let _ = writeln!(tsv, "{}", tsv_line(row, find_peer(rows, row), facts));
     }
     let tsv_path = config.out.join("raw.tsv");
     fs::write(&tsv_path, &tsv).map_err(io_error(&tsv_path))?;
+    let raw_path = config.out.join("raw.jsonl");
+    fs::write(&raw_path, raw_jsonl(rows, raw.context, raw.contract)).map_err(io_error(&raw_path))?;
     let table_path = config.out.join("scoreboard.md");
     let table = scoreboard_markdown(rows, cells);
     fs::write(&table_path, &table).map_err(io_error(&table_path))?;
@@ -3974,7 +4415,12 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
             debug_build: false,
             features: "std,metal".to_owned(),
             gate: GateOutcome::Clear { waited_secs: 30 },
-            parity: Parity::unevaluated(),
+            parity: Parity { checks: std::array::from_fn(|_| Check::Held) },
+            started_at: UNIX_EPOCH,
+            ended_at: UNIX_EPOCH,
+            position: 0,
+            process: None,
+            run_facts: Vec::new(),
         }
     }
 
@@ -4713,5 +5159,171 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         let cached = parse_config(arguments).expect("cache flags");
         assert_eq!(cached.incumbent_cache, Some(PathBuf::from("/cache")));
         assert!(cached.refresh_incumbent);
+    }
+
+    const RAW_LLAMA_TIME: &str = "       12.00 real         3.00 user         1.00 sys\n   952119104  peak memory footprint\n";
+
+    fn fixture_proxima_log() -> String {
+        let decode_steps = (0..3)
+            .flat_map(|run| (1..4).map(move |step| format!("step_time run_index={run} step={step} step_ms=0 step_ns={} phase=decode", 60_000_000 + step * 1_000_000)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("{PROX_LOG}\n{decode_steps}\n")
+    }
+
+    fn fixture_host() -> HostFacts {
+        HostFacts {
+            hw_model: Some("fixture-model".to_owned()),
+            chip: Some("fixture-chip".to_owned()),
+            memory_bytes: Some(34_359_738_368),
+            os_build: Some("fixture-build".to_owned()),
+            power_source: Some("AC".to_owned()),
+        }
+    }
+
+    fn fixture_context(contract: &Value) -> RecordContext {
+        RecordContext {
+            model: "fixture-blob".to_owned(),
+            backend: "cpu".to_owned(),
+            commit: "2364281a8".to_owned(),
+            session_id: "s-fixture".to_owned(),
+            llama_commit: "ba3c05f71".to_owned(),
+            proxima_arm: contract_proxima_arm(contract),
+            host: fixture_host(),
+        }
+    }
+
+    fn fixture_rows() -> Vec<Row> {
+        let log = fixture_proxima_log();
+        let mut proxima = proxima_row(vec![1, 2, 3], 26);
+        proxima.metrics = parse_proxima(&log).expect("legacy parse");
+        proxima.run_facts = parse_run_facts(&log);
+        proxima.process = parse_process_times(&log);
+        proxima.started_at = UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        proxima.ended_at = UNIX_EPOCH + Duration::from_secs(1_000_000_008);
+        let mut llama = llama_row(vec![1, 2, 3]);
+        llama.process = parse_process_times(RAW_LLAMA_TIME);
+        llama.position = 1;
+        llama.started_at = UNIX_EPOCH + Duration::from_secs(1_000_000_010);
+        llama.ended_at = UNIX_EPOCH + Duration::from_secs(1_000_000_020);
+        vec![proxima, llama]
+    }
+
+    fn scoreboard_script() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scripts/scoreboard/scoreboard")
+    }
+
+    /// Writes `lines` to a scratch file and returns what `scoreboard validate` printed.
+    fn validate_lines(name: &str, lines: &[String]) -> Vec<String> {
+        let path = std::env::temp_dir().join(format!("kv_scoreboard_{}_{name}.jsonl", std::process::id()));
+        fs::write(&path, lines.join("\n") + "\n").expect("write raw.jsonl");
+        let output = Command::new(scoreboard_script()).arg("validate").arg(&path).output().expect("run scoreboard validate");
+        fs::remove_file(&path).ok();
+        String::from_utf8_lossy(&output.stdout).lines().map(str::to_owned).collect()
+    }
+
+    fn raw_lines() -> Vec<String> {
+        let contract = load_contract().expect("contract.json");
+        raw_jsonl(&fixture_rows(), &fixture_context(&contract), &contract).lines().map(str::to_owned).collect()
+    }
+
+    fn names_a_field_problem(line: &str) -> bool {
+        line.contains(": missing") || line.contains("not a finite") || line.contains("unreported")
+    }
+
+    #[test]
+    fn raw_records_satisfy_every_field_the_contract_requires() {
+        let lines = validate_lines("positive", &raw_lines());
+        eprintln!("validate lines: {lines:#?}");
+        let problems: Vec<&String> = lines.iter().filter(|line| names_a_field_problem(line)).collect();
+        assert!(problems.is_empty(), "field problems: {problems:#?}");
+        assert!(!lines.is_empty(), "one fixture round must still trip the n, warm-up and alternation rules");
+    }
+
+    #[test]
+    fn a_record_missing_a_required_field_fails_validation_naming_that_field() {
+        let mut lines = raw_lines();
+        let mut first: Value = serde_json::from_str(&lines[0]).expect("record json");
+        first["timings"].as_object_mut().expect("timings object").remove("ttft_us");
+        lines[0] = first.to_string();
+        let failures = validate_lines("negative", &lines);
+        assert!(failures.iter().any(|line| line.contains("run 0 field timings.ttft_us: missing")), "{failures:#?}");
+    }
+
+    #[test]
+    fn one_record_per_repeat_with_contiguous_indices_and_not_run_for_other_backends() {
+        let lines = raw_lines();
+        let contract = load_contract().expect("contract.json");
+        let runs: Vec<Value> = lines.iter().map(|line| serde_json::from_str(line).expect("json")).filter(|record: &Value| record["record"] == "run").collect();
+        assert_eq!(runs.len(), 3 + 2, "proxima runs 0..2 plus llama cold and warm");
+        assert!(runs.iter().enumerate().all(|(position, record)| record["index"] == position));
+        assert_eq!(lines.len() - runs.len(), contract_backends(&contract).len() - 1);
+        assert_eq!(runs[0]["arm"], "proxima");
+        assert_eq!(runs[3]["arm"], LLAMA_ARM);
+    }
+
+    #[test]
+    fn unreported_appears_only_on_incumbent_fields_the_contract_marks_unreportable() {
+        fn collect(value: &Value, prefix: &str, found: &mut Vec<String>) {
+            let Some(object) = value.as_object() else { return };
+            if object.contains_key("unreported") {
+                found.push(prefix.to_owned());
+                return;
+            }
+            for (key, inner) in object {
+                collect(inner, &if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") }, found);
+            }
+        }
+        let contract = load_contract().expect("contract.json");
+        let allowed: Vec<String> = contract["required_common"]
+            .as_array()
+            .into_iter()
+            .chain(contract["modalities"]["llm"]["required"].as_array())
+            .flatten()
+            .filter(|field| field["unreportable"] == true)
+            .filter_map(|field| field["path"].as_str().map(str::to_owned))
+            .collect();
+        for line in raw_lines() {
+            let record: Value = serde_json::from_str(&line).expect("json");
+            let mut found = Vec::new();
+            collect(&record, "", &mut found);
+            assert!(found.iter().all(|path| allowed.contains(path)), "{found:?} not all unreportable");
+            assert!(record["arm"] != "proxima" || found.is_empty(), "proxima record carries unreported {found:?}");
+        }
+    }
+
+    #[test]
+    fn process_times_come_from_the_time_line_in_integer_microseconds() {
+        let times = parse_process_times(PROX_LOG).expect("time line");
+        assert_eq!(times, ProcessTimes { wall_us: 7_530_000, user_us: 2_900_000, sys_us: 1_850_000 });
+        assert_eq!(micros_from_millis("1573.234917"), Some(1_573_234));
+    }
+
+    #[test]
+    fn timestamps_use_the_contract_shape() {
+        assert_eq!(utc_text(UNIX_EPOCH), "1970-01-01T00:00:00.000000Z");
+        assert_eq!(utc_text(UNIX_EPOCH + Duration::from_micros(1_000_000_000_000_123)), "2001-09-09T01:46:40.000123Z");
+    }
+
+    #[test]
+    fn host_facts_parse_from_os_text() {
+        assert_eq!(power_source_from_pmset("Now drawing from 'AC Power'\n -InternalBattery-0"), Some("AC".to_owned()));
+        assert_eq!(power_source_from_pmset("Now drawing from 'Battery Power'"), Some("battery".to_owned()));
+        assert_eq!(memory_bytes_from_meminfo("MemTotal:       32768000 kB\nMemFree: 1 kB\n"), Some(33_554_432_000));
+        assert_eq!(model_name_from_cpuinfo("processor\t: 0\nmodel name\t: AMD EPYC\n"), Some("AMD EPYC".to_owned()));
+    }
+
+    #[test]
+    fn backend_is_checked_against_the_contract_list_and_run_needs_both_flags() {
+        let base = ["--out", "o", "--model", "m", "--llama", "l", "--long-prompt-file", "p", "--llama-commit", "ba3c05f71", "--prox", "new=/bin/a"];
+        let mut arguments: Vec<String> = base.iter().map(|text| (*text).to_owned()).collect();
+        let bare = parse_config(arguments.clone()).expect("flags are optional until run");
+        assert!(bare.backend.is_none() && bare.commit.is_none());
+        assert!(run(&bare).is_err());
+        arguments.extend(["--backend", "tpu"].map(str::to_owned));
+        assert!(parse_config(arguments.clone()).is_err());
+        arguments.extend(["--backend", "cuda", "--commit", "2364281a8"].map(str::to_owned));
+        let config = parse_config(arguments).expect("known backend");
+        assert_eq!((config.backend.as_deref(), config.commit.as_deref()), (Some("cuda"), Some("2364281a8")));
     }
 }
