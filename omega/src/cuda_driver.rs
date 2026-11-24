@@ -1742,7 +1742,7 @@ impl CudaDriver {
             arena
                 .buffers
                 .insert(output_node, CudaGraphBuffer::F32(device_output));
-            return Err(error.into());
+            return Err(error);
         }
         self.graph_launches.fetch_add(1, Ordering::Relaxed);
         if synchronize {

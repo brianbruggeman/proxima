@@ -6062,37 +6062,29 @@ fn an_out_of_range_stacked_q8_0_expert_route_faults_on_the_staged_gathered_dp4a(
     }
 }
 
-const GROUPED_EXPERTS: usize = 8;
-const GROUPED_ROWS: usize = 128;
-const GROUPED_DEPTH: usize = 512;
-
-fn grouped_route(tokens: usize) -> Vec<f32> {
-    (0..tokens).map(|token| ((token * 5 + token / 3) % GROUPED_EXPERTS) as f32).collect()
-}
 
 /// Every codec the tensor-core gemm decodes and `arbitrary_blocks` can fill: a gathered expert
 /// product with at least the grouped minimum of token rows takes the route prepass and the grouped
 /// kernel, and equals the cpu engine over the same packed blocks.
 #[test]
 fn a_gathered_expert_product_above_the_grouped_minimum_takes_the_grouped_kernel_and_matches_cpu_on_cuda() {
-    let tokens = omega::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS as usize + 16;
-    let route = grouped_route(tokens);
-    let activation: Vec<f32> = random_vec(731, tokens * GROUPED_DEPTH).into_iter().map(|value| value * 2.0 - 1.0).collect();
+    let (experts, rows, depth) = (8, 128, 512);
+    let tokens = usize::try_from(omega::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS).expect("the minimum fits a count") + 16;
+    let route: Vec<_> = (0..tokens).map(|token| ((token * 5 + token / 3) % experts) as _).collect();
+    let activation: Vec<_> = random_vec(731, tokens * depth).into_iter().map(|value| value * 2.0 - 1.0).collect();
+    let inputs = vec![("route".to_string(), route), ("activation".to_string(), activation)];
     let codecs: Vec<Codec> = Codec::ALL
         .into_iter()
-        .filter(|codec| omega::cuda::is_mma_weight(*codec))
-        .filter(|codec| codec.block_layout().is_some_and(|layout| layout.scale.layout.width() == 16 && GROUPED_DEPTH % usize::from(layout.elements) == 0))
+        .filter(|codec| omega::cuda::is_mma_weight(*codec) && omega::cuda::is_int8_weight(*codec))
+        .filter(|codec| codec.block_layout().is_some_and(|layout| depth % usize::from(layout.elements) == 0))
         .collect();
     assert!(!codecs.is_empty(), "the decode table accepts block codecs");
     for codec in codecs {
         let layout = codec.block_layout().expect("a block codec");
-        let weight = arbitrary_blocks(&layout, GROUPED_EXPERTS * GROUPED_ROWS * GROUPED_DEPTH / usize::from(layout.elements), 733);
-        let (program, sum) = gathered_expert_program(GROUPED_EXPERTS as u32, GROUPED_ROWS as u32, GROUPED_DEPTH as u32, tokens as u32);
-        let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
-            ("weight", QuantizedBlock::Packed { codec, bytes: &weight }),
-            ("route", QuantizedBlock::Float32(&route)),
-            ("activation", QuantizedBlock::Float32(&activation)),
-        ];
+        let weight = arbitrary_blocks(&layout, experts * rows * depth / usize::from(layout.elements), 733);
+        let (program, sum) = gathered_expert_program(experts.try_into().unwrap(), rows.try_into().unwrap(), depth.try_into().unwrap(), tokens.try_into().unwrap());
+        let mut named = as_named_blocks(&inputs);
+        named.push(("weight", QuantizedBlock::Packed { codec, bytes: &weight }));
         let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), &program, &[], &named, &[sum], NumericPolicy::default())
             .expect("the gathered expert product plans on cuda");
         let identities = cuda_kernel_identities(&plan).expect("a cuda plan");
@@ -6103,10 +6095,10 @@ fn a_gathered_expert_product_above_the_grouped_minimum_takes_the_grouped_kernel_
         let mut reference_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[sum], NumericPolicy::default())
             .expect("the gathered expert product plans on cpu");
         let expected = execute_plan_named(&mut reference_plan, &named).expect("the reference runs on cpu");
-        assert_eq!(actual.root().len(), tokens * GROUPED_ROWS, "{codec:?}: one output per (token, row)");
-        let magnitude = expected.root().iter().fold(0.0f32, |largest, value| largest.max(value.abs()));
+        assert_eq!(actual.root().len(), tokens * rows, "{codec:?}: one output per (token, row)");
+        let magnitude = expected.root().iter().map(|value| value.abs()).reduce(|largest, value| largest.max(value)).unwrap_or_default();
         assert!(magnitude > 0.0, "{codec:?}: an all-zero reference would make parity vacuous");
-        let worst = actual.root().iter().zip(expected.root()).map(|(got, want)| (got - want).abs()).fold(0.0f32, f32::max);
+        let worst = actual.root().iter().zip(expected.root()).map(|(got, want)| (got - want).abs()).reduce(|largest, value| largest.max(value)).unwrap_or_default();
         assert!(worst / magnitude < 1e-5, "{codec:?}: grouped kernel disagrees with cpu: worst={worst} magnitude={magnitude}");
     }
 }
