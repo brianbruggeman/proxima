@@ -757,12 +757,9 @@ mod bench {
             &mut graph,
             input,
             case.tensor,
-            case.side,
-            case.side,
-            case.in_channels,
-            case.out_channels,
-            case.groups,
-            case.groups,
+            (case.side, case.side),
+            (case.in_channels, case.out_channels),
+            (case.groups, case.groups),
             ConvTaps::Three,
         )
         .expect("conv");

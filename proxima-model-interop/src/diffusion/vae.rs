@@ -114,14 +114,14 @@ fn conv(
     graph: &mut Graph,
     x: NodeId,
     tensor: &str,
-    height: u32,
-    width: u32,
-    in_channels: u32,
-    out_channels: u32,
-    in_groups: u32,
-    out_groups: u32,
+    grid: (u32, u32),
+    channels: (u32, u32),
+    groups: (u32, u32),
     tap_form: ConvTaps,
 ) -> Result<NodeId, TensorError> {
+    let (height, width) = grid;
+    let (in_channels, out_channels) = channels;
+    let (in_groups, out_groups) = groups;
     let start = graph.program.len();
     let weight_shape = [
         out_groups,
@@ -269,38 +269,24 @@ fn pointwise(
 /// a decoder by hand (the per-shape bench) rather than through
 /// [`build_vae_decode`].
 ///
-/// `groups` is the channel-group count the decoder's checkpoint was trained
-/// with; `out_groups` is `1` for the final `3`-channel carve and `groups`
-/// otherwise.
+/// `grid` is `(height, width)`, `channels` is `(in, out)`, and `groups` is
+/// `(in, out)` channel-group counts: the decoder's checkpoint was trained with
+/// `groups` on the input side, and the output side is `1` for the final
+/// `3`-channel carve and `groups` otherwise.
 ///
 /// # Errors
 ///
 /// [`TensorError`] when a notation or extent fails to build.
-#[allow(clippy::too_many_arguments)]
 pub fn build_conv3x3(
     graph: &mut Graph,
     x: NodeId,
     tensor: &str,
-    height: u32,
-    width: u32,
-    in_channels: u32,
-    out_channels: u32,
-    groups: u32,
-    out_groups: u32,
+    grid: (u32, u32),
+    channels: (u32, u32),
+    groups: (u32, u32),
     tap_form: ConvTaps,
 ) -> Result<NodeId, TensorError> {
-    conv(
-        graph,
-        x,
-        tensor,
-        height,
-        width,
-        in_channels,
-        out_channels,
-        groups,
-        out_groups,
-        tap_form,
-    )
+    conv(graph, x, tensor, grid, channels, groups, tap_form)
 }
 
 fn resnet(
@@ -309,11 +295,10 @@ fn resnet(
     prefix: &str,
     in_channels: u32,
     out_channels: u32,
-    height: u32,
-    width: u32,
+    grid: (u32, u32),
     config: &VaeConfig,
 ) -> Result<NodeId, TensorError> {
-    let rows = height * width;
+    let rows = grid.0 * grid.1;
     let first = norm(
         graph,
         x,
@@ -327,12 +312,9 @@ fn resnet(
         graph,
         first,
         &format!("{prefix}.conv1"),
-        height,
-        width,
-        in_channels,
-        out_channels,
-        config.groups,
-        config.groups,
+        grid,
+        (in_channels, out_channels),
+        (config.groups, config.groups),
         config.conv_taps,
     )?;
     let second = norm(
@@ -348,12 +330,9 @@ fn resnet(
         graph,
         second,
         &format!("{prefix}.conv2"),
-        height,
-        width,
-        out_channels,
-        out_channels,
-        config.groups,
-        config.groups,
+        grid,
+        (out_channels, out_channels),
+        (config.groups, config.groups),
         config.conv_taps,
     )?;
     let residual = if in_channels == out_channels {
@@ -385,11 +364,11 @@ fn upsample(
     x: NodeId,
     prefix: &str,
     channels: u32,
-    height: u32,
-    width: u32,
+    grid: (u32, u32),
     config: &VaeConfig,
     trace: &mut Vec<(&'static str, NodeId)>,
 ) -> Result<NodeId, TensorError> {
+    let (height, width) = grid;
     let start = graph.program.len();
     let index = graph.index_leaf(
         &format!("upsample.{height}x{width}.index"),
@@ -403,12 +382,9 @@ fn upsample(
         graph,
         grown,
         &format!("{prefix}.conv"),
-        height * 2,
-        width * 2,
-        channels,
-        channels,
-        config.groups,
-        config.groups,
+        (height * 2, width * 2),
+        (channels, channels),
+        (config.groups, config.groups),
         config.conv_taps,
     )
 }
@@ -538,12 +514,9 @@ pub fn build_vae_decode(
         graph,
         quantised,
         "decoder.conv_in",
-        height,
-        width,
-        in_channels,
-        first,
-        config.groups,
-        config.groups,
+        (height, width),
+        (in_channels, first),
+        (config.groups, config.groups),
         config.conv_taps,
     )?;
     trace.push(("conv_in", hidden));
@@ -554,8 +527,7 @@ pub fn build_vae_decode(
         "decoder.mid.block_1",
         first,
         first,
-        height,
-        width,
+        (height, width),
         config,
     )?;
     trace.push(("mid1", hidden));
@@ -567,8 +539,7 @@ pub fn build_vae_decode(
         "decoder.mid.block_2",
         first,
         first,
-        height,
-        width,
+        (height, width),
         config,
     )?;
     trace.push(("mid2", hidden));
@@ -582,8 +553,7 @@ pub fn build_vae_decode(
                 &prefix,
                 channels,
                 out_channels,
-                height,
-                width,
+                (height, width),
                 config,
             )?;
             channels = out_channels;
@@ -604,8 +574,7 @@ pub fn build_vae_decode(
                 hidden,
                 &format!("decoder.up.{level}.upsample"),
                 channels,
-                height,
-                width,
+                (height, width),
                 config,
                 &mut trace,
             )?;
@@ -636,12 +605,9 @@ pub fn build_vae_decode(
         graph,
         normed,
         "decoder.conv_out",
-        height,
-        width,
-        channels,
-        config.out_channels,
-        config.groups,
-        1,
+        (height, width),
+        (channels, config.out_channels),
+        (config.groups, 1),
         config.conv_taps,
     )?;
     trace.push(("image", image));
