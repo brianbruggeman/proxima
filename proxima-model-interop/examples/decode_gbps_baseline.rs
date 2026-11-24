@@ -337,16 +337,6 @@ fn main() {
         }),
         Err(_) => ServingConfig::default().kv_bucket_tokens,
     };
-    let numeric_policy = match std::env::var("PROXIMA_EPILOGUE_SOURCES").as_deref() {
-        Ok("0") => ServingConfig::default()
-            .numeric_policy
-            .with_epilogue_sources(false),
-        Ok("1") => ServingConfig::default()
-            .numeric_policy
-            .with_epilogue_sources(true),
-        Ok(other) => panic!("PROXIMA_EPILOGUE_SOURCES={other}: expected `0` or `1`"),
-        Err(_) => ServingConfig::default().numeric_policy,
-    };
     let resident_prefill_plan_bytes: usize =
         match std::env::var("PROXIMA_RESIDENT_PREFILL_PLAN_BYTES") {
             Ok(value) => value.parse().unwrap_or_else(|_| {
@@ -380,7 +370,7 @@ fn main() {
         warm_model_buffers_at_load,
         speculative,
         gpu_layers: base.gpu_layers,
-        numeric_policy,
+        numeric_policy: base.numeric_policy,
         kv_cache_key_quant: base.kv_cache_key_quant,
         kv_cache_value_quant: base.kv_cache_value_quant,
         flash_attention: base.flash_attention,
@@ -779,6 +769,17 @@ mod tests {
     fn configured_cpu_gpu_layers_reach_the_serving_config() {
         let toml = MATCHED_TOML.replace("gpu_layers = -1", "gpu_layers = 0");
         assert_eq!(lowered_gpu_layers(&toml), 0);
+    }
+
+    #[test]
+    fn configured_activation_quantization_reaches_the_serving_config() {
+        let toml = format!(
+            "{MATCHED_TOML}\n[numeric_policy]\ncontraction = true\nreassociation = true\nnan_assumptions = false\nsigned_zero = false\napprox_functions = false\nepilogue_sources = true\nactivation_quantization = true\n"
+        );
+        let settings: Settings = conflaguration::from_toml_str(&toml).expect("serving toml parses");
+        let policy = settings.as_serving_config(&[]).numeric_policy;
+        assert!(policy.activation_quantization);
+        assert!(policy.epilogue_sources);
     }
 
     #[test]
