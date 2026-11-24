@@ -25389,3 +25389,163 @@ mod conv_direct_loop {
         assert_agree(&run(true), &run(false), "the two forms");
     }
 }
+
+#[cfg(feature = "std")]
+mod bounded_flag_matrix {
+    use super::forward_scales::profile_text;
+    use super::*;
+
+    const CAPTURE_ENV: &str = "PROXIMA_BOUNDED_HASH_CAPTURE";
+    const FIXTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/bounded_flag_matrix.program_hash"
+    );
+
+    struct Case {
+        label: String,
+        descriptor: ModelDescriptor,
+        key_pad_id: Option<u32>,
+    }
+
+    fn descriptor(
+        expert_count: u32,
+        qk_norm: bool,
+        qkv_biases: bool,
+        paired: bool,
+        fused: bool,
+    ) -> ModelDescriptor {
+        let layout = if qk_norm { "split_half" } else { "adjacent" };
+        let profile = toml::from_str::<FamilyProfile>(&profile_text(layout))
+            .expect("the bounded profile parses");
+        let used = if expert_count > 0 { 2 } else { 0 };
+        gqa_descriptor_from_shape(
+            16,
+            8,
+            16,
+            2,
+            1,
+            4,
+            2,
+            expert_count,
+            used,
+            qk_norm,
+            qkv_biases,
+            paired,
+            fused,
+            &profile,
+        )
+    }
+
+    fn case(label: String, descriptor: ModelDescriptor, key_pad_id: Option<u32>) -> Case {
+        Case {
+            label,
+            descriptor,
+            key_pad_id,
+        }
+    }
+
+    fn dense_flag_cases() -> Vec<Case> {
+        let mut cases = Vec::new();
+        for qk_norm in [false, true] {
+            for qkv_biases in [false, true] {
+                for (paired, fused) in [(false, false), (true, false), (false, true)] {
+                    if qk_norm && fused {
+                        continue;
+                    }
+                    let label = alloc::format!(
+                        "dense qk_norm={qk_norm} biases={qkv_biases} paired={paired} fused={fused}"
+                    );
+                    let built = descriptor(0, qk_norm, qkv_biases, paired, fused);
+                    cases.push(case(label, built, None));
+                }
+            }
+        }
+        cases
+    }
+
+    fn windowed_cases() -> Vec<Case> {
+        [false, true]
+            .into_iter()
+            .map(|ring| {
+                let mut built = descriptor(0, false, false, false, false);
+                built.layers[0].attention.mask_window = Some(3);
+                built.sliding_kv_ring = ring;
+                case(alloc::format!("windowed ring={ring}"), built, None)
+            })
+            .collect()
+    }
+
+    fn scaled(mut built: ModelDescriptor) -> ModelDescriptor {
+        built.embedding_scale = Some(EmbeddingScale::Factor(12.0));
+        built.logit_scale = Some(0.5);
+        built.residual_scale = Some(0.25);
+        built
+    }
+
+    fn remaining_cases() -> Vec<Case> {
+        let mut cases = Vec::new();
+        for qk_norm in [false, true] {
+            let built = descriptor(4, qk_norm, false, false, false);
+            cases.push(case(alloc::format!("routed qk_norm={qk_norm}"), built, None));
+        }
+        cases.push(case(
+            "dense scales".into(),
+            scaled(descriptor(0, false, false, false, false)),
+            None,
+        ));
+        cases.push(case(
+            "routed scales".into(),
+            scaled(descriptor(4, false, false, false, false)),
+            None,
+        ));
+        cases.push(case(
+            "dense key_pad_id".into(),
+            descriptor(0, false, false, false, false),
+            Some(3),
+        ));
+        let mut all_rows = descriptor(0, false, false, false, false);
+        all_rows.last_row_only = false;
+        cases.push(case("dense all rows".into(), all_rows, None));
+        cases
+    }
+
+    fn all_cases() -> Vec<Case> {
+        let mut cases = dense_flag_cases();
+        cases.extend(windowed_cases());
+        cases.extend(remaining_cases());
+        cases
+    }
+
+    fn lowered_hash(case: &Case) -> u64 {
+        let built = build_forward_with_key_pad(&case.descriptor, case.key_pad_id)
+            .unwrap_or_else(|error| panic!("{}: {error:?}", case.label));
+        head_repeats::digest(&built.program)
+    }
+
+    fn recorded_lines(cases: &[Case]) -> Vec<String> {
+        cases
+            .iter()
+            .map(|case| alloc::format!("{} => {:016x}", case.label, lowered_hash(case)))
+            .collect()
+    }
+
+    #[test]
+    fn bounded_flag_matrix_lowers_to_the_recorded_program_hash() {
+        let cases = all_cases();
+        let actual = recorded_lines(&cases);
+        assert_eq!(actual.len(), 18, "the matrix is 18 descriptors");
+        if std::env::var(CAPTURE_ENV).is_ok_and(|value| value == "1") {
+            std::fs::write(FIXTURE, actual.join("\n") + "\n").expect("the fixture writes");
+        }
+        let recorded = std::fs::read_to_string(FIXTURE).expect("the fixture reads");
+        let expected: Vec<&str> = recorded.lines().collect();
+        let equal = actual
+            .iter()
+            .zip(&expected)
+            .filter(|(found, wanted)| found.as_str() == **wanted)
+            .count();
+        assert_eq!(expected.len(), actual.len(), "one recorded line per descriptor");
+        assert_eq!(equal, actual.len(), "a descriptor drifted from {FIXTURE}");
+        std::println!("{} descriptors, {equal} equal", actual.len());
+    }
+}

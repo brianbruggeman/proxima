@@ -1841,6 +1841,72 @@ fn hand_written_granite_moe_config_equals_the_gguf_header_descriptor() {
     assert_hand_written_config_equals_header(&GRANITE_MOE, "granite_moe.toml");
 }
 
+fn is_bounded_non_hybrid(descriptor: &ModelDescriptor) -> bool {
+    descriptor.cache_strategy == CacheStrategy::Cached
+        && descriptor.cache_mask == CacheMask::Bounded
+        && !descriptor.gated_attention
+        && descriptor
+            .layers
+            .iter()
+            .all(|layer| layer.kind != LayerKind::Gdn)
+}
+
+fn program_hash_fixture(name: &str, routed: bool) -> PathBuf {
+    let strategy = if routed && STACKED_EXPERTS {
+        ".stacked"
+    } else {
+        ""
+    };
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/model-configs")
+        .join(format!("{name}{strategy}.program_hash"))
+}
+
+/// Pins the Bounded engine's lowering for every hand-written config that selects it, so the
+/// later move of that engine onto shared sublayer blocks has to reproduce the same program.
+#[test]
+fn bounded_model_configs_lower_to_the_recorded_program_hash() {
+    let config_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/model-configs");
+    let mut names: Vec<String> = std::fs::read_dir(&config_dir)
+        .expect("the model-configs directory reads")
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let file = entry.file_name().to_string_lossy().into_owned();
+            file.strip_suffix(".toml").map(str::to_string)
+        })
+        .collect();
+    names.sort();
+
+    let capture = std::env::var(CAPTURE_ENV).is_ok_and(|value| value == "1");
+    let (mut bounded, mut equal) = (0usize, 0usize);
+    for name in &names {
+        let descriptor = hand_written_config(&format!("{name}.toml"));
+        if !is_bounded_non_hybrid(&descriptor) {
+            continue;
+        }
+        bounded += 1;
+        let ForwardProgram { program, .. } =
+            build_forward(&descriptor).expect("the hand-written config lowers");
+        let actual = format!("{}\n", ops_digest(&program));
+        let fixture = program_hash_fixture(name, descriptor.expert_count > 0);
+        if capture {
+            std::fs::write(&fixture, &actual)
+                .unwrap_or_else(|error| panic!("write {}: {error}", fixture.display()));
+        }
+        let expected = std::fs::read_to_string(&fixture)
+            .unwrap_or_else(|error| panic!("no program hash at {}: {error}", fixture.display()));
+        assert_eq!(
+            expected, actual,
+            "{name}: the Bounded lowering drifted from {}",
+            fixture.display()
+        );
+        equal += 1;
+    }
+
+    assert_eq!(bounded, 2, "granite_moe and qwen2 are the Bounded configs");
+    println!("program_hash: {bounded} bounded descriptors, {equal} equal");
+}
+
 fn window_ceiling_constants(program: &[Op], window: u32) -> usize {
     let ceiling = (window as f32 - 1.0).to_bits();
     program

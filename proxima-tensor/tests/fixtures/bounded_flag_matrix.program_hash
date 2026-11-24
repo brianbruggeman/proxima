@@ -1,0 +1,18 @@
+dense qk_norm=false biases=false paired=false fused=false => 06f54ba5aca48c70
+dense qk_norm=false biases=false paired=true fused=false => 0e5326e361e8752a
+dense qk_norm=false biases=false paired=false fused=true => 0115db94b6e23383
+dense qk_norm=false biases=true paired=false fused=false => e529a32382ac2d08
+dense qk_norm=false biases=true paired=true fused=false => 48a44bb890445302
+dense qk_norm=false biases=true paired=false fused=true => 084ae9ff95f370fe
+dense qk_norm=true biases=false paired=false fused=false => 363660e0c487060f
+dense qk_norm=true biases=false paired=true fused=false => 888c2937164cc8b4
+dense qk_norm=true biases=true paired=false fused=false => 3430410ac8f0232f
+dense qk_norm=true biases=true paired=true fused=false => 78a3cdb2589e3485
+windowed ring=false => 5ec30ba2b4f1f717
+windowed ring=true => 863753c0a34b528e
+routed qk_norm=false => 14331a0c4d5b5a88
+routed qk_norm=true => 0a9e2966faf73d57
+dense scales => 2593fe25b4466195
+routed scales => 3acfadcaf75dfba6
+dense key_pad_id => b5b01f1c7cda2133
+dense all rows => e58b1ad963dac872
