@@ -1609,10 +1609,11 @@ fn parse_config(arguments: impl IntoIterator<Item = String>) -> Result<Config, H
     };
     let llama_inproc = values.get("--llama-inproc").map(PathBuf::from);
     let stages = values.get("--stages").map(PathBuf::from);
+    let prompts = parse_names(&values, "--prompts", "short|long", ALL_PROMPTS, Prompt::parse)?;
     let long_prompt_file = match (&stages, values.get("--long-prompt-file")) {
         (_, Some(path)) => PathBuf::from(path),
-        (Some(_), None) => PathBuf::new(),
-        (None, None) => return Err(HarnessError::MissingFlag("--long-prompt-file")),
+        (None, None) if prompts.contains(&Prompt::Long) => return Err(HarnessError::MissingFlag("--long-prompt-file")),
+        _ => PathBuf::new(),
     };
     let stage_kv = match values.get("--stage-kv") {
         None => Kv::F16,
@@ -1635,7 +1636,6 @@ fn parse_config(arguments: impl IntoIterator<Item = String>) -> Result<Config, H
     if proxima.is_empty() && llama_inproc.is_none() {
         return Err(HarnessError::MissingFlag("--prox"));
     }
-    let prompts = parse_names(&values, "--prompts", "short|long", ALL_PROMPTS, Prompt::parse)?;
     let kvs = parse_names(&values, "--kvs", "F32|F16|BF16|Q4K", ALL_KV, Kv::parse)?;
     let rounds: usize = parse_value(&values, "--rounds", "a positive integer", DEFAULT_ROUNDS)?;
     if rounds == 0 {
@@ -2088,6 +2088,15 @@ fn blank_row(round: usize, position: usize, cell: &Cell, prompt: &PromptData, id
     }
 }
 
+fn prompt_text(prompt: Prompt, long_prompt_file: &Path) -> Result<String, HarnessError> {
+    match prompt {
+        Prompt::Short => Ok(SHORT_PROMPT.to_owned()),
+        Prompt::Long => fs::read_to_string(long_prompt_file)
+            .map(|text| text.trim_end_matches('\n').to_owned())
+            .map_err(io_error(long_prompt_file)),
+    }
+}
+
 fn load_prompts(config: &Config) -> Result<(String, BTreeMap<Prompt, PromptData>), HarnessError> {
     let file = File::open(&config.model).map_err(io_error(&config.model))?;
     // SAFETY: the mapping is read-only and the blob is not modified while the harness runs.
@@ -2096,12 +2105,9 @@ fn load_prompts(config: &Config) -> Result<(String, BTreeMap<Prompt, PromptData>
     let parsed = parse_complete(&bytes).map_err(|source| HarnessError::Tokenize(format!("{source:?}")))?;
     let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
         .map_err(|source| HarnessError::Tokenize(format!("{source:?}")))?;
-    let long_text = fs::read_to_string(&config.long_prompt_file)
-        .map_err(io_error(&config.long_prompt_file))?
-        .trim_end_matches('\n')
-        .to_owned();
     let mut prompts = BTreeMap::new();
-    for (prompt, text) in [(Prompt::Short, SHORT_PROMPT.to_owned()), (Prompt::Long, long_text)] {
+    for prompt in config.prompts.iter().copied() {
+        let text = prompt_text(prompt, &config.long_prompt_file)?;
         let ids = tokenize_like_proxima(&text, &vocab)?;
         let capacity = kv_capacity(ids.len(), MAX_TOKENS, config.kv_bucket, config.context_length);
         prompts.insert(prompt, PromptData { text, ids, capacity });
@@ -5060,6 +5066,16 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         assert!((cov.expect("n=3") - 20.0).abs() < 1e-9);
         assert_eq!(sample_mean_cov(&[5.0]), Some((5.0, None)));
         assert_eq!(sample_mean_cov(&[]), None);
+    }
+
+    #[test]
+    fn the_long_prompt_file_is_required_only_when_the_long_prompt_is_selected() {
+        let base = ["--out", "o", "--model", "m", "--llama", "l", "--llama-commit", "ba3c05f71", "--prox", "new=/bin/a"];
+        let with = |extra: &[&str]| parse_config(base.iter().chain(extra).map(|text| (*text).to_owned()).collect::<Vec<_>>());
+        assert!(matches!(with(&[]), Err(HarnessError::MissingFlag("--long-prompt-file"))));
+        assert!(matches!(with(&["--prompts", "short,long"]), Err(HarnessError::MissingFlag("--long-prompt-file"))));
+        assert_eq!(with(&["--prompts", "short"]).expect("short needs no file").prompts, vec![Prompt::Short]);
+        assert!(with(&["--prompts", "long", "--long-prompt-file", "p"]).is_ok());
     }
 
     #[test]
