@@ -7998,6 +7998,7 @@ mod flat_grid_form {
 
     use super::*;
 
+    #[cfg(any(target_os = "macos", feature = "metal-wide-cooperative-reduce", feature = "metal-tiled-gemm"))]
     const FLAT_MARKER: &str = "ulong wide_group_index";
     #[cfg(feature = "metal-wide-cooperative-reduce")]
     const LINEAR_SIGNATURE: &str = "uint gid [[thread_position_in_grid]]";
