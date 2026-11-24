@@ -421,7 +421,7 @@ pub(super) fn upload_resident_copy(
     }
     counter!(COPYING_BUFFER_UPLOADS, 1);
     counter!(RESIDENT_BUFFER_UPLOADS, 1);
-    counter!(BLOCK_COPIED_BYTES, byte_length as u64);
+    record_block_copied(byte_length as u64);
     let buffer = copy_into_new_buffer(device, pointer, byte_length)?;
     #[cfg(feature = "instrument")]
     record_device_buffer("weight_copy", "resident", name, byte_length, false);
@@ -476,7 +476,7 @@ pub(super) fn upload_strided_runs(
         return Ok(existing);
     }
     counter!(COPYING_BUFFER_UPLOADS, 1);
-    counter!(BLOCK_COPIED_BYTES, byte_length as u64);
+    record_block_copied(byte_length as u64);
     let buffer = device
         .newBufferWithLength_options(byte_length, MTLResourceOptions::StorageModeShared)
         .ok_or_else(|| MetalError::CompileFailed {

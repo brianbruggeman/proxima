@@ -211,7 +211,7 @@ impl ServingContext {
 mod tests {
     use core::ops::ControlFlow;
 
-    use omega::metal::{BLOCK_COPIED_BYTES, MAPPING_OFFSET_UPLOADS, page_size};
+    use omega::metal::{block_copied_bytes_total, mapping_offset_uploads_total, page_size};
     use proxima_gguf::parse_complete;
     use proxima_numeric::NumericFormat;
     use proxima_tensor::AlignedBuffer;
@@ -266,14 +266,14 @@ mod tests {
         let (offset_uploads, copied_bytes) = std::thread::scope(|scope| {
             scope
                 .spawn(|| {
-                    let offsets_before = MAPPING_OFFSET_UPLOADS.get();
-                    let copied_before = BLOCK_COPIED_BYTES.get();
+                    let offsets_before = mapping_offset_uploads_total();
+                    let copied_before = block_copied_bytes_total();
                     model
                         .generate_from_ids(&PROMPT, 3, &config, &mut |_| ControlFlow::Continue(()))
                         .expect("thread B decodes from the model loaded on thread A");
                     (
-                        MAPPING_OFFSET_UPLOADS.get() - offsets_before,
-                        BLOCK_COPIED_BYTES.get() - copied_before,
+                        mapping_offset_uploads_total() - offsets_before,
+                        block_copied_bytes_total() - copied_before,
                     )
                 })
                 .join()
@@ -304,13 +304,13 @@ mod tests {
         std::thread::scope(|scope| {
             scope
                 .spawn(|| {
-                    let offsets_before = MAPPING_OFFSET_UPLOADS.get();
-                    let copied_before = BLOCK_COPIED_BYTES.get();
+                    let offsets_before = mapping_offset_uploads_total();
+                    let copied_before = block_copied_bytes_total();
                     let output = work();
                     (
                         output,
-                        MAPPING_OFFSET_UPLOADS.get() - offsets_before,
-                        BLOCK_COPIED_BYTES.get() - copied_before,
+                        mapping_offset_uploads_total() - offsets_before,
+                        block_copied_bytes_total() - copied_before,
                     )
                 })
                 .join()

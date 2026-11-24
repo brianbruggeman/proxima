@@ -3,6 +3,7 @@ use super::warm_resident_buffers::release_all_mapping_residency;
 use super::warm_resident_buffers::{release_mapping_residency, request_mapping_residency};
 use super::*;
 use proxima_numeric::float_layout::FloatLayout;
+use std::sync::atomic::AtomicU64;
 
 #[cfg(feature = "instrument")]
 use sha2::{Digest, Sha256};
@@ -1425,7 +1426,7 @@ pub(super) fn upload_block_as_float(
     if let Some(name) = resident_name {
         return upload_resident_copy(device, name, pointer, byte_length).map(|buffer| (buffer, 0));
     }
-    counter!(BLOCK_COPIED_BYTES, byte_length as u64);
+    record_block_copied(byte_length as u64);
     counter!(COPYING_BUFFER_UPLOADS, 1);
     upload_block_copy(device, pointer, byte_length).map(|buffer| (buffer, 0))
 }
@@ -1496,7 +1497,7 @@ pub(super) fn upload_packed_bytes(
     if let Some(name) = resident_name {
         return upload_resident_copy(device, name, pointer, byte_length).map(|buffer| (buffer, 0));
     }
-    counter!(BLOCK_COPIED_BYTES, byte_length as u64);
+    record_block_copied(byte_length as u64);
     counter!(COPYING_BUFFER_UPLOADS, 1);
     upload_block_copy(device, pointer, byte_length).map(|buffer| (buffer, 0))
 }
@@ -1724,6 +1725,30 @@ pub fn unregister_checkpoint_mapping(bytes: &[u8]) {
 /// direct witness for the census this mechanism is meant to zero out.
 pub static MAPPING_OFFSET_UPLOADS: Counter =
     Counter::new("omega.metal.upload_block.mapping_offset");
+static MAPPING_OFFSET_UPLOADS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static BLOCK_COPIED_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Everything `MAPPING_OFFSET_UPLOADS` ever counted. `metal_stage_totals`
+/// drains the counter after every decode step, so a reader taking a delta
+/// across a decode reads this never-reset total instead.
+pub fn mapping_offset_uploads_total() -> u64 {
+    MAPPING_OFFSET_UPLOADS_TOTAL.load(Ordering::Relaxed)
+}
+
+/// Everything `BLOCK_COPIED_BYTES` ever counted; see `mapping_offset_uploads_total`.
+pub fn block_copied_bytes_total() -> u64 {
+    BLOCK_COPIED_BYTES_TOTAL.load(Ordering::Relaxed)
+}
+
+pub(super) fn record_block_copied(byte_length: u64) {
+    counter!(BLOCK_COPIED_BYTES, byte_length);
+    BLOCK_COPIED_BYTES_TOTAL.fetch_add(byte_length, Ordering::Relaxed);
+}
+
+fn record_mapping_offset_upload() {
+    counter!(MAPPING_OFFSET_UPLOADS, 1);
+    MAPPING_OFFSET_UPLOADS_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
 /// Counts packed-source uploads observed while the bounded expert mapping was
 /// published. The paired miss counter distinguishes a mapping that exists from
 /// a source slice whose address/length falls outside that mapping.
@@ -1762,7 +1787,7 @@ pub(super) fn checkpoint_mapping_offset(
     if !mapping_offset_is_aligned(address - base, tensor_name) {
         return None;
     }
-    counter!(MAPPING_OFFSET_UPLOADS, 1);
+    record_mapping_offset_upload();
     counter!(BLOCK_OFFSET_BOUND_BYTES, byte_length as u64);
     Some(
         mapping_buffer(device, CHECKPOINT_MAPPING_NOCOPY_NAME, base, mapping_length)
@@ -1845,7 +1870,7 @@ pub(super) fn expert_mapping_offset(
     if !mapping_offset_is_aligned(address - base, tensor_name) {
         return None;
     }
-    counter!(MAPPING_OFFSET_UPLOADS, 1);
+    record_mapping_offset_upload();
     counter!(BLOCK_OFFSET_BOUND_BYTES, byte_length as u64);
     Some(
         mapping_buffer(device, EXPERT_MAPPING_NOCOPY_NAME, base, mapping_length)
