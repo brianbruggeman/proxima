@@ -25552,6 +25552,41 @@ mod bounded_flag_matrix {
         assert_eq!(equal, actual.len(), "a descriptor drifted from {FIXTURE}");
         std::println!("{} descriptors, {equal} equal", actual.len());
     }
+
+    #[test]
+    fn lowered_blocks_equal_the_monolith_over_the_matrix() {
+        let cases = all_cases();
+        for case in &cases {
+            let monolith = build_forward_with_key_pad(&case.descriptor, case.key_pad_id)
+                .unwrap_or_else(|error| panic!("{}: {error:?}", case.label));
+            let network = blocks::Network::from_bounded(&case.descriptor)
+                .unwrap_or_else(|error| panic!("{}: {error:?}", case.label));
+            let lowered = network
+                .lower(case.key_pad_id)
+                .unwrap_or_else(|error| panic!("{}: {error:?}", case.label));
+
+            assert_eq!(lowered.program, monolith.program, "{}: program", case.label);
+            assert_eq!(lowered.logits, monolith.logits, "{}: logits", case.label);
+            assert_eq!(lowered.hidden, monolith.hidden, "{}: hidden", case.label);
+            assert_eq!(
+                lowered.layer_roots, monolith.layer_roots,
+                "{}: layer roots",
+                case.label
+            );
+            assert_eq!(
+                lowered.layer_residuals, monolith.layer_residuals,
+                "{}: layer residuals",
+                case.label
+            );
+            assert_eq!(
+                alloc::format!("{:?}", lowered.moe_sites),
+                alloc::format!("{:?}", monolith.moe_sites),
+                "{}: moe sites",
+                case.label
+            );
+        }
+        std::println!("{} descriptors, {} lowered equal", cases.len(), cases.len());
+    }
 }
 
 mod cached_attention_bodies {

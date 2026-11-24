@@ -1,3 +1,5 @@
+use alloc::string::String;
+
 use serde::{Deserialize, Serialize};
 
 /// The statistic a [`Norm`] divides by.
@@ -22,10 +24,13 @@ pub struct Norm {
     #[serde(rename = "norm")]
     #[cfg_attr(feature = "config", setting(skip))]
     pub kind: NormKind,
-    /// Added under the root of the variance, so a zero row stays finite (1e-5 in the llama family).
-    pub eps: crate::op::ConstantLiteral,
-    /// Whether a learned per-channel gain multiplies the normalised rows; false is the unscaled form.
-    pub scaled: bool,
+    /// Added under the root of the variance, so a zero row stays finite (1e-5 in the llama family);
+    /// None reads the host-fed `eps` input every program already declares.
+    #[cfg_attr(feature = "config", setting(skip))]
+    pub eps: Option<crate::op::ConstantLiteral>,
+    /// Full tensor name of the learned per-channel gain; None is the unscaled form.
+    #[cfg_attr(feature = "config", setting(skip))]
+    pub weight: Option<String>,
     /// Normalise independently inside each contiguous group of this many channels (the head dimension
     /// for per-head norms); None normalises the whole width.
     #[cfg_attr(feature = "config", setting(skip))]
@@ -36,7 +41,7 @@ pub struct Norm {
 impl conflaguration::Validate for Norm {
     fn validate(&self) -> conflaguration::Result<()> {
         let mut errors = alloc::vec::Vec::new();
-        if !self.eps.is_finite() || self.eps <= 0.0 {
+        if self.eps.is_some_and(|eps| !eps.is_finite() || eps <= 0.0) {
             errors.push(conflaguration::ValidationMessage::new(
                 "eps",
                 "must be positive and finite",

@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use super::{Decode, Input, Stack};
+use super::{Decode, Head, Input, Stack};
 
-/// A whole network: what enters, the body that transforms it, and how it runs.
-/// `heads` and `embed` arrive with the cards that define them.
+/// A whole network: what enters, the body that transforms it, what leaves, and
+/// how it runs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "config", derive(bon::Builder, conflaguration::Settings))]
 #[cfg_attr(feature = "config", settings(prefix = "PROXIMA_NETWORK"))]
@@ -15,6 +15,11 @@ pub struct Network {
     /// The transformation from `input` to the network's outputs.
     #[cfg_attr(feature = "config", setting(skip))]
     pub body: Stack,
+    /// The final norm and output projection; a placeholder `validate` rejects when absent.
+    #[serde(default)]
+    #[cfg_attr(feature = "config", setting(skip))]
+    #[cfg_attr(feature = "config", builder(default))]
+    pub head: Head,
     /// Execution options; defaults when absent from config.
     #[serde(default)]
     #[cfg_attr(feature = "config", setting(nested))]
@@ -27,6 +32,7 @@ impl conflaguration::Validate for Network {
     fn validate(&self) -> conflaguration::Result<()> {
         conflaguration::Validate::validate(&self.input)?;
         conflaguration::Validate::validate(&self.body)?;
+        conflaguration::Validate::validate(&self.head)?;
         conflaguration::Validate::validate(&self.decode)
     }
 }
@@ -35,7 +41,7 @@ impl conflaguration::Validate for Network {
 mod tests {
     use alloc::vec;
 
-    use super::super::{Block, Decode, Input, Norm, NormKind, Stack};
+    use super::super::{Block, Decode, Head, Input, Norm, NormKind, Stack};
     use super::Network;
     use crate::spec::ModelDescriptor;
 
@@ -109,11 +115,12 @@ ple = true
             body: Stack {
                 blocks: vec![Block::Norm(Norm {
                     kind: NormKind::Rms,
-                    eps: 1e-5,
-                    scaled: true,
+                    eps: Some(1e-5),
+                    weight: Some("blk.0.attn_norm.weight".into()),
                     group_width: None,
                 })],
             },
+            head: Head::default(),
             decode: Decode::default(),
         };
         let text = toml::to_string(&network).expect("a network with one norm serializes to toml");

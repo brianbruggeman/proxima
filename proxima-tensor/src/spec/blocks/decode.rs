@@ -22,6 +22,12 @@ pub struct Decode {
     pub cache_mask: CacheMask,
     /// Positions per prefill program; None prefills one position per program.
     pub prefill_width: Option<u32>,
+    /// Project only the last position's row to logits; a verify program keeps every row.
+    #[cfg_attr(feature = "config", setting(default = true))]
+    pub last_row_only: bool,
+    /// Windowed layers keep their keys in one sliding ring slot instead of the full cache.
+    #[cfg_attr(feature = "config", setting(default = false))]
+    pub sliding_kv_ring: bool,
 }
 
 impl Default for Decode {
@@ -32,6 +38,8 @@ impl Default for Decode {
             cache_strategy: CacheStrategy::default(),
             cache_mask: CacheMask::default(),
             prefill_width: None,
+            last_row_only: true,
+            sliding_kv_ring: false,
         }
     }
 }
