@@ -56,6 +56,55 @@ fn log_missing_pattern(residency: &[i8], page: usize, stage: &'static str) {
     );
 }
 
+/// Wall time and minor faults of one residency pass, logged at debug level so
+/// each pass of the ladder is attributable on its own. A zero-size no-op
+/// without `instrument`.
+#[cfg(feature = "instrument")]
+struct PassClock {
+    started: std::time::Instant,
+    faults_before: i64,
+}
+
+#[cfg(feature = "instrument")]
+impl PassClock {
+    fn start() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            faults_before: minor_faults(),
+        }
+    }
+
+    fn finish(self, pass: &'static str) {
+        proxima_telemetry::debug!(
+            pass,
+            pass_micros = self.started.elapsed().as_micros() as u64,
+            minor_faults = minor_faults() - self.faults_before,
+            "checkpoint_mapping_residency: pass timing"
+        );
+    }
+}
+
+#[cfg(feature = "instrument")]
+fn minor_faults() -> i64 {
+    // SAFETY: `rusage` is plain old data, so the zeroed value is valid, and
+    // `getrusage` only writes through the pointer it is given.
+    let mut usage: libc::rusage = unsafe { core::mem::zeroed() };
+    let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    if status == 0 { usage.ru_minflt as i64 } else { 0 }
+}
+
+#[cfg(not(feature = "instrument"))]
+struct PassClock;
+
+#[cfg(not(feature = "instrument"))]
+impl PassClock {
+    fn start() -> Self {
+        Self
+    }
+
+    fn finish(self, _pass: &'static str) {}
+}
+
 /// One [`prove_resident`] call's own accounting, carried out to the caller
 /// so it can log `mapping_prefault_ms`/`mapping_resident_pages`/
 /// `mapping_missing_pages` under `feature = "instrument"` the same way
@@ -155,6 +204,7 @@ pub(crate) fn probe_residency(bytes: &[u8]) -> Vec<i8> {
     let page = omega::metal::page_size();
     let page_count = bytes.len().div_ceil(page);
     let mut residency = vec![0_i8; page_count];
+    let clock = PassClock::start();
     // SAFETY: `bytes` is a live borrow for the duration of this call, and
     // `residency` is sized for exactly `page_count` bytes, matching
     // `mincore`'s own `len`-derived output length contract.
@@ -165,6 +215,7 @@ pub(crate) fn probe_residency(bytes: &[u8]) -> Vec<i8> {
             residency.as_mut_ptr().cast::<libc::c_char>(),
         )
     };
+    clock.finish("mincore");
     if probed != 0 {
         // a failed probe proves nothing; treat every page as missing rather
         // than reporting a false all-resident pass.
@@ -239,12 +290,14 @@ pub(crate) fn lock_resident(bytes: &[u8]) {
     // SAFETY: `bytes` is a live borrow for the duration of this call;
     // `mlock` only pins pages already mapped into this process and never
     // writes through the pointer.
+    let clock = PassClock::start();
     let outcome = unsafe {
         rustix::mm::mlock(
             bytes.as_ptr().cast::<core::ffi::c_void>().cast_mut(),
             bytes.len(),
         )
     };
+    clock.finish("mlock");
     #[cfg(feature = "instrument")]
     if let Err(error) = outcome {
         // a failed pin leaves the mapping evictable -- the exact gap this
@@ -307,8 +360,14 @@ pub fn prove_resident(bytes: &[u8]) -> Result<ResidencyReport, InteropError> {
             return count_missing_pages(&residency);
         }
         let outcome = match rung {
-            ResidencyRung::Prefault => crate::loader::prefault(bytes),
+            ResidencyRung::Prefault => {
+                let clock = PassClock::start();
+                let result = crate::loader::prefault(bytes);
+                clock.finish("prefault");
+                result
+            }
             ResidencyRung::Retry => {
+                let clock = PassClock::start();
                 let mut result = Ok(());
                 for (start, end) in missing_byte_ranges(&residency, page, bytes.len()) {
                     if let Err(error) = crate::loader::prefault(&bytes[start..end]) {
@@ -316,6 +375,7 @@ pub fn prove_resident(bytes: &[u8]) -> Result<ResidencyReport, InteropError> {
                         break;
                     }
                 }
+                clock.finish("prefault_retry");
                 result
             }
             ResidencyRung::Mlock => {

@@ -152,8 +152,15 @@ fn encode_text(
         }
     }
     drop(values);
+    let model_started = Instant::now();
     drop(model);
+    let model_millis = model_started.elapsed().as_millis();
+    let unmap_started = Instant::now();
     drop(checkpoint);
+    eprintln!(
+        "text_drop: model {model_millis} ms, checkpoint (munlock + munmap) {} ms",
+        unmap_started.elapsed().as_millis()
+    );
     Ok(joined)
 }
 
@@ -400,10 +407,28 @@ fn vae_config() -> VaeConfig {
 }
 
     pub fn main() {
-        if let Err(why) = run() {
+        #[cfg(feature = "instrument")]
+        let recorder = install_telemetry();
+        let outcome = run();
+        #[cfg(feature = "instrument")]
+        if let Some(recorder) = recorder {
+            recorder.drain();
+        }
+        if let Err(why) = outcome {
             eprintln!("{why}");
             std::process::exit(1);
         }
+    }
+
+    /// Routes the residency pass timings (`RUST_LOG=debug`) to stdout; the
+    /// ring is drained once at exit, which is enough for one short run.
+    #[cfg(feature = "instrument")]
+    fn install_telemetry() -> Option<std::sync::Arc<proxima_telemetry::recorder::Recorder>> {
+        proxima_telemetry::emit::global::install_from_env();
+        proxima_telemetry::recorder::Recorder::builder()
+            .export(proxima_telemetry::export::Exporter::std())
+            .and_then(|builder| builder.install())
+            .ok()
     }
 
 /// The four Euler steps: Philox noise, the DiT velocity and the flow-match

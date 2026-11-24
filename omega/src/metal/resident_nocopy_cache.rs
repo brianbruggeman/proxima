@@ -231,6 +231,16 @@ pub(super) fn upload_block_no_copy_uncached(
     Ok(buffer)
 }
 
+/// Minor page faults the process has taken so far, so a no-copy buffer
+/// creation can report how many faults it caused (Metal wires the range).
+fn minor_fault_count() -> i64 {
+    // SAFETY: `rusage` is plain old data, so the zeroed value is valid, and
+    // `getrusage` only writes through the pointer it is given.
+    let mut usage: libc::rusage = unsafe { core::mem::zeroed() };
+    let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    if status == 0 { usage.ru_minflt as i64 } else { 0 }
+}
+
 /// The `newBufferWithBytesNoCopy` FFI call itself, shared by
 /// [`upload_block_no_copy`] and [`upload_block_no_copy_uncached`] — caching
 /// is entirely the callers' concern, not this function's.
@@ -245,14 +255,23 @@ pub(super) fn create_no_copy_buffer(
     // as the deallocator tells Metal it never owns this memory, so it is
     // never freed or written out from under the caller.
     let pointer = unsafe { NonNull::new_unchecked(pointer as *mut c_void) };
-    unsafe {
+    let started = std::time::Instant::now();
+    let faults_before = minor_fault_count();
+    let created = unsafe {
         device.newBufferWithBytesNoCopy_length_options_deallocator(
             pointer,
             byte_length,
             MTLResourceOptions::StorageModeShared,
             None,
         )
-    }
+    };
+    debug!(
+        byte_length = byte_length as u64,
+        create_micros = started.elapsed().as_micros() as u64,
+        minor_faults = minor_fault_count() - faults_before,
+        "metal_no_copy_buffer_created"
+    );
+    created
     .ok_or_else(|| MetalError::CompileFailed {
         log: "device refused a no-copy shared buffer for a page-aligned block input".to_string(),
     })
