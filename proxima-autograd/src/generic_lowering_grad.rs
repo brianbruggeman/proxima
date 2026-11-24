@@ -1,6 +1,6 @@
 //! Gradient checks for the model-agnostic diffusion lowerings in
 //! `proxima_tensor::spec` (`layer_norm_no_affine`, `modulate`,
-//! `non_causal_attention`, `multi_axis_rope_tables` -> `fused_rope_pair`,
+//! `non_causal_attention_heads`, `multi_axis_rope_tables` -> `fused_rope_pair`,
 //! `tap_layers`). Each test differentiates the real builder output with
 //! [`crate::adjoint::differentiate`] and compares every requested input's
 //! gradient with central finite differences of the forward program.
@@ -16,7 +16,7 @@ use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 use proxima_tensor::spec::{
     RopePairing, STFT_COS_INPUT, STFT_SIN_INPUT, STFT_WINDOW_INPUT, StftLogMelConfig, cross_kv,
     elementwise_like, fused_rope_pair, fused_rope_rows, layer_norm, layer_norm_no_affine, modulate,
-    multi_axis_rope_tables, non_causal_attention, reduce_like, scalar_constant_like, stft_log_mel,
+    multi_axis_rope_tables, non_causal_attention_heads, reduce_like, scalar_constant_like, stft_log_mel,
     stft_tables, tap_layers,
 };
 
@@ -226,8 +226,9 @@ async fn non_causal_attention_gradient_matches_finite_differences_for_q_k_and_v(
     let k = input(&mut program, "k", &[t, u, i]);
     let v = input(&mut program, "v", &[t, u, d]);
     let scale = scalar_constant_like(&mut program, 0.5, q).expect("scale builds");
-    let out = non_causal_attention(&mut program, q, k, v, scale).expect("attention builds");
-    let loss = weighted_loss(&mut program, out, "sugd", &[s, u, 1, d]);
+    let out = non_causal_attention_heads(&mut program, &[(q, k)], v, scale, "u", "i", "d")
+        .expect("attention builds");
+    let loss = weighted_loss(&mut program, out, "sud", &[s, u, d]);
     let bound = [
         ("q", Lcg::values(7, 24)),
         ("k", Lcg::values(8, 16)),
@@ -235,7 +236,7 @@ async fn non_causal_attention_gradient_matches_finite_differences_for_q_k_and_v(
         ("w", Lcg::values(10, 18)),
     ];
     let reports = check(
-        "non_causal_attention",
+        "non_causal_attention_heads",
         &program,
         loss,
         &bound,
@@ -414,7 +415,8 @@ fn cross_recomputed() -> (Vec<Op>, NodeId, NodeId, NodeId) {
     let (k, v) = cross_kv(&mut program, memory, k_weight, Some(k_bias), v_weight, None)
         .expect("cross kv builds");
     let scale = scalar_constant_like(&mut program, CROSS_SCALE, q).expect("scale builds");
-    let out = non_causal_attention(&mut program, q, k, v, scale).expect("attention builds");
+    let out = non_causal_attention_heads(&mut program, &[(q, k)], v, scale, "u", "i", "d")
+        .expect("attention builds");
     (program, k, v, out)
 }
 
@@ -426,18 +428,19 @@ fn cross_cached() -> (Vec<Op>, NodeId) {
     let k = input(&mut program, "cross_k", &[t, u, i]);
     let v = input(&mut program, "cross_v", &[t, u, d]);
     let scale = scalar_constant_like(&mut program, CROSS_SCALE, q).expect("scale builds");
-    let out = non_causal_attention(&mut program, q, k, v, scale).expect("attention builds");
+    let out = non_causal_attention_heads(&mut program, &[(q, k)], v, scale, "u", "i", "d")
+        .expect("attention builds");
     (program, out)
 }
 
 /// `sum(out * out)` as a scalar loss node.
 fn sum_of_squares(program: &mut Vec<Op>, out: NodeId) -> NodeId {
-    let axes = "sugd";
+    let axes = "sud";
     let squared = elementwise_like(
         program,
         out,
         ScalarOp::Multiply,
-        &[(out, "sugd->sugd"), (out, "sugd->sugd")],
+        &[(out, "sud->sud"), (out, "sud->sud")],
     )
     .expect("square builds");
     reduce_like(
@@ -445,7 +448,7 @@ fn sum_of_squares(program: &mut Vec<Op>, out: NodeId) -> NodeId {
         ScalarOp::Add,
         ReduceInit::Zero,
         squared,
-        "sugd->sugd",
+        "sud->sud",
         alloc::format!("->{axes}").as_str(),
     )
     .expect("loss reduce builds")

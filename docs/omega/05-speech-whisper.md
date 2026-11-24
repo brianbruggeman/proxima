@@ -14,7 +14,7 @@ Two files in this crate pair are both named `generic_lowering.rs` — one in `pr
 |---|---|---|
 | log-mel front end | `stft_log_mel`, `proxima-tensor/src/spec/generic_lowering.rs:525` | frames the signal, runs a DFT against precomputed tables, clamps and rescales |
 | its configuration | `StftLogMelConfig`, `generic_lowering.rs:397` | window, `n_fft` (400), `hop` (160), floor, dynamic range, final scale/offset |
-| cross-attention | `non_causal_attention`, `generic_lowering.rs:166` | attention with no causal mask, for a decoder reading an encoder |
+| cross-attention | `non_causal_attention_heads` (one builder, head-first), `generic_lowering.rs` | attention with no causal mask, for a decoder reading an encoder |
 | encoder convolution | `conv1d`, `proxima-autograd/src/conv.rs:223` | 1-D convolution with stride, padding and dilation, differentiable |
 | layer norm | `layer_norm`, `generic_lowering.rs:99` | affine normalisation |
 | rotary tables | `multi_axis_rope_tables`, `generic_lowering.rs:295` | per-axis rotary position tables |

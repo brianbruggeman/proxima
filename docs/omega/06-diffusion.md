@@ -42,7 +42,7 @@ PASS proxima-autograd generic_lowering_grad::modulate_gradient_matches_finite_di
 SUMMARY  passed=3 failed=0 ignored=0 not_run=0  wall=2.361s discovered=203 run=3 filtered=200 binaries=24
 ```
 
-The same file checks `non_causal_attention` for `q`, `k` and `v` (`proxima-autograd/src/generic_lowering_grad.rs:222`) and both rope and tap lowerings, so a diffusion graph built from these pieces is differentiable end to end without a second implementation.
+The same file checks `non_causal_attention_heads` (one builder, head-first) for `q`, `k` and `v` (`proxima-autograd/src/generic_lowering_grad.rs:222`) and both rope and tap lowerings, so a diffusion graph built from these pieces is differentiable end to end without a second implementation.
 
 ## 3. What omega does not do yet
 

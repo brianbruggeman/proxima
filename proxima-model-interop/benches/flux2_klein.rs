@@ -719,10 +719,7 @@ mod bench {
         let scale = attention_scale(graph, &config).map_err(context("attention scale"))?;
         non_causal_attention_heads(
             &mut graph.program,
-            q_even,
-            q_odd,
-            k_even,
-            k_odd,
+            &[(q_even, k_even), (q_odd, k_odd)],
             v,
             scale,
             "u",

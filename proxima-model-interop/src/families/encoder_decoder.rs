@@ -8,6 +8,7 @@
 //! is the same one `proxima-autograd` differentiates. Shapes are inferred from
 //! the operand maps; a caller passes only the head width and the mask choice.
 
+use alloc::format;
 use alloc::vec::Vec;
 
 use proxima_numeric::{DType, FloatLayout};
@@ -15,7 +16,7 @@ use proxima_tensor::error::TensorError;
 use proxima_tensor::op::{Extent, NodeId, Op, ReduceInit, ScalarOp};
 use proxima_tensor::spec::{
     CachedLayerRoots, PLANE_CACHE_READS, PLANE_NEW_READS, RopePairing, causal_mask, elementwise,
-    embedding_lookup, input_leaf, layer_norm, non_causal_attention, reduce, scalar_constant,
+    embedding_lookup, input_leaf, layer_norm, non_causal_attention_heads, reduce, scalar_constant,
     two_range_attention, unrotated_head_pair,
 };
 
@@ -259,19 +260,30 @@ pub fn flatten_heads(
     )
 }
 
-/// `[s, heads, 1, head_dim] @ [heads, head_dim, out] -> [s, out]`, the
-/// head-major output projection over an attention result. A reduce over the
+/// `[s, heads, head_dim] @ [heads, head_dim, out] -> [s, out]`, the
+/// head-major output projection over an attention result. `attended` is the
+/// letter run of `x`'s axes: `"sud"` for [`non_causal_attention_heads`]'s
+/// `[s, u, d]`, `"sugd"` for the mixer's `[s, u, 1, d]`. A reduce over the
 /// head, group and channel axes is a merge with no separate flatten node.
 ///
 /// # Errors
 ///
 /// [`TensorError`] when a map or node is malformed.
-pub fn project_heads(program: &mut Vec<Op>, x: NodeId, w: Linear) -> Result<NodeId, TensorError> {
+pub fn project_heads(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    attended: &str,
+    w: Linear,
+) -> Result<NodeId, TensorError> {
+    let space = format!("{attended}o");
     let product = elementwise(
         program,
         ACTIVATION,
         ScalarOp::Multiply,
-        &[(x, "sugd->sugdo"), (w.weight, "udo->sugdo")],
+        &[
+            (x, format!("{attended}->{space}").as_str()),
+            (w.weight, format!("udo->{space}").as_str()),
+        ],
     )?;
     let out = reduce(
         program,
@@ -279,8 +291,8 @@ pub fn project_heads(program: &mut Vec<Op>, x: NodeId, w: Linear) -> Result<Node
         ScalarOp::Add,
         ReduceInit::Zero,
         product,
-        "sugdo->sugdo",
-        "so->sugdo",
+        format!("{space}->{space}").as_str(),
+        format!("so->{space}").as_str(),
     )?;
     match w.bias {
         Some(bias) => elementwise(
@@ -360,8 +372,8 @@ pub fn encoder_layer(
     let k = linear_heads(program, normed, layer.attn.k, head_dim)?;
     let v = linear_heads(program, normed, layer.attn.v, head_dim)?;
     let inv = scalar_constant(program, 1.0 / (head_dim as f32).sqrt());
-    let attended = non_causal_attention(program, q, k, v, inv)?;
-    let projected = project_heads(program, attended, layer.attn.out)?;
+    let attended = non_causal_attention_heads(program, &[(q, k)], v, inv, "u", "i", "d")?;
+    let projected = project_heads(program, attended, "sud", layer.attn.out)?;
     let residual = binary(program, ScalarOp::Add, x, projected, "sd")?;
     let mlp_normed = layer_norm(
         program,
@@ -447,7 +459,7 @@ pub fn decoder_layer(
         PLANE_CACHE_READS,
         PLANE_NEW_READS,
     )?;
-    let projected = project_heads(program, attended, layer.self_attn.out)?;
+    let projected = project_heads(program, attended, "sugd", layer.self_attn.out)?;
     let residual = binary(program, ScalarOp::Add, x, projected, "sd")?;
 
     let cross_normed = layer_norm(
@@ -462,8 +474,9 @@ pub fn decoder_layer(
         eps,
     )?;
     let cross_q = linear_heads(program, cross_normed, layer.cross_q, head_dim)?;
-    let cross = non_causal_attention(program, cross_q, cross_k, cross_v, inv)?;
-    let cross_projected = project_heads(program, cross, layer.cross_out)?;
+    let cross =
+        non_causal_attention_heads(program, &[(cross_q, cross_k)], cross_v, inv, "u", "i", "d")?;
+    let cross_projected = project_heads(program, cross, "sud", layer.cross_out)?;
     let cross_residual = binary(program, ScalarOp::Add, residual, cross_projected, "sd")?;
 
     let mlp_normed = layer_norm(

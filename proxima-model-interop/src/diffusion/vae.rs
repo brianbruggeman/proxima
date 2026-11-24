@@ -447,10 +447,7 @@ fn attention(
     let k_odd = group_range(graph, k, half, half)?;
     let attended = non_causal_attention_heads(
         &mut graph.program,
-        q_even,
-        q_odd,
-        k_even,
-        k_odd,
+        &[(q_even, k_even), (q_odd, k_odd)],
         v,
         inv_sqrt,
         "",

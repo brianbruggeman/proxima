@@ -9,7 +9,7 @@ use proxima_tensor::cpu::evaluate_named;
 use proxima_tensor::op::{Extent, NodeId, Op};
 use proxima_tensor::spec::{
     RopePairing, fused_rope_pair, input_leaf, layer_norm_no_affine, modulate,
-    multi_axis_rope_tables, non_causal_attention, scalar_constant, tap_layers,
+    multi_axis_rope_tables, non_causal_attention_heads, scalar_constant, tap_layers,
 };
 
 const F32_TOLERANCE: f32 = 1e-5;
@@ -109,7 +109,8 @@ fn non_causal_attention_lets_every_query_see_every_key() {
         &[keys as u32, heads as u32, value_dim as u32],
     );
     let inv_sqrt = scalar_constant(&mut program, 1.0 / (head_dim as f32).sqrt());
-    let out = non_causal_attention(&mut program, q, k, v, inv_sqrt).expect("attention builds");
+    let out = non_causal_attention_heads(&mut program, &[(q, k)], v, inv_sqrt, "u", "i", "d")
+        .expect("attention builds");
     let actual = run(
         &program,
         &[("q", &q_data), ("k", &k_data), ("v", &v_data)],

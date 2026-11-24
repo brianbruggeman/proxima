@@ -9,7 +9,7 @@
 //! named here. Learn the pattern from [`super::rmsnorm`] (the affine, root-mean-square
 //! sibling of [`layer_norm_no_affine`]) and from the attention core shared with
 //! [`super::append_attention_mixer`], whose causal mask is the switch
-//! [`non_causal_attention`] leaves off.
+//! [`non_causal_attention_heads`] leaves off.
 
 use alloc::format;
 use alloc::string::ToString;
@@ -890,7 +890,7 @@ pub fn concat_rows(
     )
 }
 
-/// [`non_causal_attention`] for a query/key pair already split into the two
+/// [`non_causal_attention_heads`] for a query/key pair already split into the two
 /// halves [`super::fused_rope_pair`] returns: the score is the sum of the two
 /// halves' dots (`q_even . k_even + q_odd . k_odd`), which is the same dot
 /// product the interleaved split computes, without re-interleaving the halves
@@ -973,56 +973,6 @@ pub fn non_causal_attention_halves(
     append_masked_softmax_mix(program, scores, inv_sqrt_head_dim, None, None, 1, v)
 }
 
-/// Softmax attention with every key visible to every query: `q` is
-/// `[s, u, i]`, `k` is `[t, u, i]`, `v` is `[t, u, d]`, the result is
-/// `[s, u, 1, d]` (row-major identical to `[s, u, d]`). `s` and `t` are
-/// independent extents, so this also serves cross and joint attention. The
-/// scale/softmax/mix is `append_masked_softmax_mix`, the very core
-/// [`super::append_attention_mixer`] runs with its causal mask; here the mask is
-/// `None`. `inv_sqrt_head_dim` is a rank-0 node (e.g. [`scalar_constant_like`]).
-///
-/// # Errors
-///
-/// [`TensorError`] when a node is not part of `program`.
-pub fn non_causal_attention(
-    program: &mut Vec<Op>,
-    q: NodeId,
-    k: NodeId,
-    v: NodeId,
-    inv_sqrt_head_dim: NodeId,
-) -> Result<NodeId, TensorError> {
-    let group_dtype = produced_dtype_or_binary32(program, q);
-    let single_group = op::append(
-        program,
-        Op::Constant {
-            dtype: group_dtype,
-            shape: alloc::vec![Extent::Static(1)],
-            value: 1.0,
-        },
-    );
-    let grouped = elementwise_like(
-        program,
-        q,
-        ScalarOp::Multiply,
-        &[(q, "sui->sugi"), (single_group, "g->sugi")],
-    )?;
-    let product = elementwise_like(
-        program,
-        q,
-        ScalarOp::Multiply,
-        &[(grouped, "sugi->stugi"), (k, "tui->stugi")],
-    )?;
-    let scores = reduce_like(
-        program,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        product,
-        "stugi->stugi",
-        "stug->stugi",
-    )?;
-    append_masked_softmax_mix(program, scores, inv_sqrt_head_dim, None, None, 1, v)
-}
-
 /// One head-split projection of the encoder memory: `memory` is `[t, m]`,
 /// `weight` is `[m, u, o]`, the result is `[t, u, o]`; an optional `bias`
 /// (`[u, o]`) is added per position. A multiply and a `Reduce` over `m`, so
@@ -1064,7 +1014,7 @@ fn project_memory(
 /// operand or it is absent (`None`); a model whose K projection has no bias
 /// passes `None`, nothing branches on a name.
 ///
-/// Feed the pair to [`non_causal_attention`] (`s != t`). Inference binds the
+/// Feed the pair to [`non_causal_attention_heads`] (`s != t`). Inference binds the
 /// cached `k`/`v` tensors as `Input`s in place of this builder's output;
 /// training calls this builder in the same graph, so the adjoint flows through
 /// the projection to the memory and the weights. The attention ops are the same
@@ -1338,7 +1288,7 @@ pub fn stft_tables(config: &StftLogMelConfig, dtype: DType) -> Result<StftTables
 /// `hop*frame + tap`, which autograd differentiates by mask composition; every other step is
 /// `Elementwise` or an Add/Maximum `Reduce`, so the whole front end is trainable to the waveform
 /// and to the filterbank. Padding the signal is the caller's job. Compose [`layer_norm`] or a
-/// convolution after it; [`non_causal_attention`] shows the same leaf-plus-table pattern.
+/// convolution after it; [`non_causal_attention_heads`] shows the same leaf-plus-table pattern.
 ///
 /// # Errors
 ///
@@ -1743,17 +1693,13 @@ mod stft_log_mel_tests {
     }
 }
 
-/// [`non_causal_attention_halves`] with the feature axes grouped the way the
-/// caller declares them and no broadcast group axis. `heads` is the letter run
-/// of the per-query feature axes: `"u"` for multi-head attention
-/// (`q_even`/`q_odd` are `[s, u, p]`, `k_even`/`k_odd` `[t, u, p]`, `v`
-/// `[t, u, d]`), `"gc"` for one attention head over a two-axis channel group
-/// (`[s, g, c]`), `""` for a single axis.
-///
-/// Every step is a two-operand `Multiply` or a one-value `Maximum`/`Add`
-/// reduce, which is the shape a backend's dense batched matmul recognises;
-/// [`non_causal_attention_halves`] with the feature axes spelled as the caller
-/// declares them and no broadcast group axis. Three letter runs describe the
+/// The one non-causal softmax attention every model uses (DiT, VAE, Whisper
+/// encoder and cross). `terms` are `(q, k)` pairs whose scaled dots are summed:
+/// one term is plain attention (`q` `[s, u, i]`, `k` `[t, u, i]`, `v`
+/// `[t, u, d]`, result `[s, u, d]`), two terms are the RoPE halves
+/// (`q_even . k_even + q_odd . k_odd`). `1/sqrt(head_dim)` is folded into each
+/// `q` before the product. `s` and `t` are independent extents, so this serves
+/// cross and joint attention. Three letter runs describe the
 /// operands: `kept` are the per-query axes the score keeps (`"u"` for
 /// multi-head attention, `""` for one head over the whole channel), `reduced`
 /// are the axes the dot product sums over (`"p"` for the rotated pairs,
@@ -1767,20 +1713,22 @@ mod stft_log_mel_tests {
 ///
 /// # Errors
 ///
-/// [`TensorError`] when a node is not part of `program`.
-#[allow(clippy::too_many_arguments)]
+/// [`TensorError`] when a node is not part of `program`, or `terms` is empty.
 pub fn non_causal_attention_heads(
     program: &mut Vec<Op>,
-    q_even: NodeId,
-    q_odd: NodeId,
-    k_even: NodeId,
-    k_odd: NodeId,
+    terms: &[(NodeId, NodeId)],
     v: NodeId,
     inv_sqrt_head_dim: NodeId,
     kept: &str,
     reduced: &str,
     value: &str,
 ) -> Result<NodeId, TensorError> {
+    let Some(&(first_query, _)) = terms.first() else {
+        return Err(TensorError::NotLowerable {
+            node: v,
+            reason: "attention needs at least one (query, key) term",
+        });
+    };
     let combined = alloc::format!("{kept}{reduced}");
     let comma = |letters: &str| -> alloc::string::String {
         if letters.is_empty() {
@@ -1821,52 +1769,55 @@ pub fn non_causal_attention_heads(
     let attended_order = alloc::format!("{kept}s{value}->s{kept}{value}");
     let query_shape = alloc::format!("s{combined}->s{combined}");
     let query_scalar = alloc::format!("->s{combined}");
-    let q_even = elementwise_like(
-        program,
-        q_even,
-        ScalarOp::Multiply,
-        &[(q_even, query_shape.as_str()), (inv_sqrt_head_dim, query_scalar.as_str())],
-    )?;
-    let q_odd = elementwise_like(
-        program,
-        q_odd,
-        ScalarOp::Multiply,
-        &[(q_odd, query_shape.as_str()), (inv_sqrt_head_dim, query_scalar.as_str())],
-    )?;
-    let even_product = elementwise_like(
-        program,
-        q_even,
-        ScalarOp::Multiply,
-        &[(q_even, query.as_str()), (k_even, key.as_str())],
-    )?;
-    let odd_product = elementwise_like(
-        program,
-        q_odd,
-        ScalarOp::Multiply,
-        &[(q_odd, query.as_str()), (k_odd, key.as_str())],
-    )?;
-    let even_scores = reduce_like(
-        program,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        even_product,
-        scores_iteration.as_str(),
-        scores_out.as_str(),
-    )?;
-    let odd_scores = reduce_like(
-        program,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        odd_product,
-        scores_iteration.as_str(),
-        scores_out.as_str(),
-    )?;
-    let scores = elementwise_like(
-        program,
-        q_even,
-        ScalarOp::Add,
-        &[(even_scores, same.as_str()), (odd_scores, same.as_str())],
-    )?;
+    // phase by phase (scale every query, then every product, then every
+    // reduce, then the sum) so a two-term call emits the same op order the
+    // fixed even/odd form did.
+    let mut scaled = Vec::with_capacity(terms.len());
+    for &(query_node, key_node) in terms {
+        let scaled_query = elementwise_like(
+            program,
+            query_node,
+            ScalarOp::Multiply,
+            &[(query_node, query_shape.as_str()), (inv_sqrt_head_dim, query_scalar.as_str())],
+        )?;
+        scaled.push((scaled_query, key_node));
+    }
+    let mut products = Vec::with_capacity(scaled.len());
+    for &(scaled_query, key_node) in &scaled {
+        products.push(elementwise_like(
+            program,
+            scaled_query,
+            ScalarOp::Multiply,
+            &[(scaled_query, query.as_str()), (key_node, key.as_str())],
+        )?);
+    }
+    let mut term_scores = Vec::with_capacity(products.len());
+    for &product in &products {
+        term_scores.push(reduce_like(
+            program,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            product,
+            scores_iteration.as_str(),
+            scores_out.as_str(),
+        )?);
+    }
+    let q_even = scaled.first().map_or(first_query, |&(scaled_query, _)| scaled_query);
+    let Some((&head, rest)) = term_scores.split_first() else {
+        return Err(TensorError::NotLowerable {
+            node: v,
+            reason: "attention needs at least one (query, key) term",
+        });
+    };
+    let mut scores = head;
+    for &next in rest {
+        scores = elementwise_like(
+            program,
+            q_even,
+            ScalarOp::Add,
+            &[(scores, same.as_str()), (next, same.as_str())],
+        )?;
+    }
     let peak = reduce_like(
         program,
         ScalarOp::Maximum,
@@ -1993,5 +1944,115 @@ mod window_and_group_norm_tests {
         assert!(program[before..].iter().all(
             |op| !matches!(op, Op::Constant { dtype, .. } if *dtype != host_dtype())
         ));
+    }
+}
+
+#[cfg(test)]
+mod non_causal_attention_terms_tests {
+    use super::*;
+
+    fn host_dtype() -> DType {
+        NumericFormat::host_element()
+            .to_dtype()
+            .expect("the host element is a scalar dtype")
+    }
+
+    fn leaf(program: &mut Vec<Op>, name: &str, shape: &[u32]) -> NodeId {
+        let extents = shape.iter().map(|&size| Extent::Static(size)).collect();
+        input_leaf(program, host_dtype(), extents, name)
+    }
+
+    #[test]
+    fn two_terms_emit_the_even_odd_rope_halves_op_sequence_unchanged() {
+        let (s, t, u, p, d) = (3_u32, 4_u32, 2_u32, 2_u32, 3_u32);
+        let mut built = Vec::new();
+        let q_even = leaf(&mut built, "q_even", &[s, u, p]);
+        let q_odd = leaf(&mut built, "q_odd", &[s, u, p]);
+        let k_even = leaf(&mut built, "k_even", &[t, u, p]);
+        let k_odd = leaf(&mut built, "k_odd", &[t, u, p]);
+        let v = leaf(&mut built, "v", &[t, u, d]);
+        let inv = scalar_constant_like(&mut built, 0.5, q_even).expect("scale builds");
+        let mut expected = built.clone();
+        let leaves = built.len();
+
+        non_causal_attention_heads(
+            &mut built,
+            &[(q_even, k_even), (q_odd, k_odd)],
+            v,
+            inv,
+            "u",
+            "p",
+            "d",
+        )
+        .expect("two-term attention builds");
+
+        let scale_map = "->sup";
+        let query_shape = "sup->sup";
+        let scaled_even = elementwise_like(
+            &mut expected,
+            q_even,
+            ScalarOp::Multiply,
+            &[(q_even, query_shape), (inv, scale_map)],
+        )
+        .expect("scaled even");
+        let scaled_odd = elementwise_like(
+            &mut expected,
+            q_odd,
+            ScalarOp::Multiply,
+            &[(q_odd, query_shape), (inv, scale_map)],
+        )
+        .expect("scaled odd");
+        let even_product = elementwise_like(
+            &mut expected,
+            scaled_even,
+            ScalarOp::Multiply,
+            &[(scaled_even, "s,u,p->ustp"), (k_even, "t,u,p->ustp")],
+        )
+        .expect("even product");
+        let odd_product = elementwise_like(
+            &mut expected,
+            scaled_odd,
+            ScalarOp::Multiply,
+            &[(scaled_odd, "s,u,p->ustp"), (k_odd, "t,u,p->ustp")],
+        )
+        .expect("odd product");
+        let even_scores = reduce_like(
+            &mut expected,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            even_product,
+            "ustp->ustp",
+            "ust->ustp",
+        )
+        .expect("even scores");
+        let odd_scores = reduce_like(
+            &mut expected,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            odd_product,
+            "ustp->ustp",
+            "ust->ustp",
+        )
+        .expect("odd scores");
+        elementwise_like(
+            &mut expected,
+            scaled_even,
+            ScalarOp::Add,
+            &[(even_scores, "ust->ust"), (odd_scores, "ust->ust")],
+        )
+        .expect("summed scores");
+
+        assert_eq!(built[leaves..expected.len()], expected[leaves..]);
+    }
+
+    #[test]
+    fn no_terms_is_an_error() {
+        let mut program = Vec::new();
+        let v = leaf(&mut program, "v", &[2, 1, 2]);
+        let inv = scalar_constant_like(&mut program, 0.5, v).expect("scale builds");
+
+        let built = non_causal_attention_heads(&mut program, &[], v, inv, "u", "p", "d");
+
+        assert!(built.is_err());
     }
 }

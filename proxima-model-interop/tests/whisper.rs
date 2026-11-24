@@ -1160,10 +1160,21 @@ mod encoder {
             &mut bound.program,
             1.0 / (HEAD_DIM as f32).sqrt(),
         );
-        let attended =
-            proxima_tensor::spec::non_causal_attention(&mut bound.program, q, k, v, inv)?;
-        let projected =
-            encoder_decoder::project_heads(&mut bound.program, attended, layer.attn.out)?;
+        let attended = proxima_tensor::spec::non_causal_attention_heads(
+            &mut bound.program,
+            &[(q, k)],
+            v,
+            inv,
+            "u",
+            "i",
+            "d",
+        )?;
+        let projected = encoder_decoder::project_heads(
+            &mut bound.program,
+            attended,
+            "sud",
+            layer.attn.out,
+        )?;
         let residual = proxima_tensor::spec::elementwise(
             &mut bound.program,
             proxima_model_interop::families::encoder_decoder::ACTIVATION,

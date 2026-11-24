@@ -414,7 +414,13 @@ fn double_block(
     let (k_even, k_odd) = rope(graph, k, inputs)?;
     let program = &mut graph.program;
     let attended = non_causal_attention_heads(
-        program, q_even, q_odd, k_even, k_odd, v, inv_sqrt, "u", "p", "d",
+        program,
+        &[(q_even, k_even), (q_odd, k_odd)],
+        v,
+        inv_sqrt,
+        "u",
+        "p",
+        "d",
     )?;
     if let Some(trace) = trace.as_mut() {
         trace.push(("b_attn", attended));
@@ -540,7 +546,13 @@ fn single_block(
     let (k_even, k_odd) = rope(graph, k, inputs)?;
     let program = &mut graph.program;
     let attended = non_causal_attention_heads(
-        program, q_even, q_odd, k_even, k_odd, v, inv_sqrt, "u", "p", "d",
+        program,
+        &[(q_even, k_even), (q_odd, k_odd)],
+        v,
+        inv_sqrt,
+        "u",
+        "p",
+        "d",
     )?;
     let attention_out = project_heads(
         graph,

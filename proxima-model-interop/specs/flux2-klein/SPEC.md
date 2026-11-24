@@ -210,7 +210,7 @@ Test target `flux2_klein` in `proxima-model-interop`, gated on `PROXIMA_FLUX2_KL
 | AC7 end to end | R7 | `cargo run --release -p proxima-model-interop --example flux2_klein -- --seed 42 --out $K/omega.png`, then `cargo run --release -p proxima-model-interop --example image_psnr -- $K/ref.png $K/omega.png` (Rust, no Python) | PNG is 1024 x 1024; printed PSNR >= 22.0 dB; the example prints 3 stage timers (text, DiT steps, VAE) |
 | AC8 speed | R8 | `scripts/flux2_klein_ab.sh` (3 alternating pairs, quiet window, release builds) | prints `runs=3 per side`; `omega_median_ms / sdcpp_median_ms <= 1.05`; **omega wall <= 84 s** (owner bar, the measured incumbent); per-stage rows (text encode, DiT step 1 to 4, VAE decode) for both sides with the ratio; peak RSS (`/usr/bin/time -l`, "maximum resident set size") for both sides (report-only, no bar); CoV <= 5% per side |
 | AC9 genericity | R9 | `git grep -n -i "flux\|klein" -- omega/src proxima-model-interop/src ':!*.toml' ':!*.md'` | 0 lines; `ls proxima-model-interop/src/arch` lists 3 files (llama, granite, flux2 TOML) |
-| AC10 generic lowerings | R10 | `cargo val -p proxima-model-interop generic_lowering::` | `6 passed`: one test per new lowering (layer_norm_no_affine, group_norm, nearest_upsample_x2, multi_axis_rope, non_causal_attention, tap_layers), each on a non-FLUX shape |
+| AC10 generic lowerings | R10 | `cargo val -p proxima-model-interop generic_lowering::` | `6 passed`: one test per new lowering (layer_norm_no_affine, group_norm, nearest_upsample_x2, multi_axis_rope, non_causal_attention_heads, tap_layers), each on a non-FLUX shape |
 
 ## Speed methodology (AC8)
 

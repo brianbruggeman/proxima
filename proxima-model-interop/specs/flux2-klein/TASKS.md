@@ -12,7 +12,7 @@ A missing fixture is a failure; `0 passed` is red.
   Validate: `cargo val -p proxima-model-interop --test flux2_klein philox::` -> `3 passed` (AC2).
 - [x] **S2 flow-match scheduler + Euler step.** Config `mu` coefficients, `steps`, `image_seq_len`; the Euler update is one Elementwise.
   Validate: `cargo val -p proxima-model-interop --test flux2_klein scheduler::` -> `3 passed` (AC4).
-- [x] **S3 generic lowerings, no model attached.** `layer_norm_no_affine` + `modulate`, `non_causal_attention`, `multi_axis_rope`, `tap_layers`, each with a non-FLUX unit test.
+- [x] **S3 generic lowerings, no model attached.** `layer_norm_no_affine` + `modulate`, `non_causal_attention_heads` (one builder, head-first), `multi_axis_rope`, `tap_layers`, each with a non-FLUX unit test.
   Validate: `cargo val -p proxima-model-interop generic_lowering::` -> `4 passed` (4 of the 6 in AC10; the other 2 land in S7).
 - [ ] **S4 text encoder.** `arch/flux2.toml` text section + Qwen3 bind through the existing HF path; tokenizer and template from config; taps 9/18/27 concatenated. First task: read sd.cpp's pad-mask behaviour and the safetensors tensor names, record both here.
   Validate: `cargo val -p proxima-model-interop --test flux2_klein text_embedding::` -> `4 passed` (AC3).
@@ -32,5 +32,5 @@ A missing fixture is a failure; `0 passed` is red.
 Order: S0 first (everything compares to it). S1, S2, S3 are independent after S0. S4 needs S3. S5 and S6 need S2 and S3. S7 is independent of S4 to S6. S8 needs S1, S2, S4, S6, S7. S9 after S8. S10 last.
 
 Notes log (one line per landed slice, appended in the slice's own commit):
-- 2026-11-20 S3: generic layer_norm_no_affine, modulate, non_causal_attention (shares the mixer softmax-mix core), multi_axis_rope tables (codec-encoded), tap_layers; `generic_lowering::` 4 passed.
+- 2026-11-20 S3: generic layer_norm_no_affine, modulate, non_causal_attention_heads (one builder, head-first; shares the mixer softmax-mix core), multi_axis_rope tables (codec-encoded), tap_layers; `generic_lowering::` 4 passed.
 - 2026-11-21 S0: reference dumps (8 raw + sidecars), Metal wall 84.58 s / 16.19 GiB RSS, Metal bit-repeatable, CPU-vs-Metal conditioner `rms_rel` 0.00353 (maxabs_rel 1.009 -> gate is `rms_rel`), image RMS 0.7326, ceilings 26.4/22.6 dB.
