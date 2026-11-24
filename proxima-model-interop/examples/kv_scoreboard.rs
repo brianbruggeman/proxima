@@ -354,19 +354,43 @@ fn cell_order(proxima: &[(String, PathBuf)], inproc: Option<&Path>, files: usize
     cells
 }
 
-/// Every round visits every cell once: odd rounds forward, even rounds reversed, so any two
-/// cells swap relative order between rounds 1 and 2 and neither always runs first.
-fn round_plan(rounds: usize, cell_count: usize) -> Vec<(usize, usize)> {
+/// Cell counts of each consecutive (prompt, kv) group; `cell_order` keeps a group contiguous.
+fn group_sizes(cells: &[Cell]) -> Vec<usize> {
+    let mut sizes: Vec<usize> = Vec::new();
+    let mut previous: Option<(Prompt, Kv)> = None;
+    for cell in cells {
+        match (previous == Some(cell.group()), sizes.last_mut()) {
+            (true, Some(size)) => *size += 1,
+            _ => sizes.push(1),
+        }
+        previous = Some(cell.group());
+    }
+    sizes
+}
+
+/// Every round visits every cell once. Odd rounds walk the groups forward and even rounds walk
+/// them reversed, but the cells inside a group keep their order, so the arms of a group pair
+/// stay in sequence and the session alternates arms from the first record to the last.
+fn round_plan(rounds: usize, sizes: &[usize]) -> Vec<(usize, usize)> {
+    let starts: Vec<usize> = sizes
+        .iter()
+        .scan(0, |next, size| {
+            let start = *next;
+            *next += size;
+            Some(start)
+        })
+        .collect();
     (1..=rounds)
         .flat_map(|round| {
-            (0..cell_count).map(move |position| {
-                let index = if round % 2 == 1 {
-                    position
-                } else {
-                    cell_count - 1 - position
-                };
-                (round, index)
-            })
+            let order: Vec<usize> = if round % 2 == 1 {
+                (0..sizes.len()).collect()
+            } else {
+                (0..sizes.len()).rev().collect()
+            };
+            order
+                .into_iter()
+                .flat_map(|group| (starts[group]..starts[group] + sizes[group]).map(move |index| (round, index)))
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -2805,7 +2829,7 @@ fn run(config: &Config) -> Result<(), HarnessError> {
     let mut warmups = run_warmups(&mut session, &cells)?;
     let mut rows = Vec::new();
     let session_id = format!("s-{}-{}", utc_text(SystemTime::now()).replace(['-', ':', '.'], ""), std::process::id());
-    for (step, (round, index)) in round_plan(config.rounds, cells.len()).into_iter().enumerate() {
+    for (step, (round, index)) in round_plan(config.rounds, &group_sizes(&cells)).into_iter().enumerate() {
         rows.push(measure(&session, &cells[index], Slot { round, step, port_index: step })?);
     }
     evaluate_all(&mut warmups, &facts);
@@ -5338,14 +5362,14 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
     }
 
     #[test]
-    fn every_round_visits_every_cell_once_and_no_pair_keeps_one_relative_order() {
+    fn every_round_visits_every_cell_once_and_no_pair_of_groups_keeps_one_relative_order() {
         let proxima = vec![
             ("new".to_owned(), PathBuf::from("/bin/a")),
             ("old".to_owned(), PathBuf::from("/bin/b")),
         ];
         let cells = cell_order(&proxima, None, 0);
         assert_eq!(cells.len(), 2 * (4 * 2 + 3));
-        let plan = round_plan(5, cells.len());
+        let plan = round_plan(5, &group_sizes(&cells));
         assert_eq!(plan.len(), 5 * cells.len());
         let order_of = |round: usize| -> Vec<usize> {
             plan.iter()
@@ -5361,6 +5385,9 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         let position = |round: usize, cell: usize| order_of(round).iter().position(|index| *index == cell);
         for first in 0..cells.len() {
             for second in (first + 1)..cells.len() {
+                if cells[first].group() == cells[second].group() {
+                    continue;
+                }
                 let before_in_round = |round: usize| position(round, first) < position(round, second);
                 let always_same = (1..=5).all(|round| before_in_round(round) == before_in_round(1));
                 assert!(!always_same, "cells {first} and {second} keep one relative order");
@@ -5368,6 +5395,31 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         }
     }
 
+
+    fn alternating_cells(files: usize) -> Vec<Cell> {
+        let proxima = vec![("new".to_owned(), PathBuf::from("/bin/a"))];
+        let mut cells = cell_order(&proxima, None, files);
+        cells.retain(|cell| cell.kv == ALL_KV[0]);
+        cells
+    }
+
+    #[test]
+    fn round_plan_alternates_arms_across_three_rounds() {
+        let cells = alternating_cells(2);
+        assert_eq!(cells.len(), 2 * 4);
+        let plan = round_plan(3, &group_sizes(&cells));
+        assert_eq!(plan.len(), 3 * cells.len());
+        let arms: Vec<&str> = plan.iter().map(|(_, index)| cells[*index].engine_name()).collect();
+        assert!(arms.windows(2).all(|pair| pair[0] != pair[1]), "arms repeat in {arms:?}");
+        assert_eq!(group_sizes(&cells), vec![2; 4]);
+    }
+
+    #[test]
+    fn round_plan_reverses_group_order_on_even_rounds_and_keeps_the_arms_of_a_group() {
+        let plan = round_plan(2, &[2, 2, 3]);
+        let second: Vec<usize> = plan.iter().filter(|(round, _)| *round == 2).map(|(_, index)| *index).collect();
+        assert_eq!(second, vec![4, 5, 6, 2, 3, 0, 1]);
+    }
 
     #[test]
     fn prompt_files_flag_repeats_and_each_file_is_one_more_input() {
