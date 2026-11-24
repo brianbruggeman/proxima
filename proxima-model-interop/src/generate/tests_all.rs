@@ -2867,6 +2867,8 @@ pub(super) mod memory_fit_gate_tests {
             program_hash: 0,
             moe_high_decisions: core::sync::atomic::AtomicU64::new(0),
             moe_low_decisions: core::sync::atomic::AtomicU64::new(0),
+            hobbit_plan_active: core::sync::atomic::AtomicBool::new(false),
+            hobbit_low_stacks: alloc::collections::BTreeMap::new(),
             program: Vec::new(),
             logits_root: proxima_tensor::op::NodeId(0),
             hidden_root: None,
