@@ -100,14 +100,16 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use memmap2::MmapOptions;
-use proxima_gguf::parse_complete;
+use proxima_gguf::{MetadataValue, ParsedGguf, parse_complete};
 use proxima_model_interop::ServingSettings;
+use proxima_tokenizer::chat_template::render_chat;
 use proxima_tokenizer::vocab::Vocab;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-const SHORT_PROMPT: &str = "<|turn>user\nWhich of these is smaller in size: a hippopotamus or a large office building?<turn|>\n<|turn>model\n";
+const SHORT_QUESTION: &str = "Which of these is smaller in size: a hippopotamus or a large office building?";
+const CHAT_TEMPLATE_KEY: &str = "tokenizer.chat_template";
 const DEFAULT_ROUNDS: usize = 5;
 const DEFAULT_TIME_BIN: &str = "/usr/bin/time";
 const DEFAULT_LOAD_LIMIT: f64 = 4.0;
@@ -1142,6 +1144,8 @@ fn write_prompt_ids(out: &Path, prompts: &BTreeMap<Prompt, PromptData>) -> Resul
     for (prompt, data) in prompts {
         let path = directory.join(format!("{}.ids", prompt.name()));
         fs::write(&path, render_prompt_ids(&data.ids)).map_err(io_error(&path))?;
+        let text_path = directory.join(format!("{}.txt", prompt.name()));
+        fs::write(&text_path, &data.text).map_err(io_error(&text_path))?;
         println!("prompt {} ids {} written to {}", prompt.name(), data.ids.len(), path.display());
     }
     Ok(())
@@ -1796,9 +1800,7 @@ struct PromptData {
 /// Mirrors `generate::residency_caches::wants_bos` and the `encode_with_bos_eos` call at
 /// `decode.rs:3420-3428`; both are unreachable from an example.
 fn tokenize_like_proxima(text: &str, vocab: &Vocab) -> Result<Vec<u32>, HarnessError> {
-    let add_bos = vocab
-        .add_bos_token()
-        .unwrap_or_else(|| vocab.bos_token_id().is_some());
+    let add_bos = wants_bos(vocab);
     let wants_eos = vocab.add_eos_token().unwrap_or(false);
     proxima_tokenizer::encode_with_bos_eos(text, vocab, add_bos, wants_eos)
         .map_err(|source| HarnessError::Tokenize(format!("{source:?}")))
@@ -2151,9 +2153,38 @@ fn blank_row(round: usize, position: usize, cell: &Cell, prompt: &PromptData, id
     }
 }
 
-fn prompt_text(prompt: Prompt, long_prompt_file: &Path) -> Result<String, HarnessError> {
+fn wants_bos(vocab: &Vocab) -> bool {
+    vocab.add_bos_token().unwrap_or_else(|| vocab.bos_token_id().is_some())
+}
+
+fn special_token_text(id: Option<u32>, vocab: &Vocab) -> &str {
+    id.and_then(|token| vocab.token_str(token)).unwrap_or_default()
+}
+
+/// the question as the model's own template renders it; no template means the plain question.
+/// a leading bos is dropped when tokenization adds its own, so it is not sent twice.
+fn render_short_prompt(template: Option<&str>, bos: &str, eos: &str, tokenizer_adds_bos: bool) -> Result<String, HarnessError> {
+    let Some(template) = template else {
+        return Ok(SHORT_QUESTION.to_owned());
+    };
+    let rendered = render_chat(template, &[("user", SHORT_QUESTION)], true, bos, eos, &[])
+        .map_err(|source| HarnessError::Tokenize(format!("chat template: {source}")))?;
+    if tokenizer_adds_bos && !bos.is_empty() && rendered.starts_with(bos) {
+        return Ok(rendered[bos.len()..].to_owned());
+    }
+    Ok(rendered)
+}
+
+fn short_prompt_text(parsed: &ParsedGguf, vocab: &Vocab) -> Result<String, HarnessError> {
+    let template = parsed.metadata_value(CHAT_TEMPLATE_KEY).and_then(MetadataValue::as_str);
+    let bos = special_token_text(vocab.bos_token_id(), vocab);
+    let eos = special_token_text(vocab.eos_token_id(), vocab);
+    render_short_prompt(template, bos, eos, wants_bos(vocab))
+}
+
+fn prompt_text(prompt: Prompt, short_text: &str, long_prompt_file: &Path) -> Result<String, HarnessError> {
     match prompt {
-        Prompt::Short => Ok(SHORT_PROMPT.to_owned()),
+        Prompt::Short => Ok(short_text.to_owned()),
         Prompt::Long => fs::read_to_string(long_prompt_file)
             .map(|text| text.trim_end_matches('\n').to_owned())
             .map_err(io_error(long_prompt_file)),
@@ -2168,9 +2199,10 @@ fn load_prompts(config: &Config) -> Result<(String, BTreeMap<Prompt, PromptData>
     let parsed = parse_complete(&bytes).map_err(|source| HarnessError::Tokenize(format!("{source:?}")))?;
     let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
         .map_err(|source| HarnessError::Tokenize(format!("{source:?}")))?;
+    let short_text = short_prompt_text(&parsed, &vocab)?;
     let mut prompts = BTreeMap::new();
     for prompt in config.prompts.iter().copied() {
-        let text = prompt_text(prompt, &config.long_prompt_file)?;
+        let text = prompt_text(prompt, &short_text, &config.long_prompt_file)?;
         let ids = tokenize_like_proxima(&text, &vocab)?;
         let capacity = kv_capacity(ids.len(), MAX_TOKENS, config.kv_bucket, config.context_length);
         prompts.insert(prompt, PromptData { text, ids, capacity });
@@ -3898,7 +3930,7 @@ fn parse_compare_config(arguments: impl IntoIterator<Item = String>) -> Result<C
         cpu_prompt: values
             .get("--cpu-prompt")
             .cloned()
-            .unwrap_or_else(|| SHORT_PROMPT.to_owned()),
+            .unwrap_or_else(|| SHORT_QUESTION.to_owned()),
         cpu_tokens: parse_value(&values, "--cpu-tokens", "a positive integer", 16)?,
     })
 }
@@ -4403,6 +4435,38 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         let metrics = parse_proxima(PROX_LOG).expect("real proxima log parses");
         assert_eq!(metrics.gpu_peak_bytes, Some(3_377_004_544));
         assert_eq!(metrics.gpu_steady_bytes, Some(3_375_693_824));
+    }
+
+    const FIXTURE_TEMPLATE: &str = "{% for message in messages %}<{{ message.role }}>{{ message.content }}</{{ message.role }}>{% endfor %}{% if add_generation_prompt %}<assistant>{% endif %}";
+
+    #[test]
+    fn short_prompt_renders_the_question_through_the_template_with_the_generation_prompt() {
+        let text = render_short_prompt(Some(FIXTURE_TEMPLATE), "", "", false).expect("fixture template renders");
+        assert_eq!(text, format!("<user>{SHORT_QUESTION}</user><assistant>"));
+    }
+
+    #[test]
+    fn short_prompt_without_a_template_is_the_plain_question() {
+        assert_eq!(render_short_prompt(None, "<s>", "</s>", true).expect("no template"), SHORT_QUESTION);
+    }
+
+    #[test]
+    fn short_prompt_drops_a_leading_bos_only_when_tokenization_adds_one() {
+        let template = "{{ bos_token }}{{ messages[0].content }}";
+        assert_eq!(render_short_prompt(Some(template), "<s>", "", true).expect("renders"), SHORT_QUESTION);
+        assert_eq!(render_short_prompt(Some(template), "<s>", "", false).expect("renders"), format!("<s>{SHORT_QUESTION}"));
+    }
+
+    #[test]
+    fn short_prompt_template_failure_is_an_error_not_a_fallback() {
+        assert!(render_short_prompt(Some("{{ messages[0].content | no_such_filter }}"), "", "", false).is_err());
+    }
+
+    #[test]
+    fn harness_source_has_no_hardcoded_turn_markers_for_the_short_prompt() {
+        let source = include_str!("kv_scoreboard.rs");
+        let constant = ["const SHORT", "_PROMPT"].concat();
+        assert!(!source.contains(&constant));
     }
 
     #[test]

@@ -49,6 +49,7 @@ std = [
     "interop-bgpool",
     "proxima-tokenizer/gguf",
     "proxima-tokenizer/hf",
+    "proxima-tokenizer/chat-template",
     "dep:fastrand",
     "dep:xxhash-rust",
     "dep:anyhow",
