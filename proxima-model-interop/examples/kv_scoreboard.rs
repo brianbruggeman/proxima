@@ -2001,6 +2001,28 @@ fn completion_body(ids: &[u32]) -> String {
     .to_string()
 }
 
+/// llama's spelling of "every layer"; both incumbents' `-ngl` accept it where a negative count is not valid
+const LLAMA_ALL_LAYERS: &str = "all";
+const CPU_BACKEND: &str = "cpu";
+
+fn llama_gpu_layers_args(gpu_layers: i32) -> [String; 2] {
+    let value = if gpu_layers < 0 { LLAMA_ALL_LAYERS.to_owned() } else { gpu_layers.to_string() };
+    ["-ngl".to_owned(), value]
+}
+
+/// the backend names the offload it measures: cpu runs no layer on a gpu, every other backend runs some.
+fn check_offload_matches_backend(backend: &str, gpu_layers: i32) -> Result<(), HarnessError> {
+    let wants_cpu = backend == CPU_BACKEND;
+    if wants_cpu == (gpu_layers == 0) {
+        return Ok(());
+    }
+    Err(HarnessError::BadValue {
+        flag: "--backend",
+        expected: "an offload the resolved serving gpu_layers agrees with (cpu needs 0, any other backend needs a non-zero count)",
+        got: format!("{backend} with gpu_layers {gpu_layers}"),
+    })
+}
+
 /// llama-server under `/usr/bin/time -l`; `stop` signals the server so `time` reports its peak.
 struct TimedServer {
     timer: Child,
@@ -2021,13 +2043,15 @@ impl TimedServer {
         let base = settings.as_serving_config(&[]);
         let batch = base.batch_size.to_string();
         let ubatch = base.ubatch_size.to_string();
+        let offload = llama_gpu_layers_args(base.gpu_layers);
         let stderr_file = File::create(stderr_path).map_err(io_error(stderr_path))?;
         let timer = Command::new(&config.time_bin)
             .arg(TimeFormat::current().flag())
             .arg(&config.llama)
             .arg("-m")
             .arg(&config.model)
-            .args(["-ngl", "99", "-fa", flash, "-np", "1", "--no-warmup", "--seed", "1"])
+            .args(&offload)
+            .args(["-fa", flash, "-np", "1", "--no-warmup", "--seed", "1"])
             .args(["-b", &batch, "-ub", &ubatch])
             .args(["-c", &capacity.to_string(), "-ctk", key, "-ctv", value])
             .args(["--host", "127.0.0.1", "--port", &port.to_string(), "-lv", "4"])
@@ -2885,6 +2909,7 @@ const PORT_SPAN: usize = 1000;
 fn run(config: &Config) -> Result<(), HarnessError> {
     let backend = config.backend.clone().ok_or(HarnessError::MissingFlag("--backend"))?;
     let commit = config.commit.clone().ok_or(HarnessError::MissingFlag("--commit"))?;
+    check_offload_matches_backend(&backend, llama_matched_settings(config).as_serving_config(&[]).gpu_layers)?;
     let contract = load_contract()?;
     let logs = config.out.join("logs");
     fs::create_dir_all(&logs).map_err(io_error(&logs))?;
@@ -6167,5 +6192,31 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
             assert_eq!(merged, base_serving_table(), "{backend}");
         }
         assert!(!merged_settings("metal").numeric_policy.activation_quantization);
+    }
+
+    #[test]
+    fn cpu_overlay_merges_zero_gpu_layers_and_llama_gets_ngl_zero() {
+        let cpu = merged_settings("cpu");
+        assert_eq!(cpu.gpu_layers, 0);
+        assert_eq!(llama_gpu_layers_args(cpu.gpu_layers), ["-ngl", "0"]);
+    }
+
+    #[test]
+    fn a_gpu_backend_keeps_the_all_layers_setting_and_llama_gets_all() {
+        for backend in ["cuda", "metal"] {
+            let gpu = merged_settings(backend);
+            assert!(gpu.gpu_layers < 0, "{backend}");
+            assert_eq!(llama_gpu_layers_args(gpu.gpu_layers), ["-ngl", "all"], "{backend}");
+        }
+    }
+
+    #[test]
+    fn the_offload_check_refuses_a_backend_that_disagrees_naming_both_values() {
+        assert!(check_offload_matches_backend("cpu", 0).is_ok());
+        assert!(check_offload_matches_backend("cuda", -1).is_ok());
+        let cpu_with_layers = check_offload_matches_backend("cpu", -1).expect_err("cpu with an offload").to_string();
+        assert!(cpu_with_layers.contains("cpu") && cpu_with_layers.contains("-1"), "{cpu_with_layers}");
+        let gpu_without_layers = check_offload_matches_backend("cuda", 0).expect_err("gpu with none").to_string();
+        assert!(gpu_without_layers.contains("cuda") && gpu_without_layers.contains('0'), "{gpu_without_layers}");
     }
 }

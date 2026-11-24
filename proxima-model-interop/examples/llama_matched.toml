@@ -12,3 +12,7 @@ gpu_layers = -1
 [backend.cuda.numeric_policy]
 activation_quantization = true
 reciprocal_activation_scale_above_rows = 8
+
+# no layer is offloaded on cpu: llama gets -ngl 0 and proxima loads on the host. selected by --backend.
+[backend.cpu]
+gpu_layers = 0
