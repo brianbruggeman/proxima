@@ -3454,6 +3454,7 @@ fn push_tiled_gemm_body_is_disabled_without_the_metal_tiled_gemm_feature() {
     let block = TiledGemmBlock {
         token_axes: Vec::new(),
         feature_axes: Vec::new(),
+        tile: TiledGemmTile::CONFIGURED,
     };
     let mut source = String::new();
     let error = push_tiled_gemm_body(
@@ -3470,7 +3471,7 @@ fn push_tiled_gemm_body_is_disabled_without_the_metal_tiled_gemm_feature() {
     .expect_err("the tiled path never exists without metal-tiled-gemm");
     assert!(matches!(error, EmitError::TiledGemmFeatureDisabled { .. }));
 
-    let error = tiled_gemm_threadgroups(bound.node, 4, 16)
+    let error = tiled_gemm_threadgroups(bound.node, 4, 16, TiledGemmTile::CONFIGURED)
         .expect_err("the tiled path never exists without metal-tiled-gemm");
     assert!(matches!(error, EmitError::TiledGemmFeatureDisabled { .. }));
 }
