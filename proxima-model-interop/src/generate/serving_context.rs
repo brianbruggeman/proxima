@@ -74,12 +74,18 @@ const _: () = {
 #[must_use]
 pub(super) struct ServingGuard<'context> {
     plans: &'context mut ResidentStore,
-    _metal: MetalContextGuard<'context>,
+    metal: MetalContextGuard<'context>,
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     slots: &'context mut ResidentSlots,
 }
 
 impl ServingGuard<'_> {
+    /// detaches every residency set and drops the no-copy and resident buffers, so none
+    /// outlives the checkpoint mapping the model borrowed. Runs on drop on every build.
+    fn clear_metal(&mut self) {
+        self.metal.clear();
+    }
+
     /// the context's slots, reachable while it is active: a slot is flushed and dropped against its own queue.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) fn slots(&mut self) -> &mut ResidentSlots {
@@ -98,6 +104,7 @@ impl Drop for ServingContext {
         self.clear_plans();
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         self.activate().slots().clear();
+        self.activate().clear_metal();
     }
 }
 
@@ -122,7 +129,7 @@ impl ServingContext {
         plans.swap_active();
         ServingGuard {
             plans,
-            _metal: metal,
+            metal,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             slots,
         }

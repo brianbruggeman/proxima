@@ -116,6 +116,13 @@ pub(super) fn release_all_mapping_residency() {
     detach_residency_sets(released.into_values());
 }
 
+/// Detaches and drops the warm residency set the active context holds; it
+/// covers every cached buffer, mapping buffers included.
+pub(super) fn release_warm_residency() {
+    let released = WARM_RESIDENCY_SET.with(|slot| slot.borrow_mut().take());
+    detach_residency_sets(released.into_iter());
+}
+
 fn detach_residency_sets(
     sets: impl Iterator<Item = Retained<ProtocolObject<dyn MTLResidencySet>>>,
 ) {

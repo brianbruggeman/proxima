@@ -19,7 +19,8 @@ use super::resident_nocopy_cache::{
 };
 use super::shared_transient::{ARENA_TRANSIENT, ATTENTION_SCRATCH_TRANSIENT};
 use super::warm_resident_buffers::{
-    MAPPING_RESIDENCY, WARM_RESIDENCY_SET, release_all_mapping_residency, warm_active_context,
+    MAPPING_RESIDENCY, WARM_RESIDENCY_SET, release_all_mapping_residency, release_warm_residency,
+    warm_active_context,
 };
 use super::{MetalBuffer, NodeId};
 
@@ -204,6 +205,7 @@ impl MetalContextGuard<'_> {
         }
         EXPERT_SOURCE_CACHE.with(|cache| cache.borrow_mut().clear());
         release_all_mapping_residency();
+        release_warm_residency();
         NOCOPY_BUFFERS.with(|cache| cache.borrow_mut().clear());
         RESIDENT_BUFFERS.with(|cache| cache.borrow_mut().clear());
         CHECKPOINT_MAPPING.with(|mapping| *mapping.borrow_mut() = None);

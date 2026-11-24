@@ -3,6 +3,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
+use objc2_foundation::NSObjectProtocol;
 use objc2_metal::MTLDevice;
 
 use super::super::MetalError;
@@ -10,7 +11,10 @@ use super::super::arena_encode_dispatch_finish::read_back_as_device_f32;
 use super::super::device_buffers_arena_plan::device_and_queue;
 use super::super::pipeline_buffers_upload::{
     CHECKPOINT_MAPPING, checkpoint_mapping_offset, page_size, register_checkpoint_mapping,
-    reset_checkpoint_mapping_for_test,
+    reset_checkpoint_mapping_for_test, upload_packed_bytes,
+};
+use super::super::warm_resident_buffers::{
+    held_mapping_residency_allocations, held_residency_allocations, warm_active_context,
 };
 use super::super::resident_nocopy_cache::{
     release_resident_names, reset_nocopy_cache_for_test, reset_resident_cache_for_test,
@@ -429,6 +433,40 @@ fn checkpoint_mapping_resolves_on_a_thread_that_did_not_register_it() {
     .expect("serving thread did not panic");
 
     assert_eq!(resolved, Some(page + 64));
+}
+
+/// the owner's release (what `ServingContext` runs on drop) leaves no residency
+/// set over the mapping: the mapping set and the warm set both go.
+#[test]
+fn clear_detaches_the_mapping_and_warm_residency_sets() {
+    let Ok((device, _queue)) = device_and_queue() else {
+        return;
+    };
+    if !device.respondsToSelector(objc2::sel!(newResidencySetWithDescriptor:error:)) {
+        return;
+    }
+    reset_checkpoint_mapping_for_test();
+    let page = page_size();
+    let mapping = proxima_tensor::AlignedBuffer::new(page / size_of::<u32>(), page)
+        .expect("page-aligned fixture standing in for a loaded checkpoint mmap");
+    // SAFETY: the buffer owns `page` bytes for the whole test.
+    let mapping_bytes = unsafe { core::slice::from_raw_parts(mapping.as_ptr().cast::<u8>(), page) };
+
+    let mut context = MetalContext::default();
+    let mut active = context.activate();
+    register_checkpoint_mapping(mapping_bytes);
+    upload_packed_bytes(&device, &mapping_bytes[8..72], Some("view.weight"))
+        .expect("an aligned tensor uploads as a view of the mapping");
+    assert_eq!(held_mapping_residency_allocations().len(), 1, "the mapping holds one set");
+    warm_active_context().expect("warming builds the context's warm set the way a model load does");
+    assert!(
+        held_residency_allocations().is_some_and(|count| count >= 1),
+        "the warm set covers the cached mapping buffer before clear"
+    );
+    active.clear();
+
+    assert_eq!(held_mapping_residency_allocations(), vec![], "no mapping set outlives clear");
+    assert_eq!(held_residency_allocations(), None, "no warm set outlives clear");
 }
 
 /// the uniform blob a decode plan would bind: real extents and strides, 16 longs.
