@@ -1590,7 +1590,7 @@ fn bind_dense_with<'file>(
         state.owned.push((target_name, decoded));
         return Ok(());
     }
-    if let Some(target) = precision_target_for(state, parsed, source_name)? {
+    if let Some(target) = gguf_precision_target(state, parsed, source_name)? {
         return recode_tensor(
             parsed,
             file_bytes,
@@ -1786,7 +1786,7 @@ pub fn bind_matmul_weight_as<'file>(
         state.owned.push((target_name, transposed));
         return Ok(());
     }
-    if let Some(target) = precision_target_for(state, parsed, source_name)? {
+    if let Some(target) = gguf_precision_target(state, parsed, source_name)? {
         return recode_tensor(
             parsed,
             file_bytes,
@@ -1814,27 +1814,36 @@ pub fn bind_matmul_weight_as<'file>(
 /// rule that matches names the tensor's own on-disk [`GgmlType`] (a matched
 /// rule that is already satisfied is not a recode). `Some(target)` tells the
 /// caller to route through [`recode_tensor`] instead of
-/// [`gguf_tensor_as_packed_block`].
+/// [`gguf_tensor_as_packed_block`]. Format-neutral: `on_disk` is the stored
+/// type of whichever container the tensor came from.
 #[cfg(feature = "std")]
-fn precision_target_for(
+pub(crate) fn precision_target_for(
     state: &BoundWeights<'_>,
-    parsed: &ParsedGguf,
     source_name: &str,
-) -> Result<Option<GgmlType>, InteropError> {
-    let Some(target) = state
+    on_disk: GgmlType,
+) -> Option<GgmlType> {
+    state
         .precision
         .iter()
         .find(|rule| rule.matches(source_name))
         .map(|rule| rule.target)
-    else {
+        .filter(|target| *target != on_disk)
+}
+
+/// [`precision_target_for`] for a GGUF tensor: looks the on-disk type up only
+/// when a rule matches `source_name`, so an unmatched tensor never pays (or
+/// fails) the lookup.
+#[cfg(feature = "std")]
+fn gguf_precision_target(
+    state: &BoundWeights<'_>,
+    parsed: &ParsedGguf,
+    source_name: &str,
+) -> Result<Option<GgmlType>, InteropError> {
+    if !state.precision.iter().any(|rule| rule.matches(source_name)) {
         return Ok(None);
-    };
+    }
     let on_disk = find_tensor(parsed, source_name)?.ggml_type;
-    Ok(if target == on_disk {
-        None
-    } else {
-        Some(target)
-    })
+    Ok(precision_target_for(state, source_name, on_disk))
 }
 
 /// [`crate::serving::ServingConfig::weight_precision`]'s bind-time recode
@@ -1894,7 +1903,39 @@ fn recode_tensor<'file>(
     let bytes_before = (range.end - range.start) as usize;
 
     let decoded = gguf_tensor_as_f32(parsed, file_bytes, source_name)?;
+    recode_decoded(
+        decoded,
+        source_name,
+        source_type,
+        target_name,
+        target,
+        transpose,
+        bytes_before,
+        state,
+    )
+}
 
+/// [`recode_tensor`]'s format-neutral half: re-encodes an already decoded
+/// tensor at `target` and binds it under `{target_name}@{suffix}`. Both the
+/// GGUF binder (via [`recode_tensor`]) and the safetensors binder call it, so
+/// `weight_precision` rules mean the same thing for either container.
+/// `bytes_before` is the stored byte count, reported in the recode event.
+///
+/// # Errors
+///
+/// As [`recode_tensor`], minus the decode.
+#[cfg(feature = "std")]
+#[allow(clippy::too_many_arguments)] // one decoded tensor plus its source/target identity and bind state
+pub(crate) fn recode_decoded<'file>(
+    decoded: Vec<f32>,
+    source_name: &str,
+    source_type: GgmlType,
+    target_name: alloc::string::String,
+    target: GgmlType,
+    transpose: Option<(usize, usize)>,
+    bytes_before: usize,
+    state: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
     if target == GgmlType::F32 {
         let final_buffer = match transpose {
             Some((out_dim, in_dim)) => {
@@ -1902,7 +1943,7 @@ fn recode_tensor<'file>(
             }
             None => decoded,
         };
-        let bytes_after = final_buffer.len() * core::mem::size_of::<f32>();
+        let bytes_after = core::mem::size_of_val(final_buffer.as_slice());
         state.resident_bytes += bytes_after;
         let recoded_name = alloc::format!("{target_name}@f32");
         emit_weight_recoded(

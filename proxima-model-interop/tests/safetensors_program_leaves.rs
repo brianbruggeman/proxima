@@ -6,12 +6,36 @@ use std::vec;
 use std::vec::Vec;
 
 use proxima_model_interop::profiles::{BindingProfile, TensorAlias};
-use proxima_model_interop::{BoundWeights, Codec, InteropError, bind_safetensors_program_leaves};
-use proxima_safetensors::{SafetensorsModel, TensorPayload, write_complete};
+use proxima_gguf::types::GgmlType;
+use proxima_model_interop::{
+    BoundWeights, Codec, InteropError, NamePattern, WeightPrecisionRule, retarget_recoded_leaves,
+};
+use proxima_safetensors::{Manifest, SafetensorsModel, TensorPayload, write_complete};
 use proxima_numeric::DType;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::op::{Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append};
+
+/// The unruled bind every test here exercises: no `weight_precision` rules,
+/// so each leaf keeps its stored dtype.
+fn bind_safetensors_program_leaves<'file>(
+    manifest: &Manifest,
+    file_bytes: &'file [u8],
+    data_start: u64,
+    program: &[Op],
+    binding: &BindingProfile,
+    runtime_inputs: &[String],
+) -> Result<BoundWeights<'file>, InteropError> {
+    proxima_model_interop::bind_safetensors_program_leaves(
+        manifest,
+        file_bytes,
+        data_start,
+        program,
+        binding,
+        runtime_inputs,
+        &[],
+    )
+}
 
 fn fixture_tensor_bytes<'file>(
     file_bytes: &'file [u8],
@@ -723,4 +747,279 @@ fn architecture_matrix_safetensors_program_leaves() {
     println!(
         "dtypes=3 bound_leaves={bound_leaf_count} runtime_inputs_skipped={runtime_input_count} packed_matmuls={packed_matmul_count} native_decodes={native_decode_count} f32_transposes={f32_transpose_count} alias_matches={alias_match_count} evaluated_matmuls={evaluated_matmul_count} decode_rules={decode_rule_count} extra_weights={extra_weight_count} overlapping_ranges_rejected={overlapping_ranges_rejected} native_f32_borrows={f32_borrow_count} misaligned_f32_decodes={misaligned_f32_decode_count} missing_weights_rejected={missing_rejected} wrong_axes_rejected={wrong_axes_rejected} dtype_byte_length_rejected={byte_length_rejected} short_payload_rejected={short_payload_rejected} offset_overflow_rejected={offset_overflow_rejected} part_alias_rejected={part_alias_rejected} join_alias_rejected={join_alias_rejected} gathered_role_rejected={gathered_role_rejected} symbolic_weight_rejected={symbolic_weight_rejected}"
     );
+}
+
+/// The ggml type the fixture's own 2-byte matrix is stored as, read off the
+/// manifest so the rule target is the stored format of a real tensor, not a
+/// spelled one.
+fn fixture_two_byte_target(manifest: &Manifest) -> GgmlType {
+    let stored = narrow_fixture_tensor(manifest, &[2, 3]).dtype;
+    GgmlType::from_numeric_format(&stored.numeric_format())
+        .expect("the two-byte fixture dtype has a ggml wire type")
+}
+
+fn input_names(program: &[Op]) -> Vec<&str> {
+    program
+        .iter()
+        .filter_map(|op| match op {
+            Op::Input {
+                name: Some(name), ..
+            } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn alias_binding(from: &str) -> BindingProfile {
+    BindingProfile {
+        aliases: vec![TensorAlias::Rename {
+            leaf: "alias".into(),
+            from: from.into(),
+        }],
+        ..BindingProfile::default()
+    }
+}
+
+#[test]
+fn a_wide_weight_leaf_recodes_to_half_width_under_a_suffix_rule() {
+    let file_bytes = safetensors_fixture();
+    let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses fixture");
+    let data_start = header_data_start(&file_bytes);
+    let matrix = wide_fixture_tensor(&manifest, &[2, 3]);
+    let norm = wide_fixture_tensor(&manifest, &[2]);
+    let (mut program, _) = program_for(matrix, norm, "alias", "tokens");
+    let rules = [WeightPrecisionRule {
+        pattern: NamePattern::Suffix(matrix),
+        target: fixture_two_byte_target(&manifest),
+    }];
+
+    let weights = proxima_model_interop::bind_safetensors_program_leaves(
+        &manifest,
+        &file_bytes,
+        data_start,
+        &program,
+        &alias_binding(norm),
+        &["tokens".into()],
+        &rules,
+    )
+    .expect("a suffix rule over a stored weight leaf binds");
+
+    assert_eq!(weights.packed_owned().len(), 1);
+    let (name, bytes, _) = &weights.packed_owned()[0];
+    assert!(name.starts_with(matrix) && name.contains('@'), "{name}");
+    assert_eq!(bytes.len(), 2 * 2 * 3);
+    let oracle = narrow_fixture_tensor(&manifest, &[2, 3]);
+    assert_eq!(
+        bytes.as_slice(),
+        fixture_tensor_bytes(&file_bytes, data_start, oracle),
+        "stored [out, in] order, packed, not transposed"
+    );
+    assert!(weights.owned().iter().all(|(owned, _)| !owned.starts_with(matrix)));
+    let recoded = name.clone();
+    retarget_recoded_leaves(&mut program, &weights);
+    let leaves = input_names(&program);
+    assert!(leaves.contains(&recoded.as_str()));
+    assert!(!leaves.contains(&matrix));
+}
+
+/// The fixture's tensor of `shape` stored at two bytes per element: the oracle
+/// a half-width recode of the wide tensor must equal byte for byte.
+fn narrow_fixture_tensor<'manifest>(
+    manifest: &'manifest Manifest,
+    shape: &[u64],
+) -> &'manifest proxima_safetensors::TensorEntry {
+    manifest
+        .tensors
+        .iter()
+        .find(|entry| entry.shape == shape && entry.dtype.size_bytes() == 2)
+        .expect("the fixture stores a narrow tensor of that shape")
+}
+
+/// The fixture's tensor of `shape` stored at four bytes per element, so a test
+/// names it from the manifest rather than spelling the stored format.
+fn wide_fixture_tensor<'manifest>(manifest: &'manifest Manifest, shape: &[u64]) -> &'manifest str {
+    manifest
+        .tensors
+        .iter()
+        .find(|entry| entry.shape == shape && entry.dtype.size_bytes() == 4)
+        .map(|entry| entry.name.as_str())
+        .expect("the fixture stores a wide tensor of that shape")
+}
+
+/// `program_for` with the weight leaf declared in the stored `[out, in]` order
+/// and read `oi`: a contracted leaf the binder gives the native role.
+fn stored_order_program(weight: &str, token: &str) -> Vec<Op> {
+    let (mut program, _) = program_for(weight, "scale", "bias", token);
+    for op in &mut program {
+        match op {
+            Op::Input { shape, name: Some(name), .. } if name.as_str() == weight => {
+                *shape = vec![Extent::Static(2), Extent::Static(3)];
+            }
+            Op::Elementwise { operands, .. } => {
+                operands[1].1 = IndexMap::Affine(map::projection(3, &[1, 2]));
+            }
+            _ => {}
+        }
+    }
+    program
+}
+
+#[test]
+fn a_stored_order_contracted_leaf_recodes_under_a_suffix_rule() {
+    let file_bytes = safetensors_fixture();
+    let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses fixture");
+    let data_start = header_data_start(&file_bytes);
+    let matrix = wide_fixture_tensor(&manifest, &[2, 3]);
+    let program = stored_order_program(matrix, "tokens");
+    let rules = [WeightPrecisionRule {
+        pattern: NamePattern::Suffix(matrix),
+        target: fixture_two_byte_target(&manifest),
+    }];
+    let binding = BindingProfile {
+        aliases: ["scale", "bias"]
+            .map(|leaf| TensorAlias::Rename {
+                leaf: leaf.into(),
+                from: wide_fixture_tensor(&manifest, &[2]).into(),
+            })
+            .into(),
+        ..BindingProfile::default()
+    };
+
+    let weights = proxima_model_interop::bind_safetensors_program_leaves(
+        &manifest,
+        &file_bytes,
+        data_start,
+        &program,
+        &binding,
+        &["tokens".into()],
+        &rules,
+    )
+    .expect("a suffix rule over a stored-order leaf binds");
+
+    assert_eq!(weights.packed_owned().len(), 1);
+    let (name, bytes, _) = &weights.packed_owned()[0];
+    assert!(name.starts_with(matrix) && name.contains('@'), "{name}");
+    let oracle = narrow_fixture_tensor(&manifest, &[2, 3]);
+    assert_eq!(
+        bytes.as_slice(),
+        fixture_tensor_bytes(&file_bytes, data_start, oracle),
+        "stored order, packed, not transposed"
+    );
+}
+
+#[test]
+fn a_norm_scale_named_weight_is_never_recoded() {
+    let file_bytes = safetensors_fixture();
+    let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses fixture");
+    let data_start = header_data_start(&file_bytes);
+    let matrix = wide_fixture_tensor(&manifest, &[2, 3]);
+    let scale = wide_fixture_tensor(&manifest, &[2]);
+    let (program, _) = program_for(matrix, "layer.norm.weight", "bias", "tokens");
+    let binding = BindingProfile {
+        aliases: ["layer.norm.weight", "bias"]
+            .map(|leaf| TensorAlias::Rename {
+                leaf: leaf.into(),
+                from: scale.into(),
+            })
+            .into(),
+        ..BindingProfile::default()
+    };
+    let rules = [WeightPrecisionRule {
+        pattern: NamePattern::Suffix(".weight"),
+        target: fixture_two_byte_target(&manifest),
+    }];
+
+    let weights = proxima_model_interop::bind_safetensors_program_leaves(
+        &manifest,
+        &file_bytes,
+        data_start,
+        &program,
+        &binding,
+        &["tokens".into()],
+        &rules,
+    )
+    .expect("a scale leaf binds under a rule that names its suffix");
+
+    assert_eq!(weights.recoded_weights().len(), 0);
+    assert!(weights.names().contains("layer.norm.weight"));
+}
+
+#[test]
+fn precision_rule_leaves_norm_and_bias_leaves_untouched() {
+    let file_bytes = safetensors_fixture();
+    let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses fixture");
+    let data_start = header_data_start(&file_bytes);
+    let matrix = wide_fixture_tensor(&manifest, &[2, 3]);
+    let norm = wide_fixture_tensor(&manifest, &[2]);
+    let (program, _) = program_for(matrix, norm, "alias", "tokens");
+    let scales_only: Vec<Op> = program
+        .into_iter()
+        .filter(|op| {
+            matches!(op, Op::Input { name: Some(name), .. } if name == norm || name == "alias")
+        })
+        .collect();
+    let rules = [WeightPrecisionRule {
+        pattern: NamePattern::Prefix(""),
+        target: fixture_two_byte_target(&manifest),
+    }];
+
+    let weights = proxima_model_interop::bind_safetensors_program_leaves(
+        &manifest,
+        &file_bytes,
+        data_start,
+        &scales_only,
+        &alias_binding(norm),
+        &[],
+        &rules,
+    )
+    .expect("scale leaves bind under a catch-all rule");
+
+    assert_eq!(weights.packed_owned().len(), 0);
+    let mut bound_names: Vec<&str> = weights
+        .owned()
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .chain(weights.packed().iter().map(|(name, _)| name.as_str()))
+        .collect();
+    bound_names.sort_unstable();
+    let mut expected = ["alias", norm];
+    expected.sort_unstable();
+    assert_eq!(bound_names, expected);
+}
+
+#[test]
+fn an_empty_rule_set_binds_bit_for_bit_as_before() {
+    let file_bytes = safetensors_fixture();
+    let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses fixture");
+    let data_start = header_data_start(&file_bytes);
+    let matrix = wide_fixture_tensor(&manifest, &[2, 3]);
+    let norm = wide_fixture_tensor(&manifest, &[2]);
+    let (program, _) = program_for(matrix, norm, "alias", "tokens");
+
+    let weights = proxima_model_interop::bind_safetensors_program_leaves(
+        &manifest,
+        &file_bytes,
+        data_start,
+        &program,
+        &alias_binding(norm),
+        &["tokens".into()],
+        &[],
+    )
+    .expect("an unruled bind is the pre-rule bind");
+
+    let entry = manifest.tensor(matrix).expect("fixture matrix");
+    let stored = fixture_tensor_bytes(&file_bytes, data_start, entry);
+    let width = stored.len() / 6;
+    let transposed_from_file: Vec<u8> = [0usize, 3, 1, 4, 2, 5]
+        .into_iter()
+        .flat_map(|index| stored[index * width..(index + 1) * width].iter().copied())
+        .collect();
+    let (_, bound) = weights
+        .owned()
+        .iter()
+        .find(|(name, _)| name == matrix)
+        .expect("unruled matmul leaf stays an owned transposed copy");
+    let bound_bytes: Vec<u8> = bound.iter().flat_map(|value| value.to_le_bytes()).collect();
+    assert_eq!(bound_bytes, transposed_from_file);
+    assert_eq!(weights.packed_owned().len(), 0);
 }

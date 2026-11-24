@@ -231,6 +231,7 @@ fn architecture_matrix_lfm_global_leaves() {
         &program,
         &binding,
         &["ids".into()],
+        &[],
     )
     .expect("global graph leaves resolve through generic profile binding");
 
@@ -291,6 +292,7 @@ fn architecture_matrix_lfm_global_leaves() {
             &program,
             &binding,
             &["ids".into()],
+            &[],
         ),
         Err(InteropError::UnknownTensor { .. })
     ));

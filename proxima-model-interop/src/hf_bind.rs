@@ -40,6 +40,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use proxima_gguf::types::GgmlType;
 use proxima_numeric::DType;
 use proxima_safetensors::{Manifest, TensorEntry};
 use proxima_tensor::cpu::QuantizedBlock;
@@ -48,8 +49,9 @@ use proxima_tensor::spec::{LayerSchedule, ModelDescriptor, RopePairing};
 
 use crate::Codec;
 use crate::bind::{
-    BoundWeights, ModelHparams, aligned_f32_view, dequantize, reinterpret_f32,
-    transpose_expert_stack, transpose_out_in_to_in_out,
+    BoundWeights, ModelHparams, aligned_f32_view, codec_from_ggml_type, dequantize,
+    precision_target_for, recode_decoded, reinterpret_f32, transpose_expert_stack,
+    transpose_out_in_to_in_out,
 };
 use crate::bind_leaves::{Role, consumers_of, role_of};
 use crate::error::InteropError;
@@ -260,6 +262,11 @@ fn collect_program_views<'manifest, 'file>(
 /// tensor's storage role.
 /// `manifest`, `file_bytes`, and `data_start` must come from the same parsed
 /// safetensors file so offsets cannot select unrelated bytes.
+///
+/// `weight_precision` is the same ordered rule list the GGUF binder takes
+/// ([`BoundWeights::new`]): a matmul operand whose leaf name matches a rule
+/// is recoded to the rule's target through [`recode_decoded`], the one recode
+/// both containers share. Pass `&[]` for the stored dtypes unchanged.
 pub fn bind_safetensors_program_leaves<'file>(
     manifest: &Manifest,
     file_bytes: &'file [u8],
@@ -267,8 +274,9 @@ pub fn bind_safetensors_program_leaves<'file>(
     program: &[Op],
     binding: &BindingProfile,
     runtime_inputs: &[String],
+    weight_precision: &[crate::serving::WeightPrecisionRule<'_>],
 ) -> Result<BoundWeights<'file>, InteropError> {
-    let mut weights = BoundWeights::new(&[]);
+    let mut weights = BoundWeights::new(weight_precision);
     weights.resident_bytes = file_bytes.len();
     let (views, stacks) = collect_program_views(
         manifest,
@@ -761,9 +769,29 @@ fn bind_safetensors_leaf<'file>(
     let bytes = view.bytes;
     let dtype = view.dtype;
     let (rows, columns) = view.part_matrix();
-    if binding.decodes_to_f32(leaf) {
+    let recode = matches!(role, Role::Native | Role::InOut)
+        .then(|| GgmlType::from_numeric_format(&dtype.numeric_format()))
+        .flatten()
+        .and_then(|stored| {
+            precision_target_for(weights, leaf, stored).map(|target| (stored, target))
+        });
+    if recode.is_some() || binding.decodes_to_f32(leaf) {
         let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, view.name)?;
         let decoded = view.part_of(decoded);
+        if let Some((stored, target)) = recode {
+            let transpose = (role == Role::InOut && codec_from_ggml_type(target).is_none())
+                .then_some((rows, columns));
+            return recode_decoded(
+                decoded,
+                leaf,
+                stored,
+                leaf.into(),
+                target,
+                transpose,
+                bytes.len(),
+                weights,
+            );
+        }
         let output = if role == Role::InOut {
             transpose_out_in_to_in_out(&decoded, leaf, rows, columns)?
         } else {

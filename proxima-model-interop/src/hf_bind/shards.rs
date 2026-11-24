@@ -102,7 +102,7 @@ fn bind_one_shard<'file>(
         .filter(|name| !stores(manifest, binding, name))
         .map(String::from)
         .collect();
-    bind_safetensors_program_leaves(manifest, bytes, *data_start, program, binding, &skipped)
+    bind_safetensors_program_leaves(manifest, bytes, *data_start, program, binding, &skipped, &[])
 }
 
 /// Binds every weight leaf of `program` out of `shards`.

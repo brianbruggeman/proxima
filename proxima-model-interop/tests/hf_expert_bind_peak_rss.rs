@@ -129,6 +129,7 @@ fn bind_hf_child(export: &Path, mode: &str, skipped: &[&str]) {
         &program,
         &binding,
         &runtime_inputs(&program, &manifest, &binding, skipped),
+        &[],
     )
     .expect("hf bind");
     report(mode, &weights);
