@@ -112,6 +112,7 @@ mod twin_elementwise;
 mod executes;
 mod activation_layout;
 mod activation_quantize;
+mod product_contraction;
 pub use activation_layout::{ACTIVATION_GROUP_ELEMENTS, Missing, is_int8_run_layout, quantize_rule_is_served};
 pub use activation_quantize::{
     activation_is_flat, collapsed_extent, derive_activation_quantize, is_derived, quantize_op, repoint,
@@ -124,6 +125,7 @@ pub use dead_code_cached_attention::*;
 pub use gdn_moe_fusion_apply::*;
 #[cfg(feature = "identity-copy-alias")]
 use identity_copy_alias::apply_identity_copy_alias;
+pub use product_contraction::{ProductContraction, product_contraction};
 pub use refit_cached_attention::{
     changed_nodes, refit_cached_attention_at, refit_cached_attention_rows, touched_positions,
     touches_changed,

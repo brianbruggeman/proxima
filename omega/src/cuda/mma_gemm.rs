@@ -15,7 +15,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use proxima_tensor::{BoundOp, BoundOpKind, Keep, ReduceInit, ScalarOp, StepArg};
+use proxima_tensor::{BoundOp, BoundOpKind, Keep, ProductContraction, ReduceInit, ScalarOp, product_contraction};
 use proxima_numeric::{DType, NumericPolicy};
 
 use super::int8_gemm::{INT8_FEATURE_TILE, INT8_TOKEN_TILE, Int8Gemm, int8_gemm_plan, push_int8_gemm_body};
@@ -24,7 +24,7 @@ use super::{
     Q1_0_BLOCK_ELEMENTS, Q2_0_BLOCK_BYTES, Q2_0_BLOCK_ELEMENTS, Q4_0_BLOCK_BYTES,
     Q4_0_BLOCK_ELEMENTS, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS, Q5_0_BLOCK_BYTES,
     Q5_0_BLOCK_ELEMENTS, Q5K_BLOCK_BYTES, Q6K_BLOCK_BYTES, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS,
-    flat_packed_rows, gather_count, push_reduce_epilogue_write, reduce_is_cooperative,
+    flat_packed_rows, push_reduce_epilogue_write, reduce_is_cooperative,
     reduction_dims,
 };
 
@@ -79,16 +79,6 @@ fn codec_shape(codec: Codec) -> Option<CodecShape> {
     })
 }
 
-fn is_plain_product(resolved: &BoundOp) -> bool {
-    let steps = &resolved.element_body().steps;
-    let [only] = steps.as_slice() else {
-        return false;
-    };
-    only.op == ScalarOp::Multiply
-        && (only.args == [StepArg::Operand(0), StepArg::Operand(1)]
-            || only.args == [StepArg::Operand(1), StepArg::Operand(0)])
-}
-
 /// `Some` when this reduce is a plain `weight * activation` sum with more than
 /// one token row. A single token row keeps the matvec body.
 pub(super) fn mma_gemm_plan(
@@ -117,40 +107,26 @@ pub(super) fn mma_gemm_plan(
     codec_shape(codec)?;
     let activation = 1 - weight;
     let operands = resolved.operands();
-    let reduce_extent: u64 = reduction_dims(resolved, output_axes)
-        .iter()
-        .map(|&dim| resolved.extents[dim as usize])
-        .product();
+    let contraction = product_contraction(resolved, weight)?;
     let weight_layout = &operands[weight].1;
     let eligible = resolved.dtype == DType::FLOAT32
         && epilogue_broadcast_axes.is_empty()
-        && gather_count(resolved) == 0
-        && is_plain_product(resolved)
+        && contraction.gathered_operands == 0
         && flat_packed_rows(resolved, quantized)
         && reduce_is_cooperative(resolved, quantized, numeric_policy)
         && !reduction_dims(resolved, output_axes).is_empty()
-        && reduce_extent.is_multiple_of(STAGE_K as u64)
+        && contraction.reduction_extent.is_multiple_of(STAGE_K as u64)
         && weight_layout.base.rem_euclid(256) == 0;
     if !eligible {
         return None;
     }
     let activation_layout = &operands[activation].1;
-    let mut feature_positions = Vec::new();
-    let mut token_positions = Vec::new();
-    for (position, &axis) in output_axes.iter().enumerate() {
-        match (
-            weight_layout.stride(axis) != 0,
-            activation_layout.stride(axis) != 0,
-        ) {
-            (true, false) => feature_positions.push(position),
-            (false, true) => token_positions.push(position),
-            _ => return None,
-        }
-    }
-    let token_total: u64 = token_positions
-        .iter()
-        .map(|&position| resolved.extents[output_axes[position] as usize])
-        .product();
+    let ProductContraction {
+        feature_positions,
+        token_positions,
+        token_total,
+        ..
+    } = contraction;
     let int8 = int8_gemm_plan(resolved, codec, numeric_policy, activation_layout, output_axes, prequantized);
     let served = prequantized.is_none() || int8.is_some();
     let several_tokens = token_total > 1 || prequantized.is_some();
