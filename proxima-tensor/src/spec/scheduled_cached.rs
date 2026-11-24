@@ -1453,19 +1453,8 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
     let attention_resources =
         build_attention_layer_resources(&mut program, schedule, query_heads, |program, window| {
             let (is_future, neg_infinity) = causal_mask_windowed(program, window)?;
-            match key_pad_id {
-                None => Ok((is_future, neg_infinity)),
-                Some(pad) => {
-                    let invalid = key_validity_mask(program, ids, pad)?;
-                    let widened = elementwise(
-                        program,
-                        DType::FLOAT32,
-                        ScalarOp::Maximum,
-                        &[(is_future, "st->st"), (invalid, "t->st")],
-                    )?;
-                    Ok((widened, neg_infinity))
-                }
-            }
+            let masked = with_pad_key_mask(program, is_future, ids, key_pad_id)?;
+            Ok((masked, neg_infinity))
         })?;
 
     // Cache-side mask (genuine history only) -- a second, separate dedup

@@ -2319,19 +2319,8 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
     let attention_resources =
         build_attention_layer_resources(&mut program, schedule, query_heads, |program, window| {
             let (is_future, neg_infinity) = causal_mask_windowed(program, window)?;
-            match key_pad_id {
-                None => Ok((is_future, neg_infinity)),
-                Some(pad) => {
-                    let invalid = key_validity_mask(program, ids, pad)?;
-                    let widened = elementwise(
-                        program,
-                        DType::FLOAT32,
-                        ScalarOp::Maximum,
-                        &[(is_future, "st->st"), (invalid, "t->st")],
-                    )?;
-                    Ok((widened, neg_infinity))
-                }
-            }
+            let masked = with_pad_key_mask(program, is_future, ids, key_pad_id)?;
+            Ok((masked, neg_infinity))
         })?;
     let mut attention_layer_index: usize = 0;
     let mut moe_sites: Vec<MoeSite> = Vec::new();
@@ -3119,12 +3108,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
             (None, None) => None,
             (Some(pair), None) | (None, Some(pair)) => Some(pair),
             (Some((window, neg_infinity)), Some((padding, _))) => {
-                let both = elementwise(
-                    &mut program,
-                    DType::FLOAT32,
-                    ScalarOp::Maximum,
-                    &[(window, "st->st"), (padding, "st->st")],
-                )?;
+                let both = merge_masks(&mut program, window, padding, "st->st")?;
                 Some((both, neg_infinity))
             }
         };
@@ -4430,7 +4414,7 @@ mod exclusive_dense_post_norm_tests {
 /// lands. A pad id only ever appears at the tail of a prompt (left padding
 /// would make the ids non-causal yet still visible as keys), so the cached
 /// range's own mask is not widened.
-fn with_pad_key_mask(
+pub(super) fn with_pad_key_mask(
     program: &mut Vec<Op>,
     mask: NodeId,
     ids: NodeId,
@@ -4439,12 +4423,23 @@ fn with_pad_key_mask(
     let Some(pad) = key_pad_id else {
         return Ok(mask);
     };
-    let invalid = key_validity_mask(program, ids, pad)?;
-    elementwise(
+    let invalid = key_validity_mask(program, ids, pad, mask)?;
+    merge_masks(program, mask, invalid, "t->st")
+}
+
+/// `"st->st"` mask `mask` combined with `other` (read through `other_notation`)
+/// by `Maximum`, in the dtype `mask` already carries.
+pub(super) fn merge_masks(
+    program: &mut Vec<Op>,
+    mask: NodeId,
+    other: NodeId,
+    other_notation: &str,
+) -> Result<NodeId, TensorError> {
+    elementwise_like(
         program,
-        DType::FLOAT32,
+        mask,
         ScalarOp::Maximum,
-        &[(mask, "st->st"), (invalid, "t->st")],
+        &[(mask, "st->st"), (other, other_notation)],
     )
 }
 
@@ -4453,9 +4448,10 @@ fn with_pad_key_mask(
 /// every query must skip it as a key; the reference's text encoders do this,
 /// and the rows it leaves behind are what a downstream cross-attention reads.
 ///
-/// `ids` is the program's token-id leaf (an INT32 input), widened to f32 before
-/// the comparison because the closed scalar set compares floats only. Token ids
-/// are exact in f32 below 2^24.
+/// `ids` is the program's token-id leaf, converted to `like`'s dtype before the
+/// comparison because the closed scalar set compares floats only (ids compare exactly only
+/// while the mask dtype represents every id exactly); the result
+/// carries `like`'s dtype, so it merges with the mask `like` names.
 ///
 /// # Errors
 ///
@@ -4464,17 +4460,13 @@ pub fn key_validity_mask(
     program: &mut Vec<Op>,
     ids: NodeId,
     pad: u32,
+    like: NodeId,
 ) -> Result<NodeId, TensorError> {
-    let widened = elementwise(
+    let widened = elementwise_like(program, like, ScalarOp::Identity, &[(ids, "t->t")])?;
+    let pad_value = scalar_constant_like(program, pad as _, like)?;
+    elementwise_like(
         program,
-        DType::FLOAT32,
-        ScalarOp::Identity,
-        &[(ids, "t->t")],
-    )?;
-    let pad_value = scalar_constant(program, pad as f32);
-    elementwise(
-        program,
-        DType::FLOAT32,
+        like,
         ScalarOp::Equal,
         &[(widened, "t->t"), (pad_value, "->t")],
     )
