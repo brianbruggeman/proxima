@@ -15,14 +15,6 @@ vae_out = "vae_out.f32"
 [traces]
 "*" = "p_{name}.f32"
 
-[vae_captures]
-conv_in = "p_dconv_in.f32"
-up3 = "p_dup3_0.f32"
-"up3.up" = "p_dup3_up.f32"
-"up2.up" = "p_dup2_up.f32"
-"up1.up" = "p_dup1_up.f32"
-image = "vae_out.f32"
-
 # parity tolerances, read in the measured value's own type
 [tolerances]
 philox = "1e-5"
