@@ -78,7 +78,7 @@ use std::time::Instant;
 use proxima_tensor::cpu::CpuStepPlan;
 use proxima_tensor::cpu::ExpertSource;
 use proxima_tensor::{Evaluated, Executes, NodeId, Op, QuantizedBlock, TensorError};
-use proxima_numeric::{NumericPolicy};
+use proxima_numeric::{NumericFormat, NumericPolicy};
 
 #[cfg(feature = "cpu")]
 use crate::lowering::Codec;
@@ -316,6 +316,29 @@ impl GpuDriver {
     #[must_use]
     pub fn renders_fused_cached_attention(self) -> bool {
         matches!(self, GpuDriver::Metal)
+    }
+
+    /// Whether this driver's cached attention reads a K cache stored as `key` and a V cache
+    /// stored as `value`. Metal answers with the MSL classifier its emitter runs; every other
+    /// driver's cached attention reads only the graph's own output format.
+    ///
+    /// # Errors
+    /// A message naming the driver and the format it does not read.
+    pub fn admits_kv_cache(self, key: &NumericFormat, value: &NumericFormat) -> Result<(), String> {
+        if matches!(self, GpuDriver::Metal) {
+            return crate::msl::cached_attention_kv_codecs_for(key, value)
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+        }
+        [key, value]
+            .into_iter()
+            .find(|format| !format.is_identity_of(&NumericFormat::Float32))
+            .map_or(Ok(()), |format| {
+                Err(format!(
+                    "the {} driver's cached attention does not read a {format:?} cache",
+                    self.name()
+                ))
+            })
     }
 }
 
@@ -2434,6 +2457,7 @@ mod tests {
 
     use proxima_tensor::NodeId;
     use proxima_tensor::cpu::ExpertSource;
+    use proxima_numeric::NumericFormat;
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use proxima_tensor::{Extent, IndexMap, Op, QuantizedBlock, ScalarOp, append, projection};
     #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -2447,6 +2471,35 @@ mod tests {
     use crate::config::RuntimeConfig;
 
     static ENVIRONMENT_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn metal_admits_exactly_what_the_msl_classifier_reads() {
+        for key in &NumericFormat::ALL {
+            for value in &NumericFormat::ALL {
+                assert_eq!(
+                    GpuDriver::Metal.admits_kv_cache(key, value).is_ok(),
+                    crate::msl::cached_attention_kv_codecs_for(key, value).is_ok(),
+                    "{key:?} key, {value:?} value"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "cuda-driver")]
+    #[test]
+    fn cuda_and_hip_admit_only_the_graph_output_format_and_name_the_refusal() {
+        let hip = GpuDriver::Hip { wave: None, device: 0 };
+        for driver in [GpuDriver::Cuda, hip] {
+            for format in &NumericFormat::ALL {
+                let reads = format.is_identity_of(&NumericFormat::Float32);
+                let answer = driver.admits_kv_cache(format, format);
+                assert_eq!(answer.is_ok(), reads, "{} {format:?}", driver.name());
+                if let Err(message) = answer {
+                    assert!(message.contains(driver.name()) && message.contains(&format!("{format:?}")), "{message}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn kv_padding_policy_resolves_auto_from_the_graph_and_forces_the_overrides() {
