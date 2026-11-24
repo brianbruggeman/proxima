@@ -566,8 +566,8 @@ mod tests {
         let codec = FormatCodec::scalar(&FloatLayout::F16).expect("f16 resolves");
         let mut packed = vec![0u8; values.len() * 2];
         codec.encode(&values, &mut packed).expect("sizes match");
-        let mut fewer = vec![MaybeUninit::<f32>::uninit(); 999];
-        let mut more = vec![MaybeUninit::<f32>::uninit(); 1001];
+        let mut fewer = vec![MaybeUninit::uninit(); 999];
+        let mut more = vec![MaybeUninit::uninit(); 1001];
 
         let read = codec.decode(&packed, &mut fewer);
         let refused = codec.decode(&packed, &mut more);
