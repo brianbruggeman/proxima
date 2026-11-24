@@ -5,7 +5,8 @@ __device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float
     float amax = fabsf(x);
     for (int offset = 16; offset > 0; offset >>= 1) { amax = fmaxf(amax, __shfl_xor_sync(PROXIMA_ALL_LANES, amax, offset)); }
     float d = amax / 127.0f;
-    int q = amax == 0.0f ? 0 : (int)roundf(x / d);
+    float d_inv = d == 0.0f ? 0.0f : 1.0f / d;
+    int q = (int)roundf(x * d_inv);
     int qsum = q;
     for (int offset = 16; offset > 0; offset >>= 1) { qsum += __shfl_xor_sync(PROXIMA_ALL_LANES, qsum, offset); }
     unsigned char *bytes = (unsigned char *)out + (group / 4) * 144;
