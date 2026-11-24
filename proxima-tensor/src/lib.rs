@@ -280,7 +280,7 @@ pub use bind::{
 pub use bind::{ContractionForm, ProductContraction, contraction_form, changed_nodes, gathered_operand_count, is_product_of, product_contraction, refit_cached_attention_at, touched_positions};
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use bind::{
-    ACTIVATION_GROUP_ELEMENTS, Missing, activation_is_flat, collapsed_extent, derive_activation_quantize, is_derived,
+    ACTIVATION_GROUP_ELEMENTS, ACTIVATION_REACH, Missing, activation_is_flat, collapsed_extent, derive_activation_quantize, is_derived,
     is_int8_run_layout, quantize_op, quantize_rule_is_served, repoint, underive_block_quantize,
 };
 #[cfg(feature = "instrument")]

@@ -281,6 +281,7 @@ pub(super) fn refuse_live_quantized_activation_readers(
 mod tests {
     use super::*;
     use crate::BodyStep;
+    use proxima_numeric::ScaleArithmetic;
     use crate::test_support::Lcg;
     use proxima_gguf::quant::block_layout_encode;
 
@@ -576,6 +577,7 @@ mod tests {
             kind: BoundOpKind::BlockQuantize {
                 operands: vec![(NodeId(3), Layout { base: 0, strides: [DEPTH as i64, 1].into_iter().collect() }, None)],
                 layout: Box::new(BlockLayout::Q8_1),
+                arithmetic: ScaleArithmetic::Quotient,
             },
         }
     }

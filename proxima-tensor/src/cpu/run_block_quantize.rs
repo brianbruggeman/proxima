@@ -7,7 +7,7 @@ pub(super) fn run_block_quantize<B: Deref<Target = [f32]> + Sync>(
     buffers: &[Option<B>],
     output: &mut [f32],
 ) -> Result<(), TensorError> {
-    let BoundOpKind::BlockQuantize { operands, layout } = &resolved.kind else {
+    let BoundOpKind::BlockQuantize { operands, layout, .. } = &resolved.kind else {
         return Err(TensorError::NotLowerable {
             node: resolved.node,
             reason: "block quantize runner received another bound operation",
@@ -40,6 +40,7 @@ mod tests {
     use proxima_numeric::codec::Codec;
     use proxima_numeric::SignEncoding;
     use proxima_numeric::block_layout::BlockLayout;
+    use proxima_numeric::ScaleArithmetic;
 
     const ROWS: u32 = 3;
     const BLOCKS_PER_ROW: u32 = 4;
@@ -55,6 +56,7 @@ mod tests {
             kind: BoundOpKind::BlockQuantize {
                 operands: vec![(NodeId(0), Layout { base: 0, strides: stride }, None)],
                 layout: Box::new(layout),
+                arithmetic: ScaleArithmetic::Quotient,
             },
         }
     }

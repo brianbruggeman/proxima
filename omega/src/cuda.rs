@@ -65,7 +65,7 @@ use proxima_numeric::block_layout::BlockLayout;
 use proxima_tensor::{
     ActivationLimits, BoundOp, BoundOpKind, ComposedBody, DeviceMemory, Executes, Form, Keep, Layout, Lookup, NodeId, Op, ReduceInit, Refusal, ScalarOp, StepArg,
 };
-use proxima_numeric::{DType, FloatLayout, NumericPolicy, NumericRewrite, admit};
+use proxima_numeric::{DType, FloatLayout, NumericPolicy, NumericRewrite, ScaleArithmetic, admit};
 
 use crate::cuda_cached_attention::{
     cached_attention_entry_name, cached_attention_runtime_bounds, render_cached_attention_cuda,
@@ -624,7 +624,7 @@ pub fn emit_q8_1_quantize(
         source: [
             "#include <cuda_fp16.h>\n",
             &Target::CUDA.lane_mask_define(),
-            &quantize_device(&BlockLayout::Q8_1),
+            &quantize_device(&BlockLayout::Q8_1, ScaleArithmetic::Quotient),
             Q8_1_QUANTIZE_ENTRY_TEXT,
         ]
         .concat(),
@@ -5727,6 +5727,7 @@ mod tests {
                     None,
                 )],
                 layout: Box::new(layout),
+                arithmetic: ScaleArithmetic::Quotient,
             },
         };
 

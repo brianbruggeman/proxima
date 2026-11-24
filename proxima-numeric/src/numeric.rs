@@ -116,6 +116,13 @@ pub struct NumericPolicy {
     #[cfg_attr(feature = "config", setting(default = false))]
     #[cfg_attr(feature = "config", serde(default))]
     pub flat_activation_blocks: bool,
+    /// Quantizes an activation read by many rows the way llama.cpp's batched path does (`quantize_mmq_q8_1`:
+    /// multiply by the reciprocal of the scale) and a single row the way its matvec path does
+    /// (`quantize_q8_1`: divide by the scale); see [`crate::encode_rule::ScaleArithmetic::for_rows`]. Off, every
+    /// activation divides.
+    #[cfg_attr(feature = "config", setting(default = false))]
+    #[cfg_attr(feature = "config", serde(default))]
+    pub batched_activation_reciprocal: bool,
 }
 
 impl NumericPolicy {
@@ -144,6 +151,7 @@ impl NumericPolicy {
             flash_narrowing: false,
             accumulator_narrowing: false,
             flat_activation_blocks: false,
+            batched_activation_reciprocal: false,
         }
     }
 
@@ -167,6 +175,7 @@ impl NumericPolicy {
             flash_narrowing: false,
             accumulator_narrowing: false,
             flat_activation_blocks: false,
+            batched_activation_reciprocal: false,
         }
     }
 
@@ -186,6 +195,7 @@ impl NumericPolicy {
             flash_narrowing: false,
             accumulator_narrowing: false,
             flat_activation_blocks: false,
+            batched_activation_reciprocal: false,
         }
     }
 
@@ -268,6 +278,12 @@ impl NumericPolicy {
     #[must_use]
     pub const fn with_flat_activation_blocks(mut self, flat_activation_blocks: bool) -> Self {
         self.flat_activation_blocks = flat_activation_blocks;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_batched_activation_reciprocal(mut self, batched_activation_reciprocal: bool) -> Self {
+        self.batched_activation_reciprocal = batched_activation_reciprocal;
         self
     }
 }

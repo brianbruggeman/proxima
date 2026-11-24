@@ -1934,7 +1934,7 @@ fn bind_resolved(
     activation_storage: Option<NumericFormat>,
 ) -> Result<(Vec<BoundOp>, PackedOperands, LowerMicros), CudaDriverError> {
     // llama.cpp's cuda norms sum in float (`ggml-cuda/norm.cu:130-140`)
-    let numeric_policy = numeric_policy.with_accumulator_narrowing().with_flash_narrowing(true).with_flat_activation_blocks(true);
+    let numeric_policy = numeric_policy.with_accumulator_narrowing().with_flash_narrowing(true).with_flat_activation_blocks(true).with_batched_activation_reciprocal(true);
     let bind_started = Instant::now();
     let bound = if unfused {
         bind_unfused(program, shapes, outputs, numeric_policy)
@@ -4199,7 +4199,7 @@ mod tests {
     use proxima_numeric::block_layout::BlockLayout;
     use super::PoolSchedule;
     use proxima_tensor::{BoundOp, BoundOpKind, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, bind_with_fusion, infer, map};
-    use proxima_numeric::{DType, NumericPolicy};
+    use proxima_numeric::{DType, NumericPolicy, ScaleArithmetic};
 
     const KERNEL_CACHE_DIR_VAR: &str = "PROXIMA_CUDA_KERNEL_CACHE_DIR";
 
@@ -4281,7 +4281,7 @@ mod tests {
             .collect()
     }
 
-    fn quantize_on_gpu(driver: &CudaDriver, layout: BlockLayout, values: &[f32]) -> Vec<u8> {
+    fn quantize_on_gpu(driver: &CudaDriver, layout: BlockLayout, values: &[f32], arithmetic: ScaleArithmetic) -> Vec<u8> {
         let bytes = (QUANTIZE_WIDTH / usize::from(layout.elements) * usize::from(layout.block_bytes)) as u64;
         let strides = [QUANTIZE_WIDTH as i64, 1].into_iter().collect();
         let bound = BoundOp {
@@ -4291,6 +4291,7 @@ mod tests {
             kind: BoundOpKind::BlockQuantize {
                 operands: vec![(NodeId(0), proxima_tensor::Layout { base: 0, strides }, None)],
                 layout: Box::new(layout),
+                arithmetic,
             },
         };
         let kernel = crate::cuda::emit_cuda_with_policy(&bound, &Default::default(), NumericPolicy::default())
@@ -4327,8 +4328,8 @@ mod tests {
     fn gpu_and_cpu_grouped_quantize_each_match_their_llama_rounding_exactly() {
         let driver = CudaDriver::new(0).expect("a cuda device");
         let values = activation_values();
-        let single = quantize_on_gpu(&driver, BlockLayout::Q8_1, &values);
-        let grouped = quantize_on_gpu(&driver, BlockLayout::Q8_1_GROUPED, &values);
+        let single = quantize_on_gpu(&driver, BlockLayout::Q8_1, &values, ScaleArithmetic::Quotient);
+        let grouped = quantize_on_gpu(&driver, BlockLayout::Q8_1_GROUPED, &values, ScaleArithmetic::Quotient);
         assert_eq!(grouped, regrouped(&single), "each warp writes its own header word and codes");
 
         let cpu = cpu_quantize(&BlockLayout::Q8_1_GROUPED, &values);
@@ -4364,6 +4365,73 @@ mod tests {
                 }
             }
         }
+    }
+
+    const NEAR_TIE_UNIT_PEAK_BITS: [u32; 6] = [0x3d11_2244, 0x3d31_62c5, 0x3d51_a346, 0x3d71_e3c7, 0x3f30_60c1, 0x3f50_a142];
+    const NEAR_TIE_UNIT_PEAK_RECIPROCAL_CODES: [i8; 6] = [4, 5, 6, 7, 87, 103];
+    const NEAR_TIE_UNIT_PEAK_QUOTIENT_CODES: [i8; 6] = [5, 6, 7, 8, 88, 104];
+    const NEAR_TIE_WIDE_PEAK_BITS: [u32; 6] = [0x3d32_ff98, 0x3d95_2a54, 0x3dd0_d4dc, 0x3e06_3fb2, 0x3e24_14f6, 0x3e41_ea3a];
+    const NEAR_TIE_WIDE_PEAK_RECIPROCAL_CODES: [i8; 6] = [2, 3, 4, 5, 6, 7];
+    const NEAR_TIE_WIDE_PEAK_QUOTIENT_CODES: [i8; 6] = [1, 2, 3, 4, 5, 6];
+    const WIDE_PEAK: f32 = 3.7;
+
+    fn near_tie_values() -> Vec<f32> {
+        let mut values = activation_values();
+        values[..64].fill(0.0);
+        values[0] = 1.0;
+        values[32] = WIDE_PEAK;
+        for (lane, bits) in NEAR_TIE_UNIT_PEAK_BITS.iter().enumerate() {
+            values[1 + lane] = f32::from_bits(*bits);
+        }
+        for (lane, bits) in NEAR_TIE_WIDE_PEAK_BITS.iter().enumerate() {
+            values[33 + lane] = f32::from_bits(*bits);
+        }
+        values
+    }
+
+    /// Test-side port of llama.cpp `quantize_mmq_q8_1` (`ggml-cuda/quantize.cu`): per 32 values
+    /// `d_inv = 127 / amax`, `q = roundf(x * d_inv)`, `d = 1 / d_inv`, `s = d * sum(q)`; one 36-byte
+    /// flat block per group, `d` and `s` as little-endian binary16, then the codes.
+    fn llama_quantize_mmq_q8_1(values: &[f32]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for group in values.chunks(32) {
+            let amax = group.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+            let inverse = 127.0f32 / amax;
+            let codes: Vec<i8> = group.iter().map(|value| if amax == 0.0 { 0 } else { (value * inverse).round() as i8 }).collect();
+            let scale = if amax == 0.0 { 0.0 } else { 1.0f32 / inverse };
+            let sum: i32 = codes.iter().map(|code| i32::from(*code)).sum();
+            out.extend_from_slice(&half::f16::from_f32(scale).to_bits().to_le_bytes());
+            out.extend_from_slice(&half::f16::from_f32(scale * sum as f32).to_bits().to_le_bytes());
+            out.extend(codes.iter().map(|code| *code as u8));
+        }
+        out
+    }
+
+    fn codes_at(packed: &[u8], group: usize, lanes: std::ops::Range<usize>) -> Vec<i8> {
+        packed[group * 36 + 4..group * 36 + 36][lanes].iter().map(|byte| *byte as i8).collect()
+    }
+
+    #[test]
+    fn gpu_reciprocal_multiply_quantize_equals_the_llama_mmq_port_on_near_ties_and_quotient_does_not() {
+        let driver = CudaDriver::new(0).expect("a cuda device");
+        let values = near_tie_values();
+        let reciprocal = quantize_on_gpu(&driver, BlockLayout::Q8_1, &values, ScaleArithmetic::ReciprocalMultiply);
+        let quotient = quantize_on_gpu(&driver, BlockLayout::Q8_1, &values, ScaleArithmetic::Quotient);
+        assert_eq!(reciprocal, llama_quantize_mmq_q8_1(&values), "device reciprocal-multiply bytes against the mmq port");
+        assert_eq!(codes_at(&reciprocal, 0, 1..7), NEAR_TIE_UNIT_PEAK_RECIPROCAL_CODES);
+        assert_eq!(codes_at(&reciprocal, 1, 1..7), NEAR_TIE_WIDE_PEAK_RECIPROCAL_CODES);
+        assert_eq!(codes_at(&quotient, 0, 1..7), NEAR_TIE_UNIT_PEAK_QUOTIENT_CODES);
+        assert_eq!(codes_at(&quotient, 1, 1..7), NEAR_TIE_WIDE_PEAK_QUOTIENT_CODES);
+        assert_ne!(reciprocal, quotient);
+    }
+
+    #[test]
+    fn gpu_reciprocal_multiply_grouped_quantize_is_four_flat_runs_behind_one_header() {
+        let driver = CudaDriver::new(0).expect("a cuda device");
+        let values = near_tie_values();
+        let flat = quantize_on_gpu(&driver, BlockLayout::Q8_1, &values, ScaleArithmetic::ReciprocalMultiply);
+        let grouped = quantize_on_gpu(&driver, BlockLayout::Q8_1_GROUPED, &values, ScaleArithmetic::ReciprocalMultiply);
+        assert_eq!(grouped, regrouped(&flat));
     }
 
     #[test]

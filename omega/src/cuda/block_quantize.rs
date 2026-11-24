@@ -7,9 +7,10 @@
 use alloc::format;
 use alloc::string::String;
 
+use proxima_numeric::ScaleArithmetic;
 use proxima_numeric::block_layout::BlockLayout;
 pub use proxima_tensor::Missing;
-use proxima_tensor::{ACTIVATION_GROUP_ELEMENTS, BoundOp, BoundOpKind, is_int8_run_layout, quantize_rule_is_served};
+use proxima_tensor::{ACTIVATION_GROUP_ELEMENTS, ACTIVATION_REACH, BoundOp, BoundOpKind, is_int8_run_layout, quantize_rule_is_served};
 
 use super::{CudaGridSpec, EmitError, MAX_GRID_BLOCKS, WORD_C};
 use super::target::Target;
@@ -56,8 +57,8 @@ pub(crate) fn producer_missing(layout: &BlockLayout) -> Result<(), Missing> {
     })
 }
 
-fn servable_layout(resolved: &BoundOp) -> Result<&BlockLayout, EmitError> {
-    let BoundOpKind::BlockQuantize { layout, operands } = &resolved.kind else {
+fn servable_layout(resolved: &BoundOp) -> Result<(&BlockLayout, ScaleArithmetic), EmitError> {
+    let BoundOpKind::BlockQuantize { layout, operands, arithmetic } = &resolved.kind else {
         return Err(EmitError::RenderKindMismatch {
             node: resolved.node,
             expected: "block_quantize",
@@ -68,7 +69,7 @@ fn servable_layout(resolved: &BoundOp) -> Result<&BlockLayout, EmitError> {
         .first()
         .is_some_and(|(_, layout, _)| layout.base == 0 && layout.strides.last() == Some(&1));
     match (producer_missing(layout).is_ok(), layout.block_bytes % 4 == 0, dense_source) {
-        (true, true, true) => Ok(layout),
+        (true, true, true) => Ok((layout, *arithmetic)),
         (false, _, _) => Err(unsupported(resolved, "block_quantize_layout")),
         (_, false, _) => Err(unsupported(resolved, "block_quantize_block_bytes_not_word_sized")),
         (_, _, false) => Err(unsupported(resolved, "block_quantize_source_not_dense")),
@@ -76,7 +77,7 @@ fn servable_layout(resolved: &BoundOp) -> Result<&BlockLayout, EmitError> {
 }
 
 pub(super) fn block_quantize_groups(resolved: &BoundOp) -> Result<u64, EmitError> {
-    let layout = servable_layout(resolved)?;
+    let (layout, _) = servable_layout(resolved)?;
     let blocks = resolved.extents.iter().product::<u64>() / u64::from(layout.block_bytes);
     Ok(blocks * u64::from(layout.runs()))
 }
@@ -99,9 +100,25 @@ pub(super) fn block_quantize_grid(resolved: &BoundOp) -> Result<CudaGridSpec, Em
     Ok(grid)
 }
 
+/// The two lines that turn the group peak `amax` into the scale `d` and the lane code `q`.
+fn scale_and_code(arithmetic: ScaleArithmetic) -> String {
+    match arithmetic {
+        ScaleArithmetic::Quotient => format!(
+            "float d = amax / {ACTIVATION_REACH}.0f;\n\
+             \x20   int q = amax == 0.0f ? 0 : (int)roundf(x / d);\n"
+        ),
+        ScaleArithmetic::ReciprocalMultiply => format!(
+            "float d_inv = {ACTIVATION_REACH}.0f / amax;\n\
+             \x20   float d = 1.0f / d_inv;\n\
+             \x20   int q = amax == 0.0f ? 0 : (int)roundf(x * d_inv);\n"
+        ),
+    }
+}
+
 /// The device function one warp runs on one 32-element group `group` of `layout`: absmax scale,
-/// codes, and the scaled code sum beside the scale, at the group's run offsets.
-pub(super) fn quantize_device(layout: &BlockLayout) -> String {
+/// codes under `arithmetic`, and the scaled code sum beside the scale, at the group's run offsets.
+pub(super) fn quantize_device(layout: &BlockLayout, arithmetic: ScaleArithmetic) -> String {
+    let scale_and_code = scale_and_code(arithmetic);
     let runs = layout.runs();
     let (scale_base, scale_stride) = (layout.run_scale_byte(0), layout.run_scale_byte(runs.min(2) - 1) - layout.run_scale_byte(0));
     let (code_base, code_stride) = (layout.run_code_byte(0), layout.run_code_byte(runs.min(2) - 1) - layout.run_code_byte(0));
@@ -110,8 +127,7 @@ pub(super) fn quantize_device(layout: &BlockLayout) -> String {
          \x20   float x = in[group * 32 + lane];\n\
          \x20   float amax = fabsf(x);\n\
          \x20   for (int offset = 16; offset > 0; offset >>= 1) {{ amax = fmaxf(amax, __shfl_xor_sync(PROXIMA_ALL_LANES, amax, offset)); }}\n\
-         \x20   float d = amax / 127.0f;\n\
-         \x20   int q = amax == 0.0f ? 0 : (int)roundf(x / d);\n\
+         \x20   {scale_and_code}\
          \x20   int qsum = q;\n\
          \x20   for (int offset = 16; offset > 0; offset >>= 1) {{ qsum += __shfl_xor_sync(PROXIMA_ALL_LANES, qsum, offset); }}\n\
          \x20   unsigned char *bytes = (unsigned char *)out + (group / {runs}) * {block_bytes};\n\
@@ -136,8 +152,8 @@ pub(super) fn render_block_quantize(
     resolved: &BoundOp,
     entry: &str,
 ) -> Result<String, EmitError> {
-    let layout = servable_layout(resolved)?;
-    let device = quantize_device(layout);
+    let (layout, arithmetic) = servable_layout(resolved)?;
+    let device = quantize_device(layout, arithmetic);
     let lane_mask_define = target.lane_mask_define();
     Ok(format!(
         "#include <{header}>\n{lane_mask_define}{device}\n\

@@ -646,6 +646,8 @@ pub enum BoundOpKind {
         operands: BoundOperands,
         // boxed because the inline layout table makes every BoundOpKind 536 bytes
         layout: Box<BlockLayout>,
+        /// How the quantize turns the group peak into scale and codes; the bind chooses it from the numeric policy and the row count.
+        arithmetic: ScaleArithmetic,
     },
 }
 
@@ -1348,6 +1350,7 @@ mod output_len_tests {
             kind: BoundOpKind::BlockQuantize {
                 operands: vec![(NodeId(0), Layout { base: 0, strides: [blocks_per_row as i64 * i64::from(layout.elements), 1].into_iter().collect() }, None)],
                 layout: Box::new(layout),
+                arithmetic: ScaleArithmetic::Quotient,
             },
         };
         assert_eq!(quantize.output_len(), 3 * 4 * usize::from(layout.block_bytes));

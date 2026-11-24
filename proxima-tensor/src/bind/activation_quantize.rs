@@ -13,7 +13,7 @@ use core::cmp::Reverse;
 
 use proxima_numeric::block_layout::BlockLayout;
 use proxima_numeric::int8_dot::INT8_DOT_ELEMENTS;
-use proxima_numeric::{DType, NumericFormat, NumericPolicy, NumericRewrite, admit, int8_dot_shape};
+use proxima_numeric::{DType, NumericFormat, NumericPolicy, NumericRewrite, ScaleArithmetic, admit, int8_dot_shape};
 
 use super::{ACTIVATION_GROUP_ELEMENTS, ActivationLimits, BoundOp, BoundOpKind, Executes, Form, Layout, StepArg};
 use crate::op::{Keep, NodeId, Op, ReduceInit, ScalarOp};
@@ -59,9 +59,16 @@ pub fn collapsed_extent(shape: &[u64]) -> Option<[u64; 2]> {
 }
 
 /// The `BlockQuantize` node `derived` that holds `activation` in the block layout `held`, over the
-/// flat `[tokens, depth]` extent, addressed like `template` with a dense row-major source.
+/// flat `[tokens, depth]` extent, addressed like `template` with a dense row-major source, rounding by `arithmetic`.
 #[must_use]
-pub fn quantize_op(derived: NodeId, activation: NodeId, extent: [u64; 2], template: &Layout, held: &BlockLayout) -> BoundOp {
+pub fn quantize_op(
+    derived: NodeId,
+    activation: NodeId,
+    extent: [u64; 2],
+    template: &Layout,
+    held: &BlockLayout,
+    arithmetic: ScaleArithmetic,
+) -> BoundOp {
     let [tokens, depth] = extent;
     let mut layout = template.clone();
     layout.base = 0;
@@ -75,6 +82,7 @@ pub fn quantize_op(derived: NodeId, activation: NodeId, extent: [u64; 2], templa
         kind: BoundOpKind::BlockQuantize {
             operands: vec![(activation, layout, None)],
             layout: Box::new(*held),
+            arithmetic,
         },
     }
 }
@@ -342,7 +350,14 @@ pub fn derive_activation_quantize(
         };
         let first = consumers.iter().map(|consumer| consumer.position).min().unwrap_or(0);
         let template = &resolved[first].operands()[consumers[0].slot].1;
-        inserts.entry(first).or_default().push(quantize_op(derived, *activation, [tokens, depth], template, &held));
+        inserts.entry(first).or_default().push(quantize_op(
+            derived,
+            *activation,
+            [tokens, depth],
+            template,
+            &held,
+            ScaleArithmetic::for_rows(tokens, policy.batched_activation_reciprocal),
+        ));
         for consumer in consumers {
             repoints.entry(consumer.position).or_default().push((consumer.slot, derived));
         }
@@ -657,6 +672,30 @@ mod tests {
         assert_eq!(activation_codec(4096, None, true), NumericFormat::Q8_1);
         assert_eq!(activation_codec(128, None, true), NumericFormat::Q8_1);
         assert_eq!(activation_codec(4096, Some(NumericFormat::Q8_1Grouped), true), NumericFormat::Q8_1Grouped);
+    }
+
+    fn derived_arithmetics(fixture: &Fixture, policy: NumericPolicy) -> Vec<ScaleArithmetic> {
+        let (resolved, _) = derive(fixture, policy, &int8_grant());
+        resolved
+            .iter()
+            .filter(|bound| is_derived(bound, fixture.program.len()))
+            .filter_map(|bound| match &bound.kind {
+                BoundOpKind::BlockQuantize { arithmetic, .. } => Some(*arithmetic),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_quantize_arithmetic_follows_the_policy_and_the_row_count_like_llama() {
+        let many = fixture(ScaleArithmetic::SINGLE_ROW_LIMIT as u32 + 1, false);
+        let few = fixture(ScaleArithmetic::SINGLE_ROW_LIMIT as u32, false);
+        let single = fixture(1, false);
+        let batched = granted().with_batched_activation_reciprocal(true);
+        assert_eq!(derived_arithmetics(&many, batched), [ScaleArithmetic::ReciprocalMultiply]);
+        assert_eq!(derived_arithmetics(&few, batched), [ScaleArithmetic::Quotient]);
+        assert_eq!(derived_arithmetics(&single, batched), [ScaleArithmetic::Quotient]);
+        assert_eq!(derived_arithmetics(&many, granted()), [ScaleArithmetic::Quotient]);
     }
 
     #[test]

@@ -127,9 +127,10 @@ fn duplicate_bound_op(original: &BoundOp, fresh: &mut u32) -> Option<BoundOp> {
             epilogue_broadcast_axes: epilogue_broadcast_axes.clone(),
             accumulator: *accumulator,
         },
-        BoundOpKind::BlockQuantize { operands, layout } => BoundOpKind::BlockQuantize {
+        BoundOpKind::BlockQuantize { operands, layout, arithmetic } => BoundOpKind::BlockQuantize {
             operands: operands.clone(),
             layout: layout.clone(),
+            arithmetic: *arithmetic,
         },
         BoundOpKind::Iota => BoundOpKind::Iota,
         BoundOpKind::Constant { value } => BoundOpKind::Constant { value: *value },

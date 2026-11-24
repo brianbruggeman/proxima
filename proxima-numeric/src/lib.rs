@@ -80,7 +80,7 @@ pub use convert::{Overflow, Rounding, narrow_to_format, narrow_to_layout};
 pub use decode::{decode_block, decode_blocks, decode_scalar, encode_scalar};
 pub use dtype::DType;
 pub use encode::{encode_blocks, reach};
-pub use encode_rule::{CodeClamp, CodeRounding, EncodeRule, FitError, FitWeighting, RangeFit, ScaleStatistic, StoredMin, SubRule, ScaleRounding};
+pub use encode_rule::{CodeClamp, CodeRounding, EncodeRule, ScaleArithmetic, FitError, FitWeighting, RangeFit, ScaleStatistic, StoredMin, SubRule, ScaleRounding};
 pub use error::NumericError;
 pub use float_layout::{FloatLayout, SignEncoding, Specials};
 pub use format::{LevelFormat, LevelGeometry, LevelTable, NumericFormat};

@@ -883,6 +883,7 @@ fn nearest_level(values: &[i8], target: f32) -> u32 {
 mod tests {
     use super::*;
     use crate::block_layout::BlockLayout;
+    use crate::encode_rule::ScaleArithmetic;
     use crate::decode::decode_blocks;
 
     /// half of a binary16 ulp at 1.0: every stored scale is a binary16, so the scale itself is
@@ -1557,6 +1558,58 @@ mod tests {
                 }
             }
         }
+    }
+
+    const UNIT_PEAK_TIES: [u32; 6] = [0x3d11_2244, 0x3d31_62c5, 0x3d51_a346, 0x3d71_e3c7, 0x3f30_60c1, 0x3f50_a142];
+    const WIDE_PEAK_TIES: [u32; 6] = [0x3d32_ff98, 0x3d95_2a54, 0x3dd0_d4dc, 0x3e06_3fb2, 0x3e24_14f6, 0x3e41_ea3a];
+    const WIDE_PEAK: f32 = 3.7;
+
+    /// Test-side port of llama.cpp `quantize_mmq_q8_1` for one group: `d_inv = 127 / amax`,
+    /// `q = roundf(x * d_inv)`, `d = 1 / d_inv`.
+    fn llama_mmq_group(peak: f32, values: &[f32]) -> (f32, std::vec::Vec<i32>) {
+        let inverse = 127.0f32 / peak;
+        (1.0f32 / inverse, values.iter().map(|value| libm::roundf(value * inverse) as i32).collect())
+    }
+
+    /// Test-side port of llama.cpp `quantize_q8_1` for one group: `d = amax / 127`, `q = roundf(x / d)`.
+    fn llama_mvq_group(peak: f32, values: &[f32]) -> (f32, std::vec::Vec<i32>) {
+        let scale = peak / 127.0f32;
+        (scale, values.iter().map(|value| libm::roundf(value / scale) as i32).collect())
+    }
+
+    #[test]
+    fn scale_arithmetic_matches_the_two_llama_quantizers_on_near_ties() {
+        let reach = 127.0f32;
+        for (peak, bits, mmq, mvq) in [
+            (1.0f32, UNIT_PEAK_TIES, [4, 5, 6, 7, 87, 103], [5, 6, 7, 8, 88, 104]),
+            (WIDE_PEAK, WIDE_PEAK_TIES, [2, 3, 4, 5, 6, 7], [1, 2, 3, 4, 5, 6]),
+        ] {
+            let values = bits.map(f32::from_bits);
+            let (mmq_scale, mmq_codes) = llama_mmq_group(peak, &values);
+            let (mvq_scale, mvq_codes) = llama_mvq_group(peak, &values);
+            assert_eq!(mmq_codes, mmq, "mmq oracle at peak {peak}");
+            assert_eq!(mvq_codes, mvq, "mvq oracle at peak {peak}");
+            let reciprocal = ScaleArithmetic::ReciprocalMultiply;
+            let quotient = ScaleArithmetic::Quotient;
+            assert_eq!(reciprocal.scale(peak, reach).to_bits(), mmq_scale.to_bits());
+            assert_eq!(quotient.scale(peak, reach).to_bits(), mvq_scale.to_bits());
+            let reciprocal_codes: std::vec::Vec<i32> = values.iter().map(|value| reciprocal.code(*value, peak, reach)).collect();
+            let quotient_codes: std::vec::Vec<i32> = values.iter().map(|value| quotient.code(*value, peak, reach)).collect();
+            assert_eq!(reciprocal_codes, mmq_codes);
+            assert_eq!(quotient_codes, mvq_codes);
+        }
+    }
+
+    #[test]
+    fn scale_arithmetic_of_a_zero_peak_is_zero_and_rows_choose_like_llama() {
+        for arithmetic in [ScaleArithmetic::Quotient, ScaleArithmetic::ReciprocalMultiply] {
+            assert_eq!(arithmetic.scale(0.0, 127.0), 0.0);
+            assert_eq!(arithmetic.code(0.0, 0.0, 127.0), 0);
+        }
+        let limit = ScaleArithmetic::SINGLE_ROW_LIMIT;
+        assert_eq!(ScaleArithmetic::for_rows(limit, true), ScaleArithmetic::Quotient);
+        assert_eq!(ScaleArithmetic::for_rows(limit + 1, true), ScaleArithmetic::ReciprocalMultiply);
+        assert_eq!(ScaleArithmetic::for_rows(limit + 1, false), ScaleArithmetic::Quotient);
     }
 
     const FLINT_EXPERT_ROWS: &str =

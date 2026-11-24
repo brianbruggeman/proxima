@@ -62,6 +62,7 @@ use core::future::Future;
 
 use arrayvec::ArrayVec;
 use proxima_numeric::block_layout::BlockLayout;
+use proxima_numeric::ScaleArithmetic;
 use proxima_primitives::pipe::Pipe;
 use smallvec::SmallVec;
 
@@ -115,7 +116,8 @@ mod top_fraction_fusion;
 mod twin_elementwise;
 mod product_contraction;
 pub use activation_layout::{
-    ACTIVATION_GROUP_ELEMENTS, Missing, is_int8_run_layout, quantize_rule_is_served,
+    ACTIVATION_GROUP_ELEMENTS, ACTIVATION_REACH, Missing, is_int8_run_layout,
+    quantize_rule_is_served,
 };
 pub use activation_quantize::{
     activation_is_flat, collapsed_extent, derive_activation_quantize, is_derived, quantize_op,

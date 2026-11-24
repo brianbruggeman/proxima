@@ -7,7 +7,10 @@ use proxima_numeric::float_layout::FloatLayout;
 /// Elements one activation scale covers: the 32-element run the int8 readers fold per step.
 pub const ACTIVATION_GROUP_ELEMENTS: u64 = 32;
 
-const QUANTIZE_DIVISOR: i32 = 127;
+/// What an int8 activation scale divides the group peak by: the largest code magnitude.
+pub const ACTIVATION_REACH: i32 = 127;
+
+const QUANTIZE_DIVISOR: i32 = ACTIVATION_REACH;
 
 /// A piece a backend's render lacks for a block activation layout, with the line that found it
 /// missing, so a refusal points at the code that would have to change and never at a format name.

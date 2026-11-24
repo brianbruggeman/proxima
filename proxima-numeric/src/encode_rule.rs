@@ -137,6 +137,65 @@ pub enum ScaleRounding {
     PowerOfTwoCeil,
 }
 
+/// How a quantize step turns a block's peak into the scale and each value into a code, for the
+/// integer codes a backend writes when it quantizes an activation. The two arithmetics round
+/// differently where `value / scale` and `value * (reach / peak)` straddle a half.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ScaleArithmetic {
+    /// `scale = peak / reach`, `code = round(value / scale)`: llama.cpp's `quantize_q8_1`
+    /// (`ggml-cuda/quantize.cu`), the path a single-row (matvec) product reads.
+    Quotient,
+    /// `inverse = reach / peak`, `code = round(value * inverse)`, `scale = 1 / inverse`: llama.cpp's
+    /// `quantize_mmq_q8_1` (`quantize.cu`), the path a many-row (matmul) product reads.
+    ReciprocalMultiply,
+}
+
+impl ScaleArithmetic {
+    /// The most rows llama.cpp's CUDA matvec path takes (`MMVQ_MAX_BATCH_SIZE`, `mmvq.cuh:3`); a
+    /// product over more rows takes the matmul path and its quantizer.
+    pub const SINGLE_ROW_LIMIT: u64 = 8;
+
+    /// The arithmetic llama.cpp picks for an activation read by `rows` rows when `batched` asks for
+    /// its batched rule; `Quotient` otherwise.
+    #[must_use]
+    pub const fn for_rows(rows: u64, batched: bool) -> Self {
+        if batched && rows > Self::SINGLE_ROW_LIMIT {
+            Self::ReciprocalMultiply
+        } else {
+            Self::Quotient
+        }
+    }
+
+    /// The unrounded scale for a block whose largest magnitude is `peak`; zero for a zero peak.
+    #[must_use]
+    pub fn scale(self, peak: f32, reach: f32) -> f32 {
+        if peak == 0.0 {
+            return 0.0;
+        }
+        match self {
+            Self::Quotient => peak / reach,
+            Self::ReciprocalMultiply => 1.0 / (reach / peak),
+        }
+    }
+
+    /// The code of `value` in a block with largest magnitude `peak`; zero for a zero peak.
+    #[must_use]
+    pub fn code(self, value: f32, peak: f32, reach: f32) -> i32 {
+        if peak == 0.0 {
+            return 0;
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the rounded quotient is at most the reach in magnitude"
+        )]
+        let code = match self {
+            Self::Quotient => libm::roundf(value / (peak / reach)) as i32,
+            Self::ReciprocalMultiply => libm::roundf(value * (reach / peak)) as i32,
+        };
+        code
+    }
+}
+
 /// Which ends of the code range clamp a code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CodeClamp {
