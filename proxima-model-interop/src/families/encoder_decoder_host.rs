@@ -3,15 +3,13 @@
 //! decoder graphs, and run a greedy transcript. This is the std half; the
 //! graph builders themselves stay alloc-only and model-neutral.
 
-use std::collections::BTreeMap;
-#[cfg(all(feature = "metal", target_os = "macos"))]
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use proxima_safetensors::{Manifest, SafetensorsParser};
-use proxima_tensor::cpu::{Evaluated, QuantizedBlock, evaluate_quantized_named};
+use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
 use proxima_tensor::op::{Extent, NodeId, Op};
 use proxima_tensor::spec::{
     CachedLayerRoots, STFT_COS_INPUT, STFT_SIN_INPUT, STFT_WINDOW_INPUT, StftLogMelConfig,
@@ -24,11 +22,10 @@ use crate::decode_policy::{DecodeConfig, DecodePolicy};
 use crate::families::encoder_decoder::{
     DecoderLayer, DecoderStem, EncoderLayer, EncoderStem, Linear, encoder,
 };
-#[cfg(all(feature = "metal", target_os = "macos"))]
-use crate::generate::{BackendRuntime, kv_extent};
+use crate::generate::{BackendRuntime, cached_kv_extent, program_hash};
 use crate::hf_bind::bind_safetensors_program_leaves;
 use crate::profiles::BindingProfile;
-use crate::serving::{ServingConfig, apply_serving_config};
+use crate::serving::apply_serving_config;
 use crate::serving_settings::ServingSettings;
 use crate::source::CheckpointMapping;
 
@@ -93,10 +90,10 @@ impl Shape {
     }
 }
 
-const CACHE_PLANES: [&str; 3] = ["first", "second", "value"];
+const CACHE_PLANES: [&str; 3] = ["k_even", "k_odd", "v"];
 
 fn cache_plane_name(plane: &str, layer: usize) -> String {
-    format!("cache_{plane}_{layer}")
+    format!("kv_cache.{layer}.{plane}")
 }
 
 fn cache_names(layers: usize) -> impl Iterator<Item = String> {
@@ -134,22 +131,6 @@ fn parse_checkpoint(bytes: &[u8]) -> Result<(Manifest, u64)> {
         return Err(anyhow::anyhow!("safetensors header did not complete"));
     };
     Ok((manifest, (8 + header_len) as u64))
-}
-
-/// the serving runtime every Metal stage plans and executes through
-#[cfg(all(feature = "metal", target_os = "macos"))]
-type Runtime = BackendRuntime;
-#[cfg(not(all(feature = "metal", target_os = "macos")))]
-struct Runtime;
-
-#[cfg(all(feature = "metal", target_os = "macos"))]
-fn open_runtime(config: &ServingConfig<'_>) -> Runtime {
-    BackendRuntime::new(config)
-}
-
-#[cfg(not(all(feature = "metal", target_os = "macos")))]
-fn open_runtime(_config: &ServingConfig<'_>) -> Runtime {
-    Runtime
 }
 
 struct Bound<'a> {
@@ -488,7 +469,7 @@ impl<'a> Bound<'a> {
         &self,
         outputs: &[NodeId],
         symbols: &[u64],
-        runtime: &mut Runtime,
+        runtime: &mut BackendRuntime,
     ) -> Result<Vec<Vec<f32>>> {
         let named: Vec<(&str, QuantizedBlock<'_>)> = self
             .named
@@ -496,17 +477,10 @@ impl<'a> Bound<'a> {
             .map(|(name, data)| (name.as_str(), QuantizedBlock::from(data.as_slice())))
             .chain(self.weights.blocks()?)
             .collect();
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        if runtime.is_metal() {
-            let resident: BTreeSet<&str> = self.weights.names();
-            let evaluated = runtime
-                .evaluate_segment(&self.program, symbols, &named, outputs, &resident, None)
-                .map_err(|error| anyhow::anyhow!("metal segment: {error:?}"))?;
-            return collect_outputs(&evaluated, outputs);
-        }
-        let _ = runtime;
-        let evaluated = evaluate_quantized_named(&self.program, symbols, &named, outputs)
-            .map_err(|error| anyhow::anyhow!("program does not evaluate: {error:?}"))?;
+        let resident: BTreeSet<&str> = self.weights.names();
+        let evaluated = runtime
+            .evaluate_segment(&self.program, symbols, &named, outputs, &resident, None)
+            .map_err(|error| anyhow::anyhow!("segment does not evaluate: {error:?}"))?;
         collect_outputs(&evaluated, outputs)
     }
 }
@@ -538,27 +512,14 @@ pub struct Transcript {
     pub last_token: Duration,
     /// one entry per decode step, each from the step's start to its token pick
     pub step_times: Vec<Duration>,
-    /// bytes Metal had allocated when the transcription ended; `None` off Metal
+    /// bytes the device had allocated when the transcription ended; `None` on the host
     pub gpu_allocated_bytes: Option<u64>,
-    /// largest allocation sampled after each stage and each decode step; `None` off Metal
+    /// largest allocation sampled after each stage and each decode step; `None` on the host
     pub gpu_allocated_peak_bytes: Option<u64>,
 }
 
-#[cfg(all(feature = "metal", target_os = "macos"))]
-fn gpu_allocated(runtime: &Runtime) -> Option<u64> {
-    runtime
-        .is_metal()
-        .then(omega::metal::current_allocated_size)
-        .flatten()
-}
-
-#[cfg(not(all(feature = "metal", target_os = "macos")))]
-fn gpu_allocated(_runtime: &Runtime) -> Option<u64> {
-    None
-}
-
-fn sample_peak(peak: &mut Option<u64>, runtime: &Runtime) {
-    *peak = (*peak).max(gpu_allocated(runtime));
+fn sample_peak(peak: &mut Option<u64>, runtime: &BackendRuntime) {
+    *peak = (*peak).max(runtime.allocated_bytes());
 }
 
 /// A loaded checkpoint ready to transcribe.
@@ -607,43 +568,53 @@ impl Model {
         }
     }
 
-    /// Replaces the serving settings every Metal stage lowers into its runtime.
+    /// Replaces the serving settings every stage lowers into its runtime.
     #[must_use]
     pub fn with_settings(mut self, settings: ServingSettings) -> Self {
         self.settings = settings;
         self
     }
 
-    /// The cached-range rows a step binds: the llm's bucketed extent when the
-    /// fused cached attention's runtime bound can exclude the pad rows (the
-    /// metal plan), otherwise exactly `cached`.
-    #[cfg(all(feature = "metal", target_os = "macos"))]
-    fn cache_extent(&self, runtime: &Runtime, cached: usize) -> usize {
-        if !runtime.is_metal() {
-            return cached;
-        }
+    /// The cached-range rows a step binds, decided exactly as the llm decides
+    /// them: the runtime probes the program, and pads to the capacity only where
+    /// the fused cached attention's runtime bound excludes the pad rows.
+    fn cache_extent(
+        &self,
+        runtime: &mut BackendRuntime,
+        decoder: &Bound<'_>,
+        outputs: &[NodeId],
+        (program_hash, cached, new_count): (u64, usize, usize),
+    ) -> usize {
         let capacity = self.shape.target_positions as usize;
-        let bucket = self.settings.kv_bucket_tokens;
-        kv_extent(cached, capacity, bucket).max(cached)
+        let probe_extent = capacity.max(1) as u64;
+        runtime.settle_kv_padding(
+            &decoder.program,
+            program_hash,
+            &[new_count as u64, probe_extent],
+            || outputs.to_vec(),
+        );
+        cached_kv_extent(
+            runtime.pads_cached_kv(program_hash, new_count),
+            cached,
+            new_count,
+            self.settings.kv_bucket_tokens,
+            capacity,
+        )
+        .max(cached)
     }
 
-    #[cfg(not(all(feature = "metal", target_os = "macos")))]
-    fn cache_extent(&self, _runtime: &Runtime, cached: usize) -> usize {
-        cached
-    }
-
-    fn runtime(&self) -> Result<Runtime> {
+    fn runtime(&self) -> Result<BackendRuntime> {
         let config = self.settings.as_serving_config(&[]);
         apply_serving_config(&config, 0)
             .map_err(|error| anyhow::anyhow!("serving settings are not admitted: {error:?}"))?;
-        Ok(open_runtime(&config))
+        Ok(BackendRuntime::new(&config))
     }
 
     pub fn shape(&self) -> &Shape {
         &self.shape
     }
 
-    /// Transcribes on the device the serving settings select: `gpu_layers` of `GPU_LAYERS_ALL` runs the stages on Metal.
+    /// Transcribes on the device the serving settings select: `gpu_layers` of `GPU_LAYERS_ALL` runs the stages on the device.
     pub fn transcribe(&self, wav: &[f32], language: &str) -> Result<Transcript> {
         self.transcribe_with(wav, language)
     }
@@ -773,6 +744,7 @@ impl Model {
             decoder.named.insert(format!("cross_v_{layer}"), v);
         }
         decoder.bind(self)?;
+        let program_hash = program_hash(&decoder.program);
 
         let mut tokens: Vec<u32> = policy.prompt().to_vec();
         let mut cached = 0;
@@ -785,7 +757,12 @@ impl Model {
             let step_start = Instant::now();
             let fresh = &tokens[cached..];
             decoder.stage_step(fresh, cached);
-            let extent = self.cache_extent(&runtime, cached);
+            let extent = self.cache_extent(
+                &mut runtime,
+                &decoder,
+                &step_outputs,
+                (program_hash, cached, fresh.len()),
+            );
             decoder.fit_cache(extent);
             let symbols = [fresh.len() as u64, extent as u64];
             let mut rows = decoder.run(&step_outputs, &symbols, &mut runtime)?;
@@ -826,7 +803,7 @@ impl Model {
             first_token,
             last_token,
             step_times,
-            gpu_allocated_bytes: gpu_allocated(&runtime),
+            gpu_allocated_bytes: runtime.allocated_bytes(),
             gpu_allocated_peak_bytes: gpu_peak,
         })
     }
@@ -1097,20 +1074,25 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[cfg(feature = "gpu")]
     #[test]
-    fn runtime_is_metal_exactly_when_settings_offload_every_layer() {
+    fn runtime_uses_the_gpu_exactly_when_settings_offload_every_layer() {
         let cpu = empty_model().with_settings(ServingSettings {
             gpu_layers: 0,
             ..ServingSettings::default()
         });
-        let metal = empty_model().with_settings(ServingSettings {
+        let offloaded = empty_model().with_settings(ServingSettings {
             gpu_layers: crate::serving::GPU_LAYERS_ALL,
             ..ServingSettings::default()
         });
 
-        assert!(!cpu.runtime().expect("cpu settings are admitted").is_metal());
-        assert!(metal.runtime().expect("metal settings are admitted").is_metal());
+        assert!(!cpu.runtime().expect("cpu settings are admitted").uses_gpu());
+        assert!(
+            offloaded
+                .runtime()
+                .expect("offload settings are admitted")
+                .uses_gpu()
+        );
     }
 
     #[cfg(not(feature = "gpu"))]

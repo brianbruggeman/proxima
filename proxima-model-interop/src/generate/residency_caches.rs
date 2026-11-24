@@ -3565,8 +3565,19 @@ impl BackendRuntime {
     }
 
     #[cfg(feature = "gpu")]
-    pub(super) fn uses_gpu(&self) -> bool {
+    pub(crate) fn uses_gpu(&self) -> bool {
         matches!(self.engine, Engine::Gpu)
+    }
+
+    /// Bytes the selected device has allocated; `None` when this runtime runs on
+    /// the host. The device query lives here so callers name no backend.
+    #[cfg(feature = "proxima-autograd")]
+    pub(crate) fn allocated_bytes(&self) -> Option<u64> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if self.uses_gpu() {
+            return omega::metal::current_allocated_size();
+        }
+        None
     }
 
     /// Whether the cached K/V range is bound padded to its bucket. Once a plan of this
@@ -3575,7 +3586,7 @@ impl BackendRuntime {
     /// `KvPaddingPolicy::resolves` asks whether the selected driver can ever render
     /// the fused op. `exact` and `padded` are the configured overrides.
     #[cfg(feature = "gpu")]
-    pub(super) fn pads_cached_kv(&self, program_hash: u64, new_count: usize) -> bool {
+    pub(crate) fn pads_cached_kv(&self, program_hash: u64, new_count: usize) -> bool {
         self.kv_pad
             .get(&(program_hash, new_count))
             .copied()
@@ -3590,7 +3601,7 @@ impl BackendRuntime {
     /// no device is touched, so a HIP call never compiles a CUDA plan to answer this. A
     /// probe that cannot infer leaves the width to the configured pre-plan default.
     #[cfg(feature = "gpu")]
-    pub(super) fn settle_kv_padding(
+    pub(crate) fn settle_kv_padding(
         &mut self,
         program: &[Op],
         program_hash: u64,
@@ -5750,8 +5761,14 @@ impl BackendRuntime {
         proxima_tensor::Executes::CPU
     }
 
-    pub(super) fn uses_gpu(&self) -> bool {
+    pub(crate) fn uses_gpu(&self) -> bool {
         false
+    }
+
+    /// Bytes the selected device has allocated; always `None` on the host runtime.
+    #[cfg(feature = "proxima-autograd")]
+    pub(crate) fn allocated_bytes(&self) -> Option<u64> {
+        None
     }
 
     pub(super) fn carries_state_on_device(&self) -> bool {
@@ -5782,7 +5799,7 @@ impl BackendRuntime {
 
     /// Whether the cached K/V range binds padded: only once the probe found every reader
     /// of the cache a fused cached attention, whose runtime bound excludes the pad rows.
-    pub(super) fn pads_cached_kv(&self, program_hash: u64, new_count: usize) -> bool {
+    pub(crate) fn pads_cached_kv(&self, program_hash: u64, new_count: usize) -> bool {
         self.kv_pad
             .get(&(program_hash, new_count))
             .copied()
@@ -5791,7 +5808,7 @@ impl BackendRuntime {
 
     /// Decides the padding of `program` at `new_count` rows by binding at `symbols`
     /// without executing, so the first call of a class already binds its range padded.
-    pub(super) fn settle_kv_padding(
+    pub(crate) fn settle_kv_padding(
         &mut self,
         program: &[Op],
         program_hash: u64,

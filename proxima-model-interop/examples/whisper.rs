@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use conflaguration::Settings;
+use proxima_model_interop::ServingSettings;
 use proxima_model_interop::audio::wav;
 use proxima_model_interop::families::encoder_decoder_host::Model;
-use proxima_model_interop::{GPU_LAYERS_ALL, ServingSettings};
 
 fn main() -> Result<()> {
     let process_start = Instant::now();
@@ -21,19 +21,20 @@ fn main() -> Result<()> {
     let mut model_path: Option<PathBuf> = None;
     let mut language = String::from("en");
     let mut noise = 0.0_f32;
-    let mut device = "cpu";
+    let mut gpu_layers: Option<i32> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--wav" => wav_path = Some(args.next().context("--wav wants a path")?.into()),
             "--model" => model_path = Some(args.next().context("--model wants a path")?.into()),
             "--lang" => language = args.next().context("--lang wants a name")?,
-            "--device" => {
-                device = match args.next().context("--device wants cpu|metal")?.as_str() {
-                    "cpu" => "cpu",
-                    "metal" => "metal",
-                    other => bail!("unknown device {other}"),
-                }
+            "--gpu-layers" => {
+                gpu_layers = Some(
+                    args.next()
+                        .context("--gpu-layers wants a count")?
+                        .parse()
+                        .context("--gpu-layers is an i32")?,
+                )
             }
             "--repeat" => {
                 repeats = args
@@ -76,10 +77,13 @@ fn main() -> Result<()> {
     let load_start = std::time::Instant::now();
     let mut settings =
         <ServingSettings as Settings>::from_env().context("serving settings from env")?;
-    settings.gpu_layers = if device == "metal" { GPU_LAYERS_ALL } else { 0 };
+    if let Some(layers) = gpu_layers {
+        settings.gpu_layers = layers;
+    }
+    let gpu_layers = settings.gpu_layers;
     let model = Model::load(&model_path)?.with_settings(settings);
     let load = load_start.elapsed();
-    println!("models=1 noise={noise} device={device}");
+    println!("models=1 noise={noise} gpu_layers={gpu_layers}");
     for repeat in 0..repeats {
         let begin = Instant::now();
         let transcript = model.transcribe(&samples, &language)?;

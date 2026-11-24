@@ -1571,7 +1571,7 @@ pub(crate) fn kv_extent(merged_len: usize, capacity: usize, bucket_tokens: usize
 /// may run the unfused chain, where a zero pad row scores 0 and adds
 /// `exp(0 - max)` to the softmax denominator -- and the pad count
 /// (`extent - cached_len`) differs between a 1-row decode and a k-row verify.
-pub(super) fn cached_kv_extent(
+pub(crate) fn cached_kv_extent(
     padded: bool,
     cached_len: usize,
     new_count: usize,
@@ -1670,7 +1670,7 @@ pub(super) struct PreGatherContext<'context, 'mapping, 'file> {
     pub(super) dense_attention_placement: Option<&'context DenseAttentionPlacement<'context>>,
 }
 
-pub(super) fn program_hash(program: &[Op]) -> u64 {
+pub(crate) fn program_hash(program: &[Op]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     program.hash(&mut hasher);
     hasher.finish()
