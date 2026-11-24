@@ -744,7 +744,7 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
 
     let ids = input_leaf(
         &mut program,
-        DType::INT32,
+        TOKEN_IDS,
         alloc::vec![Extent::Symbolic(0)],
         "ids",
     );
@@ -1399,7 +1399,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
 
     let ids = input_leaf(
         &mut program,
-        DType::INT32,
+        TOKEN_IDS,
         alloc::vec![Extent::Symbolic(0)],
         "ids",
     );

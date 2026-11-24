@@ -2277,7 +2277,7 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
 
     let ids = input_leaf(
         &mut program,
-        DType::INT32,
+        TOKEN_IDS,
         alloc::vec![Extent::Symbolic(0)],
         "ids",
     );
@@ -2940,7 +2940,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
 
     let ids = input_leaf(
         &mut program,
-        DType::INT32,
+        TOKEN_IDS,
         alloc::vec![Extent::Symbolic(0)],
         "ids",
     );
@@ -3813,7 +3813,7 @@ mod ple_stage_a_tests {
         let mut program = Vec::new();
         let ids = input_leaf(
             &mut program,
-            DType::INT32,
+            TOKEN_IDS,
             alloc::vec![Extent::Symbolic(0)],
             "ids",
         );
@@ -3936,7 +3936,7 @@ mod ple_stage_b_tests {
         let mut program = Vec::new();
         let ids = input_leaf(
             &mut program,
-            DType::INT32,
+            TOKEN_IDS,
             alloc::vec![Extent::Symbolic(0)],
             "ids",
         );
@@ -4130,7 +4130,7 @@ mod ple_single_reduce_parity_tests {
         let mut program = Vec::new();
         let ids = input_leaf(
             &mut program,
-            DType::INT32,
+            TOKEN_IDS,
             alloc::vec![Extent::Symbolic(0)],
             "ids",
         );

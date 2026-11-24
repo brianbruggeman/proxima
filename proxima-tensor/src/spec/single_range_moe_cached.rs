@@ -660,7 +660,7 @@ pub fn gqa_single_range_cached_forward_program_with_biases(
 
     let ids = input_leaf(
         &mut program,
-        DType::INT32,
+        TOKEN_IDS,
         alloc::vec![Extent::Symbolic(0)],
         "ids",
     );

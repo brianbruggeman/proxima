@@ -643,7 +643,7 @@ pub fn input_leaf(program: &mut Vec<Op>, dtype: DType, shape: Vec<Extent>, name:
 /// multi-node `Iota` derivation before the variant existed, and
 /// [`Op::Constant`]'s own doc records what each cost.
 #[must_use]
-pub fn scalar_constant(program: &mut Vec<Op>, value: f32) -> NodeId {
+pub fn scalar_constant(program: &mut Vec<Op>, value: op::ConstantLiteral) -> NodeId {
     scalar_constant_as(program, value, DType::FLOAT32)
 }
 
@@ -652,7 +652,11 @@ pub fn scalar_constant(program: &mut Vec<Op>, value: f32) -> NodeId {
 /// ([`super::ModelDescriptor::activation`]). [`scalar_constant`] is this at
 /// f32, for constants that must stay f32 by contract.
 #[must_use]
-pub fn scalar_constant_as(program: &mut Vec<Op>, value: f32, dtype: DType) -> NodeId {
+pub fn scalar_constant_as(
+    program: &mut Vec<Op>,
+    value: op::ConstantLiteral,
+    dtype: DType,
+) -> NodeId {
     op::append(
         program,
         Op::Constant {

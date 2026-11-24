@@ -1,5 +1,8 @@
 use super::*;
 
+/// The one dtype a program's token-id input takes.
+pub(crate) const TOKEN_IDS: DType = DType::INT32;
+
 /// The whole model as one program: token embedding lookup, `block_count`
 /// copies of `specs/mistral_layer.toml`'s layer (each with its own weights,
 /// same node shape, generated rather than hand-authored — this is the whole
@@ -43,7 +46,7 @@ pub fn gqa_forward_program(
 
     let ids = input_leaf(
         &mut program,
-        DType::INT32,
+        TOKEN_IDS,
         alloc::vec![Extent::Symbolic(0)],
         "ids",
     );

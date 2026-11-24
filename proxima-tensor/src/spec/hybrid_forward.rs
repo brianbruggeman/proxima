@@ -155,7 +155,7 @@ pub(super) fn hybrid_dense_forward(
         )
     });
 
-    let ids = input_leaf(&mut program, DType::INT32, alloc::vec![x_extent], "ids");
+    let ids = input_leaf(&mut program, TOKEN_IDS, alloc::vec![x_extent], "ids");
     let table = input_leaf(
         &mut program,
         DType::FLOAT32,
@@ -1134,7 +1134,7 @@ pub(super) fn hybrid_routed_forward(
 
     let mut program = Vec::new();
 
-    let ids = input_leaf(&mut program, DType::INT32, alloc::vec![x_extent], "ids");
+    let ids = input_leaf(&mut program, TOKEN_IDS, alloc::vec![x_extent], "ids");
     let table = input_leaf(
         &mut program,
         DType::FLOAT32,

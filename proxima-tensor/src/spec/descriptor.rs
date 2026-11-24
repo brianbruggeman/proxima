@@ -173,11 +173,11 @@ pub struct ModelDescriptor {
     pub logit_softcap: Option<f32>,
     /// Divisor on the final logits, `logits / logit_scale`: the checkpoint's
     /// `<family>.logit_scale`, 6.0 for granite; `None` leaves the logits untouched.
-    pub logit_scale: Option<f32>,
+    pub logit_scale: Option<op::ConstantLiteral>,
     /// Multiplier on each sublayer output before it joins the residual stream,
     /// `x + scale * sublayer`: the checkpoint's `<family>.residual_scale`, 0.22 for
     /// granite; `None` is the plain add.
-    pub residual_scale: Option<f32>,
+    pub residual_scale: Option<op::ConstantLiteral>,
     /// One entry per block. In a config file an entry may carry `repeat = N`
     /// ("this layer, N times"), or hold a `pattern` of entries that `repeat`s
     /// (the sliding-pattern family's four sliding layers then a full one, three times); it expands

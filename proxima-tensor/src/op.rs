@@ -278,9 +278,13 @@ pub enum Op {
     Constant {
         dtype: DType,
         shape: Vec<Extent>,
-        value: f32,
+        value: ConstantLiteral,
     },
 }
+
+/// The one type a program constant's value takes, so a config scalar that
+/// becomes a constant names it here and nowhere else.
+pub type ConstantLiteral = f32;
 
 /// `Constant`'s `f32` is hashed by bit pattern, so `Op` cannot derive `Hash`:
 /// an `f32` has no `Hash` impl because `0.0 == -0.0` while their bits differ.

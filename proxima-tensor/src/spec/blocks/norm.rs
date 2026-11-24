@@ -23,7 +23,7 @@ pub struct Norm {
     #[cfg_attr(feature = "config", setting(skip))]
     pub kind: NormKind,
     /// Added under the root of the variance, so a zero row stays finite (1e-5 in the llama family).
-    pub eps: f32,
+    pub eps: crate::op::ConstantLiteral,
     /// Whether a learned per-channel gain multiplies the normalised rows; false is the unscaled form.
     pub scaled: bool,
     /// Normalise independently inside each contiguous group of this many channels (the head dimension
