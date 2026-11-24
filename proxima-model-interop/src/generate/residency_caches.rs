@@ -6,6 +6,8 @@ use core::ops::ControlFlow;
 use omega::config::{KvPaddingPolicy, RuntimeConfig, SelectionMode};
 
 use super::*;
+#[cfg(feature = "gpu")]
+use super::warm_up::WarmUp;
 #[cfg(feature = "cuda")]
 use super::cuda_resident_plans::{CudaPlanIdentity, CudaPlanKey, CudaResidentPlans, same_width_class};
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
@@ -142,18 +144,8 @@ mod configured_runtime_tests {
         assert!(!configured.numeric_policy.bf16_input_rounding);
     }
 
-    #[test]
-    fn configured_runtime_plans_once_and_zero_budget_refuses() {
-        let runtime_config = RuntimeConfig::default();
-        let config = ServingConfig {
-            gpu_layers: 0,
-            numeric_policy: runtime_config.numeric,
-            exact_activations: runtime_config.exact_activations,
-            omega_runtime: Some(&runtime_config),
-            ..ServingConfig::default()
-        };
-        validate_omega_runtime_config(&config).expect("coherent runtime configuration");
-        let program = vec![
+    fn negate_program() -> Vec<Op> {
+        vec![
             Op::Input {
                 dtype: DType::FLOAT32,
                 shape: vec![Extent::Static(2)],
@@ -165,13 +157,87 @@ mod configured_runtime_tests {
                 operands: vec![(NodeId(0), IndexMap::Affine(map::projection(1, &[0])))],
                 name: Some(String::from("negated")),
             },
-        ];
+        ]
+    }
+
+    fn negate_input() -> [(&'static str, QuantizedBlock<'static>); 1] {
+        [("values", QuantizedBlock::Float32(&[3.0, -4.0]))]
+    }
+
+    fn evaluated_bits(runtime: &mut BackendRuntime) -> Vec<u32> {
+        let evaluated = runtime
+            .evaluate(
+                (&negate_program(), 0),
+                &[1, 1],
+                &negate_input(),
+                &[NodeId(1)],
+                &BTreeSet::new(),
+                None,
+            )
+            .expect("a tiny negate program evaluates");
+        evaluated
+            .get(NodeId(1))
+            .expect("the negated output")
+            .0
+            .iter()
+            .map(|value| value.to_bits())
+            .collect()
+    }
+
+    #[test]
+    fn warm_is_idempotent_and_leaves_evaluation_results_unchanged() {
+        let cold = ServingConfig { gpu_layers: 0, ..ServingConfig::default() };
+        let warmed = ServingConfig { gpu_layers: crate::GPU_LAYERS_ALL, ..ServingConfig::default() };
+        let unwarmed_bits = evaluated_bits(&mut BackendRuntime::new(&cold));
+
+        let driver = omega::backend::GpuDriver::for_target();
+        let first = driver.map(|driver| driver.warm().is_ok());
+        let second = driver.map(|driver| driver.warm().is_ok());
+        let mut runtime = BackendRuntime::new(&warmed);
+        let warmed_bits = evaluated_bits(&mut runtime);
+
+        assert_eq!(first, second, "a second warm must report what the first did");
+        assert_eq!(
+            warmed_bits, unwarmed_bits,
+            "warming must not change a single output bit"
+        );
+        assert!(runtime.warmed(), "the first evaluation settles the warm-up");
+    }
+
+    #[test]
+    fn a_new_runtime_starts_warm_up_exactly_when_it_has_a_driver_to_warm() {
+        let config = ServingConfig { gpu_layers: crate::GPU_LAYERS_ALL, ..ServingConfig::default() };
+        let mut runtime = BackendRuntime::new(&config);
+
+        assert_eq!(
+            runtime.warm_launched(),
+            runtime.uses_gpu() && omega::backend::GpuDriver::for_target().is_some(),
+            "a worker starts for a runtime that selected a driver, and only then"
+        );
+        runtime.settle_warm();
+        assert!(runtime.warmed(), "settling joins the worker and leaves the runtime warm");
+        runtime.settle_warm();
+        assert!(runtime.warmed(), "a second settle is a no-op");
+    }
+
+    #[test]
+    fn configured_runtime_plans_once_and_zero_budget_refuses() {
+        let runtime_config = RuntimeConfig::default();
+        let config = ServingConfig {
+            gpu_layers: 0,
+            numeric_policy: runtime_config.numeric,
+            exact_activations: runtime_config.exact_activations,
+            omega_runtime: Some(&runtime_config),
+            ..ServingConfig::default()
+        };
+        validate_omega_runtime_config(&config).expect("coherent runtime configuration");
+        let program = negate_program();
         let mut runtime = BackendRuntime::new(&config);
         let first = runtime
             .evaluate(
                 (&program, 0),
                 &[1, 1],
-                &[("values", QuantizedBlock::Float32(&[3.0, -4.0]))],
+                &negate_input(),
                 &[NodeId(1)],
                 &BTreeSet::new(),
                 None,
@@ -201,7 +267,7 @@ mod configured_runtime_tests {
             .evaluate(
                 (&program, 0),
                 &[1, 1],
-                &[("values", QuantizedBlock::Float32(&[3.0, -4.0]))],
+                &negate_input(),
                 &[NodeId(1)],
                 &BTreeSet::new(),
                 None,
@@ -3293,6 +3359,9 @@ pub struct BackendRuntime {
     /// The driver `omega_runtime` named for this build, or the compiled target's default.
     #[cfg(feature = "gpu")]
     gpu_driver: Option<omega::backend::GpuDriver>,
+    /// The driver's one-time setup, started in [`Self::new`] on a worker thread and
+    /// joined by [`Self::settle_warm`] before the first evaluation.
+    warm_up: WarmUp,
     /// `omega_runtime.kv_padding`, resolved from the build-time `[kv_padding]` default.
     #[cfg(feature = "gpu")]
     kv_padding: KvPaddingPolicy,
@@ -3391,6 +3460,15 @@ impl BackendRuntime {
 #[cfg(feature = "gpu")]
 impl BackendRuntime {
     pub fn new(config: &ServingConfig) -> Self {
+        let engine = select_backend(config);
+        let gpu_driver = match config.omega_runtime {
+            Some(runtime) => omega::backend::GpuDriver::from_config(runtime)
+                .ok()
+                .flatten(),
+            None => omega::backend::GpuDriver::for_target(),
+        };
+        let warm_up = WarmUp::start(gpu_driver.filter(|_| matches!(engine, Engine::Gpu)));
+        debug!(launched = warm_up.launched(), "backend runtime warm-up");
         Self {
             omega_runtime: config.omega_runtime.cloned(),
             #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
@@ -3415,14 +3493,10 @@ impl BackendRuntime {
             cuda_home: None,
             #[cfg(feature = "cuda")]
             active_cuda_shape: None,
-            engine: select_backend(config),
+            engine,
             #[cfg(feature = "gpu")]
-            gpu_driver: match config.omega_runtime {
-                Some(runtime) => omega::backend::GpuDriver::from_config(runtime)
-                    .ok()
-                    .flatten(),
-                None => omega::backend::GpuDriver::for_target(),
-            },
+            gpu_driver,
+            warm_up,
             #[cfg(feature = "gpu")]
             kv_padding: config
                 .omega_runtime
@@ -3567,6 +3641,29 @@ impl BackendRuntime {
     #[cfg(feature = "gpu")]
     pub(crate) fn uses_gpu(&self) -> bool {
         matches!(self.engine, Engine::Gpu)
+    }
+
+    /// Waits for the driver warm-up [`Self::new`] started; the first evaluation calls it so
+    /// its own device setup finds the work already paid. A no-op once settled.
+    pub(crate) fn settle_warm(&mut self) {
+        let started = std::time::Instant::now();
+        let finished_early = self.warm_up.warmed();
+        self.warm_up.settle();
+        if !finished_early {
+            debug!(wait_us = started.elapsed().as_micros() as u64, "evaluation waited for driver warm-up");
+        }
+    }
+
+    /// Whether the driver warm-up has finished; trivially true when no driver was warmed.
+    #[cfg(test)]
+    pub(crate) fn warmed(&self) -> bool {
+        self.warm_up.warmed()
+    }
+
+    /// Whether [`Self::new`] started a warm-up worker.
+    #[cfg(test)]
+    pub(crate) fn warm_launched(&self) -> bool {
+        self.warm_up.launched()
     }
 
     /// Bytes the selected device has allocated; `None` when this runtime runs on
@@ -3760,6 +3857,7 @@ impl BackendRuntime {
             &alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
         >,
     ) -> Result<Evaluated, InteropError> {
+        self.settle_warm();
         trace!(rows = symbols[0], "backend evaluation");
         let shape = (
             symbols[0] as usize,
@@ -3987,6 +4085,7 @@ impl BackendRuntime {
     where
         Owner: Future<Output = Result<(), ProximaError>> + Send,
     {
+        self.settle_warm();
         let CudaGraphRequest {
             program,
             symbols,
@@ -4192,6 +4291,7 @@ impl BackendRuntime {
             &alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
         >,
     ) -> Result<Evaluated, InteropError> {
+        self.settle_warm();
         let host_timing = event_enabled(module_path!(), Level::DEBUG);
         let resolve_started = std::time::Instant::now();
         let program_key = program.as_ptr() as usize;
@@ -4291,6 +4391,10 @@ impl BackendRuntime {
                     encode_dispatch_ms = ticks_to_nanos(stage.encode_dispatch_ticks) as f64 / 1_000_000.0,
                     readback_ms = ticks_to_nanos(stage.readback_ticks) as f64 / 1_000_000.0,
                     block_upload_ms = ticks_to_nanos(stage.block_upload_ticks) as f64 / 1_000_000.0,
+                    pipeline_compile_us = ticks_to_nanos(stage.pipeline_compile_ticks) / 1_000,
+                    resolve_steps_us = ticks_to_nanos(stage.resolve_steps_ticks) / 1_000,
+                    pipeline_misses = stage.pipeline_misses,
+                    block_copied_bytes = stage.block_copied_bytes,
                     device_before,
                     device_after = omega::metal::current_allocated_size().unwrap_or_default(),
                     device_delta = omega::metal::current_allocated_size()
@@ -4613,6 +4717,7 @@ impl BackendRuntime {
         expert_sources: Option<&BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>>,
         kv_codecs: (Option<Codec>, Option<Codec>),
     ) -> Result<Evaluated, InteropError> {
+        self.settle_warm();
         reject_bounded_placed_execution(
             self.omega_runtime.as_ref(),
             input_placements,

@@ -793,6 +793,7 @@ fn thread_device_and_queue() -> Result<DeviceAndQueue, MetalError> {
         if let Some(existing) = slot.as_ref() {
             return Ok(existing.clone());
         }
+        let started = Instant::now();
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::NoDevice)?;
         let queue = device
             .newCommandQueue()
@@ -801,9 +802,48 @@ fn thread_device_and_queue() -> Result<DeviceAndQueue, MetalError> {
             })?;
         let pair = (device, queue);
         *slot = Some(pair.clone());
+        debug!(
+            elapsed_us = started.elapsed().as_micros() as u64,
+            "metal device and queue created"
+        );
         Ok(pair)
     })
 }
+
+/// The one-time costs the first real program would otherwise pay on its
+/// critical path: the device and queue, the shader compiler service's
+/// startup (the first `newLibraryWithSource` of a process), and the GPU's
+/// first wake (the first command buffer to reach the device). Idempotent: a
+/// second call finds each already paid. See [`crate::backend::GpuDriver::warm`],
+/// the backend-neutral entry that calls this.
+///
+/// The device, the compiler service and the GPU's power state are process
+/// wide; only the `(device, queue)` slot is per thread, so warming on a
+/// worker thread leaves the caller's own thread a cached device to look up.
+///
+/// # Errors
+/// [`MetalError::NoDevice`] when the host has no device; the driver's own
+/// message when the probe kernel or the empty command buffer is refused.
+pub fn warm() -> Result<(), MetalError> {
+    let (device, queue) = device_and_queue()?;
+    let source = NSString::from_str(WARM_PROBE_SOURCE);
+    let library = device
+        .newLibraryWithSource_options_error(&source, Some(&MTLCompileOptions::new()))
+        .map_err(|error| MetalError::CompileFailed { log: error.to_string() })?;
+    drop(library);
+    let command_buffer = queue
+        .commandBuffer()
+        .ok_or_else(|| MetalError::DriverRefusedObject {
+            object: "command buffer",
+            reason: "queue returned none while warming".to_string(),
+        })?;
+    command_buffer.commit();
+    command_buffer.waitUntilCompleted();
+    Ok(())
+}
+
+/// The smallest compilable kernel: it exists only to start the compiler service.
+const WARM_PROBE_SOURCE: &str = "#include <metal_stdlib>\nkernel void warm_probe() {}\n";
 
 /// Runs a tensor program on the system's default Metal device.
 ///

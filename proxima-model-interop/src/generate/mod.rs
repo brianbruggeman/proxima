@@ -251,6 +251,8 @@ mod pregather;
 #[cfg(feature = "cuda")]
 mod cuda_resident_plans;
 mod residency_caches;
+#[cfg(feature = "gpu")]
+mod warm_up;
 #[macro_use]
 mod decode;
 #[cfg(test)]

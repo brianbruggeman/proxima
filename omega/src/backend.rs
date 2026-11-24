@@ -298,6 +298,31 @@ impl GpuDriver {
         }
     }
 
+    /// Pays this driver's one-time setup now so the first real program does not: Metal creates
+    /// the device and queue, starts the shader compiler service and wakes the GPU; CUDA opens
+    /// its context and stream (the shared driver every plan binds through). Wgpu and HIP have
+    /// nothing lazy to pay here. Idempotent, and safe to call from a worker thread while the
+    /// caller prepares host data; the cpu engine has no driver and so nothing to call.
+    ///
+    /// # Errors
+    /// The driver's own refusal: no device, or a context that cannot open.
+    pub fn warm(self) -> Result<(), BackendError> {
+        match self {
+            GpuDriver::Metal => {
+                #[cfg(all(feature = "metal", target_os = "macos"))]
+                {
+                    crate::metal::warm()?;
+                }
+                Ok(())
+            }
+            GpuDriver::Wgpu => Ok(()),
+            #[cfg(feature = "cuda-driver")]
+            GpuDriver::Cuda => cuda_driver().map(|_| ()),
+            #[cfg(feature = "cuda-driver")]
+            GpuDriver::Hip { .. } => Ok(()),
+        }
+    }
+
     /// Whether this driver keeps a K cache stored as `key` and a V cache stored as `value` on the
     /// device between steps: it reads both ([`Self::admits_kv_cache`]) and its encode render
     /// accepts them, so the step's rows land in the cache's format.
