@@ -1742,7 +1742,7 @@ pub fn resolve_named_blocks<'block>(
             .find(|(candidate, _)| *candidate == name)
             .map(|(_, data)| *data)
             .ok_or_else(|| TensorError::UnboundInputName(String::from(name)))?;
-        blocks.push(data);
+        blocks.push(data.host_view());
     }
     Ok(blocks)
 }
@@ -1772,7 +1772,7 @@ pub fn resolve_named_blocks_with_experts<'block>(
             .find(|(candidate, _)| *candidate == name)
             .map(|(_, data)| *data)
         {
-            blocks.push(data);
+            blocks.push(data.host_view());
         } else {
             return Err(TensorError::UnboundInputName(String::from(name)));
         }

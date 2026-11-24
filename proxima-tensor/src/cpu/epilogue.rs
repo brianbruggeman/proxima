@@ -1965,6 +1965,30 @@ pub fn expert_entries_from_stack(
 }
 
 impl<'a> QuantizedBlock<'a> {
+    /// A packed block already in the host element, viewed in place as decoded values: the same
+    /// bytes, no decode, so it takes the decoded-values path exactly. Any other block, and a
+    /// view the allocation's alignment or the byte order refuses, is returned unchanged.
+    #[must_use]
+    pub fn host_view(self) -> Self {
+        let Self::Packed { codec, bytes } = self else {
+            return self;
+        };
+        if !codec.is_host_element() || !cfg!(target_endian = "little") {
+            return self;
+        }
+        // SAFETY: the format is the decoded element's own layout, for which every bit pattern is a valid value
+        match unsafe { bytes.align_to() } {
+            ([], view, [])
+                if view.is_empty()
+                    || core::mem::size_of_val(view) / view.len()
+                        == Codec::host_element().size_bytes() =>
+            {
+                Self::from(view)
+            }
+            _ => self,
+        }
+    }
+
     /// The packed byte slice underneath any codec, or `None` for
     /// [`Self::Float32`]/[`Self::Int32`] (which carry decoded values, not
     /// packed bytes) -- [`ExpertSource`]'s own gather read uses this to swap
@@ -2138,6 +2162,62 @@ fn codec_name_for_error(codec: Codec) -> &'static str {
 mod tests {
     use super::*;
     use proxima_numeric::format::NumericFormat;
+    use proxima_numeric::packed_rows::PackedRows;
+
+    #[test]
+    fn host_view_takes_a_host_element_block_as_decoded_values_without_a_copy() {
+        let values = [1.5, -2.25, 0.0, -0.0, 7.0];
+        let rows =
+            PackedRows::from_values(&Codec::host_element(), &values).expect("host element encodes");
+        let block = QuantizedBlock::Packed {
+            codec: Codec::host_element(),
+            bytes: rows.as_bytes(),
+        };
+
+        let viewed = block.host_view();
+
+        assert!(viewed.packed_bytes().is_none());
+        assert_eq!(
+            viewed
+                .element_count()
+                .expect("a decoded view counts its values"),
+            values.len()
+        );
+    }
+
+    #[test]
+    fn host_view_returns_what_it_cannot_view_unchanged() {
+        let values = [1.5, -2.25, 0.0, 4.0, 7.0];
+        let host =
+            PackedRows::from_values(&Codec::host_element(), &values).expect("host element encodes");
+        let mut refused = 0;
+        for codec in NumericFormat::ALL
+            .iter()
+            .filter(|format| !format.is_host_element())
+        {
+            let block = QuantizedBlock::Packed {
+                codec: *codec,
+                bytes: host.as_bytes(),
+            };
+            assert!(
+                matches!(block.host_view(), QuantizedBlock::Packed { .. }),
+                "{codec:?} was viewed"
+            );
+            refused += 1;
+        }
+        let misaligned = QuantizedBlock::Packed {
+            codec: Codec::host_element(),
+            bytes: &host.as_bytes()[1..5],
+        };
+        let plain = QuantizedBlock::from(&values[..]);
+
+        assert!(refused > 0);
+        assert!(matches!(
+            misaligned.host_view(),
+            QuantizedBlock::Packed { .. }
+        ));
+        assert!(plain.host_view().packed_bytes().is_none());
+    }
 
     #[test]
     fn every_ggml_decodable_format_packs_to_its_ggml_wire_shape() {
