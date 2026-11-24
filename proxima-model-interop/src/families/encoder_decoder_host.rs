@@ -27,7 +27,7 @@ use crate::families::encoder_decoder::{
     DecoderLayer, DecoderStem, EncoderLayer, EncoderStem, Linear, encoder,
 };
 #[cfg(all(feature = "metal", target_os = "macos"))]
-use crate::generate::BackendRuntime;
+use crate::generate::{BackendRuntime, kv_extent};
 use crate::hf_bind::safetensors_tensor_as_packed_block;
 use crate::serving::{ServingConfig, apply_serving_config};
 use crate::serving_settings::ServingSettings;
@@ -282,11 +282,47 @@ impl<'a> Bound<'a> {
             .collect()
     }
 
+    fn cached_len_leaf(&mut self) -> NodeId {
+        input_leaf(
+            &mut self.program,
+            super::encoder_decoder::ACTIVATION,
+            Vec::new(),
+            "cached_len",
+        )
+    }
+
+    fn cache_row_widths(&self) -> [usize; 3] {
+        let heads = self.shape.decoder_heads as usize;
+        let half = self.shape.decoder_head_dim as usize / 2;
+        let full = self.shape.decoder_head_dim as usize;
+        [heads * half, heads * half, heads * full]
+    }
+
+    fn fit_cache(&mut self, extent: usize) {
+        let widths = self.cache_row_widths();
+        for (index, name) in cache_names(self.shape.decoder_layers).enumerate() {
+            if let Some(plane) = self.named.get_mut(&name) {
+                plane.resize(extent * widths[index % widths.len()], Default::default());
+            }
+        }
+    }
+
+    fn trim_cache(&mut self, kept: usize) {
+        let widths = self.cache_row_widths();
+        for (index, name) in cache_names(self.shape.decoder_layers).enumerate() {
+            if let Some(plane) = self.named.get_mut(&name) {
+                plane.truncate(kept * widths[index % widths.len()]);
+            }
+        }
+    }
+
     fn stage_step(&mut self, ids: &[u32], cached: usize) {
         let tokens = ids.iter().map(|id| *id as _).collect();
         let positions = (cached..cached + ids.len()).map(|at| at as _).collect();
+        let live = (cached..=cached).map(|at| at as _).collect();
         self.named.insert("tokens".into(), tokens);
         self.named.insert("positions".into(), positions);
+        self.named.insert("cached_len".into(), live);
     }
 
     fn weight(&mut self, name: &str, shape: &[u32], stored: &str, tensors: &'a Tensors) -> NodeId {
@@ -618,6 +654,24 @@ impl Model {
         self
     }
 
+    /// The cached-range rows a step binds: the llm's bucketed extent when the
+    /// fused cached attention's runtime bound can exclude the pad rows (the
+    /// metal plan), otherwise exactly `cached`.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    fn cache_extent(&self, runtime: &Runtime, cached: usize) -> usize {
+        if !runtime.is_metal() {
+            return cached;
+        }
+        let capacity = self.shape.target_positions as usize;
+        let bucket = self.settings.kv_bucket_tokens;
+        kv_extent(cached, capacity, bucket).max(cached)
+    }
+
+    #[cfg(not(all(feature = "metal", target_os = "macos")))]
+    fn cache_extent(&self, _runtime: &Runtime, cached: usize) -> usize {
+        cached
+    }
+
     fn runtime(&self) -> Result<Runtime> {
         let config = self.settings.as_serving_config(&[]);
         apply_serving_config(&config, 0)
@@ -764,6 +818,7 @@ impl Model {
             decoder.named.insert(format!("cross_v_{layer}"), v);
         }
         let cache_leaves = decoder.cache_leaves();
+        decoder.cached_len_leaf();
         let (logits, appended) = super::encoder_decoder::decoder(
             &mut decoder.program,
             token_leaf,
@@ -794,9 +849,12 @@ impl Model {
             let step_start = Instant::now();
             let fresh = &tokens[cached..];
             decoder.stage_step(fresh, cached);
-            let symbols = [fresh.len() as u64, cached as u64];
+            let extent = self.cache_extent(&runtime, cached);
+            decoder.fit_cache(extent);
+            let symbols = [fresh.len() as u64, extent as u64];
             let mut rows = decoder.run(&step_outputs, &symbols, &mut runtime)?;
             let flat = rows.remove(0);
+            decoder.trim_cache(cached);
             for (name, added) in cache_names(self.shape.decoder_layers).zip(rows) {
                 if let Some(plane) = decoder.named.get_mut(&name) {
                     plane.extend(added);

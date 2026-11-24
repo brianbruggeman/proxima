@@ -1556,7 +1556,7 @@ pub(super) fn build_single_range_program(
 /// arithmetic, no platform or feature dependency of its own -- available to
 /// any `std`-gated caller regardless of which backend feature is compiled
 /// in.
-pub(super) fn kv_extent(merged_len: usize, capacity: usize, bucket_tokens: usize) -> usize {
+pub(crate) fn kv_extent(merged_len: usize, capacity: usize, bucket_tokens: usize) -> usize {
     merged_len
         .div_ceil(bucket_tokens)
         .saturating_mul(bucket_tokens)
