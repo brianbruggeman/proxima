@@ -28,7 +28,7 @@ use proxima_numeric::block_layout::BlockLayout;
 use omega::backend::{
     BackendError, Engine, GpuDriver, Plan, cuda_kernel_identities, execute_plan_named, plan_named,
 };
-use proxima_numeric::NumericPolicy;
+use proxima_numeric::{NumericPolicy, ScaleArithmetic};
 use proxima_tensor::infer;
 use proxima_tensor::spec::{
     input_leaf, qk_norm_cached_forward_program, rmsnorm, rmsnorm_per_head, count_constant, scalar_constant,
@@ -4868,14 +4868,15 @@ fn int8_gemm_program_over(features: u32, trailing: &[u32], tokens: u32) -> (Vec<
     (program, sum)
 }
 
-fn fake_quantize_blocks(activation: &[f32], scale_through_fp16: bool) -> Vec<f32> {
+fn fake_quantize_blocks(activation: &[f32], scale_through_fp16: bool, arithmetic: ScaleArithmetic) -> Vec<f32> {
     activation
         .as_chunks::<32>().0.iter()
         .flat_map(|group| {
-            let step = group.iter().fold(0.0f32, |peak, value| peak.max(value.abs())) / 127.0;
+            let peak = group.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+            let step = arithmetic.scale(peak, 127.0);
             // llama.cpp stores the q8_1 scale as half2 ds (ggml-common.h:265, mmq.cuh:41), so the device rounds it to f16
             let used = if scale_through_fp16 { half::f16::from_f32(step).to_f32() } else { step };
-            group.iter().map(move |value| if step == 0.0 { 0.0 } else { (value / step).round() * used })
+            group.iter().map(move |value| arithmetic.code(*value, peak, 127.0) as f32 * used)
         })
         .collect()
 }
@@ -4937,8 +4938,8 @@ async fn int8_prefill_gemm_matches_the_fake_quantized_activation_reference_on_cu
         identities.iter().any(|identity| identity.contains("_mma8x8x16s8c")),
         "the activation-quantized prefill gemm did not take the int8 mma kernel: {identities:?}"
     );
-    let block_scale_reference = gemm_rows_max_over_peak(&output, &dequantized, &fake_quantize_blocks(&activation, true), depth, tokens);
-    let f32_scale_reference = gemm_rows_max_over_peak(&output, &dequantized, &fake_quantize_blocks(&activation, false), depth, tokens);
+    let block_scale_reference = gemm_rows_max_over_peak(&output, &dequantized, &fake_quantize_blocks(&activation, true, ScaleArithmetic::for_rows(tokens as u64, true)), depth, tokens);
+    let f32_scale_reference = gemm_rows_max_over_peak(&output, &dequantized, &fake_quantize_blocks(&activation, false, ScaleArithmetic::for_rows(tokens as u64, true)), depth, tokens);
     let unquantized = gemm_rows_max_over_peak(&output, &dequantized, &activation, depth, tokens);
     println!("int8 gemm {features}x{depth}x{tokens}: vs fp16-scale fake-quantized {block_scale_reference:.3e}, vs f32-scale fake-quantized {f32_scale_reference:.3e}, vs unquantized {unquantized:.3e}");
     assert!(output.iter().all(|value| value.is_finite()) && block_scale_reference < 2e-5,
@@ -5011,7 +5012,7 @@ fn assert_derived_parity_on(codec: Codec, weight_blocks: &[u8], dequantized: &[f
         identities.iter().all(|identity| !identity.contains("_prepass") && !identity.contains("_smv8x4g")),
         "the activation must be quantized by the derived node, not an own prologue: {identities:?}"
     );
-    let reference = gemm_rows_max_over_peak(&output, dequantized, &fake_quantize_blocks(activation, true), depth, tokens);
+    let reference = gemm_rows_max_over_peak(&output, dequantized, &fake_quantize_blocks(activation, true, ScaleArithmetic::for_rows(tokens as u64, true)), depth, tokens);
     let unquantized = gemm_rows_max_over_peak(&output, dequantized, activation, depth, tokens);
     println!("derived matvec {codec:?} {features}x{depth}x{tokens}: vs fp16-scale fake-quantized {reference:.3e}, vs unquantized {unquantized:.3e}");
     assert!(output.iter().all(|value| value.is_finite()) && reference < 2e-5,
@@ -5188,7 +5189,7 @@ fn kernel_entries(identities: &[String]) -> Vec<&str> {
 type MixedReader = (Codec, (Vec<u8>, Vec<f32>));
 
 fn assert_int8_reader_matches(label: &str, output: &[f32], dequantized: &[f32], activation: &[f32], depth: usize, tokens: usize) {
-    let reference = gemm_rows_max_over_peak(output, dequantized, &fake_quantize_blocks(activation, true), depth, tokens);
+    let reference = gemm_rows_max_over_peak(output, dequantized, &fake_quantize_blocks(activation, true, ScaleArithmetic::for_rows(tokens as u64, true)), depth, tokens);
     let unquantized = gemm_rows_max_over_peak(output, dequantized, activation, depth, tokens);
     println!("{label} int8 reader at {tokens} tokens: vs fp16-scale fake-quantized {reference:.3e}, vs unquantized {unquantized:.3e}");
     assert!(output.iter().all(|value| value.is_finite()) && reference < 2e-5,
@@ -5486,7 +5487,7 @@ fn int8_prefill_gemm_with_a_fused_residual_add_matches_the_fake_quantized_refere
     let (output, identities) = run_int8_epilogue_plan(&program, root, &named);
 
     assert_int8_epilogue_kernel(&identities);
-    let reference: Vec<f64> = exact_gemm(&dequantized, &fake_quantize_blocks(&activation, true), depth, tokens)
+    let reference: Vec<f64> = exact_gemm(&dequantized, &fake_quantize_blocks(&activation, true, ScaleArithmetic::for_rows(tokens as u64, true)), depth, tokens)
         .into_iter()
         .zip(&residual)
         .map(|(product, addend)| product + f64::from(*addend))
@@ -5533,7 +5534,7 @@ fn int8_prefill_gemm_with_a_fused_swiglu_matches_the_fake_quantized_reference_on
         let ups = exact_gemm(&up_dequantized, activations, depth, tokens);
         gates.into_iter().zip(ups).map(|(gate, up)| gate / (1.0 + (-gate).exp()) * up).collect()
     };
-    let agreement = max_over_peak(&output, &swiglu(&fake_quantize_blocks(&activation, true)));
+    let agreement = max_over_peak(&output, &swiglu(&fake_quantize_blocks(&activation, true, ScaleArithmetic::Quotient)));
     assert!(output.iter().all(|value| value.is_finite()) && agreement < 2e-5, "swiglu epilogue disagrees by {agreement} of peak");
     assert!(max_over_peak(&output, &swiglu(&activation)) > 2.0 * agreement, "degenerate control: output matches the unquantized activations");
 }
@@ -5568,7 +5569,7 @@ fn one_block_quantize_feeds_two_int8_gemms_and_matches_the_fake_quantized_refere
         let ups = exact_gemm(&up_dequantized, activations, depth, tokens);
         gates.into_iter().zip(ups).map(|(gate, up)| gate + up).collect()
     };
-    let agreement = max_over_peak(&output, &summed(&fake_quantize_blocks(&activation, true)));
+    let agreement = max_over_peak(&output, &summed(&fake_quantize_blocks(&activation, true, ScaleArithmetic::Quotient)));
     assert!(output.iter().all(|value| value.is_finite()) && agreement < 2e-5, "shared quantize disagrees by {agreement} of peak");
     assert!(max_over_peak(&output, &summed(&activation)) > 2.0 * agreement, "degenerate control: output matches the unquantized activations");
 }
@@ -6025,7 +6026,7 @@ fn a_stacked_q8_0_expert_product_with_a_per_slot_activation_matches_the_int8_gri
         .into_iter()
         .map(|value| value * 2.0 - 1.0)
         .collect();
-    let rounded = fake_quantize_blocks(&raw, true);
+    let rounded = fake_quantize_blocks(&raw, true, ScaleArithmetic::Quotient);
     let slot_row = |slot: usize| rounded[slot * STACKED_DEPTH..(slot + 1) * STACKED_DEPTH].to_vec();
 
     let (identities, result) = run_q8_0_expert_stack_staged_with_activation(&packed, &route, &raw, false);
@@ -6138,7 +6139,7 @@ fn a_gathered_expert_product_under_activation_quantization_takes_the_int8_groupe
         .collect();
     assert!(!codecs.is_empty(), "the int8 table accepts block codecs");
     let route = &inputs[0].1;
-    let quantized = fake_quantize_blocks(&inputs[1].1, true);
+    let quantized = fake_quantize_blocks(&inputs[1].1, true, ScaleArithmetic::Quotient);
     let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true);
     let mut table: Vec<(Codec, bool, _, _)> = Vec::new();
     for codec in codecs {
