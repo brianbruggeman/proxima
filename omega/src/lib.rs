@@ -64,6 +64,8 @@ mod cuda_cached_attention_mma;
 mod cuda_cached_attention_tiled;
 #[cfg(feature = "cuda")]
 pub mod cuda_layout;
+#[cfg(feature = "cuda")]
+pub mod cuda_encode;
 #[cfg(feature = "cuda-driver")]
 pub mod cuda_driver;
 #[cfg(feature = "cuda-driver")]

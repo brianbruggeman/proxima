@@ -1545,7 +1545,7 @@ pub(crate) fn cuda_float_literal(value: f32) -> String {
 /// `__half` and `__nv_bfloat16` where the layout's fields equal binary16's and bfloat16's, `float`
 /// for every other layout (the kernel computes in binary32 and the host narrows through the
 /// layout codec at the buffer boundary, as on Metal).
-fn type_token(target: Target, node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
+pub(crate) fn type_token(target: Target, node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
     match dtype {
         DType::Layout(layout) if layout.width() <= 32 => {
             Ok(match crate::msl::layout_render::hardware_type(&layout) {

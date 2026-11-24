@@ -4831,6 +4831,24 @@ mod tests {
         assert_eq!(format!("{:?}", moved.plan), format!("{:?}", rebuilt.plan));
         Ok(())
     }
+
+    #[test]
+    fn every_cuda_encode_the_neutral_renderer_accepts_compiles_with_nvrtc() {
+        use crate::cuda::target::Target;
+        use crate::cuda_encode::CudaEncode;
+        use crate::encode_render::format_encode_kernel;
+
+        let dialect = CudaEncode { target: Target::CUDA };
+        let mut compiled = 0usize;
+        for format in crate::cuda_encode::tests::every_format() {
+            let Ok(rendered) = format_encode_kernel(&dialect, &format, "probe_encode") else { continue };
+            let header_dir = super::cuda_header_dir(&rendered.source).expect("a cuda include dir");
+            super::compile_ptx_with_opts(&rendered.source, super::nvrtc_options(header_dir.as_deref()))
+                .unwrap_or_else(|error| panic!("{format:?} does not compile: {error}\n{}", rendered.source));
+            compiled += 1;
+        }
+        assert!(compiled > 0, "no encode kernel was compiled");
+    }
 }
 
 // ---- ROCm runtime boundary -------------------------------------------------
