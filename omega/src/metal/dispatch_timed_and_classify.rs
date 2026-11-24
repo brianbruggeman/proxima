@@ -289,6 +289,16 @@ pub(super) fn execute_op_timed(
         }
         device_buffers.remove(retired);
     }
+    debug!(
+        node = ?bound.node,
+        kind = %kind,
+        extents = ?bound.extents,
+        gpu_ns = gpu_ns,
+        operand_bytes = operand_bytes,
+        dense_gemm = %diagnose_dense_kind(bound, packed_operands, numeric_policy),
+        packed_row = ?packed_row_block_rejection,
+        "metal op timed"
+    );
     Ok(OpGpuTiming {
         node: bound.node,
         kind,
@@ -2307,6 +2317,42 @@ pub(super) mod classify_kind_packed_row_marker_tests {
                  take the fast packed-row body, whether grouped (gate/up) or per-route (down)"
             );
         }
+    }
+}
+
+/// [`diagnose_dense_batched_gemm_block`]'s verdict for THIS bound op: `"Ok"`
+/// when the dense-batched `simdgroup_matrix` kernel takes it, the rejection's
+/// `Debug` text otherwise, `"NotReduce"` for an op that is not a reduce at all.
+#[cfg(feature = "instrument")]
+pub(super) fn diagnose_dense_kind(
+    bound: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+) -> String {
+    let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        output_axes,
+        ..
+    } = &bound.kind
+    else {
+        return "NotReduce".to_string();
+    };
+    let quantized: Vec<Option<Codec>> = bound
+        .operands()
+        .iter()
+        .map(|(node, _, _)| packed_operands.get(node).copied())
+        .collect();
+    match diagnose_dense_batched_gemm_block(
+        bound,
+        &quantized,
+        numeric_policy,
+        *reduce_op,
+        *init,
+        output_axes,
+    ) {
+        Ok(()) => "Ok".to_string(),
+        Err(rejection) => format!("{rejection:?}"),
     }
 }
 

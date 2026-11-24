@@ -15,6 +15,12 @@ use proxima_model_interop::audio::wav;
 use proxima_model_interop::families::encoder_decoder_host::Model;
 
 fn main() -> Result<()> {
+    // RUST_LOG selects the level; with none installed every debug! is a no-op.
+    #[cfg(feature = "instrument")]
+    let recorder = proxima_telemetry::export::install_console_recorder()
+        .context("install the console telemetry recorder")?;
+    #[cfg(feature = "instrument-metrics")]
+    proxima_model_interop::families::encoder_decoder_host::log_span_durations(&recorder);
     let process_start = Instant::now();
     let mut repeats = 1_usize;
     let mut wav_path: Option<PathBuf> = None;
@@ -128,5 +134,7 @@ fn main() -> Result<()> {
         );
         println!("text={}", transcript.text);
     }
+    #[cfg(feature = "instrument")]
+    while recorder.drain() > 0 {}
     Ok(())
 }

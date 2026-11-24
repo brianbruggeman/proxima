@@ -4180,6 +4180,7 @@ impl BackendRuntime {
     /// shape-only decode-plan cache to alias a different partition having
     /// the same `(new_count, kv_bound_extent)` pair. Routed execution uses
     /// this for the router and gather programs surrounding one layer.
+    #[cfg_attr(feature = "instrument", proxima_telemetry::instrument(level = "debug"))]
     pub(crate) fn evaluate_segment(
         &mut self,
         program: &[Op],

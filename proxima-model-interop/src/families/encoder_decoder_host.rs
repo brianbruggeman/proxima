@@ -465,8 +465,18 @@ impl<'a> Bound<'a> {
         Ok(outputs)
     }
 
+    /// Runs the program and returns `outputs`; `stage` (mel, encode, decode)
+    /// names the program in the span and in any error.
+    #[cfg_attr(
+        feature = "instrument",
+        proxima_telemetry::instrument(
+            level = "debug",
+            fields(stage = stage, rows = symbols.first().copied().unwrap_or_default())
+        )
+    )]
     fn run(
         &self,
+        stage: &'static str,
         outputs: &[NodeId],
         symbols: &[u64],
         runtime: &mut BackendRuntime,
@@ -480,11 +490,12 @@ impl<'a> Bound<'a> {
         let resident: BTreeSet<&str> = self.weights.names();
         let evaluated = runtime
             .evaluate_segment(&self.program, symbols, &named, outputs, &resident, None)
-            .map_err(|error| anyhow::anyhow!("segment does not evaluate: {error:?}"))?;
+            .map_err(|error| anyhow::anyhow!("{stage} segment does not evaluate: {error:?}"))?;
         collect_outputs(&evaluated, outputs)
     }
 }
 
+#[cfg_attr(feature = "instrument", proxima_telemetry::instrument(level = "debug"))]
 fn collect_outputs(evaluated: &Evaluated, outputs: &[NodeId]) -> Result<Vec<Vec<f32>>> {
     outputs
         .iter()
@@ -495,6 +506,18 @@ fn collect_outputs(evaluated: &Evaluated, outputs: &[NodeId]) -> Result<Vec<Vec<
                 .with_context(|| format!("evaluated program has no output for node {node:?}"))
         })
         .collect()
+}
+
+/// Makes every closed `#[instrument]` span emit a `debug!` carrying its name and
+/// `duration_ns`, so span durations reach the same console and `RUST_LOG` filter
+/// as the rest of the telemetry. Uses the recorder's own duration observer
+/// ([`proxima_telemetry::recorder::Recorder::set_duration_observer`]); no timer
+/// of its own.
+#[cfg(feature = "instrument-metrics")]
+pub fn log_span_durations(recorder: &proxima_telemetry::recorder::Recorder) {
+    recorder.set_duration_observer(|name, duration_ns| {
+        proxima_telemetry::debug!(name = name, duration_ns = duration_ns, "span closed");
+    });
 }
 
 /// One transcription and the values the caller can check.
@@ -603,6 +626,7 @@ impl Model {
         .max(cached)
     }
 
+    #[cfg_attr(feature = "instrument", proxima_telemetry::instrument(level = "debug"))]
     fn runtime(&self) -> Result<BackendRuntime> {
         let config = self.settings.as_serving_config(&[]);
         apply_serving_config(&config, 0)
@@ -679,7 +703,7 @@ impl Model {
             .named
             .insert(STFT_SIN_INPUT.into(), decode(&tables.sin));
         let mel_start = std::time::Instant::now();
-        let mel_values = mel_bound.run(&[mel], &[], &mut runtime)?.remove(0);
+        let mel_values = mel_bound.run("mel", &[mel], &[], &mut runtime)?.remove(0);
         let mel = mel_start.elapsed();
         sample_peak(&mut gpu_peak, &runtime);
         // The encoder consumes the first 2*source_positions frames.
@@ -731,7 +755,7 @@ impl Model {
         }
         bound.bind(self)?;
         let encode_start = std::time::Instant::now();
-        let mut values = bound.run(&outputs, &[], &mut runtime)?;
+        let mut values = bound.run("encode", &outputs, &[], &mut runtime)?;
         let encode = encode_start.elapsed();
         sample_peak(&mut gpu_peak, &runtime);
 
@@ -765,7 +789,7 @@ impl Model {
             );
             decoder.fit_cache(extent);
             let symbols = [fresh.len() as u64, extent as u64];
-            let mut rows = decoder.run(&step_outputs, &symbols, &mut runtime)?;
+            let mut rows = decoder.run("decode", &step_outputs, &symbols, &mut runtime)?;
             let flat = rows.remove(0);
             decoder.trim_cache(cached);
             for (name, added) in cache_names(self.shape.decoder_layers).zip(rows) {

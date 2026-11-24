@@ -236,7 +236,7 @@ use crate::config::{DenseMmaInputLayout, ResourceConstraints, RuntimeConfig};
 use crate::emit;
 use crate::error::EmitError;
 #[cfg(feature = "instrument")]
-use crate::msl::diagnose_packed_row_block;
+use crate::msl::{diagnose_dense_batched_gemm_block, diagnose_packed_row_block};
 use crate::msl::{
     AttentionKernelChoice, device_scalar_token, gather_count, kernel_dispatch_shape, kernel_dispatch_shape_with_schedule,
     reduction_dims,
