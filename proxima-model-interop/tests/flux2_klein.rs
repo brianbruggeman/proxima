@@ -483,7 +483,7 @@ mod dit {
         );
 
         let checkpoint = Checkpoint::open(&fixtures.model.join("flux-2-klein-4b.safetensors"))?;
-        let diffusion = DiffusionSettings::resolved();
+        let diffusion = DiffusionSettings::try_resolved().map_err(|why| why.to_string())?;
         let activation = graph.activation();
         let extra: Vec<NodeId> = output.trace.iter().map(|(_, node)| *node).collect();
         let loading = Instant::now();
@@ -512,7 +512,7 @@ mod dit {
         let reference_velocity = token_major(&named_values!(fixtures.reference, "velocity1"));
         let mut verdicts = 0;
         for step in 0..STEPS as usize {
-            let settings = DiffusionSettings::resolved();
+            let settings = DiffusionSettings::try_resolved().map_err(|why| why.to_string())?;
             let format = settings.dit_activation;
             let timestep_rows = PackedRows::from_values(&format, &[sigmas[step]])
                 .map_err(|why| why.to_string())
@@ -745,8 +745,8 @@ mod vae {
             .unwrap_or_else(|| PathBuf::from(&home).join("models/image_gen/flux2-klein-4b")))
     }
 
-    fn config(window: u32) -> VaeConfig {
-        VaeConfig {
+    fn config(window: u32) -> Result<VaeConfig, String> {
+        Ok(VaeConfig {
             window,
             channels: CHANNELS as u32,
             block_channels: [128, 256, 512, 512],
@@ -757,8 +757,10 @@ mod vae {
             width: SIDE as u32,
             // `PROXIMA_DIFFUSION_CONV_TAPS=nine` A/Bs the lowering without a
             // rebuild; unset keeps the default three-tap form.
-            conv_taps: proxima_model_interop::diffusion::DiffusionSettings::resolved().conv_taps(),
-        }
+            conv_taps: DiffusionSettings::try_resolved()
+                .map_err(|why| why.to_string())?
+                .conv_taps(),
+        })
     }
 
     /// `step4` is the 128-channel latent in channel-major order; the decoder
@@ -817,7 +819,7 @@ mod vae {
         let started = Instant::now();
         let window = checkpoint.window_extent("decoder.conv_in.weight")?;
         let output =
-            build_vae_decode(&mut graph, &config(window), input).map_err(|why| why.to_string())?;
+            build_vae_decode(&mut graph, &config(window)?, input).map_err(|why| why.to_string())?;
         let image = output.image;
         eprintln!(
             "decoder: {} ops, {} weights, {} hosts built in {:?}",
@@ -833,7 +835,9 @@ mod vae {
             graph,
             image,
             &[TOKENS as u64],
-            DiffusionSettings::resolved().vae_weights,
+            DiffusionSettings::try_resolved()
+                .map_err(|why| why.to_string())?
+                .vae_weights,
             &serving_settings()?.as_serving_config(&[]),
         )?;
         eprintln!("vae weights loaded in {:?}", loading.elapsed());
@@ -901,7 +905,7 @@ mod vae {
 
 #[cfg(feature = "std")]
 mod vae_shape {
-    use proxima_model_interop::diffusion::{Graph, VaeConfig, build_vae_decode};
+    use proxima_model_interop::diffusion::{DiffusionSettings, Graph, VaeConfig, build_vae_decode};
 
     #[test]
     fn the_whole_decoder_program_shapes_without_any_weights() {
@@ -913,7 +917,9 @@ mod vae_shape {
             out_channels: 3,
             height: 128,
             width: 128,
-            conv_taps: proxima_model_interop::diffusion::DiffusionSettings::resolved().conv_taps(),
+            conv_taps: DiffusionSettings::try_resolved()
+                .expect("a PROXIMA_DIFFUSION_ override must parse and validate")
+                .conv_taps(),
             window: super::shape_only_window(),
         };
         let activation = super::activation::vae().expect("the decoder's activation dtype resolves");
@@ -943,7 +949,7 @@ mod vae_shape {
 
 #[cfg(feature = "std")]
 mod vae_bind {
-    use proxima_model_interop::diffusion::{Graph, VaeConfig, build_vae_decode};
+    use proxima_model_interop::diffusion::{DiffusionSettings, Graph, VaeConfig, build_vae_decode};
     use proxima_numeric::NumericPolicy;
 
     #[test]
@@ -956,7 +962,9 @@ mod vae_bind {
             out_channels: 3,
             height: 128,
             width: 128,
-            conv_taps: proxima_model_interop::diffusion::DiffusionSettings::resolved().conv_taps(),
+            conv_taps: DiffusionSettings::try_resolved()
+                .expect("a PROXIMA_DIFFUSION_ override must parse and validate")
+                .conv_taps(),
             window: super::shape_only_window(),
         };
         let activation = super::activation::vae().expect("the decoder's activation dtype resolves");
@@ -1081,7 +1089,9 @@ mod vae_conv_probe {
             graph,
             image,
             &[rows as u64],
-            DiffusionSettings::resolved().vae_weights,
+            DiffusionSettings::try_resolved()
+                .map_err(|why| why.to_string())?
+                .vae_weights,
             &ServingSettings::from_env()
                 .map_err(|why| why.to_string())?
                 .as_serving_config(&[]),
@@ -1319,12 +1329,14 @@ mod reduce_split_axis {
         let program = case.program.clone();
         let root = case.root;
         let blocks = decoded_case.clone();
+        let codec = DiffusionSettings::try_resolved()
+            .map_err(|why| why.to_string())?
+            .vae_weights;
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             // The kernel is bound exactly as the decoder binds it: packed
             // packed weight rows, not host elements. The host binding passes; the packed
             // one is what the served graph actually uses.
-            let codec = DiffusionSettings::resolved().vae_weights;
             let packed = PackedRows::from_values(
                 &codec,
                 &blocks.iter().find(|(name, _)| *name == "kernel").expect("kernel").1,
@@ -1439,7 +1451,9 @@ mod vae_prefix {
             height: SIDE,
             width: SIDE,
             window: checkpoint.window_extent("decoder.conv_in.weight")?,
-            conv_taps: proxima_model_interop::diffusion::DiffusionSettings::resolved().conv_taps(),
+            conv_taps: DiffusionSettings::try_resolved()
+                .map_err(|why| why.to_string())?
+                .conv_taps(),
         };
         let mut graph = Graph::new(super::activation::vae()?).expect("diffusion settings validate");
         let latent = graph.host("latent", &[SIDE * SIDE, 32, 1], graph.unbound());
@@ -1454,7 +1468,9 @@ mod vae_prefix {
             graph,
             output.image,
             &[TOKENS as u64],
-            DiffusionSettings::resolved().vae_weights,
+            DiffusionSettings::try_resolved()
+                .map_err(|why| why.to_string())?
+                .vae_weights,
             &ServingSettings::from_env()
                 .map_err(|why| why.to_string())?
                 .as_serving_config(&[]),
@@ -1478,7 +1494,7 @@ mod vae_prefix {
 
 #[cfg(feature = "std")]
 mod vae_gathers {
-    use proxima_model_interop::diffusion::{Graph, VaeConfig, build_vae_decode};
+    use proxima_model_interop::diffusion::{DiffusionSettings, Graph, VaeConfig, build_vae_decode};
     use proxima_tensor::map::IndexMap;
     use proxima_tensor::op::Op;
 
@@ -1492,7 +1508,9 @@ mod vae_gathers {
             out_channels: 3,
             height: 16,
             width: 16,
-            conv_taps: proxima_model_interop::diffusion::DiffusionSettings::resolved().conv_taps(),
+            conv_taps: DiffusionSettings::try_resolved()
+                .expect("a PROXIMA_DIFFUSION_ override must parse and validate")
+                .conv_taps(),
             window: super::shape_only_window(),
         };
         let activation = super::activation::vae().expect("the decoder's activation dtype resolves");

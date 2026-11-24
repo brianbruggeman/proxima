@@ -15,7 +15,14 @@ fn main() {
         eprintln!("usage: image_psnr <reference.png> <actual.png>");
         std::process::exit(64);
     };
-    let sample = DiffusionSettings::resolved().png_sample;
+    let settings = match DiffusionSettings::try_resolved() {
+        Ok(settings) => settings,
+        Err(why) => {
+            eprintln!("diffusion settings: {why}");
+            std::process::exit(1);
+        }
+    };
+    let sample = settings.png_sample;
     let reference = match read_png(reference.as_ref(), &sample) {
         Ok(image) => image,
         Err(why) => {

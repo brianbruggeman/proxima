@@ -120,21 +120,6 @@ impl Default for DiffusionSettings {
 }
 
 impl DiffusionSettings {
-    /// [`Settings::from_env`] with the fallback every caller wants: an
-    /// unreadable environment is the default, not a failed image run. Keeps the
-    /// trait out of every call site that only wants the switch.
-    ///
-    /// Layered: the shipped `defaults.toml` formats first, then every
-    /// `PROXIMA_DIFFUSION_<FIELD>` that is set.
-    #[must_use]
-    pub fn resolved() -> Self {
-        let mut settings = Self::default();
-        match settings.override_from_env() {
-            Ok(()) => settings,
-            Err(_) => Self::default(),
-        }
-    }
-
     /// The shipped formats with every set `PROXIMA_DIFFUSION_<FIELD>` over
     /// them, validated: a format a graph's element type cannot express fails
     /// here, at load, instead of being papered over where a graph is built.
@@ -347,6 +332,16 @@ impl Validate for DiffusionSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unparseable_override_is_an_error_not_the_defaults() {
+        let resolved = temp_env::with_vars(
+            [("PROXIMA_DIFFUSION_DIT_WEIGHTS", Some("not-a-format"))],
+            DiffusionSettings::try_resolved,
+        );
+
+        assert!(resolved.is_err(), "a mistyped override must fail, not run the defaults");
+    }
 
     #[test]
     fn the_shipped_formats_validate() {

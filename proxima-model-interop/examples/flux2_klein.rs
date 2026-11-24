@@ -415,8 +415,8 @@ fn rope_positions<T: Copy + From<u16>>() -> Vec<T> {
     positions
 }
 
-fn vae_config(window: u32) -> VaeConfig {
-    VaeConfig {
+fn vae_config(window: u32) -> Result<VaeConfig, String> {
+    Ok(VaeConfig {
         window,
         channels: (LATENT_CHANNELS / 4) as u32,
         block_channels: [128, 256, 512, 512],
@@ -425,8 +425,10 @@ fn vae_config(window: u32) -> VaeConfig {
         out_channels: 3,
         height: LATENT_SIDE * 2,
         width: LATENT_SIDE * 2,
-        conv_taps: proxima_model_interop::diffusion::DiffusionSettings::resolved().conv_taps(),
-    }
+        conv_taps: DiffusionSettings::try_resolved()
+            .map_err(|why| why.to_string())?
+            .conv_taps(),
+    })
 }
 
     pub fn main() {
@@ -538,7 +540,7 @@ fn diffuse(
         .element_layout()
         .ok_or("the host element has no scalar layout")?;
     for step in 0..STEPS as usize {
-        let settings = DiffusionSettings::resolved();
+        let settings = DiffusionSettings::try_resolved().map_err(|why| why.to_string())?;
         let format = settings.dit_activation;
         let sigma = PackedRows::from_values(&format, &[sigmas[step]]).map_err(|why| why.to_string())?;
         let timestep = settings.timestep_embedding(&sigma, 256, &format)?;
@@ -619,7 +621,7 @@ fn run() -> Result<(), String> {
         ));
     }
     let started = Instant::now();
-    let diffusion = DiffusionSettings::resolved();
+    let diffusion = DiffusionSettings::try_resolved().map_err(|why| why.to_string())?;
     let vocab = read_vocab(&dir)?;
     let ids = padded_ids(&vocab)?;
     let settings = serving_settings(&dir, ids.len())?;
@@ -719,7 +721,7 @@ fn run() -> Result<(), String> {
     let mut vae_graph = ModelGraph::new(vae_activation).map_err(|why| why.to_string())?;
     let vae_latent = vae_graph.host("latent", &latent_shape, vae_graph.unbound());
     let window = vae.window_extent("decoder.conv_in.weight")?;
-    let vae_output = build_vae_decode(&mut vae_graph, &vae_config(window), vae_latent)
+    let vae_output = build_vae_decode(&mut vae_graph, &vae_config(window)?, vae_latent)
         .map_err(|why| why.to_string())?;
     let vae_load = Instant::now();
     let mut decoder = Decoder::new(
@@ -882,7 +884,7 @@ fn finish_image(image: &PackedRows, out: Option<PathBuf>) -> Result<(), String> 
         }
     }
     if let Some(path) = out {
-        let settings = DiffusionSettings::resolved();
+        let settings = DiffusionSettings::try_resolved().map_err(|why| why.to_string())?;
         let unit = PackedRows::from_values(&settings.vae_activation, &rgb).map_err(|why| why.to_string())?;
         write_png(&path, side as u32, side as u32, 3, &unit, &settings.png_sample)?;
         eprintln!("wrote {} ({side}x{side})", path.display());

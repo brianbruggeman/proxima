@@ -98,7 +98,7 @@ mod bench {
         symbols: &[u64],
         config: &ServingConfig<'_>,
     ) -> Outcome<Denoiser> {
-        let weights = DiffusionSettings::resolved().dit_weights;
+        let weights = diffusion_settings()?.dit_weights;
         Denoiser::new(checkpoint, graph, output, symbols, weights, config)
             .map_err(context("dit stage"))
     }
@@ -110,18 +110,18 @@ mod bench {
         symbols: &[u64],
         config: &ServingConfig<'_>,
     ) -> Outcome<Decoder> {
-        let weights = DiffusionSettings::resolved().vae_weights;
+        let weights = diffusion_settings()?.vae_weights;
         Decoder::new(checkpoint, graph, output, symbols, weights, config)
             .map_err(context("vae stage"))
     }
 
     /// A weightless program (attention, upsample) as a stage: no checkpoint
     /// leaves to bind, its host leaves resident.
-    fn bare_weights() -> Weights {
-        Weights {
-            codec: DiffusionSettings::resolved().vae_weights,
+    fn bare_weights() -> Outcome<Weights> {
+        Ok(Weights {
+            codec: diffusion_settings()?.vae_weights,
             entries: Vec::new(),
-        }
+        })
     }
 
     /// Deterministic normal noise packed in `format`: denormals and an
@@ -482,7 +482,7 @@ mod bench {
             &[TEXT_TOKENS, JOINT_ATTENTION],
             seeded(graph, (TEXT_TOKENS * JOINT_ATTENTION) as usize, 5),
         );
-        let settings = DiffusionSettings::resolved();
+        let settings = diffusion_settings()?;
         let format = settings.dit_activation;
         let embedding = PackedRows::from_values(&format, &[0.5])
             .map_err(|why| why.to_string())
@@ -746,7 +746,7 @@ mod bench {
             * element;
         let settings = serving_settings()?;
         let config = settings.as_serving_config(&[]);
-        let mut stage = Denoiser::with_weights(graph, output, &symbols, bare_weights(), &config)
+        let mut stage = Denoiser::with_weights(graph, output, &symbols, bare_weights()?, &config)
             .map_err(context("attention stage"))?;
         let mut group = c.benchmark_group("dit");
         group.sample_size(10);
@@ -772,8 +772,8 @@ mod bench {
     }
 
     // ----------------------------------------------------------------- vae --
-    fn vae_config(window: u32) -> VaeConfig {
-        VaeConfig {
+    fn vae_config(window: u32) -> Outcome<VaeConfig> {
+        Ok(VaeConfig {
             window,
             channels: LATENT_CHANNELS / 4,
             block_channels: [128, 256, 512, 512],
@@ -782,8 +782,8 @@ mod bench {
             out_channels: 3,
             height: LATENT_SIDE * 2,
             width: LATENT_SIDE * 2,
-            conv_taps: proxima_model_interop::diffusion::DiffusionSettings::resolved().conv_taps(),
-        }
+            conv_taps: diffusion_settings()?.conv_taps(),
+        })
     }
 
     struct ConvCase {
@@ -847,7 +847,7 @@ mod bench {
             .map_err(context("conv window"))?;
         let config = VaeConfig {
             conv_taps: ConvTaps::Three,
-            ..vae_config(window)
+            ..vae_config(window)?
         };
         let rows_n = case.side * case.side;
         let mut graph = vae_graph()?;
@@ -986,7 +986,7 @@ mod bench {
                 nearest_upsample_x2(&mut graph.program, x, index).map_err(context("upsample"))?;
             let symbols = [u64::from(height * width)];
             let bytes = u64::from(height * width * channels) * element * 2;
-            let mut stage = Decoder::with_weights(graph, output, &symbols, bare_weights(), &config)
+            let mut stage = Decoder::with_weights(graph, output, &symbols, bare_weights()?, &config)
                 .map_err(context("upsample stage"))?;
             let mut group = c.benchmark_group("vae");
             group.sample_size(10);
@@ -1020,7 +1020,7 @@ mod bench {
         let bytes = u64::from(tokens) * 512 * 2 * element;
         let settings = serving_settings()?;
         let config = settings.as_serving_config(&[]);
-        let mut stage = Decoder::with_weights(graph, output, &symbols, bare_weights(), &config)
+        let mut stage = Decoder::with_weights(graph, output, &symbols, bare_weights()?, &config)
             .map_err(context("attention stage"))?;
         let mut group = c.benchmark_group("vae");
         group.sample_size(10);
@@ -1049,7 +1049,7 @@ mod bench {
         let window = checkpoint
             .window_extent("decoder.conv_in.weight")
             .map_err(context("vae window"))?;
-        let config = vae_config(window);
+        let config = vae_config(window)?;
         let mut graph = vae_graph()?;
         let tokens = LATENT_SIDE * 2 * LATENT_SIDE * 2;
         let input = graph.host(
@@ -1265,7 +1265,9 @@ mod bench {
         ) -> Outcome<(DType, Codec)> {
             let (graph, output) = conv_graph(case, checkpoint)?;
             let activation = graph.activation();
-            let codec = DiffusionSettings::resolved().vae_weights;
+            let codec = DiffusionSettings::try_resolved()
+                .map_err(context("diffusion settings"))?
+                .vae_weights;
             with_tiles(tiles, |config| {
                 let mut stage = Decoder::new(
                     checkpoint,
@@ -1308,7 +1310,9 @@ mod bench {
             );
             let output = project_rows(&mut graph.program, staged, weight, None)
                 .map_err(context("linear"))?;
-            let codec = DiffusionSettings::resolved().vae_weights;
+            let codec = DiffusionSettings::try_resolved()
+                .map_err(context("diffusion settings"))?
+                .vae_weights;
             with_tiles(tiles, |config| {
                 let mut stage =
                     Decoder::new(checkpoint, graph, output, &[u64::from(rows)], codec, config)
