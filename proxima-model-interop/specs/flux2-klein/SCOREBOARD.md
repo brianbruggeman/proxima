@@ -2,16 +2,10 @@
 
 ## Verdict
 
-End-to-end is proven. Image parity is met (32.58 dB ours, 49.16 dB reference text). Wall: the
-quiet set is **82.17 s** median against the incumbent's 84.58 s (0.97x), CoV 1.0 %. The
-2026-11-23 re-measurement on the reconciled tree, taken while the box carried other builds and a
-desktop indexer (1-min load 2.1-10.7, no quiet window), records a best **84.09 s** median
-(0.99x) and a 12-run median of **85.22 s** (CoV 2.38 %). **Bar status: met on the recorded set
-(84.09 < 84.58) and on the quiet set (82.17); the loaded median is over the bar, so the result is
-load-attributed and a quiet-window re-measure is still owed.** The DiT is 0.53x on the quiet set
-(24.71 s vs 47.04 s) and 0.56x today (26.10 s) despite the VAE still being 3.4x slower (41.94 /
-42.40 s vs 12.22 s). Backend coverage: cpu and metal parity proven on this host; cuda blocked on
-versailles' NVML driver mismatch; wgpu unexercised.
+The current measurements are in `docs/omega/06-diffusion.md` section 4, measured 2026-11-24, n=3,
+not yet contract-rendered (the contract needs 20 runs per arm). The dated sections below were
+taken before `5d5167b864` and are kept as history. Backend coverage: cpu and metal parity on this
+host; cuda blocked on versailles' NVML driver mismatch; wgpu unexercised.
 
 Reference: `stable-diffusion.cpp` tag `master-1052-f5df5f8`, M1 Max 64 GB, Metal, seed 42,
 1024x1024, 4 Euler steps, wall from `/usr/bin/time -l`. Image oracle: `$K/ref/ref.png`.
@@ -28,7 +22,7 @@ Acceptance: image PSNR >= 22.0 dB and omega wall < 84.58 s.
 | wall | 84.58 s |
 | peak RSS | 16.19 GiB |
 
-## proxima / omega, Metal (quiet set, 2026-11-22)
+## proxima / omega, Metal (quiet set, 2026-11-22; before `5d5167b864`)
 
 Three runs, load printed per run (1.46-2.43), release binary, stage timers from the example.
 
@@ -49,7 +43,7 @@ This set is the folded three-tap default, current binary, `/usr/bin/time -l`, lo
 printed per run (`/tmp/proxnum588/wall.log`). `block_n=64` is measured and rejected (below):
 the wider tile does not help the dominant shapes in this kernel.
 
-## proxima / omega, Metal (2026-11-23 re-measurement, load-attributed)
+## proxima / omega, Metal (2026-11-23 re-measurement, load-attributed; before `5d5167b864`)
 
 Same binary shape after the tile reconciliation, `/usr/bin/time -l`, three runs per set; four
 sets were needed because the 1-min load moved from 2.1 to 10.7 with other builds and a desktop
