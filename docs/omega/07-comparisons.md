@@ -1,10 +1,10 @@
 # Omega 07: comparisons
 
-**Prerequisites:** [page 03](./03-train.md) and [page 04](./04-infer-an-llm.md): this page compares what those pages ran, and every command here is one of theirs.
+**Prerequisites:** [page 03](./03-train.md) and [page 04](./04-infer-an-llm.md): this page compares what those pages ran, plus the whisper (page 05) and FLUX (page 06) paths. The llama.cpp, whisper.cpp and sd.cpp rows cite raw logs and scoreboard sections in place of a command.
 
 **You will:** see, for each of the five targets, either a measured row with the exact command, the hardware and the variance, or a named gap with the artifact that is missing.
 
-**New concepts (in order):** what a comparison row must carry · the machine · omega decode measured · llama.cpp on the same checkpoint · burn's own example, and why it is not the same workload · PyTorch · whisper.cpp · stable-diffusion.cpp · reading the table.
+**New concepts (in order):** what a comparison row must carry · the machine · llama.cpp, by model · burn's own example, and why it is not the same workload · PyTorch · whisper.cpp · stable-diffusion.cpp · reading the table.
 
 ## 1. What a row must carry
 
@@ -16,49 +16,43 @@ The five targets, and the answer each one gets today:
 
 | target | row | number, or the missing piece |
 |---|---|---|
-| llama.cpp | measured, same checkpoint | omega 21.08 ms/token warm vs llama.cpp 9.59 ms/token; **omega is 2.2x slower** (N=3 / 5) |
+| llama.cpp | measured, depends on the model | flint (MoE) on Metal, 2026-11-22: TTFT 1.002x, decode 0.904x, peak RAM 0.81x of llama.cpp b12110. Other models range from 0.43x to 1.54x of llama.cpp on one metric, section 2 |
 | burn | rate measured, accuracy not comparable | 2.25 s per 256-image iteration; its example is a CNN over 20 epochs, page 03 is an MLP over 4 |
 | PyTorch | gap | not installed, and this workspace installs no Python tooling |
-| whisper.cpp | gap | source only, no `ggml-*.bin`, and the converter is Python |
-| stable-diffusion.cpp | gap | `sd-cli` exists, but omega has no image path to run against it |
+| whisper.cpp | measured, exact token parity | Metal, tiny: 2.77 s vs about 0.30 s (about 9.2x slower); large-v3-turbo: 62.14 s vs 1.318 s (47.2x slower). Section 5 |
+| stable-diffusion.cpp | measured, FLUX.2 klein 4B | Metal, 2026-11-24 same window: 48.87 s vs 59.80 s median wall (0.82x), n=3. Model load is the stage omega loses, section 6 |
 
-## 2. llama.cpp: decode on the same checkpoint
+Ratios are omega over incumbent, so below 1.0x omega takes less time or memory. The numbers on this page come from the slot-0 `kv-epic/SCOREBOARD.md` (llama.cpp, whisper.cpp, sd.cpp) and from page 06 section 4; each section names its date and run count.
 
-Both sides load `~/models/Llama-3.2-1B-Instruct/Llama-3.2-1B-Instruct-f16.gguf`, a 16-bit GGUF of Llama-3.2-1B-Instruct, and generate 24 tokens greedily.
+## 2. llama.cpp: the result depends on the model
 
-omega, release build, through `decode_loop_wall_clock` (page 04):
+The earlier row on this page, omega 21.08 vs 9.59 ms/token on Llama-3.2-1B f16 (2026-11-21, 2.2x slower), is superseded. omega's current path is flint, served through ragd, and the gap to llama.cpp is small or negative on one model and positive on another. Source for every row below: slot-0 `kv-epic/SCOREBOARD.md`, sections "flint (llm, MoE) vs llama.cpp b12110" and "other models and backends", read 2026-11-24.
 
-```sh
-PROXIMA_OPENCHAT_GGUF=$HOME/models/Llama-3.2-1B-Instruct/Llama-3.2-1B-Instruct-f16.gguf \
-PROXIMA_MAX_TOKENS=24 \
-PROXIMA_PROMPT="The capital of France is" \
-cargo run --release -p proxima-model-interop --features std,metal --example decode_loop_wall_clock
-```
+**flint, MoE, 4,069-token prompt, Metal, llama.cpp b12110.** The llama arm is `/opt/homebrew/bin/llama-server`, which reports `version: 0.9.0 (build 12110, commit cd959bae9)` on `MTL0: Apple M1 Max`. Launch line: `~/.cache/kvgate/proximaomega62/attn-fa/sb679/block10/run.sh:27`. Flash attention on both sides. Runs admitted only at load below 4.5, 2026-11-22 13:47-14:28 CST, n=1 per arm per run, 8 runs in all.
 
-```text
-decode_summary tokens_generated=24 stopped_by_eos=false total_wall_clock_ms=501.920 mean_ms_per_token=20.913 generated_text=" Paris. The Eiffel Tower is located in Paris. The Louvre Museum is also located in Paris. The famous" ids=[12366, 13, 578, 469, 3168, 301, 22703, 374, 7559, 304, 12366, 13, 578, 9928, 49606, 16730, 374, 1101, 7559, 304, 12366, 13, 578, 11495]
-```
+| metric, block 10 | omega | llama.cpp | ratio |
+|---|---|---|---|
+| first-request TTFT | 4,964.0 ms (main `ca546929e`); 4,975.1 ms (636 `676c5aca7`) | 4,953.2 ms | 1.002x; 1.004x |
+| decode | 18.76 ms/token (main); 18.83 (636) | 20.76 ms/token | 0.904x; 0.907x |
+| peak RAM (`time -l` footprint) | 439.2 MB (main); 460.3 MB (636) | 540.3 MB | 0.81x; 0.85x |
 
-Run three times warm, the same binary printed `mean_ms_per_token` of 20.913, 20.920 and 21.416 — mean 21.083 ms, sample coefficient of variation 1.4% at N=3. The first run after a rebuild was 116.152 ms per token on the same command: Metal compiles its pipelines on first use and caches them.
+Omega's decode is `(total - ttft) / 63`; llama.cpp's is its own `predicted_per_token_ms`. All 8 runs keep the order: decode omega 18.76-19.37 vs llama.cpp 20.48-20.76 ms/token, RAM omega 424-477 vs llama.cpp 540-554 MB. The llama Metal claim rests on the launch line and the binary's identity; `llama_server_r1.log` has no device banner. One prompt, n=1 per run: a direction, not a fit.
 
-llama.cpp, the `llama-bench` binary at `~/repos/others/llama.cpp/bin/llama-bench` (build `b2534622`, release), same checkpoint, 24 tokens generated, 5 repetitions:
+**Other models** (ratio is omega over llama.cpp; a decode row gives tok/s where the board does):
 
-```sh
-~/repos/others/llama.cpp/bin/llama-bench \
-  -m $HOME/models/Llama-3.2-1B-Instruct/Llama-3.2-1B-Instruct-f16.gguf -p 0 -n 24 -r 5
-```
+| model | backend | metric | omega | llama.cpp | ratio | date and caveat |
+|---|---|---|---|---|---|---|
+| gemma4:e2b-it-qat, short prompt | Metal | warm TTFT; decode | 60.8 / 50.4 ms; 75-83 tok/s | 68.2 ms; 49.1 tok/s | 0.89x TTFT | 2026-11-21, b11671, load 43, quiet gate off; I4 (token ids) passes. Cold 1,195 ms vs 133 ms (9.0x), a first-use compile |
+| gemma4:e2b-it-qat, 2,024 tokens | Metal | warm TTFT; decode | 558.8 / 577.6 ms; 76 tok/s | 1,298.4 ms; 56.1 tok/s | 0.43x TTFT | same run; cold 1,180.8 vs 1,399.2 ms (0.84x) |
+| granite (ollama blob), 2,024 tokens, f32 | Metal | warm TTFT; decode; peak RAM | 581.7-613.8 ms; 51.9 tok/s; 553.3 MB | 500.3 ms; 44.7 tok/s; 387.5 MB | 1.16-1.23x TTFT; 1.43x RAM | 2026-11-21, b11671, load 47, quiet gate off; I4 (token ids) passes |
+| granite (ollama blob), 2,024 tokens, f16 | Metal | warm TTFT; decode | 558-572 ms; 5.91 ms/token | about 426 ms; 5.34 ms/token | 1.31x TTFT; 1.11x decode | 2026-11-21, b12110, load 32; ids diverge, so not a like-for-like row |
+| granite-4.0-350m Q8_0 | Metal | decode | 4.03 ms/token | 3.61 ms/token | 1.12x | mid-November probe; the owner reports about 2x now, unreproduced |
+| granite | CUDA, RTX 2070 | decode; TTFT | 5.35 ms/token; 1,189 ms | 3.62 ms/token; 151 ms | 1.48x; 7.9x | 2026-11-13 |
+| qwen3.6:35b-a3b, short prompt | Metal | TTFT; decode | 5,486-6,024 ms; 152-155 ms/token | no run: llama-server never became healthy in 180 s | - | 2026-11-21; omega only. 24.6 GB steady RSS is the full GGUF mapping |
 
-```text
-| model                          |       size |     params | backend    | threads |            test |                  t/s |
-| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
-| llama 1B F16                   |   2.30 GiB |     1.24 B | Metal,BLAS |       8 |            tg24 |        104.30 ± 0.98 |
-```
+Not measured: granite at 5,005 tokens (the 2026-11-13 1.24-1.44x decode and 1.6-1.8x TTFT rows are stale), gemma4-26b, qwen3:8b and 4b.
 
-`104.30 ± 0.98` tokens per second over 5 repetitions is **9.59 ms per token** (CoV 0.94%). Against omega's warm 21.08 ms, the measured ratio is **2.20x slower** on this prompt, this checkpoint and this machine. The cold omega number, 116 ms, is 12x slower; report it as first-request cost.
-
-Both sides of this row were measured back to back, with no other build running. That condition is not decoration: a later window on the same machine under load average 78 put omega between 24 and 64 ms per token for the same command. A decode number without the load it was taken under is not reusable.
-
-That is a 1B f16 decode, one prompt, 24 tokens, in a release build on both sides.
+Two things move these numbers more than the code does. The first request after a build pays a Metal pipeline compile; on granite it moved from 3.0 s of first-request TTFT into load-time prewarm. And load average: the rows above carry theirs, and a window under load 78 put an earlier omega decode between 24 and 64 ms/token for a command that ran 21 ms/token quiet.
 
 ## 3. burn: training on MNIST
 
@@ -101,14 +95,41 @@ grep -m1 "Iteration 50$" /tmp/burn-example-mnist/experiment.log
 
 ## 5. whisper.cpp
 
-**Gap.** No `ggml-*.bin` exists on this machine and whisper.cpp has never been built here; converting the tiny HF checkpoint needs its Python converter, which this workspace does not run. Page 05 covers the rest: even with a ggml model there is no proxima whisper path to run against it.
+omega transcribes jfk.wav (11 s) end to end (page 05) and is slower than whisper.cpp v1.9.5 on every row. Source: slot-0 `kv-epic/SCOREBOARD.md`, section "whisper (speech) vs whisper.cpp v1.9.5", read 2026-11-24. M1 Max. Token ids match whisper.cpp exactly on every row (24/24 tiny, 27/27 large-v3-turbo).
+
+| model | device | omega | whisper.cpp | ratio | commit |
+|---|---|---|---|---|---|
+| tiny | Metal | 2.69-2.78 s (n=3, median 2.77 s) | 0.28-0.34 s (n=3, median 0.30 s) | about 9.2x slower | `42e701117`, unlanded `card/proxnum-683` |
+| tiny | CPU | 20.92 s | 0.506 s | 41.3x | `ca546929e`, `evaluate_named` |
+| large-v3-turbo | Metal | 62.14 s | 1.318 s | 47.2x | `ca546929e` plus the Metal backend, load 3.8-14.5 |
+| large-v3-turbo | CPU | 150.92 s | 1.318 s | 114.5x | `ca546929e` |
+
+The tiny Metal row has two sessions behind it: omega on 2026-11-23 about 12:2x at load 3.7-4.4, whisper.cpp the same day about 08:2x at load 7.3-7.9. An alternating rerun is owed. The owner's bar is about 300 ms for tiny, which is whisper.cpp's time; at the 5% bar of 0.315 s, omega is about 8.8x over. For turbo the 5% bar is 1.384 s, and omega is 44.9x over.
+
+Where the time goes, tiny on Metal (omega vs whisper.cpp): encode 870-903 ms vs 32-40 ms (about 24x), decode 64.3-65.7 vs 1.2-1.8 ms/token (about 43x), mel 126-162 vs 4.7 ms, peak RAM 0.94 vs 0.23 GB (about 4.1x). Load goes the other way: 21-29 ms for omega against 54-56 ms. Encode and decode per token carry the gap, not load.
+
+For turbo the only stage breakdown is the CPU one from before PROXNUM-681 (n=1, `2a0bfa33d`): 123.38 s wall, of which encode 104.4 s and decode 17.58 s (651 ms/token, 27 tokens), against whisper.cpp's 378.4 ms encode and 1.91 ms/token. `user` 117.27 s against `real` 123.38 s, so about one core. Peak RAM was 22.79 GB against 1.84 GB; on the unlanded `card/proxnum-681` it is 4.81 GB (about 2.6x) with 27/27 ids, and wall is unchanged because the work still runs on the CPU.
 
 ## 6. stable-diffusion.cpp
 
-**Gap.** `sd-cli` exists (`master-1052-f5df5f8`), but omega has no image path, so wall time per image has nothing to compare. Page 06 says what is missing; the row needs that path plus a checkpoint both sides load.
+FLUX.2 klein 4B, 1024x1024, 4 Euler steps, seed 42, Metal, against `sd-cli` `master-1052-f5df5f8`. Medians of 3 rounds, interleaved omega then sd.cpp, 2026-11-24 11:42-11:53, quiet 0/0/0, wall from `/usr/bin/time -l`. Raw logs: `~/.cache/kvgate/proxnum699/rebench/{u1,t1,sd}-r{1,2,3}.log`, tables in page 06 section 4 and slot-0 `kv-epic/SCOREBOARD.md`.
+
+| stage | omega | sd.cpp | ratio |
+|---|---|---|---|
+| wall, same window | 48.87 s (51.89 / 48.87 / 44.43) | 59.80 s (76.71 / 59.66 / 59.80) | 0.82x |
+| wall, cold first run | 51.89 s | 76.71 s | 0.68x |
+| wall, warm, back to back | 40.82 s (40.33 / 40.85 / 40.82), `5d5167b864` | 59.80 s (the same-window median) | 0.68x |
+| text encode | 4.69 s | 5.09 s | 0.92x |
+| DiT, 4 steps | 25.59 s | 41.79 s | 0.61x |
+| VAE decode | 3.66 s | 12.28 s | 0.30x |
+| peak footprint | 12.32 GB | 14.80 GB | 0.83x |
+
+The time cost omega carries is DiT load. omega takes 6.3 s warm and 9.2-16.1 s in the same window; sd.cpp takes 1.74-1.87 s for the DiT tensors (3.4x warm, 4.9-8.6x same window). sd.cpp's separate 4.14-5.22 s is its qwen text-encoder load, which falls on omega's text stage. omega decodes the 7.75 GB bf16 DiT to f32, re-encodes to f16 and copies; sd.cpp reads the bf16 into place. Planned fix: PROXNUM-699 U2-U7, views of the mapping with no re-encode.
+
+The load tracks the file-backed page count at start (567,751 to 851,597 pages for today's code, against 856,404 to 1,123,457 for the control binary, which has the same compute). Rounds 2 and 3 of today's code ran straight after an sd.cpp run; its 14.8 GB footprint evicts about 300k file pages. Three rounds, one prompt: a direction. The sd.cpp round 1 wall of 76.71 s is unexplained. The image scored 32.58 dB against the reference on 2026-11-22 (49.16 dB with reference text) and was not re-scored on 2026-11-24. The scoreboard contract asks for 20 runs per arm; this is n=3.
 
 ## 7. What omega does not do yet, and how to read the table
 
-- Decode is the one row where both sides run the same weights and the same token count, so the milliseconds are comparable. One prompt on one machine says nothing about long context, batching, or another model family.
+- The llama.cpp, whisper.cpp and sd.cpp rows run the same weights on both sides, so the times are comparable. One prompt on one machine says nothing about another model: section 2 has omega ahead on flint decode and behind on granite.
 - Training is comparable only if both sides use the same data files and the same network; page 03 fixes omega's side, section 3 of this page shows that burn's shipped example does not, and names what would have to change.
-- A gap is missing evidence. Three of five targets have nothing to compare because an artifact is missing. A benchmark nobody ran says which artifact is missing; it does not say how fast the code is.
+- A gap is missing evidence. One of five targets, PyTorch, has nothing to compare because an artifact is missing. A benchmark nobody ran says which artifact is missing; it does not say how fast the code is.

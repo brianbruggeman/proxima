@@ -2,7 +2,7 @@
 
 **Prerequisites:** [page 02](./02-programs-as-data.md) (a program is a graph over named buffers) and [page 03](./03-train.md) (a lowering is trainable if autograd can differentiate it).
 
-**You will:** see which pieces of a whisper pipeline exist as ordinary graph operations, run two of them, and read the exact point where a `.wav` would fall off the end.
+**You will:** see which pieces of a whisper pipeline exist as ordinary graph operations, run two of them, and see where the end-to-end transcription path sits and what it costs against whisper.cpp.
 
 **New concepts (in order):** a lowering is a graph-building function · the log-mel front end · cross-attention · conv1d · why "no per-model profile" is a requirement · what omega does not do yet.
 
@@ -51,12 +51,20 @@ PASS proxima-autograd generic_lowering_grad::non_causal_attention_gradient_match
 SUMMARY  passed=3 failed=0 ignored=0 not_run=0  wall=2.406s discovered=203 run=3 filtered=200 binaries=24
 ```
 
-## 3. What omega does not do yet
+## 3. What exists end to end, and what omega does not do yet
 
-- No whisper model path. `proxima-model-interop/specs/whisper/SPEC.md:3` is a draft: written from whisper.cpp's source, with no code, no build and no model run. Nothing in `proxima-model-interop/src` mentions whisper.
+Whisper transcribes today. `Model::load` and `Model::transcribe` (`proxima-model-interop/src/families/encoder_decoder_host.rs:474`) run the front end, the encoder, the cross-KV cache and the token loop on a checkpoint directory, on CPU or, through `with_device`, on Metal. The test `transcript::ids_and_text_match_the_reference` (`proxima-model-interop/tests/whisper.rs:1202`) transcribes a wav and asserts the token ids, the end-of-text stop and the text equal the reference. `proxima-model-interop/specs/whisper/SPEC.md:3` lists S8 (two modes from one graph set) and S11-S13 (training overfit, genericity audit, timed comparison) as open.
+
 - A per-model profile is ruled out. The spec's second requirement (`proxima-model-interop/specs/whisper/SPEC.md:26`) forbids a per-model profile — no `whisper.toml`, no "whisper" branch in omega or interop. The intended path is one encoder-decoder template that fills its slots from `model.safetensors` names plus `config.json`. A template is more work than a profile, which is why it is not done.
-- The checkpoint is on disk and unread. `~/models/asr/whisper-tiny` is a complete HF checkpoint (`config.json`, `tokenizer.json`, `preprocessor_config.json`, `model.safetensors`); no code path opens it.
-- There is no decoder loop. Even with every lowering present, nothing assembles the encoder pass, the cross-KV cache and the token loop into a transcription. The spec's slice list still owes that driver.
-- Nothing to compare against yet. `~/repos/others/whisper.cpp` is source only (`build` does not exist) and there is no `ggml-*.bin` here. Converting the tiny checkpoint to ggml needs whisper.cpp's Python converter, which this workspace does not run, so the spec's wall-time requirement (`proxima-model-interop/specs/whisper/SPEC.md:37`) has no measurable row.
+- It is slower than whisper.cpp on every measured row. Source: slot-0 `kv-epic/SCOREBOARD.md`, section "whisper (speech) vs whisper.cpp v1.9.5", read 2026-11-24, jfk.wav (11 s) on an M1 Max, token ids exact on both models.
+
+  | model | device | omega | whisper.cpp v1.9.5 | ratio |
+  |---|---|---|---|---|
+  | tiny | Metal | 2.69-2.78 s (n=3, 2026-11-23) | 0.28-0.34 s (n=3, other session) | about 9.2x |
+  | tiny | CPU | 20.92 s | 0.506 s | 41.3x |
+  | large-v3-turbo | Metal | 62.14 s | 1.318 s | 47.2x |
+  | large-v3-turbo | CPU | 150.92 s | 1.318 s | 114.5x |
+
+  On tiny/Metal the gap is encode (870-903 ms against 32-40 ms, about 24x) and decode per token (64.3-65.7 ms against 1.2-1.8 ms, about 43x). Load and mel are not where the time goes. The owner's bar is about 300 ms for tiny; the 5% bar is 0.315 s. [Page 07 section 5](./07-comparisons.md#5-whispercpp) has the commits, the load under each run and the caveats.
 
 Next: [06: diffusion](./06-diffusion.md) does the same for image generation: the adaLN and attention pieces exist and are differentiable; the scheduler and the VAE decode do not.
