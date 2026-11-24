@@ -718,6 +718,7 @@ pub(super) fn staged_prepass(
         grid: staged_prepass_grid(plan, resolved.node)?,
         extra_outputs: Vec::new(),
         prologue: Vec::new(),
+        route_compaction_words: 0,
     })
 }
 

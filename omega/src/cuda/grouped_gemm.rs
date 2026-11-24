@@ -17,6 +17,7 @@ use super::mma_gemm::{
     FEATURE_TILE, GEMM_THREADS, MmaGemm, TOKEN_TILE, grouped_contraction_grant, mma_gemm_plan_for, weight_slot,
 };
 use super::{Codec, CudaGridSpec, CudaKernel, EmitError, gather_slots};
+use crate::lowering::Binding;
 use crate::route_compaction::{
     COUNT_HEADER_WORDS, ROUTE_COMPACTION_MISMATCH_FAULT, compaction_words, device_bases, tile_upper_bound,
 };
@@ -162,18 +163,21 @@ pub(super) fn grouped_grid(resolved: &BoundOp, plan: &GroupedGemm) -> Result<Cud
     CudaGridSpec::launch(resolved.node, grouped_threads(resolved, plan), Some(GEMM_THREADS), resolved.kind.name())
 }
 
-pub(super) fn pair(source: String, entries: [String; 2], resolved: &BoundOp, plan: &GroupedGemm, bindings: Vec<crate::lowering::Binding>) -> Result<[CudaKernel; 2], EmitError> {
+pub(super) fn pair(source: String, entries: [String; 2], resolved: &BoundOp, plan: &GroupedGemm, bindings: Vec<Binding>) -> Result<[CudaKernel; 2], EmitError> {
     let [prepass, grouped] = entries;
-    let kernel = |entry: String, grid: CudaGridSpec| CudaKernel {
+    let route_indices = bindings.iter().filter(|binding| matches!(binding, Binding::Indices(_))).nth(plan.route.slot).cloned();
+    let prepass_bindings: Vec<Binding> = route_indices.into_iter().chain([Binding::Uniforms, Binding::Fault]).collect();
+    let kernel = |entry: String, grid: CudaGridSpec, bindings: Vec<Binding>| CudaKernel {
         source: source.clone(),
         entry,
-        bindings: bindings.clone(),
+        bindings,
         grid,
         extra_outputs: Vec::new(),
         prologue: Vec::new(),
+        route_compaction_words: 0,
     };
     Ok([
-        kernel(prepass, prepass_grid(resolved)?),
-        kernel(grouped, grouped_grid(resolved, plan)?),
+        kernel(prepass, prepass_grid(resolved)?, prepass_bindings),
+        kernel(grouped, grouped_grid(resolved, plan)?, bindings),
     ])
 }

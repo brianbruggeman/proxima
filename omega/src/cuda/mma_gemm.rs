@@ -83,15 +83,10 @@ fn codec_shape(codec: Codec) -> Option<CodecShape> {
     })
 }
 
-/// The token-row minimum the tiled form is admitted at, from `[contraction] cuda_tiled_min_tokens`.
-pub(super) const fn mma_contraction_limits() -> ContractionLimits {
-    ContractionLimits::tiled_only(crate::sized::CUDA_TILED_CONTRACTION_MIN_TOKENS)
-}
-
 /// The contraction grant of the tensor-core path, shared by `mma_gemm_plan` and `crate::cuda::executes`.
-/// The grouped form is not granted here: the driver has no launch for the two-kernel route yet.
+/// The grouped form rides with it: the driver launches the route prepass ahead of the grouped kernel.
 pub(super) const fn mma_contraction_grant(base: Executes) -> Executes {
-    base.with(Form::TiledContraction).with_contraction(mma_contraction_limits())
+    grouped_contraction_grant(base)
 }
 
 /// What the grouped emitter plans against: the tiled grant plus [`Form::GroupedContraction`] at `[contraction] grouped_min_tokens`.

@@ -20,7 +20,7 @@ use std::time::Instant;
 use conflaguration::Settings;
 use cudarc::driver::sys as cuda_sys;
 use cudarc::driver::{
-    CudaContext, CudaEvent, CudaFunction, CudaModule, CudaSlice, CudaStream, DriverError, LaunchConfig,
+    CudaContext, CudaEvent, CudaFunction, CudaModule, CudaSlice, CudaStream, CudaView, DriverError, LaunchArgs, LaunchConfig,
     PushKernelArg,
 };
 use cudarc::nvrtc::sys as nvrtc_sys;
@@ -292,6 +292,7 @@ struct CachedCudaModule {
 #[derive(Debug, Default)]
 pub struct CudaF32Arena {
     buffers: BTreeMap<NodeId, CudaGraphBuffer>,
+    route_compaction: BTreeMap<NodeId, CudaSlice<u32>>,
     uniforms: BTreeMap<NodeId, CudaSlice<u8>>,
     uniform_host: BTreeMap<NodeId, Vec<u8>>,
     resident_sources: BTreeMap<NodeId, (usize, usize)>,
@@ -515,6 +516,13 @@ enum CudaGraphBuffer {
     F32(CudaSlice<f32>),
     // shared with the driver's resident cache, so a clone is a refcount bump rather than a device copy.
     Bytes(Arc<CudaSlice<u8>>),
+}
+
+fn push_buffer<'a, 'b>(args: &'b mut LaunchArgs<'a>, buffer: &'a CudaGraphBuffer) -> &'b mut LaunchArgs<'a> {
+    match buffer {
+        CudaGraphBuffer::F32(input) => args.arg(input),
+        CudaGraphBuffer::Bytes(input) => args.arg(input.as_ref()),
+    }
 }
 
 /// A reusable CUDA graph for the currently connected dense/reduction CUDA ABI.
@@ -1525,6 +1533,9 @@ impl CudaDriver {
         kernel: &CudaKernel,
         uniforms: &[u8],
     ) -> Result<(), CudaDriverError> {
+        if kernel.route_compaction_words > 0 {
+            return Ok(());
+        }
         for prologue in &kernel.prologue {
             let Some(Binding::Output(node)) = prologue
                 .bindings
@@ -1678,12 +1689,20 @@ impl CudaDriver {
         let fault_window =
             deferred_fault.map(|(array, offset, slots)| array.slice(offset..offset + slots));
         arena.launch_profile.mark(3, &mut lap);
+        let mut route_buffer = self.take_route_compaction(&mut arena.route_compaction, output_node, kernel.route_compaction_words)?;
+        let prepass_result = match route_buffer.as_mut() {
+            Some(compaction) => {
+                let owned_view = fault_buffer.as_ref().map(|buffer| buffer.slice(..));
+                let fault_view = fault_window.as_ref().or(owned_view.as_ref());
+                self.launch_route_prepass(&arena.buffers, kernel, compaction, device_uniforms, fault_view)
+            }
+            None => Ok(()),
+        };
         let mut args = self.stream.launch_builder(function);
         for binding in &kernel.bindings[..output_index] {
             match binding {
                 Binding::Input(node) | Binding::Indices(node) => match arena.buffers.get(node) {
-                    Some(CudaGraphBuffer::F32(input)) => args.arg(input),
-                    Some(CudaGraphBuffer::Bytes(input)) => args.arg(input.as_ref()),
+                    Some(buffer) => push_buffer(&mut args, buffer),
                     None => {
                         arena
                             .buffers
@@ -1709,8 +1728,14 @@ impl CudaDriver {
         for (_, buffer) in &mut extra_buffers {
             args.arg(buffer);
         }
+        if let Some(buffer) = route_buffer.as_mut() {
+            args.arg(buffer);
+        }
         arena.launch_profile.mark(4, &mut lap);
-        let launch_result = unsafe { args.launch(config) };
+        let launch_result = prepass_result.and_then(|()| unsafe { args.launch(config) }.map_err(CudaDriverError::from));
+        if let Some(buffer) = route_buffer.take() {
+            arena.route_compaction.insert(output_node, buffer);
+        }
         arena.launch_profile.mark(5, &mut lap);
         Self::restore_extra_outputs(arena, extra_buffers);
         if let Err(error) = launch_result {
@@ -1745,6 +1770,59 @@ impl CudaDriver {
         arena
             .buffers
             .insert(output_node, CudaGraphBuffer::F32(device_output));
+        Ok(())
+    }
+
+    fn take_route_compaction(
+        &self,
+        held: &mut BTreeMap<NodeId, CudaSlice<u32>>,
+        node: NodeId,
+        words: usize,
+    ) -> Result<Option<CudaSlice<u32>>, CudaDriverError> {
+        if words == 0 {
+            return Ok(None);
+        }
+        match held.remove(&node) {
+            Some(buffer) if buffer.len() == words => Ok(Some(buffer)),
+            Some(_) | None => Ok(Some(self.stream.alloc_zeros::<u32>(words)?)),
+        }
+    }
+
+    /// Launches the grouped kernel's route prepass, its one prologue kernel, on the stream ahead
+    /// of the kernel: it binds the route's index buffer, the shared uniforms, the fault window and
+    /// the compaction buffer the grouped kernel reads next.
+    fn launch_route_prepass(
+        &self,
+        buffers: &BTreeMap<NodeId, CudaGraphBuffer>,
+        kernel: &CudaKernel,
+        compaction: &mut CudaSlice<u32>,
+        uniforms: &CudaSlice<u8>,
+        fault: Option<&CudaView<'_, u32>>,
+    ) -> Result<(), CudaDriverError> {
+        let [prepass] = kernel.prologue.as_slice() else {
+            return Err(CudaDriverError::BindingContract);
+        };
+        let function = self.function_for(prepass)?;
+        let config = LaunchConfig {
+            grid_dim: (launch_blocks(&prepass.grid)?, 1, 1),
+            block_dim: (prepass.grid.block_width_or_default() as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut args = self.stream.launch_builder(&function);
+        for binding in &prepass.bindings {
+            match binding {
+                Binding::Indices(node) => match buffers.get(node) {
+                    Some(buffer) => push_buffer(&mut args, buffer),
+                    None => return Err(CudaDriverError::MissingBuffer(*node)),
+                },
+                Binding::Uniforms => args.arg(uniforms),
+                Binding::Fault => args.arg(fault.ok_or(CudaDriverError::BindingContract)?),
+                _ => return Err(CudaDriverError::BindingContract),
+            };
+        }
+        args.arg(compaction);
+        unsafe { args.launch(config) }?;
+        self.graph_launches.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -3046,6 +3124,7 @@ impl CudaPlan {
     pub fn kernel_identities(&self) -> Vec<String> {
         self.kernels
             .iter()
+            .flat_map(|kernel| kernel.prologue.iter().chain(std::iter::once(kernel)))
             .map(|kernel| format!("{}\n{}", kernel.entry, kernel.source))
             .collect()
     }
@@ -4045,6 +4124,7 @@ fn add_one_kernel(input: NodeId, output: NodeId, elements: usize) -> Result<Cuda
         .map_err(|_| CudaDriverError::IdleLaunch)?,
         extra_outputs: Vec::new(),
         prologue: Vec::new(),
+        route_compaction_words: 0,
     })
 }
 
@@ -5773,6 +5853,7 @@ pub mod rocm {
             .map_err(|_| HipDriverError::IdleLaunch)?,
             extra_outputs: Vec::new(),
             prologue: Vec::new(),
+            route_compaction_words: 0,
         })
     }
 
@@ -5799,6 +5880,7 @@ pub mod rocm {
             .map_err(|_| HipDriverError::IdleLaunch)?,
             extra_outputs: Vec::new(),
             prologue: Vec::new(),
+            route_compaction_words: 0,
         })
     }
 

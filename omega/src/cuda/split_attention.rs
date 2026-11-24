@@ -103,6 +103,7 @@ pub(super) fn split_pass(
         )?,
         extra_outputs: Vec::new(),
         prologue: Vec::new(),
+        route_compaction_words: 0,
     })
 }
 

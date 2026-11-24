@@ -239,6 +239,7 @@ mod device_scale_dump {
                 .unwrap_or_else(|error| panic!("the probe count is a nonzero constant: {error:?}")),
             extra_outputs: Vec::new(),
             prologue: Vec::new(),
+            route_compaction_words: 0,
         };
         let name = dot.name;
         let source = kernel.source.replace("NAME", &name);

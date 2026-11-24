@@ -156,6 +156,9 @@ pub struct CudaKernel {
     /// Kernels the driver launches, in order, on the same stream before this one.
     /// Empty for every kernel `emit_cuda_with_policy` produces today.
     pub prologue: Vec<CudaKernel>,
+    /// Words of the route-compaction buffer the driver binds after this kernel's own bindings
+    /// (and after the prologue's own, which names the same buffer); zero when the kernel takes none.
+    pub route_compaction_words: usize,
 }
 
 pub use crate::grid::{DEFAULT_BLOCK_WIDTH, LaunchGrid as CudaGridSpec};
@@ -277,6 +280,9 @@ pub(crate) fn emit_on_target(
     device: EmitDevice,
 ) -> Result<CudaKernel, EmitError> {
     validate(resolved)?;
+    if let Some(grouped) = grouped_kernel(target, resolved, packed_operands, numeric_policy, device)? {
+        return Ok(grouped);
+    }
     let quantized = operand_codecs(resolved, packed_operands);
     reject_unserved_prequantized(target, resolved, &quantized, numeric_policy, device)?;
     let form_refusal = executes(&target).admit(resolved).err().map(refusal_kind);
@@ -359,13 +365,36 @@ pub(crate) fn emit_on_target(
         grid,
         extra_outputs,
         prologue,
+        route_compaction_words: 0,
     })
+}
+
+/// The grouped kernel with its route prepass as the one prologue kernel, when this target grants
+/// [`Form::GroupedContraction`] and the op takes it: the shape the driver launches.
+fn grouped_kernel(
+    target: Target,
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    device: EmitDevice,
+) -> Result<Option<CudaKernel>, EmitError> {
+    if !executes(&target).forms.contains(Form::GroupedContraction) {
+        return Ok(None);
+    }
+    let Some(([prepass, mut grouped], words)) =
+        emit_grouped_on_target(target, resolved, packed_operands, numeric_policy, device)?
+    else {
+        return Ok(None);
+    };
+    grouped.prologue = vec![prepass];
+    grouped.route_compaction_words = words;
+    Ok(Some(grouped))
 }
 
 /// The route prepass and the grouped tensor-core kernel of an expert-grouped contraction on a known
 /// device, with the words of the route-compaction buffer to bind after the kernels' own bindings.
-/// `None` when the op does not take the form. The driver does not launch the pair yet, so
-/// [`executes`] does not grant [`Form::GroupedContraction`].
+/// `None` when the op does not take the form. [`emit_cuda_on_device`] returns the same pair as one
+/// kernel whose prologue is the prepass, so the driver launches it through [`CudaKernel::prologue`].
 ///
 /// # Errors
 /// Whatever rendering the grouped kernel returns.
@@ -607,6 +636,7 @@ pub fn emit_q8_1_quantize(
         grid,
         extra_outputs: Vec::new(),
         prologue: Vec::new(),
+        route_compaction_words: 0,
     })
 }
 
@@ -748,6 +778,10 @@ pub(crate) fn refit_grid_on_target(
     numeric_policy: NumericPolicy,
     device: EmitDevice,
 ) -> Result<(), EmitError> {
+    if let Some(grouped) = grouped_kernel(target, new, packed_operands, numeric_policy, device)? {
+        *kernel = grouped;
+        return Ok(());
+    }
     let quantized = operand_codecs(new, packed_operands);
     let staged = target
         .card_asm
@@ -940,6 +974,10 @@ fn refit_extent_fields_in_place(
     numeric_policy: NumericPolicy,
     device: EmitDevice,
 ) -> Result<(), EmitError> {
+    if let Some(grouped) = grouped_kernel(target, bound, packed_operands, numeric_policy, device)? {
+        *kernel = grouped;
+        return Ok(());
+    }
     let quantized = operand_codecs(bound, packed_operands);
     let (grid, extra_outputs) =
         extent_fields(target, bound, &quantized, numeric_policy, device)?;
@@ -6276,8 +6314,8 @@ mod tests {
     }
 
     #[test]
-    fn the_cuda_grant_does_not_name_the_grouped_form_until_the_driver_launches_it() {
-        assert!(!executes(&Target::CUDA).forms.contains(Form::GroupedContraction));
+    fn the_cuda_grant_names_the_grouped_form_now_the_driver_launches_it() {
+        assert!(executes(&Target::CUDA).forms.contains(Form::GroupedContraction));
     }
 
     #[test]
