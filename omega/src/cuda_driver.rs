@@ -263,6 +263,8 @@ pub struct CudaDriver {
     parked_state: Arc<Mutex<BTreeMap<NodeId, (NodeId, CudaGraphBuffer)>>>,
     // appended-row caches whose plan was evicted: keyed by cache input node, valued by its valid row count and device buffer.
     parked_appends: Arc<Mutex<BTreeMap<NodeId, (u64, CudaGraphBuffer)>>>,
+    // device bytes already in use when this driver was created, so other contexts and the display are not charged to it.
+    baseline_used_bytes: u64,
 }
 
 fn multiprocessor_count(context: &CudaContext) -> Result<u32, CudaDriverError> {
@@ -628,6 +630,8 @@ impl CudaDriver {
         // every launch runs on this one default stream, so per-buffer read/write events order nothing and cost two cuEventCreate per buffer
         unsafe { context.disable_event_tracking() };
         let stream = context.default_stream();
+        let (free, total) = context.mem_get_info()?;
+        let baseline_used_bytes = total.saturating_sub(free) as u64;
         Ok(Self {
             context,
             stream,
@@ -640,6 +644,7 @@ impl CudaDriver {
             graph_launches: Arc::new(AtomicU64::new(0)),
             parked_state: Arc::default(),
             parked_appends: Arc::default(),
+            baseline_used_bytes,
         })
     }
 
@@ -740,6 +745,13 @@ impl CudaDriver {
     /// fit check; host RSS and checkpoint file size are only proxies.
     pub fn memory_info(&self) -> Result<(usize, usize), CudaDriverError> {
         Ok(self.context.mem_get_info()?)
+    }
+
+    /// Device bytes in use now beyond what was in use when this driver was created, `None` when the driver cannot report.
+    #[must_use]
+    pub fn allocated_bytes(&self) -> Option<u64> {
+        let (free, total) = self.memory_info().ok()?;
+        Some((total.saturating_sub(free) as u64).saturating_sub(self.baseline_used_bytes))
     }
 
     fn function_for(&self, kernel: &CudaKernel) -> Result<CudaFunction, CudaDriverError> {

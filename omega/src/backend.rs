@@ -272,8 +272,8 @@ impl GpuDriver {
 
     /// Bytes this driver's device has allocated right now, `None` when the
     /// driver cannot report. Metal reads its own device count; CUDA reads the
-    /// already-initialized shared driver's `total - free` and never opens a
-    /// context to answer, so it is `None` before the first plan binds.
+    /// already-initialized shared driver's device use since that driver was created
+    /// and never opens a context to answer, so it is `None` before the first plan binds.
     #[must_use]
     pub fn allocated_device_bytes(self) -> Option<u64> {
         match self {
@@ -290,10 +290,7 @@ impl GpuDriver {
             GpuDriver::Wgpu => None,
             #[cfg(feature = "cuda-driver")]
             GpuDriver::Cuda => match CUDA_DRIVER.get() {
-                Some(Ok(driver)) => driver
-                    .memory_info()
-                    .ok()
-                    .map(|(free, total)| total.saturating_sub(free) as u64),
+                Some(Ok(driver)) => driver.allocated_bytes(),
                 _ => None,
             },
             #[cfg(feature = "cuda-driver")]
