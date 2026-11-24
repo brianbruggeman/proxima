@@ -3469,7 +3469,7 @@ async fn appended_rows_stay_on_device_and_drain_equal_to_the_host_append(
     let mut host_plan = appended_rows_plan(&program, initial_extent, &padded_cache(&seed, initial_extent), &first_row);
     let mut carry_plan = appended_rows_plan(&program, initial_extent, &padded_cache(&seed, initial_extent), &first_row);
     assert!(
-        omega::backend::carry_cuda_rows(&mut carry_plan, &[(APPEND_CACHE, APPENDED_ROWS)], initial_rows as u64),
+        omega::backend::carry_cuda_rows(&mut carry_plan, &[(APPEND_CACHE, APPENDED_ROWS, proxima_numeric::NumericFormat::default())], initial_rows as u64),
         "the cache and row outputs share a row width"
     );
 
@@ -3547,7 +3547,7 @@ async fn seven_rows_into_an_exact_empty_cache_then_single_rows_grow_the_device_c
     let mut host_plan = appended_rows_plan_with_symbols(&program, &symbols, &[], &first_block);
     let mut carry_plan = appended_rows_plan_with_symbols(&program, &symbols, &[], &first_block);
     assert!(
-        omega::backend::carry_cuda_rows(&mut carry_plan, &[(APPEND_CACHE, APPENDED_ROWS)], 0),
+        omega::backend::carry_cuda_rows(&mut carry_plan, &[(APPEND_CACHE, APPENDED_ROWS, proxima_numeric::NumericFormat::default())], 0),
         "the cache and row outputs share a row width"
     );
 
@@ -3609,7 +3609,7 @@ fn carry_rows_rejects_a_pair_whose_row_widths_differ() {
     let row = appended_row_values(0);
     let mut plan = appended_rows_plan(&program, 4, &cache, &row);
 
-    let carried = omega::backend::carry_cuda_rows(&mut plan, &[(APPEND_CACHE, APPEND_COLUMN_SUM)], 0);
+    let carried = omega::backend::carry_cuda_rows(&mut plan, &[(APPEND_CACHE, APPEND_COLUMN_SUM, proxima_numeric::NumericFormat::default())], 0);
 
     assert!(!carried, "the column sum has row width 1, the cache row width {APPEND_WIDTH}");
     assert_eq!(omega::backend::cuda_carried_host_bytes(&plan), Some(0));

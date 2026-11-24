@@ -3282,7 +3282,7 @@ pub struct BackendRuntime {
     carry_pairs: Vec<(NodeId, NodeId)>,
     /// `(cache input, new-rows output)` pairs whose attention KV the next CUDA evaluation keeps on
     /// the device; empty when no KV is carried.
-    kv_carry_pairs: Vec<(NodeId, NodeId)>,
+    kv_carry_pairs: Vec<(NodeId, NodeId, NumericFormat)>,
     kv_carry_cached_rows: u64,
     kv_carry_accepted: bool,
     /// Per `new_count`, whether the first CUDA plan built for that width reads its
@@ -3668,7 +3668,7 @@ impl BackendRuntime {
     /// Selects the `(cache input, new-rows output)` pairs whose attention KV the following
     /// evaluations keep on the device, `cached_rows` being the valid host rows at the first
     /// upload; an empty set restores host round trips and requires a prior drain.
-    pub(super) fn set_kv_carry(&mut self, pairs: Vec<(NodeId, NodeId)>, cached_rows: u64) {
+    pub(super) fn set_kv_carry(&mut self, pairs: Vec<(NodeId, NodeId, NumericFormat)>, cached_rows: u64) {
         self.kv_carry_pairs = pairs;
         self.kv_carry_cached_rows = cached_rows;
         self.kv_carry_accepted = false;
@@ -5749,7 +5749,7 @@ impl BackendRuntime {
         Ok(Vec::new())
     }
 
-    pub(super) fn set_kv_carry(&mut self, _pairs: Vec<(NodeId, NodeId)>, _cached_rows: u64) {}
+    pub(super) fn set_kv_carry(&mut self, _pairs: Vec<(NodeId, NodeId, NumericFormat)>, _cached_rows: u64) {}
 
     pub(super) fn set_kv_cached_rows(&mut self, _cached_rows: u64) {}
 

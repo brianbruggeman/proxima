@@ -298,6 +298,25 @@ impl GpuDriver {
         }
     }
 
+    /// Whether this driver keeps a K cache stored as `key` and a V cache stored as `value` on the
+    /// device between steps: it reads both ([`Self::admits_kv_cache`]) and its encode render
+    /// accepts them, so the step's rows land in the cache's format.
+    ///
+    /// # Errors
+    /// A message naming the driver and the format it does not admit or encode.
+    pub fn admits_kv_carry(self, key: &NumericFormat, value: &NumericFormat) -> Result<(), String> {
+        self.admits_kv_cache(key, value)?;
+        #[cfg(feature = "cuda")]
+        if !matches!(self, GpuDriver::Metal) {
+            let dialect = crate::cuda_encode::CudaEncode { target: crate::cuda::target::Target::CUDA };
+            return [key, value].into_iter().try_for_each(|format| {
+                crate::encode_render::encode_kernel_refusal(&dialect, format)
+                    .map_err(|reason| format!("the {} driver cannot encode a {format:?} cache: {reason}", self.name()))
+            });
+        }
+        Ok(())
+    }
+
     /// The driver `config` names for its engine, `None` on `cpu`.
     ///
     /// # Errors
@@ -2350,12 +2369,12 @@ pub fn carry_cuda_state(plan: &mut Plan, pairs: &[(NodeId, NodeId)]) -> bool {
     }
 }
 
-/// Keeps each `(cache input, new-rows output)` pair's cache on the device of a [`Plan::Cuda`],
-/// appending every call's output rows to it there; `cached_rows` is the valid row count of the
-/// host block at the first upload. Returns whether the plan carries them; every other backend
-/// returns `false`.
+/// Keeps each `(cache input, new-rows output, cache format)` triple's cache on the device of a
+/// [`Plan::Cuda`], encoding every call's output rows into it there in the cache's format;
+/// `cached_rows` is the valid row count of the host block at the first upload. Returns whether
+/// the plan carries them; every other backend returns `false`.
 #[cfg(feature = "cuda-driver")]
-pub fn carry_cuda_rows(plan: &mut Plan, pairs: &[(NodeId, NodeId)], cached_rows: u64) -> bool {
+pub fn carry_cuda_rows(plan: &mut Plan, pairs: &[(NodeId, NodeId, NumericFormat)], cached_rows: u64) -> bool {
     match plan {
         Plan::Cuda(cuda_plan) => cuda_plan.carry_rows(pairs, cached_rows),
         #[allow(unreachable_patterns)]

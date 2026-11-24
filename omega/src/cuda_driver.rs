@@ -20,8 +20,8 @@ use std::time::Instant;
 use conflaguration::Settings;
 use cudarc::driver::sys as cuda_sys;
 use cudarc::driver::{
-    CudaContext, CudaEvent, CudaFunction, CudaModule, CudaSlice, CudaStream, CudaView, DriverError, LaunchArgs, LaunchConfig,
-    PushKernelArg,
+    CudaContext, CudaEvent, CudaFunction, CudaModule, CudaSlice, CudaStream, CudaView, CudaViewMut, DriverError, LaunchArgs,
+    LaunchConfig, PushKernelArg,
 };
 use crate::encode_render::{EncodeRows, RenderedEncode, row_bytes};
 use cudarc::nvrtc::sys as nvrtc_sys;
@@ -580,6 +580,20 @@ struct StateCarry {
     rows: KvCarry<NodeId>,
     cached_rows: u64,
     fresh_cached_rows: Option<u64>,
+    encodes: BTreeMap<NodeId, KvEncode>,
+}
+
+/// The format a carried cache input stores and the encode rendered for it: every appended row goes through it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KvEncode {
+    format: NumericFormat,
+    rendered: RenderedEncode,
+}
+
+fn kv_encode(format: &NumericFormat) -> Option<KvEncode> {
+    let dialect = crate::cuda_encode::CudaEncode { target: Target::CUDA };
+    let rendered = crate::encode_render::format_encode_kernel(&dialect, format, "kv_carry_encode").ok()?;
+    Some(KvEncode { format: *format, rendered })
 }
 
 /// Numeric and activation policy for one plan, plus the runtime config when the
@@ -770,6 +784,22 @@ impl CudaDriver {
         destination: &mut CudaSlice<u8>,
         rows: EncodeRows,
     ) -> Result<(), CudaDriverError> {
+        let mut window = destination.slice_mut(..);
+        self.encode_rows_into(rendered, format, source, &mut window, rows)
+    }
+
+    /// [`Self::encode_rows`] over a window of device bytes, so a cache whose storage is not a byte slice is encoded through the same dispatch.
+    ///
+    /// # Errors
+    /// As [`Self::encode_rows`].
+    pub fn encode_rows_into<Row: cudarc::driver::DeviceRepr>(
+        &self,
+        rendered: &RenderedEncode,
+        format: &NumericFormat,
+        source: &CudaSlice<Row>,
+        destination: &mut CudaViewMut<'_, u8>,
+        rows: EncodeRows,
+    ) -> Result<(), CudaDriverError> {
         if row_bytes() != Some(core::mem::size_of::<Row>()) {
             return Err(CudaDriverError::BindingContract);
         }
@@ -793,6 +823,22 @@ impl CudaDriver {
         };
         unsafe { args.launch(config) }?;
         Ok(())
+    }
+
+    /// Encodes `count` host row values from `source` into `cache` at the packed position of element `offset`, the cache's storage read as bytes.
+    fn encode_into_cache<Row: cudarc::driver::DeviceRepr>(
+        &self,
+        encode: &KvEncode,
+        source: &CudaSlice<Row>,
+        cache: &mut CudaSlice<Row>,
+        offset: usize,
+        count: usize,
+    ) -> Result<(), CudaDriverError> {
+        let byte_offset = encode.format.packed_len(offset).ok_or(CudaDriverError::BindingContract)?;
+        let bytes = cache.len() * core::mem::size_of::<Row>();
+        // the cache's own allocation read as bytes: every byte pattern is a valid u8
+        let mut window = unsafe { cache.transmute_mut::<u8>(bytes) }.ok_or(CudaDriverError::BindingContract)?;
+        self.encode_rows_into(&encode.rendered, &encode.format, source, &mut window, EncodeRows { element_count: count, byte_offset })
     }
 
     fn function_for(&self, kernel: &CudaKernel) -> Result<CudaFunction, CudaDriverError> {
@@ -3315,18 +3361,31 @@ impl CudaPlan {
         Ok(drained)
     }
 
-    /// Keeps each `(cache input, new-rows output)` pair's cache on the device: the input leaf has
-    /// shape `[extent_rows, ..row]`, the output `[new_rows, ..row]`. The first call uploads the host
-    /// block (holding `cached_rows` valid rows); afterwards the input is never uploaded and each
-    /// call's output rows are copied device-to-device onto the end of the valid rows, and the output
-    /// is not read back. Returns `false` (carrying nothing) for a resource-constrained plan, an
-    /// output that is not a plan output, or differing row widths. The same set keeps live state; a
-    /// different set requires [`Self::drain_appended_rows`] first. Every decision comes from
-    /// [`KvCarry`]; this method only runs the commands it returns.
-    pub fn carry_rows(&mut self, pairs: &[(NodeId, NodeId)], cached_rows: u64) -> bool {
+    /// Keeps each `(cache input, new-rows output, cache format)` triple's cache on the device: the
+    /// input leaf has shape `[extent_rows, ..row]`, the output `[new_rows, ..row]`. The first call
+    /// uploads the host block (holding `cached_rows` valid rows); afterwards the input is never
+    /// uploaded and each call's output rows are encoded into the cache's format at the end of the
+    /// valid rows through [`CudaDriver::encode_rows_into`], and the output is not read back. The
+    /// graph-output format is the identity encode. Returns `false` (carrying nothing) for a
+    /// resource-constrained plan, an output that is not a plan output, differing row widths, a
+    /// format the encode render refuses, or a format whose host block upload is not encoded yet
+    /// (anything but the graph-output format). The same set keeps live state; a different set
+    /// requires [`Self::drain_appended_rows`] first. Every decision comes from [`KvCarry`]; this
+    /// method only runs the commands it returns.
+    pub fn carry_rows(&mut self, pairs: &[(NodeId, NodeId, NumericFormat)], cached_rows: u64) -> bool {
+        let encodes: Option<BTreeMap<NodeId, KvEncode>> = pairs
+            .iter()
+            .map(|(input, _, format)| {
+                let encode = kv_encode(format).filter(|_| format.is_identity_of(&NumericFormat::default()));
+                encode.map(|encode| (*input, encode))
+            })
+            .collect();
+        let Some(encodes) = encodes else {
+            return false;
+        };
         let wanted: Vec<RowPair<NodeId>> = pairs
             .iter()
-            .map(|(input, output)| RowPair {
+            .map(|(input, output, _)| RowPair {
                 input: *input,
                 output: *output,
                 row_width: self.row_width(*input),
@@ -3335,15 +3394,19 @@ impl CudaPlan {
         self.carry.cached_rows = cached_rows;
         self.carry.fresh_cached_rows = Some(cached_rows);
         if self.carry.rows.selects(&wanted) {
+            if !wanted.is_empty() && encodes != self.carry.encodes {
+                return false;
+            }
             return self.drive_rows(KvEvent::Select { pairs: wanted }).is_ok();
         }
         let appendable = self.constraints.is_none()
             && pairs
                 .iter()
-                .all(|(input, output)| self.appendable(*input, *output));
+                .all(|(input, output, _)| self.appendable(*input, *output));
         if !appendable || self.carry.rows.has_live() {
             return false;
         }
+        self.carry.encodes = encodes;
         self.drive_rows(KvEvent::Select { pairs: wanted }).is_ok()
     }
 
@@ -3508,19 +3571,18 @@ impl CudaPlan {
         offset: usize,
         count: usize,
     ) -> Result<(), CudaDriverError> {
+        let Some(encode) = self.carry.encodes.get(&input) else {
+            return Err(CudaDriverError::MissingBuffer(input));
+        };
         let Some(CudaGraphBuffer::F32(mut cache)) = self.arena.buffers.remove(&input) else {
             return Err(CudaDriverError::MissingBuffer(input));
         };
-        let copied = match self.arena.buffers.get(&output) {
-            Some(CudaGraphBuffer::F32(source)) if source.len() >= count && offset + count <= cache.len() => self
-                .driver
-                .stream
-                .memcpy_dtod(&source.slice(0..count), &mut cache.slice_mut(offset..offset + count))
-                .map_err(CudaDriverError::from),
+        let appended = match self.arena.buffers.get(&output) {
+            Some(CudaGraphBuffer::F32(source)) => self.driver.encode_into_cache(encode, source, &mut cache, offset, count),
             _ => Err(CudaDriverError::MissingBuffer(output)),
         };
         self.arena.buffers.insert(input, CudaGraphBuffer::F32(cache));
-        copied
+        appended
     }
 
     /// Bytes of carried recurrent state that crossed PCIe in either direction so far.
@@ -4968,6 +5030,85 @@ mod tests {
         }
         eprintln!("device encode covered {covered:?}");
         assert!(!covered.is_empty(), "no format was encoded on the device");
+    }
+
+    fn carry_cache_bytes<Row: cudarc::driver::DeviceRepr>(driver: &CudaDriver, cache: &cudarc::driver::CudaSlice<Row>) -> Vec<u8> {
+        let bytes = cache.len() * core::mem::size_of::<Row>();
+        let view = unsafe { cache.transmute::<u8>(bytes) }.expect("the cache reads as bytes");
+        driver.stream.clone_dtoh(&view).expect("read the cache back")
+    }
+
+    fn carry_sentinel_cache<Row: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits>(
+        driver: &CudaDriver,
+        bytes: usize,
+    ) -> cudarc::driver::CudaSlice<Row> {
+        let words = bytes.div_ceil(core::mem::size_of::<Row>());
+        let mut cache = driver.stream.alloc_zeros::<Row>(words).expect("allocate the sentinel cache");
+        let total = words * core::mem::size_of::<Row>();
+        let mut view = unsafe { cache.transmute_mut::<u8>(total) }.expect("the cache writes as bytes");
+        driver.stream.memcpy_htod(&vec![u8::MAX; total], &mut view).expect("fill the sentinel");
+        cache
+    }
+
+    #[test]
+    fn carrying_graph_output_rows_leaves_the_bytes_of_the_old_device_copy() {
+        use super::kv_encode;
+        use proxima_numeric::NumericFormat;
+
+        let driver = CudaDriver::new(0).expect("a cuda device");
+        let format = NumericFormat::default();
+        let encode = kv_encode(&format).expect("the graph output format renders an encode");
+        let NumericFormat::Scalar(layout) = &format else { panic!("the graph output format is a scalar") };
+        let maximum = layout.max_normal();
+        let infinity = maximum / (maximum * 0.0);
+        let nan = infinity - infinity;
+        let rows = [maximum * 0.0, -maximum * 0.0, 1.0, 0.1, maximum, layout.min_subnormal() * 0.5, infinity, -infinity, nan, -nan];
+        let source = driver.stream.clone_htod(&rows).expect("upload rows");
+        let offset = 3;
+        let filler = vec![rows[2] * 7.5; offset + rows.len() + offset];
+        let mut encoded = driver.stream.clone_htod(&filler).expect("upload cache");
+        let mut copied = driver.stream.clone_htod(&filler).expect("upload cache");
+        driver.encode_into_cache(&encode, &source, &mut encoded, offset, rows.len()).expect("the carry encodes");
+        driver.stream.memcpy_dtod(&source.slice(0..rows.len()), &mut copied.slice_mut(offset..offset + rows.len())).expect("the old copy");
+        driver.stream.synchronize().expect("the carry completes");
+        assert_eq!(carry_cache_bytes(&driver, &encoded), carry_cache_bytes(&driver, &copied));
+    }
+
+    #[test]
+    fn carrying_into_a_narrow_cache_format_writes_the_host_codec_bytes_at_the_row_offset() {
+        use super::kv_encode;
+        use proxima_numeric::{FormatCodec, NumericFormat};
+
+        let driver = CudaDriver::new(0).expect("a cuda device");
+        let mut covered = Vec::new();
+        for format in NumericFormat::every() {
+            let Some(encode) = kv_encode(&format) else { continue };
+            if format.is_identity_of(&NumericFormat::default()) {
+                continue;
+            }
+            let NumericFormat::Scalar(layout) = &format else { continue };
+            let maximum = layout.max_normal();
+            let mut values = vec![1.0, -1.0, 0.1, maximum / 3.0, maximum, -maximum * 2.0, layout.min_subnormal(), maximum * 0.0];
+            while values.len() % encode.rendered.elements_per_thread != 0 {
+                values.push(0.5);
+            }
+            let codec = FormatCodec::for_format(&format).expect("a rendered format resolves");
+            let mut expected = vec![0u8; codec.packed_len(values.len()).expect("whole elements")];
+            codec.encode(&values, &mut expected).expect("the host encodes");
+            let skipped = encode.rendered.elements_per_thread * 2;
+            let byte_offset = format.packed_len(skipped).expect("whole blocks");
+            let source = driver.stream.clone_htod(&values).expect("upload rows");
+            let mut cache = carry_sentinel_cache(&driver, byte_offset + expected.len() + byte_offset);
+            let before = carry_cache_bytes(&driver, &cache);
+            driver.encode_into_cache(&encode, &source, &mut cache, skipped, values.len()).expect("the carry encodes");
+            driver.stream.synchronize().expect("the carry completes");
+            let after = carry_cache_bytes(&driver, &cache);
+            assert_eq!(after[byte_offset..byte_offset + expected.len()], expected[..], "{format:?}: the rows are not the host codec's bytes");
+            assert_eq!(after[..byte_offset], before[..byte_offset], "{format:?}: rows before the offset changed");
+            assert_eq!(after[byte_offset + expected.len()..], before[byte_offset + expected.len()..], "{format:?}: rows past the range changed");
+            covered.push(format);
+        }
+        assert!(!covered.is_empty(), "no narrow format was carried");
     }
 }
 

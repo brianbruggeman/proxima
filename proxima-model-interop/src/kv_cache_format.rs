@@ -133,6 +133,36 @@ pub(crate) fn stores_graph_output(format: &NumericFormat) -> bool {
     stores_graph_output_format(format)
 }
 
+/// Whether the active backend keeps a cache stored as `key` and `value` on the device between
+/// steps: it admits the pair and its encode render accepts both formats. A build with no driver
+/// keeps only the graph-output format.
+#[cfg(feature = "std")]
+pub(crate) fn carry_admitted(key: &NumericFormat, value: &NumericFormat) -> bool {
+    carry_pair(key, value).is_ok()
+}
+
+#[cfg(all(feature = "std", feature = "gpu"))]
+fn carry_pair(key: &NumericFormat, value: &NumericFormat) -> Result<(), String> {
+    match omega::backend::GpuDriver::for_target() {
+        Some(driver) => driver.admits_kv_carry(key, value),
+        None => graph_output_pair(key, value),
+    }
+}
+
+#[cfg(all(feature = "std", not(feature = "gpu")))]
+fn carry_pair(key: &NumericFormat, value: &NumericFormat) -> Result<(), String> {
+    graph_output_pair(key, value)
+}
+
+#[cfg(feature = "std")]
+fn graph_output_pair(key: &NumericFormat, value: &NumericFormat) -> Result<(), String> {
+    if stores_graph_output_format(key) && stores_graph_output_format(value) {
+        Ok(())
+    } else {
+        Err(String::from("only the graph output format is carried"))
+    }
+}
+
 /// Whether the cache is narrower than the graph's binary32 output: the kernel reads it through a
 /// codec, so the step's rows are narrowed into a device-resident cache.
 #[cfg(all(

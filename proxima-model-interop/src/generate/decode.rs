@@ -4705,7 +4705,10 @@ not read this cache format; only the single-row decode kernel reads it from the 
         let mut step = 0usize;
         let mut carried_layers: Vec<(usize, NodeId)> = Vec::new();
         let mut carried_program = 0usize;
-        let kv_carry_eligible = kv_cache_format::stores_graph_output(&serving_config.kv_cache_key_quant)
+        let kv_carry_eligible = kv_cache_format::carry_admitted(
+            &serving_config.kv_cache_key_quant,
+            &serving_config.kv_cache_value_quant,
+        )
             && layer_caches.iter().all(|state| match state {
                 LayerCacheState::Attention(cache) => cache.ring.is_none(),
                 _ => true,
@@ -5202,7 +5205,13 @@ not read this cache format; only the single-row decode kernel reads it from the 
                             kv_carried_layers[leaf.layer] = true;
                         }
                         runtime.set_kv_carry(
-                            kv_carried.iter().map(|leaf| (leaf.input, leaf.output)).collect(),
+                            kv_carried
+                                .iter()
+                                .filter_map(|leaf| {
+                                    let format = kv_field_format(&layer_caches[leaf.layer], leaf.field)?;
+                                    Some((leaf.input, leaf.output, format))
+                                })
+                                .collect(),
                             cached_len as u64,
                         );
                         kv_carry_program = program_address;
@@ -9296,6 +9305,20 @@ fn kv_leaves_share_inputs(carried: &[KvCarryLeaf], next: &[KvCarryLeaf]) -> bool
             .iter()
             .zip(next)
             .all(|(left, right)| (left.input, left.layer, left.field) == (right.input, right.layer, right.field))
+}
+
+fn kv_field_format(state: &LayerCacheState, field: usize) -> Option<NumericFormat> {
+    let plane = match (state, field) {
+        (LayerCacheState::Attention(cache), 0) => &cache.k_even,
+        (LayerCacheState::Attention(cache), 1) => &cache.k_odd,
+        (LayerCacheState::Attention(cache), 2) => &cache.v,
+        (LayerCacheState::DenseAttention(cache), 0) => &cache.k_first,
+        (LayerCacheState::DenseAttention(cache), 1) => &cache.k_second,
+        (LayerCacheState::DenseAttention(cache), 2) => &cache.k_pass,
+        (LayerCacheState::DenseAttention(cache), 3) => &cache.v,
+        _ => return None,
+    };
+    Some(*plane.format())
 }
 
 fn write_kv_field(state: &mut LayerCacheState, field: usize, values: &[f32]) -> Result<(), InteropError> {
