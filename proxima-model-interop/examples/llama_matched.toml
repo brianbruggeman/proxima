@@ -16,3 +16,12 @@ reciprocal_activation_scale_above_rows = 8
 # no layer is offloaded on cpu: llama gets -ngl 0 and proxima loads on the host. selected by --backend.
 [backend.cpu]
 gpu_layers = 0
+incumbent_device = ""
+
+# the device-name prefix llama's own --list-devices must show for this backend (empty: llama runs every op on the
+# cpu with -dev none). the harness refuses a llama that lists no such device. selected by --backend.
+[backend.metal]
+incumbent_device = "MTL"
+
+[backend.cuda]
+incumbent_device = "CUDA"

@@ -2023,6 +2023,101 @@ fn check_offload_matches_backend(backend: &str, gpu_layers: i32) -> Result<(), H
     })
 }
 
+const INCUMBENT_DEVICE_KEY: &str = "incumbent_device";
+const DEVICE_LIST_HEADER: &str = "Available devices:";
+const LLAMA_PROBE_LIMIT: Duration = Duration::from_secs(30);
+const LLAMA_NO_DEVICE_ARGS: [&str; 3] = ["-dev", "none", "--no-op-offload"];
+const LLAMA_NO_DEVICE_HELP_FLAGS: [&str; 2] = ["--device", "--no-op-offload"];
+
+/// the device-name prefix the serving TOML names for the backend; `None` when the file names none.
+fn incumbent_device_prefix(config: &Config) -> Result<Option<String>, HarnessError> {
+    let path = serving_config_path(config);
+    let text = if path.is_file() {
+        fs::read_to_string(&path).map_err(io_error(&path))?
+    } else {
+        include_str!("llama_matched.toml").to_owned()
+    };
+    let table: toml::Table = text.parse().map_err(|source| HarnessError::BadResponse(format!("serving toml: {source}")))?;
+    Ok(table.get(INCUMBENT_DEVICE_KEY).and_then(toml::Value::as_str).map(str::to_owned))
+}
+
+/// names under the "Available devices:" header of llama's `--list-devices` text: `  MTL0: Apple M1 Max (...)` yields `MTL0`.
+fn parse_llama_devices(text: &str) -> Vec<String> {
+    text.lines()
+        .skip_while(|line| line.trim() != DEVICE_LIST_HEADER)
+        .skip(1)
+        .filter_map(|line| line.trim().split_once(':'))
+        .map(|(name, _)| name)
+        .filter(|name| !name.is_empty() && !name.contains(char::is_whitespace))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// refuses a llama that lists no device with the backend's prefix; an empty prefix admits any list.
+fn check_incumbent_device(backend: &str, prefix: &str, devices: &[String]) -> Result<(), HarnessError> {
+    if prefix.is_empty() || devices.iter().any(|device| device.starts_with(prefix)) {
+        return Ok(());
+    }
+    Err(HarnessError::BadValue {
+        flag: "--llama",
+        expected: "a llama build whose --list-devices shows a device of the measured backend",
+        got: format!("backend {backend} needs a device starting with {prefix:?}, llama lists [{}]", devices.join(", ")),
+    })
+}
+
+/// an empty prefix runs llama on no device, which needs these flags in its help text.
+fn check_llama_help_has_flags(help: &str, flags: &[&str]) -> Result<(), HarnessError> {
+    match flags.iter().find(|flag| !help.contains(**flag)) {
+        None => Ok(()),
+        Some(missing) => Err(HarnessError::BadValue {
+            flag: "--llama",
+            expected: "a llama whose --help lists every flag the no-device run passes",
+            got: format!("{missing} is missing from its help text"),
+        }),
+    }
+}
+
+fn llama_device_args(prefix: &str) -> Vec<String> {
+    if prefix.is_empty() { LLAMA_NO_DEVICE_ARGS.map(str::to_owned).to_vec() } else { Vec::new() }
+}
+
+/// runs `llama <argument>` with stdout and stderr in one file under a deadline; the process is killed past it.
+fn llama_probe_text(config: &Config, argument: &str, name: &str) -> Result<String, HarnessError> {
+    let path = config.out.join(name);
+    fs::create_dir_all(&config.out).map_err(io_error(&config.out))?;
+    let sink = File::create(&path).map_err(io_error(&path))?;
+    let twin = sink.try_clone().map_err(io_error(&path))?;
+    let mut child = Command::new(&config.llama)
+        .arg(argument)
+        .stdin(Stdio::null())
+        .stdout(sink)
+        .stderr(twin)
+        .spawn()
+        .map_err(|source| HarnessError::Server(format!("spawn {} {argument}: {source}", config.llama.display())))?;
+    let deadline = Instant::now() + LLAMA_PROBE_LIMIT;
+    while child.try_wait().map_err(io_error(&path))?.is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(HarnessError::Server(format!("llama {argument} did not exit in {LLAMA_PROBE_LIMIT:?}")));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    fs::read_to_string(&path).map_err(io_error(&path))
+}
+
+/// before any process starts: llama must list a device of the backend (or, for none, accept the no-device flags);
+/// returns the listed devices for the rows.
+fn probe_incumbent(config: &Config, backend: &str) -> Result<Vec<String>, HarnessError> {
+    let prefix = incumbent_device_prefix(config)?.unwrap_or_default();
+    let devices = parse_llama_devices(&llama_probe_text(config, "--list-devices", "llama_devices.txt")?);
+    check_incumbent_device(backend, &prefix, &devices)?;
+    if prefix.is_empty() {
+        check_llama_help_has_flags(&llama_probe_text(config, "--help", "llama_help.txt")?, &LLAMA_NO_DEVICE_HELP_FLAGS)?;
+    }
+    Ok(devices)
+}
+
 /// llama-server under `/usr/bin/time -l`; `stop` signals the server so `time` reports its peak.
 struct TimedServer {
     timer: Child,
@@ -2044,6 +2139,7 @@ impl TimedServer {
         let batch = base.batch_size.to_string();
         let ubatch = base.ubatch_size.to_string();
         let offload = llama_gpu_layers_args(base.gpu_layers);
+        let device_args = llama_device_args(&incumbent_device_prefix(config)?.unwrap_or_default());
         let stderr_file = File::create(stderr_path).map_err(io_error(stderr_path))?;
         let timer = Command::new(&config.time_bin)
             .arg(TimeFormat::current().flag())
@@ -2051,6 +2147,7 @@ impl TimedServer {
             .arg("-m")
             .arg(&config.model)
             .args(&offload)
+            .args(&device_args)
             .args(["-fa", flash, "-np", "1", "--no-warmup", "--seed", "1"])
             .args(["-b", &batch, "-ub", &ubatch])
             .args(["-c", &capacity.to_string(), "-ctk", key, "-ctv", value])
@@ -2611,6 +2708,7 @@ struct RecordContext {
     commit: String,
     session_id: String,
     llama_commit: String,
+    llama_devices: String,
     proxima_arm: String,
     host: HostFacts,
 }
@@ -2626,7 +2724,7 @@ fn llama_arm_version(row: &Row, context: &RecordContext) -> String {
     } else {
         context.llama_commit.clone()
     };
-    format!("{base}+fa={}", row.flash)
+    format!("{base}+dev={}+fa={}", context.llama_devices, row.flash)
 }
 
 fn arm_of(row: &Row, context: &RecordContext) -> (String, String) {
@@ -2918,6 +3016,7 @@ fn run(config: &Config) -> Result<(), HarnessError> {
     let backend = config.backend.clone().ok_or(HarnessError::MissingFlag("--backend"))?;
     let commit = config.commit.clone().ok_or(HarnessError::MissingFlag("--commit"))?;
     check_offload_matches_backend(&backend, llama_matched_settings(config).as_serving_config(&[]).gpu_layers)?;
+    let llama_devices = probe_incumbent(config, &backend)?.join(",");
     let contract = load_contract()?;
     let logs = config.out.join("logs");
     fs::create_dir_all(&logs).map_err(io_error(&logs))?;
@@ -2942,6 +3041,7 @@ fn run(config: &Config) -> Result<(), HarnessError> {
         commit,
         session_id,
         llama_commit: config.llama_commit.clone(),
+        llama_devices,
         proxima_arm: contract_proxima_arm(&contract),
         host: host_facts(),
     };
@@ -5255,7 +5355,7 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         let unhashed = Facts { llama_sha256: String::new(), ..facts() };
         assert_eq!(failing_names(&proxima, &llama, &unhashed), vec!["I12"]);
         let context = fixture_context(&load_contract().expect("contract.json"));
-        assert_eq!(arm_of(&llama, &context).1, format!("ba3c05f71+sha256:{}+fa={}", llama.binary_sha256, llama.flash));
+        assert_eq!(arm_of(&llama, &context).1, format!("ba3c05f71+sha256:{}+dev={}+fa={}", llama.binary_sha256, context.llama_devices, llama.flash));
     }
     #[test]
     fn i8_fails_for_a_debug_binary_or_a_missing_binary_hash() {
@@ -6093,6 +6193,7 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
             commit: "2364281a8".to_owned(),
             session_id: "s-fixture".to_owned(),
             llama_commit: "ba3c05f71".to_owned(),
+            llama_devices: "MTL0,BLAS".to_owned(),
             proxima_arm: contract_proxima_arm(contract),
             host: fixture_host(),
         }
@@ -6254,10 +6355,12 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
 
     #[test]
     fn metal_and_unknown_backends_merge_to_the_base() {
-        for backend in ["metal", "not-a-backend"] {
-            let merged: toml::Table = merged_serving_toml(SERVING_TOML, backend).expect("merge").parse().expect("parse");
-            assert_eq!(merged, base_serving_table(), "{backend}");
-        }
+        let unknown: toml::Table = merged_serving_toml(SERVING_TOML, "not-a-backend").expect("merge").parse().expect("parse");
+        assert_eq!(unknown, base_serving_table());
+        let mut metal_base = base_serving_table();
+        metal_base.insert(INCUMBENT_DEVICE_KEY.to_owned(), toml::Value::String("MTL".to_owned()));
+        let metal: toml::Table = merged_serving_toml(SERVING_TOML, "metal").expect("merge").parse().expect("parse");
+        assert_eq!(metal, metal_base);
         assert!(!merged_settings("metal").numeric_policy.activation_quantization);
     }
 
@@ -6285,5 +6388,67 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         assert!(cpu_with_layers.contains("cpu") && cpu_with_layers.contains("-1"), "{cpu_with_layers}");
         let gpu_without_layers = check_offload_matches_backend("cuda", 0).expect_err("gpu with none").to_string();
         assert!(gpu_without_layers.contains("cuda") && gpu_without_layers.contains('0'), "{gpu_without_layers}");
+    }
+
+    const NO_GPU_DEVICES: &str = "Available devices:\n  BLAS: Accelerate\n";
+    const METAL_DEVICES: &str = "Available devices:\n  MTL0: Apple M1 Max (49152 MiB, 49151 MiB free)\n  BLAS: Accelerate\n";
+    const CUDA_DEVICES: &str = "ggml_cuda_init: found a device\nAvailable devices:\n  CUDA0: NVIDIA GeForce RTX (24564 MiB, 23000 MiB free)\n";
+    const FULL_HELP: &str = "  -dev,  --device <dev1,dev2,..>  comma-separated list of devices\n  --no-op-offload   disable offloading host tensor operations to device\n";
+
+    fn serving_prefix(backend: &str) -> String {
+        let text = merged_serving_toml(SERVING_TOML, backend).expect("merge");
+        let table: toml::Table = text.parse().expect("parse");
+        table.get(INCUMBENT_DEVICE_KEY).and_then(toml::Value::as_str).expect("backend names a device prefix").to_owned()
+    }
+
+    #[test]
+    fn the_device_list_parses_names_and_skips_the_header() {
+        assert_eq!(parse_llama_devices(METAL_DEVICES), ["MTL0", "BLAS"]);
+        assert_eq!(parse_llama_devices(CUDA_DEVICES), ["CUDA0"]);
+        assert_eq!(parse_llama_devices(NO_GPU_DEVICES), ["BLAS"]);
+    }
+
+    #[test]
+    fn a_llama_without_a_gpu_refuses_metal_and_cuda_naming_the_devices() {
+        let devices = parse_llama_devices(NO_GPU_DEVICES);
+        for backend in ["metal", "cuda"] {
+            let refusal = check_incumbent_device(backend, &serving_prefix(backend), &devices).expect_err(backend).to_string();
+            assert!(refusal.contains(backend) && refusal.contains("BLAS"), "{refusal}");
+        }
+    }
+
+    #[test]
+    fn a_listed_device_of_the_backend_admits_it() {
+        assert!(check_incumbent_device("metal", &serving_prefix("metal"), &parse_llama_devices(METAL_DEVICES)).is_ok());
+        assert!(check_incumbent_device("cuda", &serving_prefix("cuda"), &parse_llama_devices(CUDA_DEVICES)).is_ok());
+        assert!(check_incumbent_device("metal", &serving_prefix("metal"), &parse_llama_devices(CUDA_DEVICES)).is_err());
+    }
+
+    #[test]
+    fn cpu_runs_llama_on_no_device_and_gpu_backends_pass_no_device_flags() {
+        let prefix = serving_prefix("cpu");
+        assert_eq!(prefix, "");
+        assert!(check_incumbent_device("cpu", &prefix, &[]).is_ok());
+        let mut args = llama_device_args(&prefix);
+        args.extend(llama_gpu_layers_args(merged_settings("cpu").gpu_layers));
+        assert_eq!(args, ["-dev", "none", "--no-op-offload", "-ngl", "0"]);
+        assert!(llama_device_args(&serving_prefix("cuda")).is_empty());
+    }
+
+    #[test]
+    fn a_help_text_missing_a_no_device_flag_refuses_naming_it() {
+        assert!(check_llama_help_has_flags(FULL_HELP, &LLAMA_NO_DEVICE_HELP_FLAGS).is_ok());
+        for missing in LLAMA_NO_DEVICE_HELP_FLAGS {
+            let help = FULL_HELP.lines().filter(|line| !line.contains(missing)).collect::<Vec<_>>().join("\n");
+            let refusal = check_llama_help_has_flags(&help, &LLAMA_NO_DEVICE_HELP_FLAGS).expect_err(missing).to_string();
+            assert!(refusal.contains(missing), "{refusal}");
+        }
+    }
+
+    #[test]
+    fn the_llama_arm_version_records_its_device_list() {
+        let contract = load_contract().expect("contract.json");
+        let version = llama_arm_version(&llama_row(vec![1]), &fixture_context(&contract));
+        assert!(version.contains("+dev=MTL0,BLAS+"), "{version}");
     }
 }
