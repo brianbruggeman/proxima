@@ -53,18 +53,18 @@ SUMMARY  passed=3 failed=0 ignored=0 not_run=0  wall=2.406s discovered=203 run=3
 
 ## 3. What exists end to end, and what omega does not do yet
 
-Whisper transcribes today. `Model::load` and `Model::transcribe` (`proxima-model-interop/src/families/encoder_decoder_host.rs:474`) run the front end, the encoder, the cross-KV cache and the token loop on a checkpoint directory, on CPU or, through `with_device`, on Metal. The test `transcript::ids_and_text_match_the_reference` (`proxima-model-interop/tests/whisper.rs:1202`) transcribes a wav and asserts the token ids, the end-of-text stop and the text equal the reference. `proxima-model-interop/specs/whisper/SPEC.md:3` lists S8 (two modes from one graph set) and S11-S13 (training overfit, genericity audit, timed comparison) as open.
+Whisper transcribes today. `Model::load` and `Model::transcribe` (`proxima-model-interop/src/families/encoder_decoder_host.rs:687`) run the front end, the encoder, the cross-KV cache and the token loop on a checkpoint directory, on CPU or, when the serving settings passed to `with_settings` set `gpu_layers` to `GPU_LAYERS_ALL`, on Metal. The test `transcript::ids_and_text_match_the_reference` (`proxima-model-interop/tests/whisper.rs:1216`) transcribes a wav and asserts the token ids, the end-of-text stop and the text equal the reference. `proxima-model-interop/specs/whisper/SPEC.md:3` lists S8 (two modes from one graph set) and S11-S13 (training overfit, genericity audit, timed comparison) as open.
 
 - A per-model profile is ruled out. The spec's second requirement (`proxima-model-interop/specs/whisper/SPEC.md:26`) forbids a per-model profile — no `whisper.toml`, no "whisper" branch in omega or interop. The intended path is one encoder-decoder template that fills its slots from `model.safetensors` names plus `config.json`. A template is more work than a profile, which is why it is not done.
 - It is slower than whisper.cpp on every measured row. Source: slot-0 `kv-epic/SCOREBOARD.md`, section "whisper (speech) vs whisper.cpp v1.9.5", read 2026-11-24, jfk.wav (11 s) on an M1 Max, token ids exact on both models.
 
   | model | device | omega | whisper.cpp v1.9.5 | ratio |
   |---|---|---|---|---|
-  | tiny | Metal | 2.69-2.78 s (n=3, 2026-11-23) | 0.28-0.34 s (n=3, other session) | about 9.2x |
+  | tiny | Metal | 1.24 s (n=3 median, 2026-11-24, same window) | 0.34 s (n=3 median) | about 3.6x |
   | tiny | CPU | 20.92 s | 0.506 s | 41.3x |
-  | large-v3-turbo | Metal | 62.14 s | 1.318 s | 47.2x |
+  | large-v3-turbo | Metal | 62.14 s (not re-measured) | 1.318 s | 47.2x |
   | large-v3-turbo | CPU | 150.92 s | 1.318 s | 114.5x |
 
-  On tiny/Metal the gap is encode (870-903 ms against 32-40 ms, about 24x) and decode per token (64.3-65.7 ms against 1.2-1.8 ms, about 43x). Load and mel are not where the time goes. The owner's bar is about 300 ms for tiny; the 5% bar is 0.315 s. [Page 07 section 5](./07-comparisons.md#5-whispercpp) has the commits, the load under each run and the caveats.
+  On tiny/Metal the gap is encode (720-737 ms against 30-37 ms, about 22x) and mel (117-123 ms against 4.5-4.7 ms, about 26x); decode is 8.7-8.8 ms/token, down from 63.8 before the decode reuse landed. The owner's bar is about 300 ms for tiny; the 5% bar is 0.357 s. [Page 07 section 5](./07-comparisons.md#5-whispercpp) has the commits, the load under each run and the caveats.
 
 Next: [06: diffusion](./06-diffusion.md) does the same for image generation: the adaLN and attention pieces exist and are differentiable; the scheduler and the VAE decode do not.

@@ -19,7 +19,7 @@ The five targets, and the answer each one gets today:
 | llama.cpp | measured, depends on the model | flint (MoE) on Metal, 2026-11-22: TTFT 1.002x, decode 0.904x, peak RAM 0.81x of llama.cpp b12110. Other models range from 0.43x (gemma4 e2b warm TTFT, 2,024 tokens) to 1.48x decode and 7.9x TTFT (granite on CUDA), section 2 |
 | burn | rate measured, accuracy not comparable | 2.25 s per 256-image iteration; its example is a CNN over 20 epochs, page 03 is an MLP over 4 |
 | PyTorch | gap | not installed, and this workspace installs no Python tooling |
-| whisper.cpp | measured, exact token parity | Metal, tiny: 2.77 s vs about 0.30 s (about 9.2x slower); large-v3-turbo: 62.14 s vs 1.318 s (47.2x slower). Section 5 |
+| whisper.cpp | measured, exact token parity | Metal, tiny, 2026-11-24 same window: 1.24 s vs 0.34 s median (about 3.6x slower); large-v3-turbo: 62.14 s vs 1.318 s (47.2x slower, not re-measured). Section 5 |
 | stable-diffusion.cpp | measured, FLUX.2 klein 4B | Metal, 2026-11-24 same window: 48.87 s vs 59.80 s median wall (0.82x), n=3. Model load is the stage omega loses, section 6 |
 
 Ratios are omega over incumbent, so below 1.0x omega takes less time or memory. The numbers on this page come from the slot-0 `kv-epic/SCOREBOARD.md` (llama.cpp, whisper.cpp, sd.cpp) and from page 06 section 4; each section names its date and run count.
@@ -101,14 +101,14 @@ omega transcribes jfk.wav (11 s) end to end (page 05) and is slower than whisper
 
 | model | device | omega | whisper.cpp | ratio | commit |
 |---|---|---|---|---|---|
-| tiny | Metal | 2.69-2.78 s (n=3, median 2.77 s) | 0.28-0.34 s (n=3, median 0.30 s) | about 9.2x slower | `42e701117`, unlanded `card/proxnum-683` |
+| tiny | Metal | 1.24 s (n=3 median) | 0.34 s (n=3 median; v1.9.5 defaults, beam 5, best-of-5) | about 3.6x slower | `6aec3fa1539` |
 | tiny | CPU | 20.92 s | 0.506 s | 41.3x | `ca546929e`, `evaluate_named` |
 | large-v3-turbo | Metal | 62.14 s | 1.318 s | 47.2x | `ca546929e` plus the Metal backend, load 3.8-14.5 |
 | large-v3-turbo | CPU | 150.92 s | 1.318 s | 114.5x | `ca546929e` |
 
-The tiny Metal row has two sessions behind it: omega on 2026-11-23 about 12:2x at load 3.7-4.4, whisper.cpp the same day about 08:2x at load 7.3-7.9. An alternating rerun is owed. The owner's bar is about 300 ms for tiny, which is whisper.cpp's time; at the 5% bar of 0.315 s, omega is about 8.8x over. For turbo the 5% bar is 1.384 s, and omega is 44.9x over.
+The tiny Metal row is one window, 2026-11-24, n=3 per side, jfk.wav, ids 24/24 on both; logs are under `~/.cache/kvgate/proxnum683/wm1/`. Before the decode reuse landed (`42e701117`, same window) omega took 2.71 s and 63.8 ms/token. The owner's bar is about 300 ms for tiny; at whisper.cpp's 0.34 s the 5% bar is 0.357 s, and omega is about 3.5x over. The turbo row was not re-measured; its 5% bar is 1.384 s, and omega is 44.9x over.
 
-Where the time goes, tiny on Metal (omega vs whisper.cpp): encode 870-903 ms vs 32-40 ms (about 24x), decode 64.3-65.7 vs 1.2-1.8 ms/token (about 43x), mel 126-162 vs 4.7 ms, peak RAM 0.94 vs 0.23 GB (about 4.1x). Load goes the other way: 21-29 ms for omega against 54-56 ms. Encode and decode per token carry the gap, not load.
+Where the time goes, tiny on Metal (omega vs whisper.cpp): mel 117-123 ms vs 4.5-4.7 ms (about 26x), encode 720-737 ms vs 30-37 ms (about 22x), decode 8.7-8.8 ms/token, footprint 0.83 vs 0.26 GB (about 3.2x; omega's RSS is 0.74 GB). Encode and mel carry the gap.
 
 For turbo the only stage breakdown is the CPU one from before PROXNUM-681 (n=1, `2a0bfa33d`): 123.38 s wall, of which encode 104.4 s and decode 17.58 s (651 ms/token, 27 tokens), against whisper.cpp's 378.4 ms encode and 1.91 ms/token. `user` 117.27 s against `real` 123.38 s, so about one core. Peak RAM was 22.79 GB against 1.84 GB; on the unlanded `card/proxnum-681` it is 4.81 GB (about 2.6x) with 27/27 ids, and wall is unchanged because the work still runs on the CPU.
 
