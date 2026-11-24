@@ -151,18 +151,14 @@ pub enum ScaleArithmetic {
 }
 
 impl ScaleArithmetic {
-    /// The most rows llama.cpp's CUDA matvec path takes (`MMVQ_MAX_BATCH_SIZE`, `mmvq.cuh:3`); a
-    /// product over more rows takes the matmul path and its quantizer.
-    pub const SINGLE_ROW_LIMIT: u64 = 8;
-
-    /// The arithmetic llama.cpp picks for an activation read by `rows` rows when `batched` asks for
-    /// its batched rule; `Quotient` otherwise.
+    /// The arithmetic for an activation read by `rows` rows when the policy asks for the reciprocal
+    /// above `reciprocal_above_rows` rows (`NumericPolicy::reciprocal_activation_scale_above_rows`);
+    /// `Quotient` when it names no limit or `rows` is within it.
     #[must_use]
-    pub const fn for_rows(rows: u64, batched: bool) -> Self {
-        if batched && rows > Self::SINGLE_ROW_LIMIT {
-            Self::ReciprocalMultiply
-        } else {
-            Self::Quotient
+    pub const fn for_rows(rows: u64, reciprocal_above_rows: Option<usize>) -> Self {
+        match reciprocal_above_rows {
+            Some(limit) if rows > limit as u64 => Self::ReciprocalMultiply,
+            _ => Self::Quotient,
         }
     }
 

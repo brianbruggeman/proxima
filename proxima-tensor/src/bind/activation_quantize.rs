@@ -356,7 +356,7 @@ pub fn derive_activation_quantize(
             [tokens, depth],
             template,
             &held,
-            ScaleArithmetic::for_rows(tokens, policy.batched_activation_reciprocal),
+            ScaleArithmetic::for_rows(tokens, policy.reciprocal_activation_scale_above_rows),
         ));
         for consumer in consumers {
             repoints.entry(consumer.position).or_default().push((consumer.slot, derived));
@@ -688,10 +688,11 @@ mod tests {
 
     #[test]
     fn the_quantize_arithmetic_follows_the_policy_and_the_row_count_like_llama() {
-        let many = fixture(ScaleArithmetic::SINGLE_ROW_LIMIT as u32 + 1, false);
-        let few = fixture(ScaleArithmetic::SINGLE_ROW_LIMIT as u32, false);
+        let limit = 3;
+        let many = fixture(limit as u32 + 1, false);
+        let few = fixture(limit as u32, false);
         let single = fixture(1, false);
-        let batched = granted().with_batched_activation_reciprocal(true);
+        let batched = granted().with_reciprocal_activation_scale_above_rows(Some(limit));
         assert_eq!(derived_arithmetics(&many, batched), [ScaleArithmetic::ReciprocalMultiply]);
         assert_eq!(derived_arithmetics(&few, batched), [ScaleArithmetic::Quotient]);
         assert_eq!(derived_arithmetics(&single, batched), [ScaleArithmetic::Quotient]);

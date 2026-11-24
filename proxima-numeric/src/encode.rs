@@ -1606,10 +1606,10 @@ mod tests {
             assert_eq!(arithmetic.scale(0.0, 127.0), 0.0);
             assert_eq!(arithmetic.code(0.0, 0.0, 127.0), 0);
         }
-        let limit = ScaleArithmetic::SINGLE_ROW_LIMIT;
-        assert_eq!(ScaleArithmetic::for_rows(limit, true), ScaleArithmetic::Quotient);
-        assert_eq!(ScaleArithmetic::for_rows(limit + 1, true), ScaleArithmetic::ReciprocalMultiply);
-        assert_eq!(ScaleArithmetic::for_rows(limit + 1, false), ScaleArithmetic::Quotient);
+        let limit = 3;
+        assert_eq!(ScaleArithmetic::for_rows(limit as u64, Some(limit)), ScaleArithmetic::Quotient);
+        assert_eq!(ScaleArithmetic::for_rows(limit as u64 + 1, Some(limit)), ScaleArithmetic::ReciprocalMultiply);
+        assert_eq!(ScaleArithmetic::for_rows(limit as u64 + 1, None), ScaleArithmetic::Quotient);
     }
 
     const FLINT_EXPERT_ROWS: &str =

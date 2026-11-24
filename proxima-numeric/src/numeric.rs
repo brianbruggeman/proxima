@@ -116,13 +116,13 @@ pub struct NumericPolicy {
     #[cfg_attr(feature = "config", setting(default = false))]
     #[cfg_attr(feature = "config", serde(default))]
     pub flat_activation_blocks: bool,
-    /// Quantizes an activation read by many rows the way llama.cpp's batched path does (`quantize_mmq_q8_1`:
-    /// multiply by the reciprocal of the scale) and a single row the way its matvec path does
-    /// (`quantize_q8_1`: divide by the scale); see [`crate::encode_rule::ScaleArithmetic::for_rows`]. Off, every
-    /// activation divides.
-    #[cfg_attr(feature = "config", setting(default = false))]
+    /// Quantizes an activation read by more rows than this the way llama.cpp's batched path does
+    /// (`quantize_mmq_q8_1`: multiply by the reciprocal of the scale); an activation read by this many
+    /// rows or fewer divides by the scale (`quantize_q8_1`); see [`crate::encode_rule::ScaleArithmetic::for_rows`].
+    /// `None` divides at every row count. A serving TOML names the limit under `[numeric_policy]`.
+    #[cfg_attr(feature = "config", setting(default))]
     #[cfg_attr(feature = "config", serde(default))]
-    pub batched_activation_reciprocal: bool,
+    pub reciprocal_activation_scale_above_rows: Option<usize>,
 }
 
 impl NumericPolicy {
@@ -151,7 +151,7 @@ impl NumericPolicy {
             flash_narrowing: false,
             accumulator_narrowing: false,
             flat_activation_blocks: false,
-            batched_activation_reciprocal: false,
+            reciprocal_activation_scale_above_rows: None,
         }
     }
 
@@ -175,7 +175,7 @@ impl NumericPolicy {
             flash_narrowing: false,
             accumulator_narrowing: false,
             flat_activation_blocks: false,
-            batched_activation_reciprocal: false,
+            reciprocal_activation_scale_above_rows: None,
         }
     }
 
@@ -195,7 +195,7 @@ impl NumericPolicy {
             flash_narrowing: false,
             accumulator_narrowing: false,
             flat_activation_blocks: false,
-            batched_activation_reciprocal: false,
+            reciprocal_activation_scale_above_rows: None,
         }
     }
 
@@ -282,8 +282,8 @@ impl NumericPolicy {
     }
 
     #[must_use]
-    pub const fn with_batched_activation_reciprocal(mut self, batched_activation_reciprocal: bool) -> Self {
-        self.batched_activation_reciprocal = batched_activation_reciprocal;
+    pub const fn with_reciprocal_activation_scale_above_rows(mut self, rows: Option<usize>) -> Self {
+        self.reciprocal_activation_scale_above_rows = rows;
         self
     }
 }
@@ -603,6 +603,19 @@ mod tests {
         assert!(text.contains("epilogue_sources = true"));
         assert_eq!(restored, granted);
         assert!(restored.epilogue_sources);
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn the_reciprocal_row_limit_is_absent_by_default_and_parses_from_a_numeric_policy_table() {
+        let absent: NumericPolicy = toml::from_str("contraction = true\n").expect("a policy without the limit parses");
+        assert_eq!(absent.reciprocal_activation_scale_above_rows, None);
+
+        let named: NumericPolicy = toml::from_str("reciprocal_activation_scale_above_rows = 3\n").expect("a policy naming the limit parses");
+        assert_eq!(named.reciprocal_activation_scale_above_rows, Some(3));
+
+        let restored: NumericPolicy = toml::from_str(&toml::to_string(&named).expect("policy serializes")).expect("policy deserializes");
+        assert_eq!(restored, named);
     }
 
     /// [`NumericRewrite::ContextSplitMerge`] -- the cross-THREADGROUP

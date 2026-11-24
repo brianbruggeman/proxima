@@ -1,0 +1,3 @@
+# llama.cpp quantizes an activation read by more than its matvec batch with the reciprocal rule (mmvq.cuh MMVQ_MAX_BATCH_SIZE)
+[numeric_policy]
+reciprocal_activation_scale_above_rows = 8
