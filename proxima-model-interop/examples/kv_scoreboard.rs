@@ -2647,6 +2647,7 @@ fn proxima_command(config: &Config, binary: &Path, text: &str, profile: Option<&
     command.env("PROXIMA_STEP_TIMES", "1");
     command.env("PROXIMA_RUNS", runs);
     command.env("PROXIMA_MAX_TOKENS", tokens.to_string());
+    command.env("PROXIMA_IGNORE_EOS", "1");
     command.env("PROXIMA_PROMPT", text);
     command.env("PROXIMA_DECODE_MODEL_GGUF", &config.model);
     command.env("PROXIMA_SERVING_CONFIG", serving_config_path(config));
