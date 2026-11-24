@@ -16,7 +16,7 @@ The five targets, and the answer each one gets today:
 
 | target | row | number, or the missing piece |
 |---|---|---|
-| llama.cpp | measured, depends on the model | flint (MoE) on Metal, 2026-11-22: TTFT 1.002x, decode 0.904x, peak RAM 0.81x of llama.cpp b12110. Other models range from 0.43x to 1.54x of llama.cpp on one metric, section 2 |
+| llama.cpp | measured, depends on the model | flint (MoE) on Metal, 2026-11-22: TTFT 1.002x, decode 0.904x, peak RAM 0.81x of llama.cpp b12110. Other models range from 0.43x (gemma4 e2b warm TTFT, 2,024 tokens) to 1.48x decode and 7.9x TTFT (granite on CUDA), section 2 |
 | burn | rate measured, accuracy not comparable | 2.25 s per 256-image iteration; its example is a CNN over 20 epochs, page 03 is an MLP over 4 |
 | PyTorch | gap | not installed, and this workspace installs no Python tooling |
 | whisper.cpp | measured, exact token parity | Metal, tiny: 2.77 s vs about 0.30 s (about 9.2x slower); large-v3-turbo: 62.14 s vs 1.318 s (47.2x slower). Section 5 |
@@ -40,11 +40,13 @@ Omega's decode is `(total - ttft) / 63`; llama.cpp's is its own `predicted_per_t
 
 **Other models** (ratio is omega over llama.cpp; a decode row gives tok/s where the board does):
 
+A decode ratio marked (derived) is omega's time per token over llama.cpp's, computed from the board's tok/s as llama.cpp tok/s over omega tok/s, so below 1.0x omega is faster, as everywhere on this page.
+
 | model | backend | metric | omega | llama.cpp | ratio | date and caveat |
 |---|---|---|---|---|---|---|
-| gemma4:e2b-it-qat, short prompt | Metal | warm TTFT; decode | 60.8 / 50.4 ms; 75-83 tok/s | 68.2 ms; 49.1 tok/s | 0.89x TTFT | 2026-11-21, b11671, load 43, quiet gate off; I4 (token ids) passes. Cold 1,195 ms vs 133 ms (9.0x), a first-use compile |
-| gemma4:e2b-it-qat, 2,024 tokens | Metal | warm TTFT; decode | 558.8 / 577.6 ms; 76 tok/s | 1,298.4 ms; 56.1 tok/s | 0.43x TTFT | same run; cold 1,180.8 vs 1,399.2 ms (0.84x) |
-| granite (ollama blob), 2,024 tokens, f32 | Metal | warm TTFT; decode; peak RAM | 581.7-613.8 ms; 51.9 tok/s; 553.3 MB | 500.3 ms; 44.7 tok/s; 387.5 MB | 1.16-1.23x TTFT; 1.43x RAM | 2026-11-21, b11671, load 47, quiet gate off; I4 (token ids) passes |
+| gemma4:e2b-it-qat, short prompt | Metal | warm TTFT; decode | 60.8 / 50.4 ms; 75-83 tok/s | 68.2 ms; 49.1 tok/s | 0.89x TTFT; 0.59-0.65x decode (derived) | 2026-11-21, b11671, load 43, quiet gate off; I4 (token ids) passes. Cold 1,195 ms vs 133 ms (9.0x), a first-use compile |
+| gemma4:e2b-it-qat, 2,024 tokens | Metal | warm TTFT; decode | 558.8 / 577.6 ms; 76 tok/s | 1,298.4 ms; 56.1 tok/s | 0.43x TTFT; 0.74x decode (derived) | same run; cold 1,180.8 vs 1,399.2 ms (0.84x) |
+| granite (ollama blob), 2,024 tokens, f32 | Metal | warm TTFT; decode; peak RAM | 581.7-613.8 ms; 51.9 tok/s; 553.3 MB | 500.3 ms; 44.7 tok/s; 387.5 MB | 1.16-1.23x TTFT; 1.43x RAM; 0.86x decode (derived) | 2026-11-21, b11671, load 47, quiet gate off; I4 (token ids) passes |
 | granite (ollama blob), 2,024 tokens, f16 | Metal | warm TTFT; decode | 558-572 ms; 5.91 ms/token | about 426 ms; 5.34 ms/token | 1.31x TTFT; 1.11x decode | 2026-11-21, b12110, load 32; ids diverge, so not a like-for-like row |
 | granite-4.0-350m Q8_0 | Metal | decode | 4.03 ms/token | 3.61 ms/token | 1.12x | mid-November probe; the owner reports about 2x now, unreproduced |
 | granite | CUDA, RTX 2070 | decode; TTFT | 5.35 ms/token; 1,189 ms | 3.62 ms/token; 151 ms | 1.48x; 7.9x | 2026-11-13 |
