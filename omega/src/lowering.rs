@@ -2,7 +2,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 pub use proxima_numeric::codec::Codec;
-use proxima_tensor::{BoundOp, NodeId, ScalarOp};
+use proxima_tensor::{BoundOp, NodeId, ScalarOp, gathered_operand_count};
 #[cfg(any(feature = "cuda", feature = "wgpu-backend"))]
 use proxima_numeric::NumericPolicy;
 #[cfg(any(feature = "cuda", feature = "wgpu-backend"))]
@@ -104,11 +104,7 @@ pub fn with_reduction_dims<Output>(
 }
 
 pub fn gather_count(resolved: &BoundOp) -> usize {
-    resolved
-        .operands()
-        .iter()
-        .filter(|(_, _, gather)| gather.is_some())
-        .count()
+    gathered_operand_count(resolved)
 }
 
 /// For each operand, `Some(slot)` if it gathers: `slot` is its position

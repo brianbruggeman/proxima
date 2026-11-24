@@ -125,7 +125,7 @@ pub use dead_code_cached_attention::*;
 pub use gdn_moe_fusion_apply::*;
 #[cfg(feature = "identity-copy-alias")]
 use identity_copy_alias::apply_identity_copy_alias;
-pub use product_contraction::{ProductContraction, product_contraction};
+pub use product_contraction::{ProductContraction, gathered_operand_count, is_product_of, product_contraction};
 pub use refit_cached_attention::{
     changed_nodes, refit_cached_attention_at, refit_cached_attention_rows, touched_positions,
     touches_changed,

@@ -71,7 +71,13 @@ pub(crate) use crate::lowering::{
     dispatch_bindings, gather_count, gather_is_reduction_invariant, gather_slots,
     is_cooperative_reduce_op, reduction_dims, with_reduction_dims,
 };
-use proxima_tensor::{BoundOp, BoundOpKind, ComposedBody, Keep, Layout, Lookup, NodeId, ReduceInit, ScalarOp, StepArg};
+use proxima_tensor::{
+    BoundOp, BoundOpKind, ComposedBody, Keep, Layout, Lookup, NodeId, ReduceInit, ScalarOp, is_product_of,
+};
+#[cfg(feature = "metal-tiled-gemm")]
+use proxima_tensor::product_contraction;
+#[cfg(test)]
+use proxima_tensor::StepArg;
 use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
 // `QuantizedBlock` itself is re-exported from the crate root only behind
 // `std` (see `proxima_tensor::lib`'s own `#[cfg(feature = "std")]` on it),

@@ -1048,19 +1048,7 @@ pub(super) fn is_plain_product_reduce(
     if reduce_op != ScalarOp::Add {
         return false;
     }
-    let [step] = resolved.element_body().steps.as_slice() else {
-        return false;
-    };
-    if step.op != ScalarOp::Multiply {
-        return false;
-    }
-    let weight = weight as u16;
-    let other = other as u16;
-    matches!(
-        step.args.as_slice(),
-        [StepArg::Operand(first), StepArg::Operand(second)]
-            if (*first == weight && *second == other) || (*first == other && *second == weight)
-    )
+    is_product_of(resolved.element_body(), weight as u16, other as u16)
 }
 
 /// Whether the row-blocked kernel has a rendered body for a level-set codec: the reduce is a plain
