@@ -89,18 +89,27 @@ impl Stage {
         weights: (Codec, bool),
         settings: &ServingSettings,
     ) -> Result<Self, String> {
-        let tokens = symbols
-            .first()
-            .ok_or_else(|| String::from("a stage needs its token count as the first symbol"))?;
-        let mut staged = settings.clone();
-        staged.context_length = u32::try_from(*tokens).map_err(|why| why.to_string())?;
         let loaded = load_weights(checkpoint, &graph.weights, weights.0, weights.1)?;
+        Self::with_weights(graph, output, symbols, loaded, settings)
+    }
+
+    fn with_weights(
+        graph: Graph,
+        output: NodeId,
+        symbols: &[u64],
+        weights: Weights,
+        settings: &ServingSettings,
+    ) -> Result<Self, String> {
+        let mut staged = settings.clone();
+        if let Some(tokens) = symbols.first() {
+            staged.context_length = u32::try_from(*tokens).map_err(|why| why.to_string())?;
+        }
         Ok(Self {
             runtime: runtime_for(&staged),
             settings: staged,
             integers: graph.int_buffers(),
             graph,
-            weights: loaded,
+            weights,
             symbols: symbols.to_vec(),
             output,
             #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -211,6 +220,21 @@ impl Denoiser {
         self.stage.evaluate(inputs, &outputs)
     }
 
+    /// [`Self::evaluate`] of the velocity node alone, with one command buffer
+    /// per op and each op's GPU time. It plans on a profile-local runtime, so a
+    /// timed plan never enters the step cache.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the plan or execution failure.
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    pub fn evaluate_op_timed(
+        &mut self,
+        inputs: &[(&str, QuantizedBlock<'_>)],
+    ) -> Result<(Evaluated, Vec<omega::metal::OpGpuTiming>), String> {
+        self.stage.evaluate_op_timed(inputs)
+    }
+
     /// The velocity node [`Self::evaluate`] always returns.
     #[must_use]
     pub fn velocity(&self) -> NodeId {
@@ -256,6 +280,23 @@ impl Decoder {
         Ok(Self { stage })
     }
 
+    /// A decoder over a program whose weights are already bound (a probe graph
+    /// whose leaves the caller supplies, or none). `symbols` may be empty.
+    ///
+    /// # Errors
+    ///
+    /// A message naming a token count that does not fit the runtime's context.
+    pub fn with_weights(
+        graph: Graph,
+        image: NodeId,
+        symbols: &[u64],
+        weights: Weights,
+        settings: &ServingSettings,
+    ) -> Result<Self, String> {
+        let stage = Stage::with_weights(graph, image, symbols, weights, settings)?;
+        Ok(Self { stage })
+    }
+
     /// Decodes one de-normalised, unpatchified latent given as `inputs`.
     ///
     /// # Errors
@@ -263,6 +304,21 @@ impl Decoder {
     /// A message naming the plan or execution failure.
     pub fn evaluate(&mut self, inputs: &[(&str, QuantizedBlock<'_>)]) -> Result<Evaluated, String> {
         self.stage.evaluate(inputs, &[self.stage.output])
+    }
+
+    /// [`Self::evaluate`] for exactly the nodes in `outputs`, for a probe that
+    /// asks where a decode stage faults or drifts. Each distinct output set
+    /// plans once.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the plan or execution failure.
+    pub fn evaluate_nodes(
+        &mut self,
+        inputs: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+    ) -> Result<Evaluated, String> {
+        self.stage.evaluate(inputs, outputs)
     }
 
     /// The image node [`Self::evaluate`] returns.
