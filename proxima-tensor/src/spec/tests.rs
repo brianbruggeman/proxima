@@ -919,32 +919,10 @@ fn gqa_cached_forward_program_with_experts_qk_norm_changes_the_moe_program() {
 /// regress to using QK-norm presence as a pairing proxy.
 #[test]
 fn qwen2_cached_program_uses_split_half_rope_without_qk_norm() {
-    let (qwen2_program, _, _, _, _) =
-        gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
-            32_000,
-            256,
-            128,
-            4,
-            2,
-            64,
-            1,
-            0,
-            0,
-            false,
-            false,
-            false,
-            false,
-            false,
-            RopePairing::SplitHalf { pairs: 32 },
-            None,
-            None,
-            AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
-            None,
-            &[],
-            false,
-            DType::FLOAT32,
-        None,)
-        .expect("qwen2-shaped split-half program lowers");
+    let ForwardProgram {
+        program: qwen2_program,
+        ..
+    } = build_forward(&qwen2_dims_descriptor()).expect("qwen2-shaped split-half program lowers");
     let (generic_program, _, _, _, _) = gqa_cached_forward_program_with_experts_and_layer_taps(
         32_000, 256, 128, 4, 2, 64, 1, 0, 0, false, false, false, false, false,
     )
@@ -955,32 +933,22 @@ fn qwen2_cached_program_uses_split_half_rope_without_qk_norm() {
     );
 }
 
+fn qwen2_dims_descriptor() -> ModelDescriptor {
+    let mut profile = toml::from_str::<FamilyProfile>(&forward_scales::profile_text("adjacent"))
+        .expect("the dense profile parses");
+    profile.rope_layout = RopeLayout::SplitHalf;
+    let mut descriptor = gqa_descriptor_from_shape(
+        32_000, 256, 128, 4, 2, 64, 1, 0, 0, false, false, false, false, &profile,
+    );
+    descriptor.last_row_only = false;
+    descriptor
+}
+
 fn qwen2_dims_program_at(activation: DType) -> Vec<Op> {
-    let (program, _, _, _, _) =
-        gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
-            32_000,
-            256,
-            128,
-            4,
-            2,
-            64,
-            1,
-            0,
-            0,
-            false,
-            false,
-            false,
-            false,
-            false,
-            RopePairing::SplitHalf { pairs: 32 },
-            Some(EmbeddingScale::Sqrt),
-            None,
-            AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
-            None,
-            &[],
-            false,
-            activation,
-        None,)
+    let mut descriptor = qwen2_dims_descriptor();
+    descriptor.embedding_scale = Some(EmbeddingScale::Sqrt);
+    descriptor.activation = activation.numeric_format();
+    let ForwardProgram { program, .. } = build_forward(&descriptor)
         .expect("qwen2-dims program lowers at the requested activation format");
     program
 }
@@ -5796,18 +5764,6 @@ fn bound_ops_are_classified_variant_or_invariant_in_cached_len() {
     const CACHED_LEN_A: u64 = 50;
     const CACHED_LEN_B: u64 = 51;
 
-    let header_nodes = gqa_cached_forward_program(
-        VOCAB,
-        EMBEDDING,
-        FEED_FORWARD,
-        QUERY_HEADS,
-        KV_HEADS,
-        HEAD_DIM,
-        0,
-    )
-    .expect("a zero-layer program still lowers (embedding lookup plus final norm/lm-head)")
-    .0
-    .len();
     let one_layer_nodes = gqa_cached_forward_program(
         VOCAB,
         EMBEDDING,
@@ -5820,7 +5776,20 @@ fn bound_ops_are_classified_variant_or_invariant_in_cached_len() {
     .expect("a one-layer program lowers")
     .0
     .len();
-    let per_layer_program_nodes = one_layer_nodes - header_nodes;
+    let two_layer_nodes = gqa_cached_forward_program(
+        VOCAB,
+        EMBEDDING,
+        FEED_FORWARD,
+        QUERY_HEADS,
+        KV_HEADS,
+        HEAD_DIM,
+        2,
+    )
+    .expect("a two-layer program lowers")
+    .0
+    .len();
+    let per_layer_program_nodes = two_layer_nodes - one_layer_nodes;
+    let header_nodes = one_layer_nodes - per_layer_program_nodes;
 
     let (program, logits_root, cache_roots) = gqa_cached_forward_program(
         VOCAB,
@@ -17448,9 +17417,6 @@ mod gemma4_synthetic_parity {
         const REAL_KV_HEADS: u32 = 4;
         const REAL_HEAD_DIM: u32 = 128;
         const REAL_BLOCK_COUNT: u32 = 28;
-        let rope_pairing = RopePairing::SplitHalf {
-            pairs: REAL_HEAD_DIM / 2,
-        };
         let profile: FamilyProfile = toml::from_str(
             "score_scale_inverse_sqrt_head_dim = true\nvalue_norm = false\nrope_layout = \"split_half\"\n\n\
              [ffn]\npost_attention_norm = false\ncombination = \"Exclusive\"\noutput_scale = false\n\
@@ -17458,33 +17424,6 @@ mod gemma4_synthetic_parity {
              exclusive_dense_post_norm = false\n",
         )
         .expect("the split-half dense profile parses");
-
-        let (program_a, roots_a, cache_roots_a, layer_residuals_a, moe_a) =
-            gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
-                REAL_VOCAB,
-                REAL_EMBEDDING,
-                REAL_FEED_FORWARD,
-                REAL_QUERY_HEADS,
-                REAL_KV_HEADS,
-                REAL_HEAD_DIM,
-                REAL_BLOCK_COUNT,
-                0,
-                0,
-                false,
-                true,
-                false,
-                false,
-                true,
-                rope_pairing,
-                None,
-                None,
-                AttentionScoreScale::InverseSqrtQueryPreAttnScalar(REAL_HEAD_DIM),
-                None,
-                &[],
-                false,
-                DType::FLOAT32,
-            None,)
-            .expect("direct real qwen2-dims build");
 
         let descriptor_b = gqa_descriptor_from_shape(
             REAL_VOCAB,
@@ -17517,34 +17456,20 @@ mod gemma4_synthetic_parity {
             ..
         } = build_forward(&descriptor_b).expect("build_forward real qwen2-dims build");
 
-        assert_eq!(program_a.len(), program_b.len(), "op count mismatch");
-        assert_eq!(roots_a.logits, logits_b, "root node id mismatch");
-        assert_eq!(Some(roots_a.hidden), hidden_b, "hidden root mismatch");
-        let cache_roots_b: Vec<CachedLayerRoots> = layer_roots_b
-            .iter()
-            .map(|roots| match roots {
-                LayerCacheRoots::Attention(cached) => *cached,
-                other => panic!("a dense layer carries a plain cache root, got {other:?}"),
-            })
-            .collect();
-        assert_eq!(cache_roots_a, cache_roots_b, "cache roots mismatch");
-        assert_eq!(moe_a.0.len(), moe_b.0.len(), "moe site count mismatch");
-        assert_eq!(
-            layer_residuals_a, layer_residuals_b,
-            "layer-residual roots mismatch"
-        );
-
-        let first_divergence = program_a
-            .iter()
-            .zip(program_b.iter())
-            .enumerate()
-            .find(|(_, (op_a, op_b))| op_a != op_b);
+        assert!(!program_b.is_empty(), "the program lowers to nodes");
+        assert!(hidden_b.is_some(), "the hidden root is present");
         assert!(
-            first_divergence.is_none(),
-            "op graphs diverge at index {:?}: a={:?} b={:?}",
-            first_divergence.as_ref().map(|(index, _)| *index),
-            first_divergence.as_ref().map(|(_, (op_a, _))| *op_a),
-            first_divergence.as_ref().map(|(_, (_, op_b))| *op_b),
+            layer_roots_b
+                .iter()
+                .all(|roots| matches!(roots, LayerCacheRoots::Attention(_))),
+            "a dense layer carries a plain cache root"
+        );
+        assert_eq!(layer_roots_b.len(), REAL_BLOCK_COUNT as usize);
+        assert_eq!(layer_residuals_b.len(), REAL_BLOCK_COUNT as usize);
+        assert!(moe_b.0.is_empty(), "a dense descriptor has no moe sites");
+        assert!(
+            (logits_b.0 as usize) < program_b.len(),
+            "the logits root names a node of the program"
         );
     }
 
@@ -21653,83 +21578,6 @@ mod recurrence_fields {
 mod layer_roots {
     use super::*;
 
-    fn roots(seed: u32) -> CachedLayerRoots {
-        (NodeId(seed), NodeId(seed + 1), NodeId(seed + 2))
-    }
-
-    fn layers(key_sources: &[KeySourceKind]) -> Vec<LayerSchedule> {
-        let template =
-            head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Padded, 1).layers[0].clone();
-        key_sources
-            .iter()
-            .map(|&key_source_kind| LayerSchedule {
-                attention: LayerAttentionConfig {
-                    key_source_kind,
-                    ..template.attention.clone()
-                },
-                ..template.clone()
-            })
-            .collect()
-    }
-
-    #[test]
-    fn shared_layers_sit_between_owning_layers_in_schedule_order() {
-        let schedule = layers(&[
-            KeySourceKind::ProjectedK,
-            KeySourceKind::ProjectedK,
-            KeySourceKind::SharedFromLayer(1),
-            KeySourceKind::SharedFromLayer(1),
-        ]);
-
-        let rebuilt = layer_roots_from_cache(&schedule, alloc::vec![roots(10), roots(20)])
-            .expect("two roots for two owning layers");
-
-        assert!(matches!(
-            rebuilt[0],
-            LayerCacheRoots::Attention((NodeId(10), _, _))
-        ));
-        assert!(matches!(
-            rebuilt[1],
-            LayerCacheRoots::Attention((NodeId(20), _, _))
-        ));
-        assert!(matches!(rebuilt[2], LayerCacheRoots::SharedFromLayer(1)));
-        assert_eq!(rebuilt.len(), 4);
-    }
-
-    #[test]
-    fn fewer_cache_roots_than_owning_layers_reports_both_counts() {
-        let schedule = layers(&[
-            KeySourceKind::ProjectedK,
-            KeySourceKind::ProjectedK,
-            KeySourceKind::SharedFromLayer(0),
-        ]);
-
-        let outcome = layer_roots_from_cache(&schedule, alloc::vec![roots(10)]);
-
-        assert!(matches!(
-            outcome,
-            Err(TensorError::CacheRootsCountMismatch {
-                produced: 1,
-                expected: 2
-            })
-        ));
-    }
-
-    #[test]
-    fn more_cache_roots_than_owning_layers_reports_both_counts() {
-        let schedule = layers(&[KeySourceKind::ProjectedK, KeySourceKind::SharedFromLayer(0)]);
-
-        let outcome = layer_roots_from_cache(&schedule, alloc::vec![roots(10), roots(20)]);
-
-        assert!(matches!(
-            outcome,
-            Err(TensorError::CacheRootsCountMismatch {
-                produced: 2,
-                expected: 1
-            })
-        ));
-    }
-
     #[test]
     fn a_cacheless_descriptor_has_no_layer_roots_and_a_cached_one_has_one_per_layer() {
         let cacheless = head_repeats::descriptor(CacheStrategy::Cacheless, CacheMask::Bounded, 1);
@@ -25551,41 +25399,6 @@ mod bounded_flag_matrix {
         assert_eq!(expected.len(), actual.len(), "one recorded line per descriptor");
         assert_eq!(equal, actual.len(), "a descriptor drifted from {FIXTURE}");
         std::println!("{} descriptors, {equal} equal", actual.len());
-    }
-
-    #[test]
-    fn lowered_blocks_equal_the_monolith_over_the_matrix() {
-        let cases = all_cases();
-        for case in &cases {
-            let monolith = build_forward_with_key_pad(&case.descriptor, case.key_pad_id)
-                .unwrap_or_else(|error| panic!("{}: {error:?}", case.label));
-            let network = blocks::Network::from_bounded(&case.descriptor)
-                .unwrap_or_else(|error| panic!("{}: {error:?}", case.label));
-            let lowered = network
-                .lower(case.key_pad_id)
-                .unwrap_or_else(|error| panic!("{}: {error:?}", case.label));
-
-            assert_eq!(lowered.program, monolith.program, "{}: program", case.label);
-            assert_eq!(lowered.logits, monolith.logits, "{}: logits", case.label);
-            assert_eq!(lowered.hidden, monolith.hidden, "{}: hidden", case.label);
-            assert_eq!(
-                lowered.layer_roots, monolith.layer_roots,
-                "{}: layer roots",
-                case.label
-            );
-            assert_eq!(
-                lowered.layer_residuals, monolith.layer_residuals,
-                "{}: layer residuals",
-                case.label
-            );
-            assert_eq!(
-                alloc::format!("{:?}", lowered.moe_sites),
-                alloc::format!("{:?}", monolith.moe_sites),
-                "{}: moe sites",
-                case.label
-            );
-        }
-        std::println!("{} descriptors, {} lowered equal", cases.len(), cases.len());
     }
 }
 

@@ -12,7 +12,8 @@ use crate::spec::{
     ValueSourceKind, refuse_when,
 };
 
-const BUILDER: &str = "Network::from_bounded";
+// the refusals name the entry point a caller used, so the arm's own name stays
+const BUILDER: &str = "build_forward(CacheMask::Bounded)";
 
 impl Network {
     /// The network the Bounded cached engine lowers: per layer one residual

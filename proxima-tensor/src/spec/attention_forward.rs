@@ -2848,14 +2848,27 @@ pub fn gqa_cached_forward_program_with_experts_and_layer_taps(
     fused_qkv_reduce: bool,
     last_row_only: bool,
 ) -> Result<GqaRoutedForwardProgramWithLayerTaps, TensorError> {
-    let rope_pairing = if qk_norm {
-        RopePairing::SplitHalf {
-            pairs: head_dim / 2,
-        }
-    } else {
-        RopePairing::Interleaved
+    let profile = FamilyProfile {
+        embedding_scale: None,
+        ffn: LayerFfnConfig {
+            routed_gating: ExpertGatingFunc::Softmax,
+            routed_expert_bias: false,
+            ..LayerFfnConfig::exclusive()
+        },
+        parallel_dense_moe: None,
+        score_scale_inverse_sqrt_head_dim: true,
+        value_norm: false,
+        qk_norm,
+        rope_layout: if qk_norm {
+            RopeLayout::SplitHalf
+        } else {
+            RopeLayout::Adjacent
+        },
+        recurrence: None,
+        schedule_source: ScheduleSource::SlidingPattern,
+        ssm_v_head_reordered: false,
     };
-    gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
+    let mut descriptor = gqa_descriptor_from_shape(
         vocab,
         embedding,
         feed_forward,
@@ -2869,603 +2882,38 @@ pub fn gqa_cached_forward_program_with_experts_and_layer_taps(
         qkv_biases,
         paired_gate_up_reduce,
         fused_qkv_reduce,
-        last_row_only,
-        rope_pairing,
-        None,
-        None,
-        AttentionScoreScale::InverseSqrtQueryPreAttnScalar(head_dim),
-        None,
-        &[],
-        false,
-        DType::FLOAT32,
-        None,
-    )
-}
-
-/// A no-QK-norm checkpoint can still use split-half (NEOX) RoPE even so,
-/// so its pairing is the family profile's `rope_pairing` rather than
-/// inferred from the presence of norm tensors -- see
-/// [`crate::spec::gqa_descriptor_from_shape`]'s own `rope_pairing` parameter, which
-/// the `proxima-model-interop` dense-architecture binder feeds with
-/// `RopePairing::SplitHalf { pairs: head_dim / 2 }` for such a
-/// checkpoint instead of a dedicated builder.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
-    vocab: u32,
-    embedding: u32,
-    feed_forward: u32,
-    query_heads: u32,
-    kv_heads: u32,
-    head_dim: u32,
-    block_count: u32,
-    expert_count: u32,
-    expert_used_count: u32,
-    qk_norm: bool,
-    qkv_biases: bool,
-    paired_gate_up_reduce: bool,
-    fused_qkv_reduce: bool,
-    last_row_only: bool,
-    rope_pairing: RopePairing,
-    embedding_scale: Option<EmbeddingScale>,
-    logit_scale: Option<f32>,
-    score_scale: AttentionScoreScale,
-    residual_scale: Option<f32>,
-    layer_windows: &[Option<u32>],
-    sliding_kv_ring: bool,
-    activation: DType,
-    key_pad_id: Option<u32>,
-) -> Result<GqaRoutedForwardProgramWithLayerTaps, TensorError> {
-    if !layer_windows.is_empty() && layer_windows.len() != block_count as usize {
-        return Err(TensorError::LayerScheduleCountMismatch {
-            expected: block_count,
-            found: layer_windows.len(),
-        });
-    }
-    let windows: Vec<u32> = layer_windows
-        .iter()
-        .flatten()
-        .copied()
-        .filter(|width| *width > 0)
-        .collect();
-    if sliding_kv_ring && windows.iter().any(|width| *width != windows[0]) {
-        return Err(TensorError::UnsupportedInBuilder {
-            builder: "gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing",
-            feature: "sliding_kv_ring with differing window widths (one sliding slot)",
-        });
-    }
-    let group = query_heads / kv_heads;
-    let pairs = head_dim / 2;
-
-    let mut program = Vec::new();
-
-    let ids = input_leaf(
-        &mut program,
-        TOKEN_IDS,
-        alloc::vec![Extent::Symbolic(0)],
-        "ids",
+        &profile,
     );
-    let table = input_leaf(
-        &mut program,
-        DType::FLOAT32,
-        alloc::vec![Extent::Static(vocab), Extent::Static(embedding)],
-        "token_embd.weight",
-    );
-    let mut x = embedding_lookup_as(&mut program, table, ids, activation);
-    if let Some(scale) = embedding_scale {
-        x = append_embedding_scale(&mut program, x, embedding, scale, activation)?;
-    }
-
-    let inv_dim = count_constant(&mut program, embedding);
-    let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
-    let ones = scalar_constant(&mut program, 1.0);
-    let inv_sqrt_head_dim = scalar_constant(&mut program, score_scale.multiplier());
-    // only materialized when a layer actually consumes it (`qk_norm`), so a
-    // dense checkpoint with no QK-norm keeps the identical node count this
-    // function has always emitted.
-    let inv_head_dim = qk_norm.then(|| count_constant(&mut program, head_dim));
-    let residual_scale = residual_scale.map(|scale| scalar_constant(&mut program, scale));
-    let cos_new = input_leaf(
-        &mut program,
-        DType::FLOAT32,
-        alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
-        "rope_cos",
-    );
-    let sin_new = input_leaf(
-        &mut program,
-        DType::FLOAT32,
-        alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
-        "rope_sin",
-    );
-    let group_ones = op::append(
-        &mut program,
-        Op::Constant {
-            dtype: DType::FLOAT32,
-            shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(group)],
-            value: 1.0,
-        },
-    );
-    // Only ever consulted by `append_gqa_cached_layer`'s
-    // `fused_qkv_reduce` branch (that parameter's own doc) -- built ONLY
-    // when the flag is set, so `false` reproduces today's program
-    // node-for-node (`cached_attention_rewrite_replaces_the_bound_attention_subgraph`'s
-    // own literal bound-op-count fixture is the guard: it caught the
-    // unconditional-`Op::Constant` version of this as a real +2 node
-    // regression before this comment existed).
-    let (head_shape_ones, kv_head_shape_ones) = if fused_qkv_reduce {
-        let head_shape_ones = op::append(
-            &mut program,
-            Op::Constant {
-                dtype: DType::FLOAT32,
-                shape: alloc::vec![Extent::Static(query_heads), Extent::Static(head_dim)],
-                value: 1.0,
-            },
-        );
-        let kv_head_shape_ones = op::append(
-            &mut program,
-            Op::Constant {
-                dtype: DType::FLOAT32,
-                shape: alloc::vec![Extent::Static(kv_heads), Extent::Static(head_dim)],
-                value: 1.0,
-            },
-        );
-        (head_shape_ones, kv_head_shape_ones)
-    } else {
-        // Never read (`append_gqa_cached_layer`'s `fused_qkv_reduce`
-        // branch is the only reader, and it never runs when the flag is
-        // `false`) -- `ones` (already built above) is reused as the
-        // placeholder rather than adding an `Option` the callee would need
-        // to `expect()` out of (this crate's own no-`expect`-in-production
-        // rule), or building a real constant no `false` caller ever needs.
-        (ones, ones)
-    };
-    let (is_future, _neg_infinity) = causal_mask(&mut program)?;
-    let is_future = with_pad_key_mask(&mut program, is_future, ids, key_pad_id)?;
-    // Rank-0 `Op::Input`, same precedent `eps`/`rope_cos`/`rope_sin` set
-    // (`causal_mask_merged`'s own doc), named "cached_len" so
-    // `proxima_tensor::bind::cached_attention_candidates` can find it by
-    // name -- this crate's own precedent for what a name is for
-    // (`Op::Input`'s own doc: "identity, not decoration"). It feeds no
-    // arithmetic in this program: the host supplies the REAL `cached_len`
-    // every call, independent of `kv_cache.{layer}.*`'s own
-    // `Extent::Symbolic(1)` extent (which a caller may round up to a
-    // bucket boundary, `ServingConfig::kv_bucket_tokens`, without
-    // rebuilding this program), and the fused `BoundOpKind::CachedAttention`
-    // reads it as a NINTH, runtime operand at execution time instead --
-    // the bucket's own zero-padding is excluded by that bound, never by a
-    // mask node in this graph (`BoundOpKind::CachedAttention`'s own doc on
-    // the `cached_key_rows != 0` discriminator).
-    let cached_len = input_leaf(&mut program, DType::FLOAT32, Vec::new(), "cached_len");
-    // A padding predicate is not one of the mask shapes the fused
-    // cached-attention matcher recognizes, so a padded program runs on the
-    // two-block path -- which scores the cached block with no `cached_key_rows`
-    // clip (that clip belongs to the fused op). Mask the rows at/past
-    // `cached_len` here, the same predicate `gated_attention`'s own
-    // `is_cached_padding` builds, so the unfused path excludes the cache
-    // bucket's zero padding exactly as the fused op's clip did. `None` (every
-    // caller before the pad mask) adds no node, keeping the program
-    // byte-for-byte what it was.
-    let cached_padding_mask = key_pad_id
-        .map(|_| {
-            super::scheduled_cached::causal_mask_cached_windowed(
-                &mut program,
-                cached_len,
-                Extent::Symbolic(1),
-                None,
-            )
+    descriptor.last_row_only = last_row_only;
+    let ForwardProgram {
+        program,
+        logits,
+        hidden,
+        layer_roots,
+        layer_residuals,
+        moe_sites,
+        ..
+    } = build_forward(&descriptor)?;
+    let hidden = hidden.ok_or(TensorError::UnsupportedInBuilder {
+        builder: "gqa_cached_forward_program_with_experts_and_layer_taps",
+        feature: "a program with no hidden root",
+    })?;
+    let cache_roots = layer_roots
+        .into_iter()
+        .map(|roots| match roots {
+            LayerCacheRoots::Attention(cached) => Ok(cached),
+            _ => Err(TensorError::UnsupportedInBuilder {
+                builder: "gqa_cached_forward_program_with_experts_and_layer_taps",
+                feature: "a layer root that is not an attention cache",
+            }),
         })
-        .transpose()?;
-    // A windowed layer masks the cached block too (the fused attention's
-    // `cached_len` bound cannot express a window), and a ring layer counts its
-    // rows from the sliding slot's own length input. A schedule with no window
-    // adds no node here.
-    let ring_len = (sliding_kv_ring && !windows.is_empty()).then(|| {
-        input_leaf(
-            &mut program,
-            DType::FLOAT32,
-            Vec::new(),
-            SLIDING_CACHED_LEN_INPUT,
-        )
-    });
-    let mut window_masks: Vec<(u32, NodeId, (NodeId, NodeId))> = Vec::new();
-    for &width in &windows {
-        if window_masks.iter().any(|(built, ..)| *built == width) {
-            continue;
-        }
-        let (new_block, _) = causal_mask_windowed(&mut program, Some(width))?;
-        let new_block = with_pad_key_mask(&mut program, new_block, ids, key_pad_id)?;
-        let cached_block = match ring_len {
-            Some(ring_len) => causal_mask_cached_windowed(
-                &mut program,
-                ring_len,
-                Extent::Symbolic(SLIDING_KV_SYMBOL),
-                Some(width),
-            )?,
-            None => causal_mask_cached_windowed(
-                &mut program,
-                cached_len,
-                Extent::Symbolic(1),
-                Some(width),
-            )?,
-        };
-        window_masks.push((width, new_block, cached_block));
-    }
-
-    let mut cache_roots: Vec<CachedLayerRoots> = Vec::with_capacity(block_count as usize);
-    let mut layer_residuals: Vec<NodeId> = Vec::with_capacity(block_count as usize);
-    let mut moe_sites: Vec<MoeSite> = Vec::new();
-
-    for layer in 0..block_count {
-        let window = layer_windows
-            .get(layer as usize)
-            .copied()
-            .flatten()
-            .filter(|width| *width > 0);
-        let masks =
-            window.and_then(|width| window_masks.iter().find(|(built, ..)| *built == width));
-        let layer_is_future = masks.map_or(is_future, |(_, new_block, _)| *new_block);
-        let cached_window_mask = match (
-            masks.map(|(_, _, cached_block)| *cached_block),
-            cached_padding_mask,
-        ) {
-            (None, None) => None,
-            (Some(pair), None) | (None, Some(pair)) => Some(pair),
-            (Some((window, neg_infinity)), Some((padding, _))) => {
-                let both = merge_masks(&mut program, window, padding, "st->st")?;
-                Some((both, neg_infinity))
-            }
-        };
-        let cache_bound = if ring_len.is_some() && window.is_some() {
-            Extent::Symbolic(SLIDING_KV_SYMBOL)
-        } else {
-            Extent::Symbolic(1)
-        };
-        let attn_norm_weight = input_leaf(
-            &mut program,
-            DType::FLOAT32,
-            alloc::vec![Extent::Static(embedding)],
-            &alloc::format!("blk.{layer}.attn_norm.weight"),
-        );
-        let ffn_norm_weight = input_leaf(
-            &mut program,
-            DType::FLOAT32,
-            alloc::vec![Extent::Static(embedding)],
-            &alloc::format!("blk.{layer}.ffn_norm.weight"),
-        );
-        let (wq, wk, wv) = if fused_qkv_reduce {
-            let rows = (query_heads + 2 * kv_heads) * head_dim;
-            let w_qkv = input_leaf(
-                &mut program,
-                DType::FLOAT32,
-                alloc::vec![Extent::Static(rows), Extent::Static(embedding)],
-                &alloc::format!("blk.{layer}.attn_qkv.weight"),
-            );
-            (w_qkv, w_qkv, w_qkv)
-        } else {
-            let wq = input_leaf(
-                &mut program,
-                DType::FLOAT32,
-                alloc::vec![
-                    Extent::Static(embedding),
-                    Extent::Static(query_heads),
-                    Extent::Static(head_dim)
-                ],
-                &alloc::format!("blk.{layer}.attn_q.weight"),
-            );
-            let wk = input_leaf(
-                &mut program,
-                DType::FLOAT32,
-                alloc::vec![
-                    Extent::Static(embedding),
-                    Extent::Static(kv_heads),
-                    Extent::Static(head_dim)
-                ],
-                &alloc::format!("blk.{layer}.attn_k.weight"),
-            );
-            let wv = input_leaf(
-                &mut program,
-                DType::FLOAT32,
-                alloc::vec![
-                    Extent::Static(embedding),
-                    Extent::Static(kv_heads),
-                    Extent::Static(head_dim)
-                ],
-                &alloc::format!("blk.{layer}.attn_v.weight"),
-            );
-            (wq, wk, wv)
-        };
-        let q_bias = qkv_biases.then(|| {
-            input_leaf(
-                &mut program,
-                DType::FLOAT32,
-                alloc::vec![Extent::Static(query_heads), Extent::Static(head_dim)],
-                &alloc::format!("blk.{layer}.attn_q.bias"),
-            )
-        });
-        let k_bias = qkv_biases.then(|| {
-            input_leaf(
-                &mut program,
-                DType::FLOAT32,
-                alloc::vec![Extent::Static(kv_heads), Extent::Static(head_dim)],
-                &alloc::format!("blk.{layer}.attn_k.bias"),
-            )
-        });
-        let v_bias = qkv_biases.then(|| {
-            input_leaf(
-                &mut program,
-                DType::FLOAT32,
-                alloc::vec![Extent::Static(kv_heads), Extent::Static(head_dim)],
-                &alloc::format!("blk.{layer}.attn_v.bias"),
-            )
-        });
-        let wo = input_leaf(
-            &mut program,
-            DType::FLOAT32,
-            alloc::vec![
-                Extent::Static(kv_heads),
-                Extent::Static(group),
-                Extent::Static(head_dim),
-                Extent::Static(embedding),
-            ],
-            &alloc::format!("blk.{layer}.attn_output.weight"),
-        );
-        let k_even_cache = input_leaf(
-            &mut program,
-            DType::FLOAT32,
-            alloc::vec![cache_bound, Extent::Static(kv_heads), Extent::Static(pairs)],
-            &alloc::format!("kv_cache.{layer}.k_even"),
-        );
-        let k_odd_cache = input_leaf(
-            &mut program,
-            DType::FLOAT32,
-            alloc::vec![cache_bound, Extent::Static(kv_heads), Extent::Static(pairs)],
-            &alloc::format!("kv_cache.{layer}.k_odd"),
-        );
-        let v_cache = input_leaf(
-            &mut program,
-            DType::FLOAT32,
-            alloc::vec![
-                cache_bound,
-                Extent::Static(kv_heads),
-                Extent::Static(head_dim)
-            ],
-            &alloc::format!("kv_cache.{layer}.v"),
-        );
-
-        let (x_next, layer_roots) = if expert_count == 0 {
-            let (w_gate, w_up) = if paired_gate_up_reduce {
-                let w_gate_up = input_leaf(
-                    &mut program,
-                    DType::FLOAT32,
-                    alloc::vec![
-                        Extent::Static(2),
-                        Extent::Static(feed_forward),
-                        Extent::Static(embedding)
-                    ],
-                    &alloc::format!("blk.{layer}.ffn_gate_up.weight"),
-                );
-                (w_gate_up, w_gate_up)
-            } else {
-                let w_gate = input_leaf(
-                    &mut program,
-                    DType::FLOAT32,
-                    alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
-                    &alloc::format!("blk.{layer}.ffn_gate.weight"),
-                );
-                let w_up = input_leaf(
-                    &mut program,
-                    DType::FLOAT32,
-                    alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
-                    &alloc::format!("blk.{layer}.ffn_up.weight"),
-                );
-                (w_gate, w_up)
-            };
-            let w_down = input_leaf(
-                &mut program,
-                DType::FLOAT32,
-                alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
-                &alloc::format!("blk.{layer}.ffn_down.weight"),
-            );
-            let qk_norm_weights = inv_head_dim.map(|inv_head_dim| {
-                let q_norm_weight = input_leaf(
-                    &mut program,
-                    DType::FLOAT32,
-                    alloc::vec![Extent::Static(head_dim)],
-                    &alloc::format!("blk.{layer}.attn_q_norm.weight"),
-                );
-                let k_norm_weight = input_leaf(
-                    &mut program,
-                    DType::FLOAT32,
-                    alloc::vec![Extent::Static(head_dim)],
-                    &alloc::format!("blk.{layer}.attn_k_norm.weight"),
-                );
-                (q_norm_weight, k_norm_weight, inv_head_dim)
-            });
-
-            append_gqa_cached_layer(
-                &mut program,
-                x,
-                inv_dim,
-                eps,
-                ones,
-                inv_sqrt_head_dim,
-                cos_new,
-                sin_new,
-                group_ones,
-                head_shape_ones,
-                kv_head_shape_ones,
-                layer_is_future,
-                group,
-                head_dim,
-                query_heads,
-                attn_norm_weight,
-                ffn_norm_weight,
-                wq,
-                wk,
-                wv,
-                wo,
-                w_gate,
-                w_up,
-                w_down,
-                k_even_cache,
-                k_odd_cache,
-                v_cache,
-                qk_norm_weights,
-                q_bias,
-                k_bias,
-                v_bias,
-                paired_gate_up_reduce,
-                fused_qkv_reduce,
-                rope_pairing,
-                cached_window_mask,
-                residual_scale,
-            )?
-        } else {
-            let gate_inp = input_leaf(
-                &mut program,
-                DType::FLOAT32,
-                alloc::vec![Extent::Static(embedding), Extent::Static(expert_count)],
-                &alloc::format!("blk.{layer}.ffn_gate_inp.weight"),
-            );
-            let expert_w_gate = input_leaf(
-                &mut program,
-                DType::FLOAT32,
-                alloc::vec![
-                    Extent::Static(expert_count),
-                    Extent::Static(embedding),
-                    Extent::Static(feed_forward)
-                ],
-                &alloc::format!("blk.{layer}.ffn_gate_exps.weight"),
-            );
-            let expert_w_up = input_leaf(
-                &mut program,
-                DType::FLOAT32,
-                alloc::vec![
-                    Extent::Static(expert_count),
-                    Extent::Static(embedding),
-                    Extent::Static(feed_forward)
-                ],
-                &alloc::format!("blk.{layer}.ffn_up_exps.weight"),
-            );
-            let expert_w_down = input_leaf(
-                &mut program,
-                DType::FLOAT32,
-                alloc::vec![
-                    Extent::Static(expert_count),
-                    Extent::Static(feed_forward),
-                    Extent::Static(embedding)
-                ],
-                &alloc::format!("blk.{layer}.ffn_down_exps.weight"),
-            );
-            let qk_norm_weights = inv_head_dim.map(|inv_head_dim| {
-                let q_norm_weight = input_leaf(
-                    &mut program,
-                    DType::FLOAT32,
-                    alloc::vec![Extent::Static(head_dim)],
-                    &alloc::format!("blk.{layer}.attn_q_norm.weight"),
-                );
-                let k_norm_weight = input_leaf(
-                    &mut program,
-                    DType::FLOAT32,
-                    alloc::vec![Extent::Static(head_dim)],
-                    &alloc::format!("blk.{layer}.attn_k_norm.weight"),
-                );
-                (q_norm_weight, k_norm_weight, inv_head_dim)
-            });
-
-            let (next_x, next_roots, site) = append_gqa_cached_routed_layer(
-                &mut program,
-                layer,
-                x,
-                inv_dim,
-                eps,
-                ones,
-                inv_sqrt_head_dim,
-                cos_new,
-                sin_new,
-                group_ones,
-                layer_is_future,
-                group,
-                head_dim,
-                attn_norm_weight,
-                ffn_norm_weight,
-                wq,
-                wk,
-                wv,
-                wo,
-                gate_inp,
-                expert_w_gate,
-                expert_w_up,
-                expert_w_down,
-                expert_count,
-                expert_used_count,
-                k_even_cache,
-                k_odd_cache,
-                v_cache,
-                qk_norm_weights,
-                residual_scale,
-                cached_window_mask,
-            )?;
-            moe_sites.push(site);
-            (next_x, next_roots)
-        };
-        x = x_next;
-        cache_roots.push(layer_roots);
-        layer_residuals.push(x_next);
-    }
-
-    let output_norm_weight = input_leaf(
-        &mut program,
-        DType::FLOAT32,
-        alloc::vec![Extent::Static(embedding)],
-        "output_norm.weight",
-    );
-    let normed_final = rmsnorm(&mut program, x, output_norm_weight, inv_dim, eps)?;
-
-    let normed_last = gather_last_row(&mut program, normed_final, last_row_only);
-
-    let lm_head = input_leaf(
-        &mut program,
-        DType::FLOAT32,
-        alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
-        "output.weight",
-    );
-    let logits_product = elementwise(
-        &mut program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(normed_last, "sd->sdv"), (lm_head, "dv->sdv")],
-    )?;
-    let logits = reduce(
-        &mut program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        logits_product,
-        "sdv->sdv",
-        "sv->sdv",
-    )?;
-    let logits = match logit_scale {
-        Some(scale) => {
-            let inverse = scalar_constant(&mut program, 1.0 / scale);
-            elementwise(
-                &mut program,
-                DType::FLOAT32,
-                ScalarOp::Multiply,
-                &[(logits, "sv->sv"), (inverse, "->sv")],
-            )?
-        }
-        None => logits,
-    };
-
+        .collect::<Result<Vec<_>, _>>()?;
     Ok((
         program,
-        ForwardRoots {
-            logits,
-            hidden: normed_last,
-        },
+        ForwardRoots { logits, hidden },
         cache_roots,
         layer_residuals,
-        MoeSites(moe_sites),
+        moe_sites,
     ))
 }
 

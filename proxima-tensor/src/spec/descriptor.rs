@@ -681,9 +681,8 @@ impl FamilyProfile {
 /// interleaved or caller-chosen RoPE off one shared table, `1/sqrt(head_dim)`
 /// attention score scale, plain projected-V (no value-norm, no shared-KV),
 /// exclusive SwiGLU FFN, no embedding scale, no logit softcap.
-/// [`CacheMask::Bounded`] makes [`build_forward`] dispatch straight to
-/// `gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing`
-/// (see that variant's own doc). Every dimension is a parameter because
+/// [`CacheMask::Bounded`] makes [`build_forward`] lower it through
+/// [`blocks::Network::from_bounded`]. Every dimension is a parameter because
 /// `DenseArch` serves every dense decoder header alike;
 /// `expert_feed_forward` is `feed_forward` because that builder sizes the
 /// routed branch off the same width as the dense one, and
@@ -833,38 +832,6 @@ pub struct ForwardProgram {
     pub readouts: Option<RecurrentReadoutRoots>,
 }
 
-/// One [`LayerCacheRoots`] per layer for a cached program: the engine returns
-/// one [`CachedLayerRoots`] per layer whose [`KeySourceKind`] is
-/// [`KeySourceKind::ProjectedK`] (a shared-KV layer owns no cache leaves),
-/// and this zips them back against the schedule so the result has one entry
-/// per layer index. A count that disagrees means an engine pushed a different
-/// number of roots than the schedule declares cache-owning layers.
-pub(super) fn layer_roots_from_cache(
-    layers: &[LayerSchedule],
-    cache_roots: Vec<CachedLayerRoots>,
-) -> Result<Vec<LayerCacheRoots>, TensorError> {
-    let expected = layers
-        .iter()
-        .filter(|layer| layer.attention.key_source_kind == KeySourceKind::ProjectedK)
-        .count();
-    let produced = cache_roots.len();
-    let mismatch = || TensorError::CacheRootsCountMismatch { produced, expected };
-    let mut cache_roots = cache_roots.into_iter();
-    let layer_roots = layers
-        .iter()
-        .map(|layer| match layer.attention.key_source_kind {
-            KeySourceKind::ProjectedK => cache_roots
-                .next()
-                .map(LayerCacheRoots::Attention)
-                .ok_or_else(mismatch),
-            KeySourceKind::SharedFromLayer(source) => Ok(LayerCacheRoots::SharedFromLayer(source)),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    match cache_roots.next() {
-        Some(_) => Err(mismatch()),
-        None => Ok(layer_roots),
-    }
-}
 
 pub(super) fn refuse_when(
     set: bool,
@@ -970,13 +937,12 @@ fn validate_recurrence(descriptor: &ModelDescriptor) -> Result<(), TensorError> 
 /// [`ModelDescriptor`] field, so the verify shape is data: one config lowers
 /// the decode program or the verify program by flipping it.
 ///
-/// [`CacheMask::Bounded`] dispatches to
-/// `gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing`
-/// directly, passing this descriptor's own `attention.rope_pairing` rather
-/// than re-inferring it from `qk_norm` -- see that variant's own doc for why
-/// (a genuinely different cache-scoring algebra, not a knob the other two
+/// [`CacheMask::Bounded`] lowers through [`blocks::Network::from_bounded`] and
+/// [`blocks::Network::lower`], keeping this descriptor's own
+/// `attention.rope_pairing` rather than re-inferring it from `qk_norm` (a
+/// genuinely different cache-scoring algebra, not a knob the other two
 /// engines can express).
-/// That builder's per-layer residual outputs are this function's own fifth
+/// That engine's per-layer residual outputs are this function's own fifth
 /// return element, empty for [`CacheStrategy::Cacheless`]/
 /// [`CacheMask::Padded`] (neither engine tracks them) -- the same
 /// "degenerate default for an engine that does not produce this value"
@@ -1159,142 +1125,7 @@ pub fn build_forward_with_row_cut_and_key_pad(
             })
         }
         (CacheStrategy::Cached, CacheMask::Bounded) => {
-            if descriptor.layers.len() != descriptor.block_count as usize {
-                return Err(TensorError::LayerScheduleCountMismatch {
-                    expected: descriptor.block_count,
-                    found: descriptor.layers.len(),
-                });
-            }
-            let Some(first) = descriptor.layers.first() else {
-                return Err(TensorError::LayerScheduleCountMismatch {
-                    expected: descriptor.block_count,
-                    found: 0,
-                });
-            };
-            // This builder takes one flat `head_dim`/`kv_heads` for the
-            // whole model, not a per-layer value (`DenseArch::bind`'s own
-            // `architecture.uniform_kv_heads()?` call makes the same
-            // requirement at bind time) -- silently reading `layers[0]`
-            // over a schedule that actually varies per layer would build a
-            // structurally wrong program with no error at all, the exact
-            // failure mode `TensorError::UnsupportedInBuilder`'s own doc
-            // says to raise instead of work around.
-            // A sink-bearing schedule is refused before the uniformity gate so
-            // the error names the missing capability rather than "make your
-            // layers agree": this engine has no per-layer attention channel
-            // beyond the mask window, and a program that binds the tensor but
-            // never adds it to the denominator would produce wrong logits with
-            // no error anywhere. Every layer is checked, not just the first, so
-            // a schedule that sets the knob only on a later layer is still named.
-            refuse_when(
-                descriptor
-                    .layers
-                    .iter()
-                    .any(|layer| layer.attention.attention_sinks),
-                "build_forward(CacheMask::Bounded)",
-                "attention sinks (this engine has no per-layer sink channel)",
-            )?;
-            // the same class one sub-block later: this arm never reads a
-            // layer's `ffn` config, so a shared-expert schedule would lower its
-            // routed branch with `ffn_{gate,up,down}_shexp.weight` bound by
-            // nothing and nothing added to the residual
-            refuse_when(
-                descriptor
-                    .layers
-                    .iter()
-                    .any(|layer| layer.ffn.combination == FfnCombination::RoutedWithSharedExpert),
-                "build_forward(CacheMask::Bounded)",
-                "a routed-with-shared-expert FFN (this engine lowers the routed branch only)",
-            )?;
-            // same class as the sink refusal above: this engine rotates from one
-            // table for every layer, so a rope-off layer built here would apply a
-            // rotation the checkpoint never asked for
-            refuse_when(
-                descriptor.layers.iter().any(|layer| !layer.attention.rope),
-                "build_forward(CacheMask::Bounded)",
-                "a layer with rope off (this engine has no per-layer rope channel)",
-            )?;
-            if descriptor.layers.iter().any(|layer| {
-                LayerAttentionConfig {
-                    mask_window: first.attention.mask_window,
-                    ..layer.attention.clone()
-                } != first.attention
-            }) {
-                return Err(TensorError::UnsupportedInBuilder {
-                    builder: "build_forward(CacheMask::Bounded)",
-                    feature: "non-uniform per-layer attention config",
-                });
-            }
-            refuse_when(
-                descriptor
-                    .layers
-                    .iter()
-                    .any(|layer| layer.kind != LayerKind::Attention),
-                "build_forward(CacheMask::Bounded)",
-                "a layer that is not attention",
-            )?;
-            let attention = &first.attention;
-            let layer_windows: Vec<Option<u32>> = descriptor
-                .layers
-                .iter()
-                .map(|layer| layer.attention.mask_window)
-                .collect();
-            let pairing_the_moe_layer_derives = if descriptor.qk_norm {
-                RopePairing::SplitHalf {
-                    pairs: attention.head_dim / 2,
-                }
-            } else {
-                RopePairing::Interleaved
-            };
-            refuse_when(
-                descriptor.expert_count > 0
-                    && attention.rope_pairing != pairing_the_moe_layer_derives,
-                "build_forward(CacheMask::Bounded)",
-                "a rope pairing the moe layer cannot express",
-            )?;
-            // `attention.rope_pairing` is this descriptor's own data, not
-            // re-inferred from `qk_norm` here -- a split-half checkpoint needs split-half RoPE
-            // with `qk_norm` still `false` (no QK-norm tensors at all), a
-            // combination the qk_norm-inferring wrapper cannot express (its
-            // own doc on that limitation, `gqa_descriptor_from_shape`'s
-            // `rope_pairing` parameter above).
-            let (program, roots, cache_roots, layer_residuals, moe_sites) =
-                gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
-                    descriptor.vocab,
-                    descriptor.embedding,
-                    descriptor.feed_forward,
-                    descriptor.query_heads,
-                    attention.kv_heads,
-                    attention.head_dim,
-                    descriptor.block_count,
-                    descriptor.expert_count,
-                    descriptor.expert_used_count,
-                    descriptor.qk_norm,
-                    descriptor.qkv_biases,
-                    descriptor.paired_gate_up_reduce,
-                    descriptor.fused_qkv_reduce,
-                    descriptor.last_row_only,
-                    attention.rope_pairing,
-                    descriptor.embedding_scale,
-                    descriptor.logit_scale,
-                    attention.score_scale,
-                    descriptor.residual_scale,
-                    &layer_windows,
-                    descriptor.sliding_kv_ring,
-                    descriptor.activation_dtype(),
-                    key_pad_id,
-                )?;
-            Ok(ForwardProgram {
-                program,
-                logits: roots.logits,
-                layer_roots: layer_roots_from_cache(&descriptor.layers, cache_roots)?,
-                moe_sites,
-                layer_residuals,
-                hidden: Some(roots.hidden),
-                duplicate_head_roots: Vec::new(),
-                layer_diagnostics: Vec::new(),
-                readouts: None,
-            })
+            blocks::Network::from_bounded(descriptor)?.lower(key_pad_id)
         }
     }
 }
