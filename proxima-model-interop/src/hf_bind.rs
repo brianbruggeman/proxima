@@ -853,6 +853,29 @@ fn hf_bind_dense<'file>(
     Ok(())
 }
 
+/// [`hf_bind_dense`] for the embedding table, which the program reads through
+/// a data-dependent row gather ([`crate::bind::bind_gathered_as`]'s GGUF
+/// counterpart): a half-width packed table stays a view of the mapped file and
+/// only the rows the ids select are decoded, instead of widening the whole table
+/// to twice its file size on the heap.
+fn hf_bind_gathered<'file>(
+    manifest: &Manifest,
+    file_bytes: &'file [u8],
+    data_start: u64,
+    lookup_name: String,
+    store_name: String,
+    state: &mut BoundWeights<'file>,
+) -> Result<(), InteropError> {
+    match safetensors_tensor_as_packed_block(manifest, file_bytes, data_start, &lookup_name) {
+        Ok(block @ QuantizedBlock::Packed { bytes, .. }) => {
+            state.resident_bytes += bytes.len();
+            state.packed.push((store_name, block));
+            Ok(())
+        }
+        Ok(_) | Err(_) => hf_bind_dense(manifest, file_bytes, data_start, lookup_name, store_name, state),
+    }
+}
+
 /// Reorders `flat`'s (`[out_dim, in_dim]` row-major, `out_dim ==
 /// head_count * head_dim`) rows from HF's own RoPE layout into the
 /// interleaved layout [`proxima_tensor::spec`]'s RoPE math (`spec.rs`'s
@@ -885,15 +908,19 @@ fn hf_bind_dense<'file>(
 /// Reorders interleaved RoPE pairs `(x[i], x[head_dim/2 + i])` into
 /// adjacent-channel pairs `(x[2*i], x[2*i+1])`, the convention this crate's
 /// own RoPE rotation expects; see the module doc above for the derivation.
+///
+/// Rows move whole, so `T` is whatever one row element is: decoded values
+/// with `in_dim` elements per row, or a packed block's raw bytes with the
+/// row's byte width as `in_dim` (a reorder never needs a decode).
 #[must_use]
-pub fn permute_rope_rows(
-    flat: &[f32],
+pub fn permute_rope_rows<T: Copy>(
+    flat: &[T],
     head_count: usize,
     head_dim: usize,
     in_dim: usize,
-) -> Vec<f32> {
+) -> Vec<T> {
     let half = head_dim / 2;
-    let mut permuted = alloc::vec![0.0f32; flat.len()];
+    let mut permuted = flat.to_vec();
     for head in 0..head_count {
         for i in 0..half {
             let source_even = (head * head_dim + i) * in_dim;
@@ -961,6 +988,22 @@ fn hf_bind_rope_weight<'file>(
     permute_rows: bool,
     state: &mut BoundWeights<'file>,
 ) -> Result<(), InteropError> {
+    if let Ok(QuantizedBlock::Packed { codec, bytes }) =
+        safetensors_tensor_as_packed_block(manifest, file_bytes, data_start, &lookup_name)
+    {
+        if !permute_rows {
+            state.resident_bytes += bytes.len();
+            state
+                .packed
+                .push((store_name, QuantizedBlock::Packed { codec, bytes }));
+            return Ok(());
+        }
+        let row_bytes = in_dim / usize::from(codec.packed_elements()) * usize::from(codec.packed_bytes());
+        let permuted = permute_rope_rows(bytes, head_count, head_dim, row_bytes);
+        state.resident_bytes += permuted.len();
+        state.packed_owned.push((store_name, permuted, codec));
+        return Ok(());
+    }
     let decoded = safetensors_tensor_as_f32(manifest, file_bytes, data_start, &lookup_name)?;
     let rows = if permute_rows {
         permute_rope_rows(&decoded, head_count, head_dim, in_dim)
@@ -1296,7 +1339,7 @@ fn bind_dense_decoder_weights<'file>(
     let vocab = architecture.vocab as usize;
     let permute_rope_rows = !safetensors_has_qk_norm(manifest);
 
-    hf_bind_dense(
+    hf_bind_gathered(
         manifest,
         file_bytes,
         data_start,

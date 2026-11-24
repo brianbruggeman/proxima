@@ -4,7 +4,7 @@
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
-use proxima_numeric::DType;
+use proxima_numeric::{DType, Numerics, NumericFormat};
 use proxima_tensor::LoopCdMode;
 use proxima_tokenizer::Vocab;
 
@@ -41,6 +41,18 @@ fn dense_architecture() -> ModelHparams {
 }
 
 fn dense_safetensors() -> Vec<u8> {
+    dense_safetensors_as(
+        Numerics::default()
+            .weights
+            .to_dtype()
+            .expect("the reference weight format is a scalar"),
+    )
+}
+
+/// The fixture with every tensor stored as `dtype`; the values are small
+/// integers, exact in any float format of two bytes or more.
+fn dense_safetensors_as(dtype: DType) -> Vec<u8> {
+    let format = dtype.format().expect("a numeric dtype has a format");
     let tensors = [
         ("model.embed_tokens.weight", [3.0f32, 4.0, 0.0, 5.0]),
         (
@@ -67,7 +79,7 @@ fn dense_safetensors() -> Vec<u8> {
         ("model.norm.weight", [1.0, 1.0, 0.0, 0.0]),
         ("lm_head.weight", [1.0, 0.0, 0.0, 1.0]),
     ];
-    let encoded: Vec<(&str, Vec<u8>)> = tensors
+    let encoded: Vec<(&str, usize, Vec<u8>)> = tensors
         .iter()
         .map(|(name, values)| {
             let width = if name.ends_with("layernorm.weight") || name.ends_with("norm.weight") {
@@ -77,17 +89,22 @@ fn dense_safetensors() -> Vec<u8> {
             };
             let bytes = values[..width]
                 .iter()
-                .flat_map(|value| value.to_le_bytes())
+                .flat_map(|value| {
+                    let mut element = vec![0u8; dtype.size_bytes()];
+                    proxima_numeric::encode_scalar(*value, &format, &mut element)
+                        .expect("the fixture value encodes in its dtype");
+                    element
+                })
                 .collect();
-            (*name, bytes)
+            (*name, width, bytes)
         })
         .collect();
     let payloads = encoded
         .iter()
-        .map(|(name, bytes)| proxima_safetensors::TensorPayload {
+        .map(|(name, width, bytes)| proxima_safetensors::TensorPayload {
             name: (*name).into(),
-            dtype: DType::FLOAT32,
-            shape: vec![(bytes.len() / 4) as u64],
+            dtype,
+            shape: vec![*width as u64],
             data: bytes,
         })
         .collect();
@@ -293,4 +310,38 @@ fn a_cpu_decode_binds_once_per_width_class_while_the_kv_length_grows() {
             ids.len()
         );
     });
+}
+
+/// A half-width checkpoint binds its embedding table and its Q/K projections
+/// as views of the file instead of widening them, and the forward must still
+/// read exactly the values the reference-width file holds.
+#[test]
+fn a_half_width_checkpoint_forwards_the_logits_of_the_reference_width_one() {
+    let logits_of = |model: &LoadedModel<'_>| {
+        model
+            .forward_node_values_from_ids(&[0, 1], &[model.logits_root()], &ServingConfig::default())
+            .expect("the tiny model forwards")
+            .remove(0)
+    };
+    let reference = with_dense_model(logits_of);
+    let half_width: Vec<DType> = NumericFormat::ALL
+        .iter()
+        .filter_map(NumericFormat::to_dtype)
+        .filter(|dtype| dtype.is_float() && dtype.size_bytes() == 2)
+        .collect();
+    assert!(!half_width.is_empty(), "the numeric registry names half-width floats");
+    for dtype in half_width {
+        let bytes = dense_safetensors_as(dtype);
+        let manifest = proxima_safetensors::parse_complete(&bytes).expect("parse the fixture");
+        let header_length = u64::from_le_bytes(bytes[..8].try_into().expect("eight header bytes"));
+        let model = LoadedModel::load_from_safetensors(
+            &manifest,
+            &bytes,
+            header_length + 8,
+            dense_architecture(),
+            byte_vocab(),
+        )
+        .expect("load the half-width model");
+        assert_eq!(logits_of(&model), reference, "{dtype:?} logits");
+    }
 }
