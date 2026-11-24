@@ -5,8 +5,8 @@
 //! prompt file} x {F32, F16, BF16, Q4_0-K + F16-V}; the Q4_0-K row has no llama arm because llama
 //! flash attention needs K type = V type (`ggml-metal-device.m:1754`), so it is proxima-only.
 //! Every round visits every cell once, alternating forward and reverse, so drift lands on every
-//! cell alike. Every child runs under `/usr/bin/time -l`; its `peak memory footprint` line is the
-//! RAM read.
+//! cell alike. Every child runs under `/usr/bin/time` (`-l` on macOS, `-v` with GNU time on Linux); its `peak memory footprint` line (macOS only) and
+//! maximum resident set size are the RAM read.
 //!
 //! Llama arm: one `llama-server` process per (prompt, KV config, round) with `-fa on`, `-b`/`-ub`
 //! from the same `ServingSettings` as proxima (`proxima-model-interop/examples/llama_matched.toml`,
@@ -59,15 +59,15 @@
 //! ```
 //!
 //! Compare mode (`kv_scoreboard compare ...`, PROXNUM-413): the two arms are a baseline and a candidate
-//! build of proxima, not proxima and llama. Per model it runs `decode_gbps_baseline` (Metal,
-//! `--features std,metal`) and/or `bench_local` (CPU, `--features std`), release, one process at a time,
+//! build of proxima, not proxima and llama. Per model it runs `decode_gbps_baseline`
+//! (any backend: `--features std,<backend>`, metal or cuda) and/or `bench_local` (CPU, `--features std`), release, one process at a time,
 //! rounds alternating A B / B A / A B. It prints text_hash equality, warm (run_index 1) decode ms/token and
 //! TTFT per round with means, CPU id-array equality, and machine load at start and before each flint
 //! pair; a non-zero exit or differing token counts marks the model INVALID. No verdict words.
 //!
 //! ```sh
 //! cargo build --release -p proxima-model-interop --example kv_scoreboard
-//! # build decode_gbps_baseline (--features std,metal) and bench_local (--features std) in the baseline
+//! # build decode_gbps_baseline (--features std,<backend>: metal or cuda) and bench_local (--features std) in the baseline
 //! # and the candidate checkout, then:
 //! kv_scoreboard compare --out ~/.cache/kvgate/compare \
 //!   --baseline-metal BASE/decode_gbps_baseline --candidate-metal CAND/decode_gbps_baseline \
@@ -436,8 +436,40 @@ fn bytes_as_f64(bytes: u64) -> f64 {
     f64::from(high) * 4_294_967_296.0 + f64::from(low)
 }
 
-/// Reads `/usr/bin/time -l`'s `peak memory footprint` line (bytes).
+/// The `time` output shape of the host: BSD `-l` on macOS, GNU `-v` elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimeFormat {
+    Bsd,
+    Gnu,
+}
+
+impl TimeFormat {
+    fn for_os(os: &str) -> Self {
+        if os == "macos" || os.ends_with("bsd") { Self::Bsd } else { Self::Gnu }
+    }
+
+    fn current() -> Self {
+        Self::for_os(std::env::consts::OS)
+    }
+
+    const fn flag(self) -> &'static str {
+        match self {
+            Self::Bsd => "-l",
+            Self::Gnu => "-v",
+        }
+    }
+}
+
+/// Peak memory footprint in bytes; GNU time has no such line, so on Linux it is absent.
 fn parse_footprint_bytes(text: &str) -> Result<u64, HarnessError> {
+    match TimeFormat::current() {
+        TimeFormat::Bsd => parse_footprint_bsd(text),
+        TimeFormat::Gnu => Err(HarnessError::MissingLine("peak memory footprint line")),
+    }
+}
+
+/// Reads `/usr/bin/time -l`'s `peak memory footprint` line (bytes).
+fn parse_footprint_bsd(text: &str) -> Result<u64, HarnessError> {
     let line = text
         .lines()
         .find(|line| line.trim_end().ends_with("peak memory footprint"))
@@ -1801,7 +1833,7 @@ impl TimedServer {
         let ubatch = base.ubatch_size.to_string();
         let stderr_file = File::create(stderr_path).map_err(io_error(stderr_path))?;
         let timer = Command::new(&config.time_bin)
-            .arg("-l")
+            .arg(TimeFormat::current().flag())
             .arg(&config.llama)
             .arg("-m")
             .arg(&config.model)
@@ -1911,7 +1943,7 @@ fn run_llama(context: &RunContext, cell: &Cell, row: &mut Row) -> Result<(), Har
 
 fn run_proxima(context: &RunContext, cell: &Cell, binary: &Path, row: &mut Row) -> Result<(), HarnessError> {
     let mut command = Command::new(&context.config.time_bin);
-    command.arg("-l").arg(binary);
+    command.arg(TimeFormat::current().flag()).arg(binary);
     command.env("PROXIMA_SPECULATIVE_TYPES", "none");
     command.env("PROXIMA_STEP_TIMES", "1");
     command.env("PROXIMA_MAX_TOKENS", MAX_TOKENS.to_string());
@@ -1960,7 +1992,7 @@ fn run_inproc(context: &RunContext, cell: &Cell, binary: &Path, row: &mut Row) -
     let ids: Vec<String> = context.prompt.ids.iter().map(u32::to_string).collect();
     let library_dir = context.config.llama.parent().unwrap_or(Path::new("."));
     let output = Command::new(&context.config.time_bin)
-        .arg("-l")
+        .arg(TimeFormat::current().flag())
         .arg(binary)
         .arg("--model")
         .arg(&context.config.model)
@@ -2118,8 +2150,15 @@ struct ProcessTimes {
     sys_us: u64,
 }
 
-/// `/usr/bin/time -l` first line, `7.53 real 2.90 user 1.85 sys`, in integer microseconds.
 fn parse_process_times(text: &str) -> Option<ProcessTimes> {
+    match TimeFormat::current() {
+        TimeFormat::Bsd => parse_process_times_bsd(text),
+        TimeFormat::Gnu => parse_process_times_gnu(text),
+    }
+}
+
+/// `/usr/bin/time -l` first line, `7.53 real 2.90 user 1.85 sys`, in integer microseconds.
+fn parse_process_times_bsd(text: &str) -> Option<ProcessTimes> {
     let line = text.lines().find(|line| line.contains(" real ") && line.contains(" user "))?;
     let tokens: Vec<&str> = line.split_whitespace().collect();
     let before = |unit: &str| {
@@ -2127,6 +2166,29 @@ fn parse_process_times(text: &str) -> Option<ProcessTimes> {
         micros_from_seconds_text(tokens.get(at.checked_sub(1)?)?)
     };
     Some(ProcessTimes { wall_us: before("real")?, user_us: before("user")?, sys_us: before("sys")? })
+}
+
+/// GNU `time -v` lines `User time (seconds): 2.90`, `System time (seconds): 1.85` and
+/// `Elapsed (wall clock) time (h:mm:ss or m:ss): 0:07.53`, in integer microseconds.
+fn parse_process_times_gnu(text: &str) -> Option<ProcessTimes> {
+    let value = |label: &str| {
+        let line = text.lines().find(|line| line.trim_start().starts_with(label))?;
+        Some(line.rsplit_once(": ")?.1.trim())
+    };
+    let seconds = |label: &str| micros_from_seconds_text(value(label)?);
+    Some(ProcessTimes {
+        wall_us: clock_micros(value("Elapsed (wall clock) time")?)?,
+        user_us: seconds("User time (seconds)")?,
+        sys_us: seconds("System time (seconds)")?,
+    })
+}
+
+/// `h:mm:ss` or `m:ss.ss` as integer microseconds.
+fn clock_micros(text: &str) -> Option<u64> {
+    let (head, seconds) = text.rsplit_once(':')?;
+    let (hours, minutes) = head.split_once(':').unwrap_or(("0", head));
+    let whole = hours.parse::<u64>().ok()? * SECONDS_PER_HOUR + minutes.parse::<u64>().ok()? * SECONDS_PER_MINUTE;
+    Some(whole * micros_from_seconds_text("1")? + micros_from_seconds_text(seconds)?)
 }
 
 /// `2026-11-23T14:00:05.000000Z`, the contract's timestamp shape, from days-since-epoch civil arithmetic.
@@ -2822,13 +2884,27 @@ fn parse_run_walls(text: &str) -> BTreeMap<usize, f64> {
         .collect()
 }
 
-/// `/usr/bin/time -l` first line: `7.53 real 2.90 user 1.85 sys`, in milliseconds.
+/// The wall time line of `time`, in milliseconds.
 fn parse_real_ms(text: &str) -> Option<f64> {
-    let line = text.lines().find(|line| line.contains(" real "))?;
-    Some(line.split_whitespace().next()?.parse::<f64>().ok()? * 1e3)
+    let times = parse_process_times(text)?;
+    Some(Duration::from_micros(times.wall_us).as_secs_f64() * 1e3)
 }
 
 fn parse_rss_bytes(text: &str) -> Option<u64> {
+    match TimeFormat::current() {
+        TimeFormat::Bsd => parse_rss_bsd(text),
+        TimeFormat::Gnu => parse_rss_gnu(text),
+    }
+}
+
+/// `Maximum resident set size (kbytes): 3704032` from GNU `time -v`, in bytes.
+fn parse_rss_gnu(text: &str) -> Option<u64> {
+    let line = text.lines().find(|line| line.trim_start().starts_with("Maximum resident set size (kbytes)"))?;
+    let kibibytes: u64 = line.rsplit_once(": ")?.1.trim().parse().ok()?;
+    kibibytes.checked_mul(BYTES_PER_KIBIBYTE)
+}
+
+fn parse_rss_bsd(text: &str) -> Option<u64> {
     let line = text.lines().find(|line| line.trim_end().ends_with("maximum resident set size"))?;
     line.split_whitespace().next()?.parse().ok()
 }
@@ -3083,7 +3159,7 @@ fn proxima_command(config: &Config, binary: &Path, text: &str, profile: Option<&
         None => ("3", MAX_TOKENS),
     };
     let mut command = Command::new(&config.time_bin);
-    command.arg("-l").arg(binary);
+    command.arg(TimeFormat::current().flag()).arg(binary);
     command.env("PROXIMA_SPECULATIVE_TYPES", "none");
     command.env("PROXIMA_STEP_TIMES", "1");
     command.env("PROXIMA_RUNS", runs);
@@ -4162,10 +4238,10 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
             ttft_warm_ms: span.ttft_warm_ms.clone(),
             decode_ms: span.tok_s.iter().map(|rate| 1000.0 / rate).collect(),
             run_walls_ms: parse_run_walls(PROX_LOG),
-            process_real_ms: parse_real_ms(PROX_LOG),
+            process_real_ms: parse_process_times_bsd(PROX_LOG).map(|times| Duration::from_micros(times.wall_us).as_secs_f64() * 1e3),
             gpu_peak_bytes: span.gpu_peak_bytes,
-            footprint_bytes: parse_footprint_bytes(PROX_LOG).ok(),
-            rss_bytes: parse_rss_bytes(PROX_LOG),
+            footprint_bytes: parse_footprint_bsd(PROX_LOG).ok(),
+            rss_bytes: parse_rss_bsd(PROX_LOG),
             kv: None,
             attention_prefill: None,
             attention_decode: parse_op_profile(OP_PROFILE_LINES),
@@ -4281,11 +4357,43 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         assert!(log.kv_types.iter().all(|(key, value)| key == "bf16" && value == "bf16"));
     }
 
+    const GNU_TIME: &str = "\tCommand being timed: \"decode_gbps_baseline\"\n\tUser time (seconds): 2.90\n\tSystem time (seconds): 1.85\n\tPercent of CPU this job got: 63%\n\tElapsed (wall clock) time (h:mm:ss or m:ss): 0:07.53\n\tMaximum resident set size (kbytes): 3704032\n\tExit status: 0\n";
+
+    #[test]
+    fn gnu_time_v_lines_give_microseconds_and_rss_bytes() {
+        let times = parse_process_times_gnu(GNU_TIME).expect("gnu time lines");
+        assert_eq!(times, ProcessTimes { wall_us: 7_530_000, user_us: 2_900_000, sys_us: 1_850_000 });
+        assert_eq!(parse_rss_gnu(GNU_TIME), Some(3_704_032 * 1024));
+        assert_eq!(parse_process_times_gnu("7.53 real 2.90 user 1.85 sys"), None);
+        assert_eq!(parse_rss_gnu(PROX_LOG), None);
+    }
+
+    #[test]
+    fn gnu_elapsed_reads_both_clock_shapes() {
+        assert_eq!(clock_micros("1:02:03.50"), Some(3_723_500_000));
+        assert_eq!(clock_micros("12:34.25"), Some(754_250_000));
+        assert_eq!(clock_micros("0:00.00"), Some(0));
+        assert_eq!(clock_micros("garbage"), None);
+    }
+
+    #[test]
+    fn the_time_format_follows_the_os() {
+        assert_eq!(TimeFormat::for_os("macos"), TimeFormat::Bsd);
+        assert_eq!(TimeFormat::for_os("linux"), TimeFormat::Gnu);
+        assert_eq!(TimeFormat::Bsd.flag(), "-l");
+        assert_eq!(TimeFormat::Gnu.flag(), "-v");
+    }
+
+    #[test]
+    fn bsd_time_l_rss_line_is_bytes() {
+        assert_eq!(parse_rss_bsd(PROX_LOG), Some(3_792_928_768));
+    }
+
     #[test]
     fn footprint_line_from_time_l_is_bytes() {
-        assert_eq!(parse_footprint_bytes(PROX_LOG).expect("footprint"), 355_363_520);
-        assert_eq!(parse_footprint_bytes(LLAMA_PEAK).expect("footprint"), 952_119_104);
-        assert!(parse_footprint_bytes("7.53 real 2.90 user").is_err());
+        assert_eq!(parse_footprint_bsd(PROX_LOG).expect("footprint"), 355_363_520);
+        assert_eq!(parse_footprint_bsd(LLAMA_PEAK).expect("footprint"), 952_119_104);
+        assert!(parse_footprint_bsd("7.53 real 2.90 user").is_err());
     }
 
     #[test]
@@ -5198,11 +5306,11 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         let mut proxima = proxima_row(vec![1, 2, 3], 26);
         proxima.metrics = parse_proxima(&log).expect("legacy parse");
         proxima.run_facts = parse_run_facts(&log);
-        proxima.process = parse_process_times(&log);
+        proxima.process = parse_process_times_bsd(&log);
         proxima.started_at = UNIX_EPOCH + Duration::from_secs(1_000_000_000);
         proxima.ended_at = UNIX_EPOCH + Duration::from_secs(1_000_000_008);
         let mut llama = llama_row(vec![1, 2, 3]);
-        llama.process = parse_process_times(RAW_LLAMA_TIME);
+        llama.process = parse_process_times_bsd(RAW_LLAMA_TIME);
         llama.position = 1;
         llama.started_at = UNIX_EPOCH + Duration::from_secs(1_000_000_010);
         llama.ended_at = UNIX_EPOCH + Duration::from_secs(1_000_000_020);
@@ -5294,7 +5402,7 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
 
     #[test]
     fn process_times_come_from_the_time_line_in_integer_microseconds() {
-        let times = parse_process_times(PROX_LOG).expect("time line");
+        let times = parse_process_times_bsd(PROX_LOG).expect("time line");
         assert_eq!(times, ProcessTimes { wall_us: 7_530_000, user_us: 2_900_000, sys_us: 1_850_000 });
         assert_eq!(micros_from_millis("1573.234917"), Some(1_573_234));
     }
