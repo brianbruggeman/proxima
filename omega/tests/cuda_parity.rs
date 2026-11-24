@@ -6061,3 +6061,52 @@ fn an_out_of_range_stacked_q8_0_expert_route_faults_on_the_staged_gathered_dp4a(
         other => panic!("expected a cuda GatherIndexOutOfRange at index 999, got {other:?}"),
     }
 }
+
+const GROUPED_EXPERTS: usize = 8;
+const GROUPED_ROWS: usize = 128;
+const GROUPED_DEPTH: usize = 512;
+
+fn grouped_route(tokens: usize) -> Vec<f32> {
+    (0..tokens).map(|token| ((token * 5 + token / 3) % GROUPED_EXPERTS) as f32).collect()
+}
+
+/// Every codec the tensor-core gemm decodes and `arbitrary_blocks` can fill: a gathered expert
+/// product with at least the grouped minimum of token rows takes the route prepass and the grouped
+/// kernel, and equals the cpu engine over the same packed blocks.
+#[test]
+fn a_gathered_expert_product_above_the_grouped_minimum_takes_the_grouped_kernel_and_matches_cpu_on_cuda() {
+    let tokens = omega::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS as usize + 16;
+    let route = grouped_route(tokens);
+    let activation: Vec<f32> = random_vec(731, tokens * GROUPED_DEPTH).into_iter().map(|value| value * 2.0 - 1.0).collect();
+    let codecs: Vec<Codec> = Codec::ALL
+        .into_iter()
+        .filter(|codec| omega::cuda::is_mma_weight(*codec))
+        .filter(|codec| codec.block_layout().is_some_and(|layout| layout.scale.layout.width() == 16 && GROUPED_DEPTH % usize::from(layout.elements) == 0))
+        .collect();
+    assert!(!codecs.is_empty(), "the decode table accepts block codecs");
+    for codec in codecs {
+        let layout = codec.block_layout().expect("a block codec");
+        let weight = arbitrary_blocks(&layout, GROUPED_EXPERTS * GROUPED_ROWS * GROUPED_DEPTH / usize::from(layout.elements), 733);
+        let (program, sum) = gathered_expert_program(GROUPED_EXPERTS as u32, GROUPED_ROWS as u32, GROUPED_DEPTH as u32, tokens as u32);
+        let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+            ("weight", QuantizedBlock::Packed { codec, bytes: &weight }),
+            ("route", QuantizedBlock::Float32(&route)),
+            ("activation", QuantizedBlock::Float32(&activation)),
+        ];
+        let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), &program, &[], &named, &[sum], NumericPolicy::default())
+            .expect("the gathered expert product plans on cuda");
+        let identities = cuda_kernel_identities(&plan).expect("a cuda plan");
+        let entries: Vec<&str> = identities.iter().filter_map(|identity| identity.lines().next()).collect();
+        assert!(entries.iter().any(|entry| entry.contains("_grp1") && !entry.ends_with("_route_prepass")), "{codec:?}: no grouped kernel planned: {entries:?}");
+        assert!(entries.iter().any(|entry| entry.contains("_grp1") && entry.ends_with("_route_prepass")), "{codec:?}: no route prepass planned: {entries:?}");
+        let actual = execute_plan_named(&mut plan, &named).expect("the grouped product runs on cuda");
+        let mut reference_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[sum], NumericPolicy::default())
+            .expect("the gathered expert product plans on cpu");
+        let expected = execute_plan_named(&mut reference_plan, &named).expect("the reference runs on cpu");
+        assert_eq!(actual.root().len(), tokens * GROUPED_ROWS, "{codec:?}: one output per (token, row)");
+        let magnitude = expected.root().iter().fold(0.0f32, |largest, value| largest.max(value.abs()));
+        assert!(magnitude > 0.0, "{codec:?}: an all-zero reference would make parity vacuous");
+        let worst = actual.root().iter().zip(expected.root()).map(|(got, want)| (got - want).abs()).fold(0.0f32, f32::max);
+        assert!(worst / magnitude < 1e-5, "{codec:?}: grouped kernel disagrees with cpu: worst={worst} magnitude={magnitude}");
+    }
+}
