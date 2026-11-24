@@ -102,7 +102,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use memmap2::MmapOptions;
 use proxima_gguf::{MetadataValue, ParsedGguf, parse_complete};
 use proxima_model_interop::ServingSettings;
-use proxima_tokenizer::chat_template::render_chat;
+use proxima_tokenizer::chat_template::{civil_from_days, render_chat};
 use proxima_tokenizer::vocab::Vocab;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -2231,11 +2231,11 @@ fn special_token_text(id: Option<u32>, vocab: &Vocab) -> &str {
 
 /// the question as the model's own template renders it; no template means the plain question.
 /// a leading bos is dropped when tokenization adds its own, so it is not sent twice.
-fn render_short_prompt(template: Option<&str>, bos: &str, eos: &str, tokenizer_adds_bos: bool) -> Result<String, HarnessError> {
+fn render_short_prompt(template: Option<&str>, bos: &str, eos: &str, tokenizer_adds_bos: bool, now_unix_seconds: i64) -> Result<String, HarnessError> {
     let Some(template) = template else {
         return Ok(SHORT_QUESTION.to_owned());
     };
-    let rendered = render_chat(template, &[("user", SHORT_QUESTION)], true, bos, eos, &[])
+    let rendered = render_chat(template, &[("user", SHORT_QUESTION)], true, bos, eos, &[], now_unix_seconds)
         .map_err(|source| HarnessError::Tokenize(format!("chat template: {source}")))?;
     if tokenizer_adds_bos && !bos.is_empty() && rendered.starts_with(bos) {
         return Ok(rendered[bos.len()..].to_owned());
@@ -2243,11 +2243,11 @@ fn render_short_prompt(template: Option<&str>, bos: &str, eos: &str, tokenizer_a
     Ok(rendered)
 }
 
-fn short_prompt_text(parsed: &ParsedGguf, vocab: &Vocab) -> Result<String, HarnessError> {
+fn short_prompt_text(parsed: &ParsedGguf, vocab: &Vocab, now_unix_seconds: i64) -> Result<String, HarnessError> {
     let template = parsed.metadata_value(CHAT_TEMPLATE_KEY).and_then(MetadataValue::as_str);
     let bos = special_token_text(vocab.bos_token_id(), vocab);
     let eos = special_token_text(vocab.eos_token_id(), vocab);
-    render_short_prompt(template, bos, eos, wants_bos(vocab))
+    render_short_prompt(template, bos, eos, wants_bos(vocab), now_unix_seconds)
 }
 
 fn prompt_file(prompt: Prompt, config: &Config) -> Option<&Path> {
@@ -2271,7 +2271,12 @@ fn prompt_text(prompt: Prompt, short_text: &str, config: &Config) -> Result<Stri
         .map_err(io_error(path))
 }
 
-fn load_prompts(config: &Config) -> Result<(String, BTreeMap<Prompt, PromptData>), HarnessError> {
+/// the chat template is read and rendered only when the short prompt will run, so a template the renderer cannot handle never blocks file-prompt runs.
+fn short_text_when_selected(prompts: &[Prompt], render: impl FnOnce() -> Result<String, HarnessError>) -> Result<String, HarnessError> {
+    if prompts.contains(&Prompt::Short) { render() } else { Ok(String::new()) }
+}
+
+fn load_prompts(config: &Config, session_start: SystemTime) -> Result<(String, BTreeMap<Prompt, PromptData>), HarnessError> {
     let file = File::open(&config.model).map_err(io_error(&config.model))?;
     // SAFETY: the mapping is read-only and the blob is not modified while the harness runs.
     let bytes = unsafe { MmapOptions::new().map(&file) }.map_err(io_error(&config.model))?;
@@ -2279,7 +2284,7 @@ fn load_prompts(config: &Config) -> Result<(String, BTreeMap<Prompt, PromptData>
     let parsed = parse_complete(&bytes).map_err(|source| HarnessError::Tokenize(format!("{source:?}")))?;
     let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
         .map_err(|source| HarnessError::Tokenize(format!("{source:?}")))?;
-    let short_text = short_prompt_text(&parsed, &vocab)?;
+    let short_text = short_text_when_selected(&config.prompts, || short_prompt_text(&parsed, &vocab, unix_seconds(session_start)))?;
     let mut prompts = BTreeMap::new();
     for prompt in config.prompts.iter().copied() {
         let text = prompt_text(prompt, &short_text, config)?;
@@ -2402,6 +2407,10 @@ fn clock_micros(text: &str) -> Option<u64> {
     Some(whole * micros_from_seconds_text("1")? + micros_from_seconds_text(seconds)?)
 }
 
+fn unix_seconds(time: SystemTime) -> i64 {
+    i64::try_from(time.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()).unwrap_or_default()
+}
+
 /// `2026-11-23T14:00:05.000000Z`, the contract's timestamp shape, from days-since-epoch civil arithmetic.
 fn utc_text(time: SystemTime) -> String {
     let since = time.duration_since(UNIX_EPOCH).unwrap_or_default();
@@ -2415,19 +2424,6 @@ fn utc_text(time: SystemTime) -> String {
         in_day % SECONDS_PER_MINUTE,
         since.subsec_micros()
     )
-}
-
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let shifted = days + 719_468;
-    let era = shifted.div_euclid(146_097);
-    let day_of_era = shifted.rem_euclid(146_097);
-    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
-    let year = year_of_era + era * 400 + i64::from(month <= 2);
-    (year, month, day)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2813,7 +2809,8 @@ fn run(config: &Config) -> Result<(), HarnessError> {
     let contract = load_contract()?;
     let logs = config.out.join("logs");
     fs::create_dir_all(&logs).map_err(io_error(&logs))?;
-    let (model_sha256, prompts) = load_prompts(config)?;
+    let session_start = SystemTime::now();
+    let (model_sha256, prompts) = load_prompts(config, session_start)?;
     write_prompt_ids(&config.out, &prompts)?;
     let llama_identity = arm_identity(&config.llama)?;
     let facts = Facts {
@@ -2828,7 +2825,7 @@ fn run(config: &Config) -> Result<(), HarnessError> {
     let mut session = Session { config, prompts: &prompts, logs, llama_sha256: llama_identity.sha256, llama_flash: String::new() };
     let mut warmups = run_warmups(&mut session, &cells)?;
     let mut rows = Vec::new();
-    let session_id = format!("s-{}-{}", utc_text(SystemTime::now()).replace(['-', ':', '.'], ""), std::process::id());
+    let session_id = format!("s-{}-{}", utc_text(session_start).replace(['-', ':', '.'], ""), std::process::id());
     for (step, (round, index)) in round_plan(config.rounds, &group_sizes(&cells)).into_iter().enumerate() {
         rows.push(measure(&session, &cells[index], Slot { round, step, port_index: step })?);
     }
@@ -4575,25 +4572,37 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
 
     #[test]
     fn short_prompt_renders_the_question_through_the_template_with_the_generation_prompt() {
-        let text = render_short_prompt(Some(FIXTURE_TEMPLATE), "", "", false).expect("fixture template renders");
+        let text = render_short_prompt(Some(FIXTURE_TEMPLATE), "", "", false, 0).expect("fixture template renders");
         assert_eq!(text, format!("<user>{SHORT_QUESTION}</user><assistant>"));
     }
 
     #[test]
+    fn file_prompts_never_touch_the_chat_template() {
+        let text = short_text_when_selected(&[Prompt::Long, Prompt::File(0)], || panic!("template rendered for a file-prompt run")).expect("no render");
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn the_short_prompt_selection_renders_the_template() {
+        let text = short_text_when_selected(&[Prompt::Long, Prompt::Short], || Ok("rendered".to_owned())).expect("renders");
+        assert_eq!(text, "rendered");
+    }
+
+    #[test]
     fn short_prompt_without_a_template_is_the_plain_question() {
-        assert_eq!(render_short_prompt(None, "<s>", "</s>", true).expect("no template"), SHORT_QUESTION);
+        assert_eq!(render_short_prompt(None, "<s>", "</s>", true, 0).expect("no template"), SHORT_QUESTION);
     }
 
     #[test]
     fn short_prompt_drops_a_leading_bos_only_when_tokenization_adds_one() {
         let template = "{{ bos_token }}{{ messages[0].content }}";
-        assert_eq!(render_short_prompt(Some(template), "<s>", "", true).expect("renders"), SHORT_QUESTION);
-        assert_eq!(render_short_prompt(Some(template), "<s>", "", false).expect("renders"), format!("<s>{SHORT_QUESTION}"));
+        assert_eq!(render_short_prompt(Some(template), "<s>", "", true, 0).expect("renders"), SHORT_QUESTION);
+        assert_eq!(render_short_prompt(Some(template), "<s>", "", false, 0).expect("renders"), format!("<s>{SHORT_QUESTION}"));
     }
 
     #[test]
     fn short_prompt_template_failure_is_an_error_not_a_fallback() {
-        assert!(render_short_prompt(Some("{{ messages[0].content | no_such_filter }}"), "", "", false).is_err());
+        assert!(render_short_prompt(Some("{{ messages[0].content | no_such_filter }}"), "", "", false, 0).is_err());
     }
 
     #[test]
