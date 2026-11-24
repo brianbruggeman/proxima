@@ -16,8 +16,8 @@ use proxima_safetensors::{Manifest, SafetensorsParser, TensorEntry};
 use proxima_tensor::cpu::{Evaluated, QuantizedBlock, evaluate_quantized_named};
 use proxima_tensor::op::{Extent, NodeId, Op};
 use proxima_tensor::spec::{
-    STFT_COS_INPUT, STFT_SIN_INPUT, STFT_WINDOW_INPUT, StftLogMelConfig, cross_kv, input_leaf,
-    stft_log_mel, stft_tables,
+    CachedLayerRoots, STFT_COS_INPUT, STFT_SIN_INPUT, STFT_WINDOW_INPUT, StftLogMelConfig,
+    cross_kv, input_leaf, stft_log_mel, stft_tables,
 };
 use serde_json::Value;
 
@@ -95,6 +95,16 @@ impl Shape {
 
 /// suffix of the cache key holding a stored `[out, in]` matrix as `[in, out]`
 const FLIPPED: &str = "#flipped";
+
+const CACHE_PLANES: [&str; 3] = ["first", "second", "value"];
+
+fn cache_plane_name(plane: &str, layer: usize) -> String {
+    format!("cache_{plane}_{layer}")
+}
+
+fn cache_names(layers: usize) -> impl Iterator<Item = String> {
+    (0..layers).flat_map(|layer| CACHE_PLANES.map(|part| cache_plane_name(part, layer)))
+}
 
 /// The checkpoint's tensors, in the layout the builders read.
 pub struct Tensors {
@@ -224,6 +234,59 @@ impl<'a> Bound<'a> {
             vec![Extent::Symbolic(0)],
             name,
         )
+    }
+
+    fn cross_leaves(&mut self) -> Vec<(NodeId, NodeId)> {
+        let dims = [
+            self.shape.source_positions,
+            self.shape.decoder_heads,
+            self.shape.decoder_head_dim,
+        ];
+        (0..self.shape.decoder_layers)
+            .map(|layer| {
+                (
+                    self.leaf(&format!("cross_k_{layer}"), &dims),
+                    self.leaf(&format!("cross_v_{layer}"), &dims),
+                )
+            })
+            .collect()
+    }
+
+    fn cache_leaves(&mut self) -> Vec<CachedLayerRoots> {
+        let heads = self.shape.decoder_heads;
+        let half = self.shape.decoder_head_dim / 2;
+        let full = self.shape.decoder_head_dim;
+        let plane = |this: &mut Self, name: String, width: u32| {
+            this.named.insert(name.clone(), Vec::new());
+            let extents = vec![
+                Extent::Symbolic(1),
+                Extent::Static(heads),
+                Extent::Static(width),
+            ];
+            input_leaf(
+                &mut this.program,
+                super::encoder_decoder::ACTIVATION,
+                extents,
+                &name,
+            )
+        };
+        (0..self.shape.decoder_layers)
+            .map(|layer| {
+                let [first, second, value] = CACHE_PLANES.map(|part| cache_plane_name(part, layer));
+                (
+                    plane(self, first, half),
+                    plane(self, second, half),
+                    plane(self, value, full),
+                )
+            })
+            .collect()
+    }
+
+    fn stage_step(&mut self, ids: &[u32], cached: usize) {
+        let tokens = ids.iter().map(|id| *id as _).collect();
+        let positions = (cached..cached + ids.len()).map(|at| at as _).collect();
+        self.named.insert("tokens".into(), tokens);
+        self.named.insert("positions".into(), positions);
     }
 
     fn weight(&mut self, name: &str, shape: &[u32], stored: &str, tensors: &'a Tensors) -> NodeId {
@@ -584,9 +647,6 @@ impl Model {
 
         let mut runtime = self.runtime()?;
         let mut gpu_peak = None;
-        // the runtime keys a segment plan on the program's address, so every
-        // decoder program stays alive here until the transcription ends
-        let mut kept_programs: Vec<Vec<Op>> = Vec::new();
         let padded = pad(wav)?;
         let front = front_end(&self.dir)?;
         if front.mels != self.shape.mels {
@@ -685,14 +745,46 @@ impl Model {
             outputs.push(*v);
         }
         let encode_start = std::time::Instant::now();
-        let values = bound.run(&outputs, &[], &mut runtime)?;
+        let mut values = bound.run(&outputs, &[], &mut runtime)?;
         let encode = encode_start.elapsed();
         sample_peak(&mut gpu_peak, &runtime);
-        let cross_values: Vec<(Vec<f32>, Vec<f32>)> = (0..self.shape.decoder_layers)
-            .map(|layer| (values[1 + layer * 2].clone(), values[2 + layer * 2].clone()))
+
+        let mut decoder = Bound::new(self.shape.clone());
+        let token_leaf = decoder.symbolic_leaf("tokens");
+        let positions = decoder.symbolic_leaf("positions");
+        let stem = decoder.decoder_stem(&self.tensors);
+        let layers: Vec<_> = (0..self.shape.decoder_layers)
+            .map(|layer| decoder.decoder_layer(layer, &self.tensors))
             .collect();
+        let cross_nodes = decoder.cross_leaves();
+        for layer in 0..self.shape.decoder_layers {
+            let k = std::mem::take(&mut values[1 + layer * 2]);
+            let v = std::mem::take(&mut values[2 + layer * 2]);
+            decoder.named.insert(format!("cross_k_{layer}"), k);
+            decoder.named.insert(format!("cross_v_{layer}"), v);
+        }
+        let cache_leaves = decoder.cache_leaves();
+        let (logits, appended) = super::encoder_decoder::decoder(
+            &mut decoder.program,
+            token_leaf,
+            positions,
+            &stem,
+            &layers,
+            &cross_nodes,
+            Some(&cache_leaves),
+            self.shape.decoder_heads,
+            self.shape.decoder_head_dim,
+            self.shape.eps,
+        )?;
+        let mut step_outputs = vec![logits];
+        step_outputs.extend(
+            appended
+                .iter()
+                .flat_map(|(first, second, value)| [*first, *second, *value]),
+        );
 
         let mut tokens: Vec<u32> = policy.prompt().to_vec();
+        let mut cached = 0;
         let mut ended = false;
         let mut step_times = Vec::new();
         let mut first_token = Duration::ZERO;
@@ -700,64 +792,19 @@ impl Model {
         let decode_start = Instant::now();
         for step in 0..policy.step_cap() as usize {
             let step_start = Instant::now();
-            let mut decoder = Bound::new(self.shape.clone());
-            let n = tokens.len() as u32;
-            let token_leaf = decoder.symbolic_leaf("tokens");
-            let positions = decoder.symbolic_leaf("positions");
-            let stem = decoder.decoder_stem(&self.tensors);
-            let layers: Vec<_> = (0..self.shape.decoder_layers)
-                .map(|layer| decoder.decoder_layer(layer, &self.tensors))
-                .collect();
-            let mut cross_nodes = Vec::new();
-            for (layer, (k, v)) in cross_values.iter().enumerate() {
-                let k_name = format!("cross_k_{layer}");
-                let v_name = format!("cross_v_{layer}");
-                let k_node = decoder.leaf(
-                    &k_name,
-                    &[
-                        self.shape.source_positions,
-                        self.shape.decoder_heads,
-                        self.shape.decoder_head_dim,
-                    ],
-                );
-                let v_node = decoder.leaf(
-                    &v_name,
-                    &[
-                        self.shape.source_positions,
-                        self.shape.decoder_heads,
-                        self.shape.decoder_head_dim,
-                    ],
-                );
-                decoder.named.insert(k_name, k.clone());
-                decoder.named.insert(v_name, v.clone());
-                cross_nodes.push((k_node, v_node));
+            let fresh = &tokens[cached..];
+            decoder.stage_step(fresh, cached);
+            let symbols = [fresh.len() as u64, cached as u64];
+            let mut rows = decoder.run(&step_outputs, &symbols, &mut runtime)?;
+            let flat = rows.remove(0);
+            for (name, added) in cache_names(self.shape.decoder_layers).zip(rows) {
+                if let Some(plane) = decoder.named.get_mut(&name) {
+                    plane.extend(added);
+                }
             }
-            let (logits, _) = super::encoder_decoder::decoder(
-                &mut decoder.program,
-                token_leaf,
-                positions,
-                &stem,
-                &layers,
-                &cross_nodes,
-                None,
-                self.shape.decoder_heads,
-                self.shape.decoder_head_dim,
-                self.shape.eps,
-            )?;
-            decoder.named.insert(
-                "tokens".into(),
-                tokens.iter().map(|id| *id as f32).collect(),
-            );
-            decoder
-                .named
-                .insert("positions".into(), (0..n).map(|i| i as f32).collect());
-            let flat = decoder
-                .run(&[logits], &[u64::from(n), 0], &mut runtime)?
-                .remove(0);
-            kept_programs.push(decoder.program);
+            cached = tokens.len();
             let vocab = self.shape.vocab as usize;
-            let last = &flat[(n as usize - 1) * vocab..n as usize * vocab];
-            let mut row = last.to_vec();
+            let mut row = flat[flat.len() - vocab..].to_vec();
             let chosen = policy.pick(&mut row, step)?;
             tokens.push(chosen);
             sample_peak(&mut gpu_peak, &runtime);
