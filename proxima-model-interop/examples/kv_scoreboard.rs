@@ -199,13 +199,15 @@ enum HarnessError {
 enum Prompt {
     Short,
     Long,
+    File(usize),
 }
 
 impl Prompt {
-    fn name(self) -> &'static str {
+    fn name(self) -> String {
         match self {
-            Prompt::Short => "short",
-            Prompt::Long => "long",
+            Prompt::Short => "short".to_owned(),
+            Prompt::Long => "long".to_owned(),
+            Prompt::File(index) => format!("file{index}"),
         }
     }
 
@@ -315,9 +317,13 @@ impl Cell {
 
 /// Cell order is fixed: prompt, then kv, then each proxima binary, then llama-server and the
 /// in-process llama arm when llama has an arm for that KV pair.
-fn cell_order(proxima: &[(String, PathBuf)], inproc: Option<&Path>) -> Vec<Cell> {
+fn prompt_set(files: usize) -> Vec<Prompt> {
+    ALL_PROMPTS.into_iter().chain((0..files).map(Prompt::File)).collect()
+}
+
+fn cell_order(proxima: &[(String, PathBuf)], inproc: Option<&Path>, files: usize) -> Vec<Cell> {
     let mut cells = Vec::new();
-    for prompt in ALL_PROMPTS {
+    for prompt in prompt_set(files) {
         for kv in ALL_KV {
             for (label, binary) in proxima {
                 cells.push(Cell {
@@ -1074,6 +1080,8 @@ struct Facts {
 struct Row {
     round: usize,
     cell: Cell,
+    /// the contract `input.id` of the prompt this row sent
+    input: String,
     /// a process run before round 1 whose record is discarded and never counts toward n
     warmup: bool,
     /// llama arm only: the `-fa` value this row ran with, derived from the proxima arm
@@ -1510,7 +1518,8 @@ fn bytes_to_megabytes(bytes: Option<u64>) -> Vec<f64> {
 /// with their failing invariants and never reach a mean.
 fn scoreboard_markdown(rows: &[Row], cells: &[Cell]) -> String {
     let mut out = String::from("# kv scoreboard\n\nmetric cells are `mean (CoV%) n=samples` over exit-0 processes whose parity record has no failing invariant; CoV is sample sd / mean x 100; MB is 1e6 bytes.\n");
-    for prompt in ALL_PROMPTS {
+    let prompts: BTreeSet<Prompt> = cells.iter().map(|cell| cell.prompt).collect();
+    for prompt in prompts {
         for kv in ALL_KV {
             let _ = write!(
                 out,
@@ -1567,6 +1576,8 @@ struct Config {
     model: PathBuf,
     llama: PathBuf,
     long_prompt_file: PathBuf,
+    /// repeated `--prompt-file`: each file is one more input, selected as `Prompt::File(index)`
+    prompt_files: Vec<PathBuf>,
     proxima: Vec<(String, PathBuf)>,
     rounds: usize,
     time_bin: PathBuf,
@@ -1645,6 +1656,7 @@ fn parse_value<T: std::str::FromStr>(
 fn parse_config(arguments: impl IntoIterator<Item = String>) -> Result<Config, HarnessError> {
     let mut values: BTreeMap<String, String> = BTreeMap::new();
     let mut proxima = Vec::new();
+    let mut prompt_files: Vec<PathBuf> = Vec::new();
     let mut tokens = arguments.into_iter();
     let mut text_edges = false;
     let mut refresh_incumbent = false;
@@ -1660,7 +1672,9 @@ fn parse_config(arguments: impl IntoIterator<Item = String>) -> Result<Config, H
         let value = tokens
             .next()
             .ok_or_else(|| HarnessError::MissingValue(flag.clone()))?;
-        if flag == "--prox" {
+        if flag == "--prompt-file" {
+            prompt_files.push(PathBuf::from(value));
+        } else if flag == "--prox" {
             let (label, path) = value
                 .split_once('=')
                 .ok_or_else(|| HarnessError::BadProx(value.clone()))?;
@@ -1679,7 +1693,8 @@ fn parse_config(arguments: impl IntoIterator<Item = String>) -> Result<Config, H
     };
     let llama_inproc = values.get("--llama-inproc").map(PathBuf::from);
     let stages = values.get("--stages").map(PathBuf::from);
-    let prompts = parse_names(&values, "--prompts", "short|long", ALL_PROMPTS, Prompt::parse)?;
+    let mut prompts = parse_names(&values, "--prompts", "short|long", ALL_PROMPTS, Prompt::parse)?;
+    prompts.extend((0..prompt_files.len()).map(Prompt::File));
     let long_prompt_file = match (&stages, values.get("--long-prompt-file")) {
         (_, Some(path)) => PathBuf::from(path),
         (None, None) if prompts.contains(&Prompt::Long) => return Err(HarnessError::MissingFlag("--long-prompt-file")),
@@ -1720,6 +1735,7 @@ fn parse_config(arguments: impl IntoIterator<Item = String>) -> Result<Config, H
         model: required("--model")?,
         llama: required("--llama")?,
         long_prompt_file,
+        prompt_files,
         stages,
         stage_kv,
         fa_off_arm,
@@ -1796,6 +1812,8 @@ fn io_error(path: &Path) -> impl FnOnce(std::io::Error) -> HarnessError + '_ {
 
 /// A prompt as both engines see it: text for proxima's env, ids for llama's request.
 struct PromptData {
+    /// the contract `input.id`: file stem (or `short`) and prompt token count
+    label: String,
     text: String,
     ids: Vec<u32>,
     capacity: usize,
@@ -2077,7 +2095,7 @@ fn run_proxima(context: &RunContext, cell: &Cell, binary: &Path, row: &mut Row) 
     for (key, value) in cell.kv.proxima_env() {
         command.env(key, value);
     }
-    if cell.prompt == Prompt::Long {
+    if cell.prompt != Prompt::Short {
         command.env("PROXIMA_PROMPT", &context.prompt.text);
     }
     let output = command
@@ -2153,6 +2171,7 @@ fn blank_row(round: usize, position: usize, cell: &Cell, prompt: &PromptData, id
     Row {
         round,
         cell: cell.clone(),
+        input: prompt.label.clone(),
         warmup: false,
         flash: String::new(),
         load1: load1(),
@@ -2207,13 +2226,25 @@ fn short_prompt_text(parsed: &ParsedGguf, vocab: &Vocab) -> Result<String, Harne
     render_short_prompt(template, bos, eos, wants_bos(vocab))
 }
 
-fn prompt_text(prompt: Prompt, short_text: &str, long_prompt_file: &Path) -> Result<String, HarnessError> {
+fn prompt_file(prompt: Prompt, config: &Config) -> Option<&Path> {
     match prompt {
-        Prompt::Short => Ok(short_text.to_owned()),
-        Prompt::Long => fs::read_to_string(long_prompt_file)
-            .map(|text| text.trim_end_matches('\n').to_owned())
-            .map_err(io_error(long_prompt_file)),
+        Prompt::Short => None,
+        Prompt::Long => Some(&config.long_prompt_file),
+        Prompt::File(index) => config.prompt_files.get(index).map(PathBuf::as_path),
     }
+}
+
+fn prompt_stem(path: Option<&Path>) -> String {
+    path.and_then(Path::file_stem).map_or_else(|| "short".to_owned(), |stem| stem.to_string_lossy().into_owned())
+}
+
+fn prompt_text(prompt: Prompt, short_text: &str, config: &Config) -> Result<String, HarnessError> {
+    let Some(path) = prompt_file(prompt, config) else {
+        return Ok(short_text.to_owned());
+    };
+    fs::read_to_string(path)
+        .map(|text| text.trim_end_matches('\n').to_owned())
+        .map_err(io_error(path))
 }
 
 fn load_prompts(config: &Config) -> Result<(String, BTreeMap<Prompt, PromptData>), HarnessError> {
@@ -2227,10 +2258,11 @@ fn load_prompts(config: &Config) -> Result<(String, BTreeMap<Prompt, PromptData>
     let short_text = short_prompt_text(&parsed, &vocab)?;
     let mut prompts = BTreeMap::new();
     for prompt in config.prompts.iter().copied() {
-        let text = prompt_text(prompt, &short_text, &config.long_prompt_file)?;
+        let text = prompt_text(prompt, &short_text, config)?;
         let ids = tokenize_like_proxima(&text, &vocab)?;
         let capacity = kv_capacity(ids.len(), MAX_TOKENS, config.kv_bucket, config.context_length);
-        prompts.insert(prompt, PromptData { text, ids, capacity });
+        let label = format!("{}-{}", prompt_stem(prompt_file(prompt, config)), ids.len());
+        prompts.insert(prompt, PromptData { label, text, ids, capacity });
     }
     Ok((model_sha256, prompts))
 }
@@ -2580,7 +2612,7 @@ fn repeats_of(row: &Row) -> Vec<RepeatFacts> {
 }
 
 fn input_id(row: &Row) -> String {
-    format!("{}-{}", row.cell.prompt.name(), row.cell.kv.name())
+    row.input.clone()
 }
 
 /// One record per repeat of the row, indices counted from `first_index`; every field of the contract's LLM record.
@@ -2767,7 +2799,7 @@ fn run(config: &Config) -> Result<(), HarnessError> {
         llama_commit: config.llama_commit.clone(),
         llama_sha256: llama_identity.sha256.clone(),
     };
-    let mut cells = cell_order(&config.proxima, config.llama_inproc.as_deref());
+    let mut cells = cell_order(&config.proxima, config.llama_inproc.as_deref(), config.prompt_files.len());
     cells.retain(|cell| config.prompts.contains(&cell.prompt) && config.kvs.contains(&cell.kv));
     let mut session = Session { config, prompts: &prompts, logs, llama_sha256: llama_identity.sha256, llama_flash: String::new() };
     let mut warmups = run_warmups(&mut session, &cells)?;
@@ -4782,6 +4814,7 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         Row {
             round: 1,
             cell: Cell { engine, label: label.to_owned(), prompt: Prompt::Short, kv: Kv::F16 },
+            input: "short-26".to_owned(),
             warmup: false,
             flash: "on".to_owned(),
             load1: 1.0,
@@ -5284,7 +5317,7 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
     #[test]
     fn llama_has_no_arm_for_the_q4_key_row_and_cells_follow_the_row_space() {
         let proxima = vec![("new".to_owned(), PathBuf::from("/bin/a"))];
-        let cells = cell_order(&proxima, None);
+        let cells = cell_order(&proxima, None, 0);
         assert_eq!(cells.len(), 2 * (4 + 3));
         assert!(!cells.iter().any(|cell| cell.engine == Engine::Llama && cell.kv == Kv::Q4K));
     }
@@ -5292,7 +5325,7 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
     #[test]
     fn the_inproc_arm_gets_a_cell_wherever_the_server_has_one_and_flags_select_a_subset() {
         let inproc = PathBuf::from("/bin/inproc_arm");
-        let cells = cell_order(&[], Some(&inproc));
+        let cells = cell_order(&[], Some(&inproc), 0);
         assert_eq!(cells.len(), 2 * 3 * 2);
         assert!(cells.iter().all(|cell| cell.kv != Kv::Q4K));
         let base = ["--out", "o", "--model", "m", "--llama", "l", "--long-prompt-file", "p", "--llama-commit", "ba3c05f71"];
@@ -5310,7 +5343,7 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
             ("new".to_owned(), PathBuf::from("/bin/a")),
             ("old".to_owned(), PathBuf::from("/bin/b")),
         ];
-        let cells = cell_order(&proxima, None);
+        let cells = cell_order(&proxima, None, 0);
         assert_eq!(cells.len(), 2 * (4 * 2 + 3));
         let plan = round_plan(5, cells.len());
         assert_eq!(plan.len(), 5 * cells.len());
@@ -5335,6 +5368,21 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         }
     }
 
+
+    #[test]
+    fn prompt_files_flag_repeats_and_each_file_is_one_more_input() {
+        let config = parse_config(
+            ["--out", "o", "--model", "m", "--llama", "l", "--llama-commit", "c", "--prox", "new=/bin/a", "--prompts", "short", "--prompt-file", "a/essay.txt", "--prompt-file", "b/story.txt"]
+                .map(str::to_owned),
+        )
+        .expect("repeated prompt files parse");
+        assert_eq!(config.prompt_files, vec![PathBuf::from("a/essay.txt"), PathBuf::from("b/story.txt")]);
+        assert_eq!(config.prompts, vec![Prompt::Short, Prompt::File(0), Prompt::File(1)]);
+        assert_eq!(prompt_file(Prompt::File(1), &config), Some(Path::new("b/story.txt")));
+        assert_eq!(prompt_stem(prompt_file(Prompt::File(0), &config)), "essay");
+        assert_eq!(prompt_stem(prompt_file(Prompt::Short, &config)), "short");
+        assert_eq!(cell_order(&config.proxima, None, 2).iter().filter(|cell| cell.prompt == Prompt::File(1)).count(), 2 * 3 + 1);
+    }
 
     #[test]
     fn proxima_start_report_decides_flash_without_naming_a_backend() {
