@@ -25,6 +25,7 @@
 //! instantiation.
 
 use core::mem::MaybeUninit;
+use core::ops::{Div, Mul};
 
 use crate::block_layout::{BlockLayout, Coded, Field, MAX_DIGITS, Plane, named_block_table};
 use crate::encode_rule::{CodeClamp, CodeRounding, EncodeRule, ScaleRounding, ScaleStatistic, StoredMin};
@@ -966,8 +967,8 @@ fn scatter_plane<const BYTES: usize, const BY_WORD: bool>(
 /// The signed value of largest magnitude, the first one on a tie, as `quantize_row_q4_0_ref` picks.
 #[inline(always)]
 fn signed_max<const ELEMENTS: usize>(input: &[f32; ELEMENTS]) -> f32 {
-    let mut amax = 0.0f32;
-    let mut max = 0.0f32;
+    let mut amax = 0.0;
+    let mut max = 0.0;
     for &value in input {
         if amax < value.abs() {
             amax = value.abs();
@@ -1004,22 +1005,28 @@ fn peak<const ELEMENTS: usize>(input: &[f32; ELEMENTS]) -> f32 {
 }
 
 #[inline(always)]
-fn inverse_of(scale: f32) -> f32 {
-    if scale == 0.0 { 0.0 } else { 1.0 / scale }
+fn inverse_of<Scalar>(scale: Scalar) -> Scalar
+where
+    Scalar: Copy + PartialEq + From<u8> + Div<Output = Scalar>,
+{
+    let zero = Scalar::from(0);
+    if scale == zero { zero } else { Scalar::from(1) / scale }
 }
 
 /// The scale and inverse a statistic fixes under the rule's arithmetic: the mmq order forms the
 /// inverse first and stores its reciprocal.
 #[inline(always)]
-fn scale_and_inverse(rule: &EncodeRule, statistic: f32) -> (f32, f32) {
-    let divisor = rule.divisor as f32;
+fn scale_and_inverse<Scalar>(rule: &EncodeRule, statistic: Scalar, divisor: Scalar) -> (Scalar, Scalar)
+where
+    Scalar: Copy + PartialEq + From<u8> + Div<Output = Scalar>,
+{
     match rule.arithmetic {
         ScaleArithmetic::InverseOfScale | ScaleArithmetic::Quotient => {
             let scale = statistic / divisor;
             (scale, inverse_of(scale))
         }
         ScaleArithmetic::ReciprocalMultiply => {
-            let inverse = if statistic == 0.0 { 0.0 } else { divisor / statistic };
+            let inverse = if statistic == Scalar::from(0) { Scalar::from(0) } else { divisor / statistic };
             (inverse_of(inverse), inverse)
         }
     }
@@ -1027,9 +1034,12 @@ fn scale_and_inverse(rule: &EncodeRule, statistic: f32) -> (f32, f32) {
 
 /// The value over the scale the rounding is applied to.
 #[inline(always)]
-fn over_scale(rule: &EncodeRule, value: f32, scale: f32, inverse: f32) -> f32 {
+fn over_scale<Scalar>(rule: &EncodeRule, value: Scalar, scale: Scalar, inverse: Scalar) -> Scalar
+where
+    Scalar: Copy + PartialEq + From<u8> + Div<Output = Scalar> + Mul<Output = Scalar>,
+{
     match rule.arithmetic {
-        ScaleArithmetic::Quotient if scale == 0.0 => 0.0,
+        ScaleArithmetic::Quotient if scale == Scalar::from(0) => Scalar::from(0),
         ScaleArithmetic::Quotient => value / scale,
         ScaleArithmetic::InverseOfScale | ScaleArithmetic::ReciprocalMultiply => value * inverse,
     }
@@ -1057,15 +1067,15 @@ fn fit_scale<const ELEMENTS: usize>(rule: &EncodeRule, input: &[f32; ELEMENTS]) 
     let divisor = rule.divisor as f32;
     match rule.statistic {
         ScaleStatistic::SignedPeak => {
-            let (scale, inverse) = scale_and_inverse(rule, signed_max(input));
+            let (scale, inverse) = scale_and_inverse(rule, signed_max(input), divisor);
             (scale, inverse, 0.0)
         }
         ScaleStatistic::PeakMagnitude => {
-            let (scale, inverse) = scale_and_inverse(rule, peak(input));
+            let (scale, inverse) = scale_and_inverse(rule, peak(input), divisor);
             (scale, inverse, 0.0)
         }
         ScaleStatistic::MeanMagnitude => {
-            let mut sum = 0.0f32;
+            let mut sum = 0.0;
             for &value in input {
                 sum += value.abs();
             }
@@ -1074,7 +1084,7 @@ fn fit_scale<const ELEMENTS: usize>(rule: &EncodeRule, input: &[f32; ELEMENTS]) 
         ScaleStatistic::MinMax(_) => {
             // a searched fit never reaches here: `fit_codes` runs it, as it also yields the codes
             let (low, high) = range_ordered(input);
-            let (scale, inverse) = scale_and_inverse(rule, high - low);
+            let (scale, inverse) = scale_and_inverse(rule, high - low, divisor);
             (scale, inverse, low)
         }
     }
@@ -1332,7 +1342,7 @@ mod tests {
     #[test]
     fn signed_max_fit_keeps_eight_bit_offset_binary_codes_unsaturated() {
         let layout = offset_binary_u8_layout();
-        let mut input = [0.0f32; 32];
+        let mut input = [0.0; 32];
         input[0] = 1.0;
         input[1] = -2.0;
         input[2] = 1.984_375;
@@ -1353,9 +1363,9 @@ mod tests {
 
     fn kv_like_block(seed: u32) -> [f32; 32] {
         let mut state = seed;
-        let mut block = [0.0f32; 32];
+        let mut block = [0.0; 32];
         for (index, slot) in block.iter_mut().enumerate() {
-            let mut gaussian = -6.0f32;
+            let mut gaussian = -6.0;
             for _ in 0..12 {
                 state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                 gaussian += (state >> 8) as f32 / (1u32 << 24) as f32;
