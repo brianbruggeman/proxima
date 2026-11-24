@@ -185,16 +185,16 @@ fn tiled_gemm_reach_fits(
     element_reach_fits
         && extents_fit
         && launch_fits
-        && packed_byte_reach_fits(&reaches, quantized)
+        && packed_byte_reach_fits(&reaches, quantized, knobs)
 }
 
-fn packed_byte_reach_fits(reaches: &[Option<u64>], quantized: &[Option<Codec>]) -> bool {
+fn packed_byte_reach_fits(reaches: &[Option<u64>], quantized: &[Option<Codec>], knobs: &EmitKnobs) -> bool {
     quantized
         .iter()
         .zip(reaches)
         .all(|(codec, reach)| match (codec, reach) {
             (None, _) => true,
-            (Some(codec), Some(reach)) => tiled_decode(*codec).is_some_and(|decode| {
+            (Some(codec), Some(reach)) => tiled_decode(*codec).filter(|_| scalar_weight_admitted(*codec, knobs)).is_some_and(|decode| {
                 (reach / decode.block_elements + 1)
                     .checked_mul(decode.block_bytes)
                     .is_some_and(index32_reach_fits)

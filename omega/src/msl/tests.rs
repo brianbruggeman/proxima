@@ -2192,6 +2192,25 @@ pub(super) const TILED_FULL_TILE_FEATURES: u32 = TiledGemmTile::CONFIGURED.block
 #[cfg(feature = "metal-tiled-gemm")]
 pub(super) const TILED_ADMITTED_BATCH: u32 = crate::sized::DENSE_TILED_MIN_THREADGROUPS as u32;
 
+#[cfg(any(feature = "metal-tiled-gemm", feature = "metal-grouped-gemm"))]
+pub(super) fn default_dequant_target() -> FloatLayout {
+    EmitKnobs::default().grouped_gemm_formats().dequant_out
+}
+
+#[cfg(any(feature = "metal-tiled-gemm", feature = "metal-grouped-gemm"))]
+pub(super) fn widened_scalar_codec() -> Codec {
+    let target = default_dequant_target();
+    Codec::ALL
+        .into_iter()
+        .find(|codec| {
+            matches!(
+                tiled_decode(*codec).map(|decode| decode.source),
+                Some(DecodeSource::Scalar(stored)) if !stored.same_format(&target)
+            )
+        })
+        .expect("a flat scalar codec other than the dequant target is described")
+}
+
 /// Same shape as [`matmul_op`] (`lhs=[features,k]` weight,
 /// `rhs=[k,tokens]` activation), but with the out_map listing the TOKEN
 /// axis before the feature axis -- `output_axes = [1, 0]` instead of
@@ -4211,7 +4230,6 @@ fn staging_switches_default_on_render_unless_explicitly_disabled() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[proxima::test]
 #[case::q2k(Codec::Q2K)]
-#[case::bfloat16(Codec::BFloat16)]
 #[case::q4_1(Codec::Q4_1)]
 #[case::iq4_nl(Codec::Iq4Nl)]
 async fn codec_without_a_tiled_decode_description_never_takes_the_tiled_gemm_path(
@@ -9549,7 +9567,6 @@ mod expert_grouped_gemm {
 
     #[proxima::test]
     #[case::q2k(Codec::Q2K)]
-    #[case::bfloat16(Codec::BFloat16)]
     #[case::iq4_nl(Codec::Iq4Nl)]
     async fn a_codec_without_a_decode_description_is_rejected_by_name(#[case] codec: Codec) {
         let bound = gathered_matmul_op(TOKENS, EXPERTS, ROWS, REDUCTION);
@@ -9564,6 +9581,34 @@ mod expert_grouped_gemm {
         assert_eq!(
             rejection,
             TiledGemmRejection::NotPackedRowBlock(PackedRowBlockRejection::NotKQuantCodec)
+        );
+    }
+
+    #[proxima::test]
+    #[case::config_names_no_compute_layout(None)]
+    #[case::config_names_the_dequant_target(Some(default_dequant_target()))]
+    async fn a_widened_scalar_expert_slab_is_refused_by_name_with_or_without_a_compute_layout(
+        #[case] dequant_out: Option<FloatLayout>,
+    ) {
+        let bound = gathered_matmul_op(TOKENS, EXPERTS, ROWS, REDUCTION);
+        let codec = widened_scalar_codec();
+        let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
+        let knobs = EmitKnobs::default().with_grouped_gemm_dequant_out(dequant_out);
+
+        let rejection = classify_tiled_gemm(
+            &bound,
+            &operand_codecs(&bound, &packed),
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            &OUTPUT_AXES,
+            &knobs,
+        )
+        .err()
+        .expect("the grouped decode does not widen a scalar slab");
+
+        assert_eq!(
+            rejection,
+            TiledGemmRejection::ScalarWeightNotWidened { codec: codec.name().unwrap_or("unnamed") }
         );
     }
 
@@ -10152,12 +10197,12 @@ mod tiled_decode_description {
                 decode.function
             );
             assert!(
-                decode.msl().contains(&signature),
+                decode.msl(default_dequant_target()).contains(&signature),
                 "{codec:?}: `{signature}` missing from its msl"
             );
             let expected_functions = 1 + usize::from(decode.has_word_variant());
             assert_eq!(
-                decode.msl().matches("static inline void").count(),
+                decode.msl(default_dequant_target()).matches("static inline void").count(),
                 expected_functions,
                 "{codec:?}: a description's msl defines its own function and, when the layout proves word alignment, its `_words` twin"
             );
@@ -10177,7 +10222,6 @@ mod tiled_decode_description {
 
     #[proxima::test]
     #[case::q2k(Codec::Q2K)]
-    #[case::bfloat16(Codec::BFloat16)]
     #[case::q4_1(Codec::Q4_1)]
     #[case::q8_k(Codec::Q8K)]
     #[case::iq4_nl(Codec::Iq4Nl)]
@@ -10189,6 +10233,14 @@ mod tiled_decode_description {
             32,
             tiled_gemm_codec_chunk_width(codec)
         ));
+    }
+
+    #[test]
+    fn a_widened_scalar_codec_has_a_chunk_width_of_one_k_step() {
+        let codec = widened_scalar_codec();
+
+        assert_eq!(tiled_gemm_codec_chunk_width(codec), STAGED_K_STEP_ELEMENTS);
+        assert!(tiled_gemm_block_k_chunk_aligned(STAGED_K_STEP_ELEMENTS, tiled_gemm_codec_chunk_width(codec)));
     }
 
     #[test]
@@ -10253,12 +10305,12 @@ mod tiled_decode_description {
             "{codec:?} must decode at the per-thread cursor:\n{source}"
         );
         assert!(
-            source.contains(&*decode.msl()),
+            source.contains(&*decode.msl(default_dequant_target())),
             "{codec:?}: its description's msl is spliced:\n{source}"
         );
         for other in DESCRIBED_CODECS.into_iter().filter(|other| *other != codec) {
             assert!(
-                !source.contains(&*described(other).msl()),
+                !source.contains(&*described(other).msl(default_dequant_target())),
                 "{codec:?}: {other:?}'s description must not be spliced into this kernel"
             );
         }
@@ -10303,7 +10355,7 @@ mod tiled_decode_description {
             "{codec:?}: the per-row schedule has no per-thread cursor"
         );
         assert!(
-            per_row.contains(&*decode.msl()),
+            per_row.contains(&*decode.msl(default_dequant_target())),
             "{codec:?}: its description's msl is spliced"
         );
     }
@@ -10488,6 +10540,39 @@ mod tiled_decode_description {
             None,
             "{codec:?}: a list naming other codecs leaves it on"
         );
+    }
+
+    fn classify_widened_scalar(knobs: &EmitKnobs) -> Option<TiledGemmRejection> {
+        let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
+        let packed = BTreeMap::from([(bound.operands()[0].0, widened_scalar_codec())]);
+        classify_tiled_gemm(
+            &bound,
+            &operand_codecs(&bound, &packed),
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            &[1, 0],
+            knobs,
+        )
+        .err()
+    }
+
+    #[test]
+    fn a_scalar_weight_off_the_dequant_target_is_rejected_when_config_names_no_compute_layout() {
+        let knobs = EmitKnobs::default().with_grouped_gemm_dequant_out(None);
+
+        assert_eq!(
+            classify_widened_scalar(&knobs),
+            Some(TiledGemmRejection::ScalarWeightNotWidened {
+                codec: widened_scalar_codec().name().unwrap_or("unnamed"),
+            })
+        );
+    }
+
+    #[test]
+    fn a_scalar_weight_off_the_dequant_target_is_admitted_when_config_names_a_compute_layout() {
+        let knobs = EmitKnobs::default().with_grouped_gemm_dequant_out(Some(default_dequant_target()));
+
+        assert_eq!(classify_widened_scalar(&knobs), None);
     }
 
     #[test]
@@ -10761,7 +10846,7 @@ mod expert_grouped_decode_description {
             "{codec:?}:\n{source}"
         );
         assert!(
-            source.contains(&*decode.msl()),
+            source.contains(&*decode.msl(default_dequant_target())),
             "{codec:?}: its description's msl is spliced"
         );
         assert!(

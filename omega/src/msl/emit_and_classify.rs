@@ -3395,6 +3395,22 @@ fn tiled_gemm_extent_multiple(codec: Codec) -> Option<usize> {
     tiled_decode(codec).map(|decode| decode.block_elements as usize)
 }
 
+/// Whether a flat scalar weight may stage through the tiled GEMM: its stored layout is the
+/// resolved dequant target, or configuration names a compute layout that differs from it. A
+/// codec whose decode is not a scalar array has no such constraint.
+pub(super) fn scalar_weight_admitted(codec: Codec, knobs: &EmitKnobs) -> bool {
+    !scalar_weight_widens(codec, knobs) || knobs.grouped_gemm_dequant_out.is_some()
+}
+
+/// Whether `codec` is a flat scalar array whose stored layout is not the resolved dequant target,
+/// so staging it converts each element.
+pub(super) fn scalar_weight_widens(codec: Codec, knobs: &EmitKnobs) -> bool {
+    let Some(DecodeSource::Scalar(stored)) = tiled_decode(codec).map(|decode| decode.source) else {
+        return false;
+    };
+    !stored.same_format(&knobs.grouped_gemm_formats().dequant_out)
+}
+
 /// [`classify_packed_row_block`] with the multi-row gathered rejection
 /// optionally lifted and the codec table swapped: `admit_gathered_rows` is only
 /// ever `true` from [`classify_tiled_gemm`], whose expert-grouped path selects
@@ -3614,6 +3630,11 @@ pub enum TiledGemmRejection {
     /// document. A codec with no `tiled_decode` description is rejected
     /// earlier, as `NotPackedRowBlock(NotKQuantCodec)`.
     CodecSwitchedOff { codec: &'static str },
+    /// The weight is a flat scalar array whose layout is not the resolved dequant target, and
+    /// either `EmitKnobs::grouped_gemm_dequant_out` does not ask for a compute layout (the widening
+    /// decode runs only where configuration names one, so every other model keeps its route) or the
+    /// weight is a gathered expert slab, whose grouped decode does not widen.
+    ScalarWeightNotWidened { codec: &'static str },
     /// `reduce_op`/`init` are not the plain `Add`-from-`Zero` shape
     /// `simdgroup_matrix` accumulation requires.
     NotAddZeroReduce,
@@ -3791,6 +3812,11 @@ pub(super) fn classify_tiled_gemm(
         // control for any codec.
         if (codec == Codec::Q4_0 && !knobs.tiled_gemm_q4_0) || tiled_gemm_codec_disabled(knobs, codec) {
             return Err(TiledGemmRejection::CodecSwitchedOff {
+                codec: codec.name().unwrap_or("unnamed"),
+            });
+        }
+        if !scalar_weight_admitted(codec, knobs) || (gathered.is_some() && scalar_weight_widens(codec, knobs)) {
+            return Err(TiledGemmRejection::ScalarWeightNotWidened {
                 codec: codec.name().unwrap_or("unnamed"),
             });
         }

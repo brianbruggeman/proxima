@@ -4,7 +4,7 @@ use proxima_numeric::float_layout::FloatLayout;
 use super::golden_support::{e3m2_kernel_source, full_matvec_source};
 use super::golden_support::matvec_source;
 #[cfg(feature = "metal-tiled-gemm")]
-use super::tests::{TILED_ADMITTED_TOKENS, gathered_matmul_op, tiled_gemm_op};
+use super::tests::{TILED_ADMITTED_TOKENS, default_dequant_target, gathered_matmul_op, tiled_gemm_op};
 use super::*;
 
 const ROW_BLOCKED_1024X512: &str =
@@ -113,7 +113,7 @@ fn scaled_e3m2_render_tiled_decode_elements_32_bytes_26() {
         source.contains(&format!("{}(wws_blk", decode.function)),
         "the tiled body stages through the description:\n{source}"
     );
-    assert!(source.contains(&*decode.msl()));
+    assert!(source.contains(&*decode.msl(default_dequant_target())));
 }
 
 #[cfg(feature = "metal-tiled-gemm")]
@@ -123,7 +123,7 @@ fn scaled_e3m2_render_grouped_gemm_source_uses_the_tiled_decode() {
     let source = grouped_source();
 
     assert!(source.contains("scaled_e3m2_decode"));
-    assert!(source.contains(&*decode.msl()));
+    assert!(source.contains(&*decode.msl(default_dequant_target())));
     assert_eq!(
         source
             .matches("static inline float scaled_e3m2_field")

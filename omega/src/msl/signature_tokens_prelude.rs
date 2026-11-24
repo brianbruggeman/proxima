@@ -1121,9 +1121,9 @@ fn push_flat_float_accessors(source: &mut String) {
 }
 
 /// Splices the [`tiled_decode`] description of `tiled_decode_codec` after the scaled-float decoders it calls. `Some(codec)` only from [`render_reduce`]'s own call site, and only when [`tiled_decode_codec_of`] finds the op on the tiled or expert-grouped GEMM path. Unlike the codec decoders in [`preamble`], which are cheap `static inline`s the compiler drops when unused, a description's `msl` is text only that stager calls: splicing all of them everywhere would grow every kernel's source and shift pipeline-cache identity for every unrelated kernel.
-pub(super) fn push_tiled_decode(source: &mut String, tiled_decode_codec: Option<Codec>) {
+pub(super) fn push_tiled_decode(source: &mut String, tiled_decode_codec: Option<Codec>, target: FloatLayout) {
     if let Some(decode) = tiled_decode_codec.and_then(tiled_decode) {
-        source.push_str(&decode.msl());
+        source.push_str(&decode.msl(target));
         source.push('\n');
     }
 }

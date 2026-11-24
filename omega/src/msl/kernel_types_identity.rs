@@ -3,7 +3,7 @@ use alloc::borrow::Cow;
 use proxima_numeric::float_layout::FloatLayout;
 use proxima_numeric::{RowBlockShape, row_block_shape};
 
-use super::layout_render::hardware_stage_type;
+use super::layout_render::{hardware_stage_type, layout_unpack_msl};
 use super::*;
 
 /// MSL source for one `Q2_K` element. The byte layout and index arithmetic
@@ -1863,8 +1863,8 @@ impl TiledDecode {
         }
     }
 
-    /// The MSL defining [`Self::function`].
-    pub(crate) fn msl(&self) -> Cow<'static, str> {
+    /// The MSL defining [`Self::function`], decoding into `target` where the source is a scalar array.
+    pub(crate) fn msl(&self, target: FloatLayout) -> Cow<'static, str> {
         match self.source {
             DecodeSource::Static(source) => Cow::Borrowed(source),
             DecodeSource::Element(element, codec) => {
@@ -1872,7 +1872,7 @@ impl TiledDecode {
                 source.push_str(&self.word_variant_msl().unwrap_or_default());
                 Cow::Owned(source)
             }
-            DecodeSource::Scalar(layout) => Cow::Owned(scalar_identity_decode_msl(self.function, &layout)),
+            DecodeSource::Scalar(layout) => Cow::Owned(scalar_decode_msl(self.function, &layout, &target)),
         }
     }
 
@@ -1916,15 +1916,27 @@ impl TiledDecode {
     }
 }
 
-/// The identity decode of a flat scalar array into `thread` memory; empty for a layout with no
-/// Metal type, which the compiler then rejects at the call site rather than a silent fallback.
-fn scalar_identity_decode_msl(function: &str, layout: &FloatLayout) -> String {
-    let Some(stage) = hardware_stage_type(layout) else {
+/// The decode of a flat `stored` scalar array into `thread` memory of the `target` layout: the
+/// identity copy when the two are one format, otherwise a per-element widen through the generic
+/// accessor of `stored`. Empty for a layout with no Metal type, which the compiler then rejects
+/// at the call site rather than a silent fallback.
+fn scalar_decode_msl(function: &str, stored: &FloatLayout, target: &FloatLayout) -> String {
+    let Some(stage) = hardware_stage_type(target) else {
         return String::new();
     };
-    let (scalar, stride) = (stage.scalar, stage.bytes);
+    if stored.same_format(target) {
+        let (scalar, stride) = (stage.scalar, stage.bytes);
+        return format!(
+            "\nstatic inline void {function}(device const uchar *block, uint slot, thread {scalar} *out) {{\n    device const {scalar} *src = (device const {scalar} *)(block + {stride}u * slot);\n    for (uint i = 0u; i < 16u; ++i) {{ out[i] = src[i]; }}\n}}\n"
+        );
+    }
+    let element = format!("{function}_element");
+    let Some(accessor) = layout_unpack_msl(*stored, &element) else {
+        return String::new();
+    };
+    let (scalar, stride) = (stage.scalar, u32::from(stored.width()) / 8);
     format!(
-        "\nstatic inline void {function}(device const uchar *block, uint slot, thread {scalar} *out) {{\n    device const {scalar} *src = (device const {scalar} *)(block + {stride}u * slot);\n    for (uint i = 0u; i < 16u; ++i) {{ out[i] = src[i]; }}\n}}\n"
+        "\n{accessor}\nstatic inline void {function}(device const uchar *block, uint slot, thread {scalar} *out) {{\n    for (uint i = 0u; i < 16u; ++i) {{ out[i] = {scalar}({element}(block + {stride}u * slot, i)); }}\n}}\n"
     )
 }
 
@@ -1998,6 +2010,15 @@ pub(crate) const fn tiled_decode(codec: Codec) -> Option<TiledDecode> {
             )),
             None => None,
         },
+        Codec::BFloat16 => match codec.element_layout() {
+            Some(layout) => Some(TiledDecode::with_source(
+                STAGED_K_STEP_ELEMENTS as usize,
+                STAGED_K_STEP_ELEMENTS as usize * (layout.width() as usize / 8),
+                "scalar_copy_decode",
+                DecodeSource::Scalar(layout),
+            )),
+            None => None,
+        },
         Codec::Iq4Xs => Some(TiledDecode::with_source(
             IQ4_XS_BLOCK_ELEMENTS,
             IQ4_XS_BLOCK_BYTES,
@@ -2011,7 +2032,6 @@ pub(crate) const fn tiled_decode(codec: Codec) -> Option<TiledDecode> {
             DecodeSource::Element("iq3_s_element", &Codec::Iq3S),
         )),
         Codec::Q2K
-        | Codec::BFloat16
         | Codec::Q4_1
         | Codec::Q8_1
         | Codec::Q8_1Grouped
@@ -2433,7 +2453,8 @@ mod row_block_step_bytes_tests {
 
 #[cfg(test)]
 mod scalar_decode_tests {
-    use super::{Codec, DecodeSource, tiled_decode};
+    use super::{Codec, DecodeSource, EmitKnobs, FloatLayout, TiledDecode, scalar_decode_msl, tiled_decode};
+    use crate::msl::layout_render::hardware_type;
 
     #[test]
     fn scalar_decode_renders_the_identity_copy_the_constant_it_replaced_spelled() {
@@ -2444,13 +2465,49 @@ static inline void f16_dequant_half16(device const uchar *block, uint slot, thre
 }
 "#;
 
+        let target = EmitKnobs::default().grouped_gemm_formats().dequant_out;
         let scalar_decodes = Codec::ALL
             .iter()
             .filter_map(|codec| tiled_decode(*codec))
-            .filter(|decode| matches!(decode.source, DecodeSource::Scalar(_)))
+            .filter(|decode| matches!(decode.source, DecodeSource::Scalar(stored) if stored.same_format(&target)))
             .collect::<Vec<_>>();
 
-        assert_eq!(scalar_decodes.len(), 1, "exactly one codec stages a flat scalar array");
-        assert_eq!(scalar_decodes[0].msl(), expected);
+        assert_eq!(scalar_decodes.len(), 1, "exactly one codec stores a flat array of the dequant target");
+        assert_eq!(scalar_decodes[0].msl(target), expected);
+    }
+
+    fn widened_scalar_decode() -> (TiledDecode, FloatLayout) {
+        let target = EmitKnobs::default().grouped_gemm_formats().dequant_out;
+        Codec::ALL
+            .iter()
+            .filter_map(|codec| tiled_decode(*codec))
+            .find_map(|decode| match decode.source {
+                DecodeSource::Scalar(stored) if !stored.same_format(&target) => Some((decode, stored)),
+                _ => None,
+            })
+            .expect("a flat scalar codec other than the dequant target has a tiled decode description")
+    }
+
+    #[test]
+    fn a_scalar_array_of_another_layout_renders_its_accessor_and_widens_each_element_into_the_target() {
+        let target = EmitKnobs::default().grouped_gemm_formats().dequant_out;
+        let (_, stored) = widened_scalar_decode();
+        let scalar = hardware_type(&target).expect("the dequant target has a metal type");
+
+        let source = scalar_decode_msl("widen_decode", &stored, &target);
+
+        assert!(source.contains("widen_decode_element(device const uchar *payload, uint index)"), "{source}");
+        assert!(
+            source.contains(&format!("out[i] = {scalar}(widen_decode_element(block + 2u * slot, i));")),
+            "{source}"
+        );
+    }
+
+    #[test]
+    fn a_scalar_array_of_another_layout_stages_as_thirty_two_element_sixty_four_byte_blocks() {
+        let (decode, _) = widened_scalar_decode();
+
+        assert_eq!(decode.block_elements, 32);
+        assert_eq!(decode.block_bytes, 64);
     }
 }

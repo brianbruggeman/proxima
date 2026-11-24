@@ -411,6 +411,7 @@ pub(super) fn render_reduce(
     push_tiled_decode(
         &mut source,
         tiled_decode_codec_of(resolved, quantized, *reduce_op, *init, output_axes, knobs),
+        knobs.grouped_gemm_formats().dequant_out,
     );
 
     source.push_str("struct Uniforms {\n");
