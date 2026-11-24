@@ -38,7 +38,97 @@ pub(super) const fn checkpoint_has_experts(expert_count: u32) -> bool {
     expert_count > 0
 }
 
+/// What [`LoadedModel::install_checkpoint_mapping`] hands a loader: the
+/// serving context that owns the no-copy mapping registration and the
+/// residency rung the proof reached. Both are cfg-gated, so a build without
+/// them carries an empty value.
+struct MappingInstall<'file> {
+    file_bytes: &'file [u8],
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    serving_context: ServingContext,
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    rung: crate::mapping_residency::ResidencyRung,
+}
+
 impl<'file> LoadedModel<'file> {
+    /// Fits, proves resident and registers `file_bytes` as the checkpoint
+    /// mapping, for every loader that serves weights as borrowed views of it.
+    /// `source` names the other shards a directory checkpoint maps; `None` is
+    /// a single-file checkpoint whose mapped size is `file_bytes.len()`.
+    ///
+    /// # Errors
+    ///
+    /// The fit gate's refusal, or [`crate::mapping_residency::prove_resident`]'s.
+    fn install_checkpoint_mapping(
+        file_bytes: &'file [u8],
+        source: Option<&WeightSource<'_, 'file>>,
+    ) -> Result<MappingInstall<'file>, InteropError> {
+        // ROW 533's own mechanism (`proxima-tensor/docs/discipline.md`): a
+        // non-resident page behind the no-copy `MTLBuffer`
+        // `register_checkpoint_mapping` installs below reads as zero rather
+        // than faulting, silently. `crate::mapping_residency::prove_resident`
+        // is the gate that turns that into a typed refusal instead --
+        // `PROXIMA_MAPPING_FIT_OVERRIDE=1` skips only the size-vs-host-limit
+        // half of it, for a measurement run.
+        // the rung is carried into `Self`'s own `mapping_residency_rung`
+        // field, so `run_decode_loop_observed_seeded`/
+        // `run_decode_loop_placed_kv` can thread THIS load's rung into
+        // `emit_token_breakdown_metal` instead of reading a shared global.
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        let rung = {
+            if std::env::var_os("PROXIMA_MAPPING_FIT_OVERRIDE").is_none()
+                && let Ok(facts) = omega::metal::system_memory_facts()
+            {
+                let limit = crate::memory_fit::HostMemoryLimit {
+                    limit_bytes: facts
+                        .recommended_max_working_set_size
+                        .min(facts.physical_memory_bytes),
+                    os_headroom_bytes: omega::sized::LOAD_TIME_FIT_OS_HEADROOM_BYTES,
+                };
+                let mapped_bytes = source.map_or(file_bytes.len() as u64, |weights| {
+                    weights.mapped_bytes(file_bytes)
+                });
+                crate::memory_fit::fit_mapping_bytes(mapped_bytes, limit)?;
+            }
+            let residency_report = crate::mapping_residency::prove_resident(file_bytes)?;
+            #[cfg(feature = "instrument")]
+            info!(
+                mapping_prefault_ms = residency_report.prefault_ms,
+                mapping_resident_pages = residency_report.resident_pages,
+                mapping_missing_pages = residency_report.missing_pages,
+                "checkpoint_mapping_residency: proved resident before metal no-copy registration"
+            );
+            let other_shards = source.map_or(
+                Ok(crate::mapping_residency::ResidencyRung::Prefault),
+                |weights| weights.prove_other_shards_resident(file_bytes),
+            )?;
+            residency_report.rung.max(other_shards)
+        };
+        #[cfg(not(all(feature = "metal", target_os = "macos")))]
+        let _ = (file_bytes, source);
+        // registers `file_bytes` -- the checkpoint's own mmap, page-aligned
+        // at its base by construction -- as the single mapping every packed
+        // tensor's borrowed slice can be addressed into by OFFSET instead of
+        // copied into its own device buffer; see
+        // `omega::metal::register_checkpoint_mapping`'s own doc. `omega` is
+        // an optional dependency gated behind the `metal` feature, so this
+        // registration is a no-op (compiled out) when that feature is off.
+        // the model owns the mapping registration: a thread serving it later activates this context
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let mut serving_context = ServingContext::new();
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        serving_context.register_checkpoint_mapping(file_bytes);
+        #[cfg(all(feature = "gpu", not(all(feature = "metal-output-placement", target_os = "macos"))))]
+        omega::backend::register_checkpoint_mapping(file_bytes);
+        Ok(MappingInstall {
+            file_bytes,
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            serving_context,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            rung,
+        })
+    }
+
     #[must_use]
     pub fn vocab(&self) -> &Vocab {
         &self.vocab
@@ -2998,57 +3088,13 @@ impl<'file> LoadedModel<'file> {
         vocab: Option<Vocab>,
         serving_config: Option<&ServingConfig<'_>>,
     ) -> Result<Self, InteropError> {
-        // ROW 533's own mechanism (`proxima-tensor/docs/discipline.md`): a
-        // non-resident page behind the no-copy `MTLBuffer`
-        // `register_checkpoint_mapping` installs below reads as zero rather
-        // than faulting, silently. `crate::mapping_residency::prove_resident`
-        // is the gate that turns that into a typed refusal instead --
-        // `PROXIMA_MAPPING_FIT_OVERRIDE=1` skips only the size-vs-host-limit
-        // half of it, for a measurement run.
-        // carried past this block into `Self`'s own `mapping_residency_rung`
-        // field, so `run_decode_loop_observed_seeded`/
-        // `run_decode_loop_placed_kv` can thread THIS load's rung into
-        // `emit_token_breakdown_metal` instead of reading a shared global.
+        let mapping_install = Self::install_checkpoint_mapping(file_bytes, Some(&source))?;
+        #[cfg(not(all(feature = "metal", target_os = "macos")))]
+        let _ = mapping_install;
         #[cfg(all(feature = "metal", target_os = "macos"))]
-        let mapping_residency_rung = {
-            if std::env::var_os("PROXIMA_MAPPING_FIT_OVERRIDE").is_none()
-                && let Ok(facts) = omega::metal::system_memory_facts()
-            {
-                let limit = crate::memory_fit::HostMemoryLimit {
-                    limit_bytes: facts
-                        .recommended_max_working_set_size
-                        .min(facts.physical_memory_bytes),
-                    os_headroom_bytes: omega::sized::LOAD_TIME_FIT_OS_HEADROOM_BYTES,
-                };
-                crate::memory_fit::fit_mapping_bytes(source.mapped_bytes(file_bytes), limit)?;
-            }
-            let residency_report = crate::mapping_residency::prove_resident(file_bytes)?;
-            #[cfg(feature = "instrument")]
-            info!(
-                mapping_prefault_ms = residency_report.prefault_ms,
-                mapping_resident_pages = residency_report.resident_pages,
-                mapping_missing_pages = residency_report.missing_pages,
-                "checkpoint_mapping_residency: proved resident before metal no-copy registration"
-            );
-            residency_report
-                .rung
-                .max(source.prove_other_shards_resident(file_bytes)?)
-        };
-        // registers `file_bytes` -- the checkpoint's own mmap, page-aligned
-        // at its base by construction -- as the single mapping every packed
-        // tensor's borrowed slice can be addressed into by OFFSET instead of
-        // copied into its own device buffer; see
-        // `omega::metal::register_checkpoint_mapping`'s own doc. `omega` is
-        // an optional dependency gated behind the `metal` feature, so this
-        // registration is a no-op (compiled out) when that feature is off.
-        // the model owns the mapping registration: a thread serving it later activates this context
-        
+        let mapping_residency_rung = mapping_install.rung;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let mut serving_context = ServingContext::new();
-        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        serving_context.register_checkpoint_mapping(file_bytes);
-        #[cfg(all(feature = "gpu", not(all(feature = "metal-output-placement", target_os = "macos"))))]
-        omega::backend::register_checkpoint_mapping(file_bytes);
+        let serving_context = mapping_install.serving_context;
         // `crate::memory_fit`'s own load-time gate needs these three sums
         // long after `parsed` has gone out of scope -- computed once, here,
         // before any weight is bound, shared by both the recurrent-interval and dense
@@ -3277,8 +3323,8 @@ impl<'file> LoadedModel<'file> {
             vocab,
             &descriptor,
             &descriptor,
-            file_bytes,
             None,
+            Self::install_checkpoint_mapping(file_bytes, None)?,
         )
     }
 
@@ -3307,8 +3353,8 @@ impl<'file> LoadedModel<'file> {
             vocab,
             &descriptor,
             &descriptor,
-            file_bytes,
             Some(key_pad_id),
+            Self::install_checkpoint_mapping(file_bytes, None)?,
         )
     }
 
@@ -3347,8 +3393,8 @@ impl<'file> LoadedModel<'file> {
             vocab,
             descriptor,
             &canonical,
-            file_bytes,
             None,
+            Self::install_checkpoint_mapping(file_bytes, None)?,
         )
     }
 
@@ -3394,8 +3440,18 @@ impl<'file> LoadedModel<'file> {
             self.vocab.clone(),
             descriptor,
             self.canonical_descriptor.as_ref().unwrap_or(origin),
-            self.checkpoint_mapping,
             None,
+            MappingInstall {
+                file_bytes: self.checkpoint_mapping,
+                #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                serving_context: {
+                    let mut context = ServingContext::new();
+                    context.register_checkpoint_mapping(self.checkpoint_mapping);
+                    context
+                },
+                #[cfg(all(feature = "metal", target_os = "macos"))]
+                rung: self.mapping_residency_rung,
+            },
         )
     }
 
@@ -3405,9 +3461,12 @@ impl<'file> LoadedModel<'file> {
         vocab: Vocab,
         descriptor: &ModelDescriptor,
         canonical: &ModelDescriptor,
-        file_bytes: &'file [u8],
         key_pad_id: Option<u32>,
+        install: MappingInstall<'file>,
     ) -> Result<Self, InteropError> {
+        let file_bytes = install.file_bytes;
+        #[cfg(not(all(feature = "metal", target_os = "macos")))]
+        let _ = install;
         let ForwardProgram {
             program,
             logits: logits_root,
@@ -3444,7 +3503,7 @@ impl<'file> LoadedModel<'file> {
             prompt_cache: Mutex::new(PromptCache::new()),
             residency: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-            serving: AsyncMutex::new(ServingContext::new()),
+            serving: AsyncMutex::new(install.serving_context),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             kv_buffer_source: None,
             #[cfg(feature = "cuda")]
@@ -3484,13 +3543,8 @@ impl<'file> LoadedModel<'file> {
                 table_bytes: 0,
                 ssm_state_bytes: 0,
             },
-            // this load path never calls `mapping_residency::prove_resident`
-            // (no no-copy `MTLBuffer` registration to guard here -- see
-            // `checkpoint_mapping`'s own doc), so there is no achieved rung
-            // to report; `Prefault` matches what the ladder's own lowest
-            // rung means: nothing needed retrying.
             #[cfg(all(feature = "metal", target_os = "macos"))]
-            mapping_residency_rung: crate::mapping_residency::ResidencyRung::Prefault,
+            mapping_residency_rung: install.rung,
             vocab,
             program_hash: program_hash(&program),
             moe_high_decisions: core::sync::atomic::AtomicU64::new(0),
