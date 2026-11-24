@@ -127,6 +127,7 @@ fn decode_program() -> (Vec<Op>, NodeId) {
             None,
             false,
             SharedExpertWidth::NONE,
+            None,
         )
         .expect("the gemma4-shaped two-range decode program lowers at the synthetic width");
     (program, logits)

@@ -1753,6 +1753,7 @@ mod serving_attention_variant_tests {
                 None,
                 false,
                 SharedExpertWidth::NONE,
+                None,
             )
             .expect("the flint-shaped prefill program builds");
         let symbols = vec![ROWS, CACHED_LEN];
