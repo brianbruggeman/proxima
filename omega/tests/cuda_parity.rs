@@ -6140,7 +6140,7 @@ fn a_gathered_expert_product_under_activation_quantization_takes_the_int8_groupe
     let route = &inputs[0].1;
     let quantized = fake_quantize_blocks(&inputs[1].1, true);
     let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true);
-    let mut table: Vec<(Codec, bool, f32, f32)> = Vec::new();
+    let mut table: Vec<(Codec, bool, _, _)> = Vec::new();
     for codec in codecs {
         let layout = codec.block_layout().expect("a block codec");
         let weight = arbitrary_blocks(&layout, experts * rows * depth / usize::from(layout.elements), 743);
@@ -6155,13 +6155,13 @@ fn a_gathered_expert_product_under_activation_quantization_takes_the_int8_groupe
             && entries.iter().any(|entry| entry.contains("_grp1") && entry.ends_with("_route_prepass"));
         let actual = execute_plan_named(&mut plan, &named).expect("the int8 grouped product runs on cuda");
         assert_eq!(actual.root().len(), tokens * rows, "{codec:?}: one output per (token, row)");
-        let mut decoded = vec![0.0f32; experts * rows * depth];
+        let mut decoded = vec![Default::default(); experts * rows * depth];
         block_layout::dequantize(&layout, &weight, &mut decoded).expect("whole blocks");
         let exact_at = |token: usize, row: usize| {
             let start = (route[token] as usize * rows + row) * depth;
-            (0..depth).map(|index| f64::from(decoded[start + index]) * f64::from(quantized[token * depth + index])).sum::<f64>() as f32
+            (0..depth).map(|index| decoded[start + index] * quantized[token * depth + index]).reduce(|sum, term| sum + term).unwrap_or_default()
         };
-        let (mut worst, mut magnitude) = (0.0f32, 0.0f32);
+        let (mut worst, mut magnitude) = (Default::default(), Default::default());
         for (slot, got) in actual.root().iter().enumerate() {
             let exact = exact_at(slot / rows, slot % rows);
             worst = (got - exact).abs().max(worst);
