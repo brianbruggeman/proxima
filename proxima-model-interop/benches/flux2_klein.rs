@@ -20,6 +20,9 @@
 //! Each row prints milliseconds, GMAC/s and GB/s. A group that executes zero
 //! iterations is a panic, never a silent pass.
 
+// bench setup is fatal: a missing checkpoint or failed stage must stop the run, not be swallowed.
+#![allow(clippy::expect_used)]
+
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod bench {
     use std::cell::RefCell;
@@ -268,11 +271,9 @@ mod bench {
     }
 
     fn padded_ids(vocab: &Vocab) -> Vec<u32> {
-        let prompt = format!(
-            "<|im_start|>user\na red fox sitting in fresh snow, morning light, photograph<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-        );
+        let prompt = "<|im_start|>user\na red fox sitting in fresh snow, morning light, photograph<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
         let mut ids =
-            proxima_tokenizer::encode_with_bos_eos(&prompt, vocab, false, false).expect("encode");
+            proxima_tokenizer::encode_with_bos_eos(prompt, vocab, false, false).expect("encode");
         ids.resize(MIN_LENGTH, 151_643);
         ids
     }
