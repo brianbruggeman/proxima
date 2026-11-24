@@ -544,6 +544,9 @@ mod layout_bytes_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod packed_normalized_projection_tests;
+#[cfg(all(test, feature = "metal-tiled-gemm"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod widening_decode_parity_tests;
 #[cfg(all(test, feature = "metal-output-placement", feature = "metal-plan-stable-buffers"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod refit_rows_tests;

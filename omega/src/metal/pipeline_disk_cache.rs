@@ -393,6 +393,22 @@ pub(super) fn pipeline_for_function(
 }
 
 #[cfg(test)]
+pub(super) fn probe_function(
+    device: &ProtocolObject<dyn MTLDevice>,
+    kernel: &Kernel,
+    math_mode: MathMode,
+) -> Function {
+    let options = MTLCompileOptions::new();
+    options.setMathMode(math_mode.as_mtl());
+    let library = device
+        .newLibraryWithSource_options_error(&NSString::from_str(&kernel.source), Some(&options))
+        .expect("the probe kernel source must compile");
+    library
+        .newFunctionWithName(&NSString::from_str(&kernel.entry))
+        .expect("the probe library must define its entry point")
+}
+
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
@@ -427,21 +443,6 @@ mod tests {
                 grid2d: None,
             },
         }
-    }
-
-    fn probe_function(
-        device: &ProtocolObject<dyn MTLDevice>,
-        kernel: &Kernel,
-        math_mode: MathMode,
-    ) -> Function {
-        let options = MTLCompileOptions::new();
-        options.setMathMode(math_mode.as_mtl());
-        let library = device
-            .newLibraryWithSource_options_error(&NSString::from_str(&kernel.source), Some(&options))
-            .expect("the probe kernel source must compile");
-        library
-            .newFunctionWithName(&NSString::from_str(&kernel.entry))
-            .expect("the probe library must define its entry point")
     }
 
     fn run_probe(pipeline: &ProtocolObject<dyn MTLComputePipelineState>) -> Vec<f32> {
