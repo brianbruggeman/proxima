@@ -29,7 +29,7 @@
 
 use core::mem::MaybeUninit;
 
-use crate::block_codec::{BlockDecodeFn, BlockEncodeFn, DecodeFn, EncodeFn, is_float_rule};
+use crate::block_codec::{BlockDecodeFn, BlockEncodeFn, BlockRuledEncodeFn, DecodeFn, EncodeFn, is_float_rule};
 use crate::block_layout::BlockLayout;
 use crate::decode::decode_block;
 use crate::encode::{encode_rule_blocks, reach as code_reach};
@@ -63,6 +63,13 @@ enum Route {
     },
     Block {
         encode: Option<BlockEncodeFn>,
+        ruled: Option<BlockRuledEncodeFn>,
+        decode: BlockDecodeFn,
+    },
+    /// A table block run by a rule other than its own: the integer rule a bind chose.
+    Ruled {
+        run: BlockRuledEncodeFn,
+        rule: EncodeRule,
         decode: BlockDecodeFn,
     },
     Identity,
@@ -109,12 +116,13 @@ impl FormatCodec {
 
     pub(crate) const fn block_table(
         encode: Option<BlockEncodeFn>,
+        ruled: Option<BlockRuledEncodeFn>,
         decode: BlockDecodeFn,
         elements: usize,
         block_bytes: usize,
     ) -> Self {
         Self {
-            route: Route::Block { encode, decode },
+            route: Route::Block { encode, ruled, decode },
             elements,
             block_bytes,
             format: UNNAMED,
@@ -169,6 +177,21 @@ impl FormatCodec {
     pub fn block(layout: &BlockLayout) -> Option<Self> {
         crate::block_codec::resolve_block(layout)
             .map(|resolved| resolved.named_as(&NumericFormat::Block(*layout)))
+    }
+
+    /// The codec for an integer-coded table layout encoded by `rule`, `None` for a layout outside the
+    /// block table or a float rule. [`Self::block`] runs the layout's own rule; this is the same loop
+    /// with another one, for instance the layout's rule with another [`crate::ScaleArithmetic`].
+    #[must_use]
+    pub fn block_with_rule(layout: &BlockLayout, rule: EncodeRule) -> Option<Self> {
+        let table = crate::block_codec::resolve_block(layout)?;
+        let Route::Block { ruled: Some(run), decode, .. } = table.route else {
+            return None;
+        };
+        if is_float_rule(&rule) {
+            return None;
+        }
+        Some(Self { route: Route::Ruled { run, rule, decode }, ..table }.named_as(&NumericFormat::Block(*layout)))
     }
 
     /// The codec for a float-coded block layout encoded by `rule`, `None` unless `rule` is a float
@@ -288,6 +311,7 @@ impl FormatCodec {
                 Ok(bytes)
             }
             Route::Block { encode: Some(run), .. } => self.encode_block(*run, values, out),
+            Route::Ruled { run, rule, .. } => self.encode_ruled(*run, rule, values, out),
             Route::Identity => {
                 let bytes = values.len() * element_bytes(&SOURCE_LAYOUT);
                 let Some(window) = out.get_mut(..bytes) else {
@@ -344,6 +368,12 @@ impl FormatCodec {
     // the instantiation sizes and checks the window against literals, so no divide runs here; the fault
     // is built on the cold path from the lengths this call saw
     #[inline(always)]
+    fn encode_ruled(&self, run: BlockRuledEncodeFn, rule: &EncodeRule, values: &[f32], out: &mut [u8]) -> Result<usize, NumericError> {
+        let window_len = out.len();
+        run(rule, values, out).ok_or_else(|| self.encode_fault(values.len(), window_len))
+    }
+
+    #[inline(always)]
     fn encode_block(&self, run: BlockEncodeFn, values: &[f32], out: &mut [u8]) -> Result<usize, NumericError> {
         let window_len = out.len();
         run(values, out).ok_or_else(|| self.encode_fault(values.len(), window_len))
@@ -388,6 +418,7 @@ impl FormatCodec {
                 Ok(bytes)
             }
             Route::Block { decode, .. } => self.decode_block(*decode, data, out),
+            Route::Ruled { decode, .. } => self.decode_block(*decode, data, out),
             Route::Identity => {
                 let bytes = out.len() * element_bytes(&SOURCE_LAYOUT);
                 let Some(window) = data.get(..bytes) else {

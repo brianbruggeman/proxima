@@ -100,15 +100,21 @@ pub(super) fn block_quantize_grid(resolved: &BoundOp) -> Result<CudaGridSpec, Em
     Ok(grid)
 }
 
-/// The two lines that turn the group peak `amax` into the scale `d` and the lane code `q`.
-fn scale_and_code(arithmetic: ScaleArithmetic) -> String {
+/// The lines that turn the group peak `amax` into the scale `d` and the lane code `q`, rendered
+/// from the rule's arithmetic and divisor (`reach`).
+fn scale_and_code(arithmetic: ScaleArithmetic, reach: i32) -> String {
     match arithmetic {
+        ScaleArithmetic::InverseOfScale => format!(
+            "float d = amax / {reach}.0f;\n\
+             \x20   float d_inv = d == 0.0f ? 0.0f : 1.0f / d;\n\
+             \x20   int q = (int)roundf(x * d_inv);\n"
+        ),
         ScaleArithmetic::Quotient => format!(
-            "float d = amax / {ACTIVATION_REACH}.0f;\n\
+            "float d = amax / {reach}.0f;\n\
              \x20   int q = amax == 0.0f ? 0 : (int)roundf(x / d);\n"
         ),
         ScaleArithmetic::ReciprocalMultiply => format!(
-            "float d_inv = {ACTIVATION_REACH}.0f / amax;\n\
+            "float d_inv = {reach}.0f / amax;\n\
              \x20   float d = 1.0f / d_inv;\n\
              \x20   int q = amax == 0.0f ? 0 : (int)roundf(x * d_inv);\n"
         ),
@@ -118,7 +124,8 @@ fn scale_and_code(arithmetic: ScaleArithmetic) -> String {
 /// The device function one warp runs on one 32-element group `group` of `layout`: absmax scale,
 /// codes under `arithmetic`, and the scaled code sum beside the scale, at the group's run offsets.
 pub(super) fn quantize_device(layout: &BlockLayout, arithmetic: ScaleArithmetic) -> String {
-    let scale_and_code = scale_and_code(arithmetic);
+    let reach = layout.encode_rule().map_or(ACTIVATION_REACH, |rule| rule.divisor);
+    let scale_and_code = scale_and_code(arithmetic, reach);
     let runs = layout.runs();
     let (scale_base, scale_stride) = (layout.run_scale_byte(0), layout.run_scale_byte(runs.min(2) - 1) - layout.run_scale_byte(0));
     let (code_base, code_stride) = (layout.run_code_byte(0), layout.run_code_byte(runs.min(2) - 1) - layout.run_code_byte(0));

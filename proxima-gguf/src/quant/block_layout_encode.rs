@@ -12,7 +12,7 @@
 //! shared scale can express, [`proxima_numeric::encode::encode_blocks`] is the encoder, and
 //! [`proxima_numeric::Numeric`] is the value-plus-format surface for converting between formats.
 
-use proxima_numeric::{FormatCodec, NumericFormat};
+use proxima_numeric::{EncodeRule, FormatCodec, NumericFormat, ScaleArithmetic};
 use proxima_numeric::encode::{encode_blocks, reach as shared_reach};
 use proxima_numeric::error::NumericError;
 
@@ -65,6 +65,39 @@ pub fn quantize_by_rule(
     let block_codec = FormatCodec::block(layout).ok_or(QuantError::UnsupportedBlockLayout {
         reason: "the layout has no encode instantiation",
     })?;
+    encode_whole_blocks(&block_codec, codec, input, output)
+}
+
+/// Encodes whole blocks of `f32` into `layout` by the layout's [`proxima_numeric::EncodeRule`] with
+/// its scale arithmetic replaced by `arithmetic`: the bound fact a quantize step carries. A layout
+/// with no rule (the grouped runs) keeps the shared walker, which has the one arithmetic.
+///
+/// # Errors
+/// As [`quantize`], and [`QuantError::NonFiniteInput`] for a NaN or infinite element.
+pub fn quantize_under(
+    layout: &proxima_numeric::BlockLayout,
+    arithmetic: ScaleArithmetic,
+    input: &[f32],
+    output: &mut [u8],
+) -> Result<(), QuantError> {
+    let Some(rule) = layout.encode_rule().filter(|rule| !rule.is_float_code()) else {
+        return quantize(layout, input, output);
+    };
+    let Some(block_codec) = FormatCodec::block_with_rule(layout, EncodeRule { arithmetic, ..rule }) else {
+        return quantize(layout, input, output);
+    };
+    if input.iter().any(|value| !value.is_finite()) {
+        return Err(QuantError::NonFiniteInput { codec: CODEC });
+    }
+    encode_whole_blocks(&block_codec, CODEC, input, output)
+}
+
+fn encode_whole_blocks(
+    block_codec: &FormatCodec,
+    codec: &'static str,
+    input: &[f32],
+    output: &mut [u8],
+) -> Result<(), QuantError> {
     if !input.len().is_multiple_of(block_codec.elements()) {
         return Err(QuantError::InputNotElementMultiple {
             codec,

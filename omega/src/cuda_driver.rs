@@ -4199,7 +4199,7 @@ mod tests {
     use proxima_numeric::block_layout::BlockLayout;
     use super::PoolSchedule;
     use proxima_tensor::{BoundOp, BoundOpKind, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, bind_with_fusion, infer, map};
-    use proxima_numeric::{DType, NumericPolicy, ScaleArithmetic};
+    use proxima_numeric::{DType, EncodeRule, FormatCodec, NumericPolicy, ScaleArithmetic};
 
     const KERNEL_CACHE_DIR_VAR: &str = "PROXIMA_CUDA_KERNEL_CACHE_DIR";
 
@@ -4389,21 +4389,12 @@ mod tests {
         values
     }
 
-    /// Test-side port of llama.cpp `quantize_mmq_q8_1` (`ggml-cuda/quantize.cu`): per 32 values
-    /// `d_inv = 127 / amax`, `q = roundf(x * d_inv)`, `d = 1 / d_inv`, `s = d * sum(q)`; one 36-byte
-    /// flat block per group, `d` and `s` as little-endian binary16, then the codes.
-    fn llama_quantize_mmq_q8_1(values: &[f32]) -> Vec<u8> {
-        let mut out = Vec::new();
-        for group in values.chunks(32) {
-            let amax = group.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
-            let inverse = 127.0f32 / amax;
-            let codes: Vec<i8> = group.iter().map(|value| if amax == 0.0 { 0 } else { (value * inverse).round() as i8 }).collect();
-            let scale = if amax == 0.0 { 0.0 } else { 1.0f32 / inverse };
-            let sum: i32 = codes.iter().map(|code| i32::from(*code)).sum();
-            out.extend_from_slice(&half::f16::from_f32(scale).to_bits().to_le_bytes());
-            out.extend_from_slice(&half::f16::from_f32(scale * sum as f32).to_bits().to_le_bytes());
-            out.extend(codes.iter().map(|code| *code as u8));
-        }
+    /// The host loop of `block_codec` run under the same bound arithmetic the device kernel renders.
+    fn host_quantize(layout: BlockLayout, values: &[f32], arithmetic: ScaleArithmetic) -> Vec<u8> {
+        let rule = EncodeRule { arithmetic, ..layout.encode_rule().expect("q8_1 has a rule") };
+        let codec = FormatCodec::block_with_rule(&layout, rule).expect("q8_1 runs under an integer rule");
+        let mut out = vec![0u8; codec.packed_len(values.len()).expect("whole blocks")];
+        codec.encode(values, &mut out).expect("the host encodes the groups");
         out
     }
 
@@ -4417,7 +4408,8 @@ mod tests {
         let values = near_tie_values();
         let reciprocal = quantize_on_gpu(&driver, BlockLayout::Q8_1, &values, ScaleArithmetic::ReciprocalMultiply);
         let quotient = quantize_on_gpu(&driver, BlockLayout::Q8_1, &values, ScaleArithmetic::Quotient);
-        assert_eq!(reciprocal, llama_quantize_mmq_q8_1(&values), "device reciprocal-multiply bytes against the mmq port");
+        assert_eq!(reciprocal, host_quantize(BlockLayout::Q8_1, &values, ScaleArithmetic::ReciprocalMultiply), "device reciprocal-multiply bytes against block_codec under the same rule");
+        assert_eq!(quotient, host_quantize(BlockLayout::Q8_1, &values, ScaleArithmetic::Quotient), "device quotient bytes against block_codec under the same rule");
         assert_eq!(codes_at(&reciprocal, 0, 1..7), NEAR_TIE_UNIT_PEAK_RECIPROCAL_CODES);
         assert_eq!(codes_at(&reciprocal, 1, 1..7), NEAR_TIE_WIDE_PEAK_RECIPROCAL_CODES);
         assert_eq!(codes_at(&quotient, 0, 1..7), NEAR_TIE_UNIT_PEAK_QUOTIENT_CODES);

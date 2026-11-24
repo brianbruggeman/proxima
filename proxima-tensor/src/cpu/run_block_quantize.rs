@@ -7,7 +7,7 @@ pub(super) fn run_block_quantize<B: Deref<Target = [f32]> + Sync>(
     buffers: &[Option<B>],
     output: &mut [f32],
 ) -> Result<(), TensorError> {
-    let BoundOpKind::BlockQuantize { operands, layout, .. } = &resolved.kind else {
+    let BoundOpKind::BlockQuantize { operands, layout, arithmetic } = &resolved.kind else {
         return Err(TensorError::NotLowerable {
             node: resolved.node,
             reason: "block quantize runner received another bound operation",
@@ -16,7 +16,7 @@ pub(super) fn run_block_quantize<B: Deref<Target = [f32]> + Sync>(
     let (source_node, _, _) = operands.first().ok_or(TensorError::Empty)?;
     let source = buffer_of(buffers, *source_node)?;
     let mut packed = vec![0u8; output.len()];
-    block_layout_encode::quantize(layout, source, &mut packed).map_err(|cause| {
+    block_layout_encode::quantize_under(layout, *arithmetic, source, &mut packed).map_err(|cause| {
         TensorError::BlockQuantizeLayout {
             node: resolved.node,
             cause,
@@ -46,7 +46,7 @@ mod tests {
     const BLOCKS_PER_ROW: u32 = 4;
     const F16_EPSILON: f32 = 1.0 / 1024.0;
 
-    fn bound(layout: BlockLayout, last: u32) -> BoundOp {
+    fn bound(layout: BlockLayout, last: u32, arithmetic: ScaleArithmetic) -> BoundOp {
         let stride = SmallVec::from_vec(vec![i64::from(last), 1]);
         let bytes = u64::from(last / u32::from(layout.elements)) * u64::from(layout.block_bytes);
         BoundOp {
@@ -56,7 +56,7 @@ mod tests {
             kind: BoundOpKind::BlockQuantize {
                 operands: vec![(NodeId(0), Layout { base: 0, strides: stride }, None)],
                 layout: Box::new(layout),
-                arithmetic: ScaleArithmetic::Quotient,
+                arithmetic,
             },
         }
     }
@@ -74,7 +74,11 @@ mod tests {
     }
 
     fn encode(layout: &BlockLayout, values: &[f32]) -> Result<Vec<u8>, TensorError> {
-        let op = bound(*layout, (values.len() / ROWS as usize) as u32);
+        encode_under(layout, values, ScaleArithmetic::Quotient)
+    }
+
+    fn encode_under(layout: &BlockLayout, values: &[f32], arithmetic: ScaleArithmetic) -> Result<Vec<u8>, TensorError> {
+        let op = bound(*layout, (values.len() / ROWS as usize) as u32, arithmetic);
         let mut output = vec![0.0f32; op.extents.iter().product::<u64>() as usize];
         let buffers = [Some(values), None];
         run_block_quantize(&op, &buffers, &mut output)?;
@@ -396,5 +400,38 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    const UNIT_PEAK_TIES: [u32; 6] = [0x3d11_2244, 0x3d31_62c5, 0x3d51_a346, 0x3d71_e3c7, 0x3f30_60c1, 0x3f50_a142];
+    const WIDE_PEAK_TIES: [u32; 6] = [0x3d32_ff98, 0x3d95_2a54, 0x3dd0_d4dc, 0x3e06_3fb2, 0x3e24_14f6, 0x3e41_ea3a];
+    const WIDE_PEAK: f32 = 3.7;
+    const UNIT_RECIPROCAL_CODES: [i8; 6] = [4, 5, 6, 7, 87, 103];
+    const UNIT_QUOTIENT_CODES: [i8; 6] = [5, 6, 7, 8, 88, 104];
+    const WIDE_RECIPROCAL_CODES: [i8; 6] = [2, 3, 4, 5, 6, 7];
+    const WIDE_QUOTIENT_CODES: [i8; 6] = [1, 2, 3, 4, 5, 6];
+
+    fn tie_codes(packed: &[u8], group: usize) -> Vec<i8> {
+        let block = BlockLayout::Q8_1.block_bytes as usize;
+        packed[group * block + 4..][1..7].iter().map(|byte| *byte as i8).collect()
+    }
+
+    #[test]
+    fn the_bound_arithmetic_picks_the_codes_the_interpreter_writes_on_near_ties() {
+        let layout = BlockLayout::Q8_1;
+        let mut values = vec![0.0f32; (ROWS * row_width(&layout)) as usize];
+        values[0] = 1.0;
+        values[32] = WIDE_PEAK;
+        for (lane, bits) in UNIT_PEAK_TIES.iter().enumerate() {
+            values[1 + lane] = f32::from_bits(*bits);
+        }
+        for (lane, bits) in WIDE_PEAK_TIES.iter().enumerate() {
+            values[33 + lane] = f32::from_bits(*bits);
+        }
+        let quotient = encode_under(&layout, &values, ScaleArithmetic::Quotient).expect("q8_1 encodes under the quotient");
+        let reciprocal = encode_under(&layout, &values, ScaleArithmetic::ReciprocalMultiply).expect("q8_1 encodes under the reciprocal");
+        assert_eq!(tie_codes(&quotient, 0), UNIT_QUOTIENT_CODES);
+        assert_eq!(tie_codes(&quotient, 1), WIDE_QUOTIENT_CODES);
+        assert_eq!(tie_codes(&reciprocal, 0), UNIT_RECIPROCAL_CODES);
+        assert_eq!(tie_codes(&reciprocal, 1), WIDE_RECIPROCAL_CODES);
     }
 }

@@ -28,7 +28,7 @@ use core::mem::MaybeUninit;
 
 use crate::block_layout::{BlockLayout, Coded, Field, MAX_DIGITS, Plane, named_block_table};
 use crate::encode_rule::{CodeClamp, CodeRounding, EncodeRule, ScaleRounding, ScaleStatistic, StoredMin};
-use crate::encode_rule::{RangeFit, SubRule};
+use crate::encode_rule::{RangeFit, ScaleArithmetic, SubRule};
 use crate::range_fit::{fit_range, nearest_even};
 use crate::float_layout::{FloatLayout, SignEncoding};
 use crate::float_layout_codec::{decode, encode};
@@ -46,6 +46,10 @@ pub type DecodeFn = fn(&[u8], &mut [MaybeUninit<f32>]);
 /// block bytes are literals: the packed byte count, or `None` with `out` unwritten when `values` is not
 /// whole blocks or `out` is shorter than the packed range.
 pub type BlockEncodeFn = fn(&[f32], &mut [u8]) -> Option<usize>;
+
+/// A block encode instantiation that runs the rule it is handed instead of the layout's own, so a
+/// bound arithmetic reaches the same loop; sized and checked like [`BlockEncodeFn`].
+pub type BlockRuledEncodeFn = fn(&EncodeRule, &[f32], &mut [u8]) -> Option<usize>;
 
 /// A block decode instantiation that sizes and checks its own window, where the element count and the
 /// block bytes are literals: the byte count read, or `None` with `out` unwritten when `out` is not
@@ -121,6 +125,7 @@ const fn stored_min_rule(layout: &BlockLayout, stored_sum: bool) -> Option<Encod
     Some(EncodeRule {
         statistic: ScaleStatistic::MinMax(RangeFit::PLAIN),
         divisor: highest - lowest,
+        arithmetic: ScaleArithmetic::InverseOfScale,
         rounding: CodeRounding::HalfUpThenTruncate,
         scale_rounding: ScaleRounding::Stored,
         min_scale_exponent: None,
@@ -239,6 +244,7 @@ const fn two_level_rule(layout: &BlockLayout) -> Option<EncodeRule> {
     Some(EncodeRule {
         statistic: ScaleStatistic::MinMax(search.range_fit()),
         divisor: highest - lowest,
+        arithmetic: ScaleArithmetic::InverseOfScale,
         rounding: CodeRounding::NearestEven,
         scale_rounding: ScaleRounding::Stored,
         min_scale_exponent: None,
@@ -279,6 +285,7 @@ const fn float_encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
     Some(EncodeRule {
         statistic: ScaleStatistic::PeakMagnitude,
         divisor: 0,
+        arithmetic: ScaleArithmetic::InverseOfScale,
         min_scale_exponent: None,
         rounding: if exponent_only_scale && code_bits(layout) <= 8 {
             CodeRounding::NearestCodeValue
@@ -341,6 +348,7 @@ pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
         return Some(EncodeRule {
             statistic: ScaleStatistic::MeanMagnitude,
             divisor: 1,
+            arithmetic: ScaleArithmetic::InverseOfScale,
             min_scale_exponent: None,
             rounding: CodeRounding::NonNegativeBit,
             scale_rounding: ScaleRounding::Stored,
@@ -363,6 +371,7 @@ pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
         return Some(EncodeRule {
             statistic: ScaleStatistic::SignedPeak,
             divisor: -bias,
+            arithmetic: ScaleArithmetic::InverseOfScale,
             min_scale_exponent: None,
             rounding: CodeRounding::HalfUpThenTruncate,
             scale_rounding: ScaleRounding::Stored,
@@ -379,6 +388,7 @@ pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
         return Some(EncodeRule {
             statistic: ScaleStatistic::PeakMagnitude,
             divisor: reach_of(layout),
+            arithmetic: ScaleArithmetic::InverseOfScale,
             min_scale_exponent: None,
             rounding: CodeRounding::NearestAwayFromZero,
             scale_rounding: ScaleRounding::Stored,
@@ -998,6 +1008,33 @@ fn inverse_of(scale: f32) -> f32 {
     if scale == 0.0 { 0.0 } else { 1.0 / scale }
 }
 
+/// The scale and inverse a statistic fixes under the rule's arithmetic: the mmq order forms the
+/// inverse first and stores its reciprocal.
+#[inline(always)]
+fn scale_and_inverse(rule: &EncodeRule, statistic: f32) -> (f32, f32) {
+    let divisor = rule.divisor as f32;
+    match rule.arithmetic {
+        ScaleArithmetic::InverseOfScale | ScaleArithmetic::Quotient => {
+            let scale = statistic / divisor;
+            (scale, inverse_of(scale))
+        }
+        ScaleArithmetic::ReciprocalMultiply => {
+            let inverse = if statistic == 0.0 { 0.0 } else { divisor / statistic };
+            (inverse_of(inverse), inverse)
+        }
+    }
+}
+
+/// The value over the scale the rounding is applied to.
+#[inline(always)]
+fn over_scale(rule: &EncodeRule, value: f32, scale: f32, inverse: f32) -> f32 {
+    match rule.arithmetic {
+        ScaleArithmetic::Quotient if scale == 0.0 => 0.0,
+        ScaleArithmetic::Quotient => value / scale,
+        ScaleArithmetic::InverseOfScale | ScaleArithmetic::ReciprocalMultiply => value * inverse,
+    }
+}
+
 /// The C scan of `quantize_row_q4_1_ref`: strict comparisons from the extremes, in element order.
 #[inline(always)]
 fn range_ordered<const ELEMENTS: usize>(input: &[f32; ELEMENTS]) -> (f32, f32) {
@@ -1020,12 +1057,12 @@ fn fit_scale<const ELEMENTS: usize>(rule: &EncodeRule, input: &[f32; ELEMENTS]) 
     let divisor = rule.divisor as f32;
     match rule.statistic {
         ScaleStatistic::SignedPeak => {
-            let scale = signed_max(input) / divisor;
-            (scale, inverse_of(scale), 0.0)
+            let (scale, inverse) = scale_and_inverse(rule, signed_max(input));
+            (scale, inverse, 0.0)
         }
         ScaleStatistic::PeakMagnitude => {
-            let scale = peak(input) / divisor;
-            (scale, inverse_of(scale), 0.0)
+            let (scale, inverse) = scale_and_inverse(rule, peak(input));
+            (scale, inverse, 0.0)
         }
         ScaleStatistic::MeanMagnitude => {
             let mut sum = 0.0f32;
@@ -1037,19 +1074,19 @@ fn fit_scale<const ELEMENTS: usize>(rule: &EncodeRule, input: &[f32; ELEMENTS]) 
         ScaleStatistic::MinMax(_) => {
             // a searched fit never reaches here: `fit_codes` runs it, as it also yields the codes
             let (low, high) = range_ordered(input);
-            let scale = (high - low) / divisor;
-            (scale, inverse_of(scale), low)
+            let (scale, inverse) = scale_and_inverse(rule, high - low);
+            (scale, inverse, low)
         }
     }
 }
 
 /// The raw code of one value under the rule's `inverse`.
 #[inline(always)]
-fn code_of(layout: &BlockLayout, rule: &EncodeRule, inverse: f32, value: f32) -> u8 {
+fn code_of(layout: &BlockLayout, rule: &EncodeRule, scale: f32, inverse: f32, value: f32) -> u8 {
     let bias = layout.element.bias as i32;
     match rule.rounding {
         CodeRounding::HalfUpThenTruncate => {
-            let raw = (value * inverse + (bias as f32 + 0.5)) as i32;
+            let raw = (over_scale(rule, value, scale, inverse) + (bias as f32 + 0.5)) as i32;
             let raw = match rule.clamp {
                 CodeClamp::Both => raw.clamp(rule.lowest + bias, rule.highest + bias),
                 CodeClamp::Upper => raw.min(rule.highest + bias),
@@ -1059,9 +1096,9 @@ fn code_of(layout: &BlockLayout, rule: &EncodeRule, inverse: f32, value: f32) ->
         }
         CodeRounding::NearestAwayFromZero | CodeRounding::NearestEven => {
             let rounded = if matches!(rule.rounding, CodeRounding::NearestEven) {
-                nearest_even(value * inverse)
+                nearest_even(over_scale(rule, value, scale, inverse))
             } else {
-                libm::roundf(value * inverse) as i32
+                libm::roundf(over_scale(rule, value, scale, inverse)) as i32
             };
             let rounded = match rule.clamp {
                 CodeClamp::Both => rounded.clamp(rule.lowest, rule.highest),
@@ -1074,6 +1111,11 @@ fn code_of(layout: &BlockLayout, rule: &EncodeRule, inverse: f32, value: f32) ->
         // float rules run through `FormatCodec::coded`, never this integer loop
         CodeRounding::NearestCodeValue | CodeRounding::NearestEvenQuotient => rule.zero_code,
     }
+}
+
+/// The scale the rule fits to `input` before the scale field narrows it.
+pub(crate) fn fitted_scale<const ELEMENTS: usize>(rule: &EncodeRule, input: &[f32; ELEMENTS]) -> f32 {
+    fit_scale(rule, input).0
 }
 
 /// Whether the scale the block will store is zero, or has a non-finite inverse, so no code can
@@ -1121,7 +1163,7 @@ fn fit_codes<const ELEMENTS: usize, const HIGH_FUSED: bool>(
         } else if degenerate {
             rule.zero_code
         } else {
-            code_of(layout, rule, inverse, if shifted { value - low } else { value })
+            code_of(layout, rule, scale, inverse, if shifted { value - low } else { value })
         };
         if HIGH_FUSED {
             word = word.wrapping_add(((u32::from(*code) >> lift) & mask).wrapping_shl(lane as u32 * bits));
@@ -1225,10 +1267,21 @@ macro_rules! resolve_named_block {
                         )
                     }),
                 };
+                let ruled: Option<BlockRuledEncodeFn> = match RULE {
+                    Some(own) if !is_float_rule(&own) => Some(|rule, values, out| {
+                        encode_run::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED, SCALE_OWNED>(
+                            BlockLayout::$name,
+                            *rule,
+                            values,
+                            out,
+                        )
+                    }),
+                    _ => None,
+                };
                 let decode: BlockDecodeFn = |data, out| {
                     decode_run::<ELEMENTS, BYTES, UNPACK_BY_WORD, IN_PLACE, PAIRED>(BlockLayout::$name, data, out)
                 };
-                return Some(FormatCodec::block_table(encode, decode, ELEMENTS, BYTES));
+                return Some(FormatCodec::block_table(encode, ruled, decode, ELEMENTS, BYTES));
             }
         )*
         None

@@ -28,7 +28,7 @@ use proxima_numeric::block_layout::BlockLayout;
 use omega::backend::{
     BackendError, Engine, GpuDriver, Plan, cuda_kernel_identities, execute_plan_named, plan_named,
 };
-use proxima_numeric::{NumericPolicy, ScaleArithmetic};
+use proxima_numeric::{EncodeRule, FormatCodec, NumericPolicy, ScaleArithmetic};
 use proxima_tensor::infer;
 use proxima_tensor::spec::{
     input_leaf, qk_norm_cached_forward_program, rmsnorm, rmsnorm_per_head, count_constant, scalar_constant,
@@ -4876,14 +4876,20 @@ fn llama_reciprocal_above_rows() -> Option<usize> {
 }
 
 fn fake_quantize_blocks(activation: &[f32], scale_through_fp16: bool, arithmetic: ScaleArithmetic) -> Vec<f32> {
+    let layout = BlockLayout::Q8_1;
+    let rule = EncodeRule { arithmetic, ..layout.encode_rule().expect("q8_1 has a rule") };
+    let codec = FormatCodec::block_with_rule(&layout, rule).expect("q8_1 runs under an integer rule");
+    let mut packed = vec![0u8; codec.packed_len(activation.len()).expect("whole blocks")];
+    codec.encode(activation, &mut packed).expect("the host encodes the activation");
+    let codes = layout.run_code_byte(0);
     activation
         .as_chunks::<32>().0.iter()
-        .flat_map(|group| {
-            let peak = group.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
-            let step = arithmetic.scale(peak, 127.0);
+        .zip(packed.chunks_exact(usize::from(layout.block_bytes)))
+        .flat_map(|(group, block)| {
+            let step = rule.fitted_scale(group);
             // llama.cpp stores the q8_1 scale as half2 ds (ggml-common.h:265, mmq.cuh:41), so the device rounds it to f16
             let used = if scale_through_fp16 { half::f16::from_f32(step).to_f32() } else { step };
-            group.iter().map(move |value| arithmetic.code(*value, peak, 127.0) as f32 * used)
+            block[codes..].iter().map(move |code| f32::from(*code as i8) * used)
         })
         .collect()
 }

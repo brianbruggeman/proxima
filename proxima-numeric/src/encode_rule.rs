@@ -137,16 +137,20 @@ pub enum ScaleRounding {
     PowerOfTwoCeil,
 }
 
-/// How a quantize step turns a block's peak into the scale and each value into a code, for the
-/// integer codes a backend writes when it quantizes an activation. The two arithmetics round
-/// differently where `value / scale` and `value * (reach / peak)` straddle a half.
+/// How a block's scale and a value's quotient over it are formed, for the integer codes. The
+/// arithmetics round differently where `value / scale` and `value * inverse` straddle a half; the
+/// tie itself stays [`CodeRounding`]'s job. `reach` is the rule's divisor, `stat` its statistic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ScaleArithmetic {
-    /// `scale = peak / reach`, `code = round(value / scale)`: llama.cpp's `quantize_q8_1`
-    /// (`ggml-cuda/quantize.cu`), the path a single-row (matvec) product reads.
+    /// `scale = stat / reach`, `inverse = 1 / scale` (zero for a zero scale), code from
+    /// `value * inverse`: ggml CPU `quantize_row_q8_0`, and what every layout's rule is filled in with.
+    InverseOfScale,
+    /// `scale = stat / reach`, code from `value / scale` (zero for a zero scale): llama.cpp's
+    /// `quantize_q8_1` (`ggml-cuda/quantize.cu`), the path a single-row (matvec) product reads.
     Quotient,
-    /// `inverse = reach / peak`, `code = round(value * inverse)`, `scale = 1 / inverse`: llama.cpp's
-    /// `quantize_mmq_q8_1` (`quantize.cu`), the path a many-row (matmul) product reads.
+    /// `inverse = reach / stat` (zero for a zero statistic), `scale = 1 / inverse`, code from
+    /// `value * inverse`: llama.cpp's `quantize_mmq_q8_1` (`quantize.cu`), the path a many-row
+    /// (matmul) product reads.
     ReciprocalMultiply,
 }
 
@@ -160,35 +164,6 @@ impl ScaleArithmetic {
             Some(limit) if rows > limit as u64 => Self::ReciprocalMultiply,
             _ => Self::Quotient,
         }
-    }
-
-    /// The unrounded scale for a block whose largest magnitude is `peak`; zero for a zero peak.
-    #[must_use]
-    pub fn scale(self, peak: f32, reach: f32) -> f32 {
-        if peak == 0.0 {
-            return 0.0;
-        }
-        match self {
-            Self::Quotient => peak / reach,
-            Self::ReciprocalMultiply => 1.0 / (reach / peak),
-        }
-    }
-
-    /// The code of `value` in a block with largest magnitude `peak`; zero for a zero peak.
-    #[must_use]
-    pub fn code(self, value: f32, peak: f32, reach: f32) -> i32 {
-        if peak == 0.0 {
-            return 0;
-        }
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "the rounded quotient is at most the reach in magnitude"
-        )]
-        let code = match self {
-            Self::Quotient => libm::roundf(value / (peak / reach)) as i32,
-            Self::ReciprocalMultiply => libm::roundf(value * (reach / peak)) as i32,
-        };
-        code
     }
 }
 
@@ -214,6 +189,9 @@ pub struct EncodeRule {
     /// on a float code replaces the reach (1024 for binary16 staging, which leaves headroom for
     /// sums of 32 staged values below the binary16 maximum).
     pub divisor: i32,
+    /// How the scale and the value over it are formed; see [`ScaleArithmetic`]. A float code and a
+    /// sign code ignore it.
+    pub arithmetic: ScaleArithmetic,
     /// The lowest exponent a power-of-two scale may take: `Some(0)` never scales a row up, so a
     /// small row is staged as it is. `None` leaves the scale field's own range.
     pub min_scale_exponent: Option<i16>,
@@ -256,6 +234,13 @@ pub struct SubRule {
 }
 
 impl EncodeRule {
+    /// The scale this rule fits to one block of `input`, before the scale field narrows it: the
+    /// statistic over the divisor under the rule's [`ScaleArithmetic`].
+    #[must_use]
+    pub fn fitted_scale<const ELEMENTS: usize>(&self, input: &[f32; ELEMENTS]) -> f32 {
+        crate::block_codec::fitted_scale(self, input)
+    }
+
     /// Whether the code is a small float chosen by [`CodeRounding::NearestCodeValue`] or
     /// [`CodeRounding::NearestEvenQuotient`], with one scale per run of elements.
     #[must_use]
@@ -288,6 +273,7 @@ mod tests {
             EncodeRule {
                 statistic: ScaleStatistic::SignedPeak,
                 divisor: -8,
+                arithmetic: ScaleArithmetic::InverseOfScale,
                 min_scale_exponent: None,
                 rounding: CodeRounding::HalfUpThenTruncate,
                 scale_rounding: ScaleRounding::Stored,
