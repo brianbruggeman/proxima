@@ -147,13 +147,14 @@ mod dit {
     use std::path::PathBuf;
     use std::time::Instant;
 
+    use conflaguration::Settings;
+    use proxima_model_interop::ServingSettings;
     use proxima_model_interop::diffusion::{
-        Checkpoint, DitConfig, DitInputs, Graph, build_dit, load_weights, timestep_sinusoid,
+        Checkpoint, Denoiser, DiffusionSettings, DitConfig, DitInputs, Graph, build_dit,
+        timestep_sinusoid,
     };
-    use proxima_numeric::codec::Codec;
     use proxima_numeric::{DType, FloatLayout, FlowMatchSchedule, euler_step};
     use proxima_tensor::op::NodeId;
-    use proxima_tensor::QuantizedBlock;
     use proxima_tensor::spec::multi_axis_rope_tables;
 
     const IMAGE_TOKENS: usize = 64 * 64;
@@ -272,16 +273,8 @@ mod dit {
         positions
     }
 
-    fn runtime() -> omega::config::RuntimeConfig {
-        let serving = proxima_model_interop::ServingConfig::default();
-        omega::config::RuntimeConfig::builder()
-            .with_engine("gpu")
-            .with_gpu_driver("metal")
-            .with_allow_fusion(true)
-            .with_numeric(proxima_numeric::NumericPolicy::llama_relaxed())
-            .with_exact_activations(serving.exact_activations)
-            .build()
-            .expect("metal runtime")
+    fn serving_settings() -> Result<ServingSettings, String> {
+        ServingSettings::from_env().map_err(|why| why.to_string())
     }
 
     #[test]
@@ -326,7 +319,6 @@ mod dit {
             .map(|(name, node)| (*name, *node))
             .collect();
         traced.push(("velocity", velocity));
-        let trace_nodes: Vec<NodeId> = traced.iter().map(|(_, node)| *node).collect();
         eprintln!(
             "program: {} ops, {} weight leaves, {} host leaves, built in {:.1}s",
             graph.program.len(),
@@ -336,68 +328,50 @@ mod dit {
         );
 
         let checkpoint = Checkpoint::open(&fixtures.model.join("flux-2-klein-4b.safetensors"))?;
+        let diffusion = DiffusionSettings::resolved();
+        let activation = graph.activation();
+        let extra: Vec<NodeId> = output.trace.iter().map(|(_, node)| *node).collect();
         let loading = Instant::now();
-        let weights = load_weights(&checkpoint, &graph.weights, Codec::Float16, false)?;
+        let mut denoiser = Denoiser::new(
+            &checkpoint,
+            graph,
+            velocity,
+            &[JOINT as u64],
+            diffusion.dit_weights,
+            &serving_settings()?,
+        )?;
         eprintln!("weights loaded in {:.1}s", loading.elapsed().as_secs_f64());
 
         let mut latent_values =
             token_major(&read_dump(&fixtures.reference.join("noise.f32"))?);
         let text_values = read_dump(&fixtures.reference.join("text.f32"))?;
-        let cos_values = decode(&cos_bytes);
-        let sin_values = decode(&sin_bytes);
         let sigmas = FlowMatchSchedule::new(STEPS, IMAGE_TOKENS as u32)
             .sigmas()
             .map_err(|why| why.to_string())?;
 
-        let runtime = runtime();
-        let planning_timestep = timestep_sinusoid(1.0, 256);
-        let integers = graph.int_buffers();
-        let mut blocks: Vec<(&str, QuantizedBlock)> = weights.blocks();
-        blocks.extend(graph.host_blocks(
-            &
-            [
-                ("latent", latent_values.as_slice()),
-                ("text", text_values.as_slice()),
-                ("timestep", planning_timestep.as_slice()),
-                ("rope_cos", cos_values.as_slice()),
-                ("rope_sin", sin_values.as_slice()),
-            ],
-            &integers,
-        ));
-        let plan_started = Instant::now();
-        let (mut plan, _) = omega::backend::plan_named_with_config(
-            &runtime,
-            &graph.program,
-            &[JOINT as u64],
-            &blocks,
-            &trace_nodes,
-        )
-        .map_err(|why| format!("plan: {why}"))?;
-        eprintln!("plan built in {:.1}s", plan_started.elapsed().as_secs_f64());
-        let _ = weights.blocks();
+        let mut call_graph = Graph::new(activation);
+        call_graph.host("latent", &[IMAGE_TOKENS as u32, HIDDEN as u32], Vec::new());
+        call_graph.host("text", &[TEXT_TOKENS as u32, 7680], Vec::new());
+        call_graph.host("timestep", &[256], Vec::new());
 
         let reference_velocity = token_major(&read_dump(&fixtures.reference.join("velocity1.f32"))?);
         let mut verdicts = 0;
         for step in 0..STEPS as usize {
             let timestep_values = timestep_sinusoid(sigmas[step], 256);
-            let mut named: Vec<(&str, QuantizedBlock)> = weights.blocks();
-            named.extend(graph.host_blocks(
-                &
-                [
+            let named = call_graph.host_blocks(
+                &[
                     ("latent", latent_values.as_slice()),
                     ("text", text_values.as_slice()),
                     ("timestep", timestep_values.as_slice()),
-                    ("rope_cos", cos_values.as_slice()),
-                    ("rope_sin", sin_values.as_slice()),
                 ],
-                &integers,
-            ));
+                &[],
+            );
             let ran = Instant::now();
             #[cfg(feature = "instrument")]
             let profiled = if env::var_os("PROXIMA_FLUX2_KLEIN_PROFILE").is_some() {
-                let (evaluated, timings) =
-                    omega::backend::execute_plan_named_metal_op_timed(&plan, &named, None)
-                        .map_err(|why| format!("step {}: {why}", step + 1))?;
+                let (evaluated, timings) = denoiser
+                    .evaluate_op_timed(&named)
+                    .map_err(|why| format!("step {}: {why}", step + 1))?;
                 let mut rows: Vec<(&str, u64, Vec<u64>)> = timings
                     .iter()
                     .map(|timing| (timing.kind, timing.gpu_ns, timing.extents.clone()))
@@ -416,7 +390,8 @@ mod dit {
             let profiled = None::<_>;
             let evaluated = match profiled {
                 Some(evaluated) => evaluated,
-                None => omega::backend::execute_plan_named(&mut plan, &named)
+                None => denoiser
+                    .evaluate(&named, &extra)
                     .map_err(|why| format!("step {}: {why}", step + 1))?,
             };
             let elapsed = ran.elapsed().as_secs_f64();
@@ -490,6 +465,11 @@ mod dit {
             verdicts += 1;
         }
         eprintln!("{verdicts} verdicts printed");
+        assert_eq!(
+            denoiser.plan_counts(),
+            (STEPS as usize - 1, 1),
+            "the four steps are one plan miss, then three hits on the retained plan"
+        );
         Ok(())
     }
 }
@@ -740,12 +720,12 @@ mod vae {
     use std::path::PathBuf;
     use std::time::Instant;
 
+    use conflaguration::Settings;
+    use proxima_model_interop::ServingSettings;
     use proxima_model_interop::diffusion::{
-        Checkpoint, Graph, VaeConfig, build_vae_decode, load_weights,
+        Checkpoint, Decoder, DiffusionSettings, Graph, VaeConfig, build_vae_decode,
     };
     use proxima_numeric::DType;
-    use proxima_numeric::codec::Codec;
-    use proxima_tensor::QuantizedBlock;
 
     const LATENT: usize = 64;
     const LATENT_CHANNELS: usize = 128;
@@ -837,16 +817,8 @@ mod vae {
         (20.0 * (1.0 / rms).log10(), dot / (left * right).sqrt())
     }
 
-    fn runtime() -> omega::config::RuntimeConfig {
-        let serving = proxima_model_interop::ServingConfig::default();
-        omega::config::RuntimeConfig::builder()
-            .with_engine("gpu")
-            .with_gpu_driver("metal")
-            .with_allow_fusion(true)
-            .with_numeric(serving.numeric_policy)
-            .with_exact_activations(serving.exact_activations)
-            .build()
-            .expect("metal runtime")
+    fn serving_settings() -> Result<ServingSettings, String> {
+        ServingSettings::from_env().map_err(|why| why.to_string())
     }
 
     #[test]
@@ -877,24 +849,23 @@ mod vae {
             started.elapsed().as_secs_f64()
         );
         let loading = Instant::now();
-        let weights = load_weights(&checkpoint, &graph.weights, Codec::Float16, true)?;
+        let activation = graph.activation();
+        let mut decoder = Decoder::new(
+            &checkpoint,
+            graph,
+            image,
+            &[TOKENS as u64],
+            DiffusionSettings::resolved().vae_weights,
+            &serving_settings()?,
+        )?;
         eprintln!("vae weights loaded in {:.1}s", loading.elapsed().as_secs_f64());
 
-        let integers = graph.int_buffers();
-        let mut blocks: Vec<(&str, QuantizedBlock)> = weights.blocks();
-        blocks.extend(graph.host_blocks(&[("latent", latent.as_slice())], &integers));
-        let plan_started = Instant::now();
-        let (mut plan, _) = omega::backend::plan_named_with_config(
-            &runtime(),
-            &graph.program,
-            &[TOKENS as u64],
-            &blocks,
-            &[image],
-        )
-        .map_err(|why| format!("plan: {why}"))?;
-        eprintln!("planned in {:.1}s", plan_started.elapsed().as_secs_f64());
+        let mut call_graph = Graph::new(activation);
+        call_graph.host("latent", &[TOKENS as u32, CHANNELS as u32, 1], Vec::new());
+        let blocks = call_graph.host_blocks(&[("latent", latent.as_slice())], &[]);
         let ran = Instant::now();
-        let evaluated = omega::backend::execute_plan_named(&mut plan, &blocks)
+        let evaluated = decoder
+            .evaluate(&blocks)
             .map_err(|why| format!("decode: {why}"))?;
         let elapsed = ran.elapsed().as_secs_f64();
         let decoded = evaluated.get(image).ok_or("image is not an output")?.0;
@@ -1057,10 +1028,10 @@ mod vae_bind {
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod vae_conv_probe {
-    use proxima_model_interop::diffusion::{Checkpoint, Graph, load_weights};
+    use conflaguration::Settings;
+    use proxima_model_interop::ServingSettings;
+    use proxima_model_interop::diffusion::{Checkpoint, Decoder, DiffusionSettings, Graph};
     use proxima_numeric::DType;
-    use proxima_numeric::codec::Codec;
-    use proxima_tensor::QuantizedBlock;
     use proxima_tensor::op::ScalarOp;
 
     const SIDE: u32 = 8;
@@ -1130,29 +1101,20 @@ mod vae_conv_probe {
             &[(convolved, "rgc->rgc"), (bias, "gc->rgc")],
         )
         .map_err(|why| why.to_string())?;
-        let weights = load_weights(&checkpoint, &graph.weights, Codec::Float16, true)?;
-        let integers = graph.int_buffers();
         let latent_values = vec![0.5f32; (rows * GROUPS) as usize];
-        let mut blocks: Vec<(&str, QuantizedBlock)> = weights.blocks();
-        blocks.extend(graph.host_blocks(&[("latent", latent_values.as_slice())], &integers));
-        let serving = proxima_model_interop::ServingConfig::default();
-        let runtime = omega::config::RuntimeConfig::builder()
-            .with_engine("gpu")
-            .with_gpu_driver("metal")
-            .with_allow_fusion(true)
-            .with_numeric(serving.numeric_policy)
-            .with_exact_activations(serving.exact_activations)
-            .build()
-            .expect("metal");
-        let (mut plan, _) = omega::backend::plan_named_with_config(
-            &runtime,
-            &graph.program,
+        let mut call_graph = Graph::new(graph.activation());
+        call_graph.host("latent", &[rows, GROUPS, 1], Vec::new());
+        let blocks = call_graph.host_blocks(&[("latent", latent_values.as_slice())], &[]);
+        let mut decoder = Decoder::new(
+            &checkpoint,
+            graph,
+            image,
             &[rows as u64],
-            &blocks,
-            &[image],
-        )
-        .map_err(|why| format!("plan: {why}"))?;
-        let evaluated = omega::backend::execute_plan_named(&mut plan, &blocks)
+            DiffusionSettings::resolved().vae_weights,
+            &ServingSettings::from_env().map_err(|why| why.to_string())?,
+        )?;
+        let evaluated = decoder
+            .evaluate(&blocks)
             .map_err(|why| format!("run: {why}"))?;
         let values = evaluated.get(image).ok_or("no image")?.0;
         let rms = (values.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>()
@@ -1181,7 +1143,9 @@ mod reduce_split_axis {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    use proxima_model_interop::diffusion::Graph;
+    use conflaguration::Settings;
+    use proxima_model_interop::ServingSettings;
+    use proxima_model_interop::diffusion::{Decoder, DiffusionSettings, Graph, Weights};
     use proxima_numeric::DType;
     use proxima_tensor::QuantizedBlock;
     use proxima_tensor::spec::{
@@ -1403,23 +1367,18 @@ mod reduce_split_axis {
                     },
                 ));
             }
-            let serving = proxima_model_interop::ServingConfig::default();
-            let runtime = omega::config::RuntimeConfig::builder()
-                .with_engine("gpu")
-                .with_gpu_driver("metal")
-                .with_allow_fusion(true)
-                .with_numeric(serving.numeric_policy)
-                .with_exact_activations(serving.exact_activations)
-                .build()
-                .expect("metal runtime");
-            let outcome = omega::backend::plan_named_with_config(
-                &runtime,
-                &program,
-                &[],
-                &bound,
-                &[root],
-            )
-            .and_then(|(mut plan, _)| omega::backend::execute_plan_named(&mut plan, &bound));
+            let diffusion = DiffusionSettings::resolved();
+            let outcome = diffusion.vae_activation_dtype().and_then(|activation| {
+                let mut graph = Graph::new(activation);
+                graph.program = program;
+                let weights = Weights {
+                    codec: diffusion.vae_weights,
+                    entries: Vec::new(),
+                };
+                let settings = ServingSettings::from_env().map_err(|why| why.to_string())?;
+                let mut decoder = Decoder::with_weights(graph, root, &[], weights, &settings)?;
+                decoder.evaluate(&bound)
+            });
             let _ = sender.send(match outcome {
                 Ok(evaluated) => Ok(evaluated.get(root).map(|value| value.0.to_vec())),
                 Err(why) => Err(format!("{why}")),
@@ -1469,12 +1428,12 @@ mod vae_prefix {
     use std::env;
     use std::path::PathBuf;
 
+    use conflaguration::Settings;
+    use proxima_model_interop::ServingSettings;
     use proxima_model_interop::diffusion::{
-        Checkpoint, Graph, VaeConfig, build_vae_decode, load_weights,
+        Checkpoint, Decoder, DiffusionSettings, Graph, VaeConfig, build_vae_decode,
     };
     use proxima_numeric::DType;
-    use proxima_numeric::codec::Codec;
-    use proxima_tensor::QuantizedBlock;
 
     const SIDE: u32 = 16;
     const TOKENS: usize = (SIDE * SIDE) as usize;
@@ -1499,37 +1458,23 @@ mod vae_prefix {
         let mut graph = Graph::new(DType::FLOAT32);
         let latent = graph.host("latent", &[SIDE * SIDE, 32, 1], vec![0.0; 8]);
         let output = build_vae_decode(&mut graph, &config, latent).map_err(|why| why.to_string())?;
-        let weights = load_weights(&checkpoint, &graph.weights, Codec::Float16, true)?;
-        let integers = graph.int_buffers();
         let latent_values = vec![0.1f32; TOKENS * 32];
-        let mut blocks: Vec<(&str, QuantizedBlock)> = weights.blocks();
-        blocks.extend(graph.host_blocks(&[("latent", latent_values.as_slice())], &integers));
-        let serving = proxima_model_interop::ServingConfig::default();
-        let runtime = omega::config::RuntimeConfig::builder()
-            .with_engine("gpu")
-            .with_gpu_driver("metal")
-            .with_allow_fusion(true)
-            .with_numeric(serving.numeric_policy)
-            .with_exact_activations(serving.exact_activations)
-            .build()
-            .expect("metal");
+        let mut call_graph = Graph::new(graph.activation());
+        call_graph.host("latent", &[SIDE * SIDE, 32, 1], Vec::new());
+        let blocks = call_graph.host_blocks(&[("latent", latent_values.as_slice())], &[]);
+        let mut decoder = Decoder::new(
+            &checkpoint,
+            graph,
+            output.image,
+            &[TOKENS as u64],
+            DiffusionSettings::resolved().vae_weights,
+            &ServingSettings::from_env().map_err(|why| why.to_string())?,
+        )?;
         for (name, node) in &output.trace {
-            match omega::backend::plan_named_with_config(
-                &runtime,
-                &graph.program,
-                &[TOKENS as u64],
-                &blocks,
-                &[*node],
-            ) {
-                Ok((mut plan, _)) => match omega::backend::execute_plan_named(&mut plan, &blocks) {
-                    Ok(_) => eprintln!("stage {name} ok"),
-                    Err(why) => {
-                        eprintln!("stage {name} FAULTS: {why}");
-                        return Ok(());
-                    }
-                },
+            match decoder.evaluate_nodes(&blocks, &[*node]) {
+                Ok(_) => eprintln!("stage {name} ok"),
                 Err(why) => {
-                    eprintln!("stage {name} does not plan: {why}");
+                    eprintln!("stage {name} FAULTS: {why}");
                     return Ok(());
                 }
             }
@@ -1622,14 +1567,14 @@ mod vae_stages {
     use std::fs;
     use std::path::PathBuf;
 
+    use conflaguration::Settings;
+    use proxima_model_interop::ServingSettings;
     use proxima_model_interop::diffusion::{
-        Checkpoint, Graph, VaeConfig, build_vae_decode, load_weights,
+        Checkpoint, Decoder, DiffusionSettings, Graph, VaeConfig, build_vae_decode,
     };
     use proxima_numeric::DType;
-    use proxima_numeric::codec::Codec;
-    use proxima_tensor::QuantizedBlock;
 
-    type Outcome = Result<(), String>;
+type Outcome = Result<(), String>;
 
     /// The reference's captures are `[width, height, channels]` with the width
     /// axis innermost; the graph's activations are `[row, groups, width]` with
@@ -1703,19 +1648,17 @@ mod vae_stages {
         let mut graph = Graph::new(DType::FLOAT32);
         let input = graph.host("latent", &[side * side, 32, 1], Vec::new());
         let output = build_vae_decode(&mut graph, &config, input).map_err(|why| why.to_string())?;
-        let weights = load_weights(&checkpoint, &graph.weights, Codec::Float16, true)?;
-        let integers = graph.int_buffers();
-        let mut blocks: Vec<(&str, QuantizedBlock)> = weights.blocks();
-        blocks.extend(graph.host_blocks(&[("latent", latent.as_slice())], &integers));
-        let serving = proxima_model_interop::ServingConfig::default();
-        let runtime = omega::config::RuntimeConfig::builder()
-            .with_engine("gpu")
-            .with_gpu_driver("metal")
-            .with_allow_fusion(true)
-            .with_numeric(serving.numeric_policy)
-            .with_exact_activations(serving.exact_activations)
-            .build()
-            .expect("metal");
+        let mut call_graph = Graph::new(graph.activation());
+        call_graph.host("latent", &[side * side, 32, 1], Vec::new());
+        let blocks = call_graph.host_blocks(&[("latent", latent.as_slice())], &[]);
+        let mut decoder = Decoder::new(
+            &checkpoint,
+            graph,
+            output.image,
+            &[(side * side) as u64],
+            DiffusionSettings::resolved().vae_weights,
+            &ServingSettings::from_env().map_err(|why| why.to_string())?,
+        )?;
         for (name, node) in &output.trace {
             let (capture, width, channels) = match *name {
                 "conv_in" => ("p_dconv_in.f32", side as usize, 512usize),
@@ -1735,15 +1678,8 @@ mod vae_stages {
             }
             let _ = width;
             let reference = channel_fastest(&read(capture)?, channels);
-            let (mut plan, _) = omega::backend::plan_named_with_config(
-                &runtime,
-                &graph.program,
-                &[(side * side) as u64],
-                &blocks,
-                &[*node],
-            )
-            .map_err(|why| format!("plan {name}: {why}"))?;
-            let evaluated = omega::backend::execute_plan_named(&mut plan, &blocks)
+            let evaluated = decoder
+                .evaluate_nodes(&blocks, &[*node])
                 .map_err(|why| format!("run {name}: {why}"))?;
             let actual = evaluated.get(*node).ok_or("stage missing")?.0;
             let scaled: Vec<f32> = if *name == "image" {
