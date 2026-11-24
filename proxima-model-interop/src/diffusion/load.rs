@@ -8,27 +8,9 @@ use std::path::Path;
 use proxima_numeric::codec::Codec;
 use proxima_numeric::{DType, FormatCodec, NumericFormat, PackedRows};
 
-use crate::CheckpointMapping;
+use crate::{BoundWeights, CheckpointMapping};
 
 use super::WeightBinding;
-
-/// One bound leaf's bytes: a packed matrix the backend's matmul paths decode,
-/// or the plain scalar vector a per-channel scale or bias binds (a packed
-/// rank-1 operand has no matmul reader, so it stays plain). A packed matrix is
-/// encoded in [`Weights::codec`], which keeps the 672-byte codec out of the
-/// variant.
-#[derive(Debug)]
-pub enum WeightData {
-    Packed(Vec<u8>),
-    Plain(PackedRows),
-}
-
-/// The bound leaves, each holding the exact bytes the plan reads.
-#[derive(Debug)]
-pub struct Weights {
-    pub codec: Codec,
-    pub entries: Vec<(String, WeightData)>,
-}
 
 /// One safetensors file's tensor directory over its mapped bytes: the file is
 /// addressed in place through [`CheckpointMapping`], never copied to the heap.
@@ -236,8 +218,11 @@ fn permute_kernel_axes<T: Copy>(values: &[T], shape: &[u64]) -> Vec<T> {
     permuted
 }
 
-/// Binds every declared weight leaf, `codec`-encoded, with each convolution
-/// kernel reordered to `[out, k, k, in]`.
+/// Binds every declared weight leaf into the shared [`BoundWeights`],
+/// `codec`-encoded, with each convolution kernel reordered to
+/// `[out, k, k, in]`. A matrix is an owned packed entry in `codec`; a rank-1
+/// leaf (a per-channel scale or bias, which has no packed matmul reader) and a
+/// matrix whose `codec` is the host element bind as owned host values.
 ///
 /// # Errors
 ///
@@ -247,8 +232,8 @@ pub fn load_weights(
     bindings: &[WeightBinding],
     codec: Codec,
     permute_kernels: bool,
-) -> Result<Weights, String> {
-    let mut entries = Vec::with_capacity(bindings.len());
+) -> Result<BoundWeights<'static>, String> {
+    let mut bound = BoundWeights::new(&[]);
     for binding in bindings {
         let (shape, values) = checkpoint.values(
             &binding.tensor,
@@ -257,26 +242,29 @@ pub fn load_weights(
             permute_kernels
                 && (binding.tap.is_some() || binding.taps || binding.tensor.ends_with("conv.weight")),
         )?;
-        if shape.len() == 1 {
-            entries.push((binding.leaf.clone(), WeightData::Plain(values)));
-            continue;
-        }
         let mut wide = Vec::new();
         values
             .decode_all(&mut wide)
             .map_err(|why| format!("{}: {why}", binding.leaf))?;
+        if shape.len() == 1 {
+            bound.owned.push((binding.leaf.clone(), wide));
+            continue;
+        }
         let wide = match binding.tap {
             Some((row, column)) => kernel_tap(&wide, &shape, row, column),
             None => wide,
         };
+        if codec.is_host_element() {
+            bound.owned.push((binding.leaf.clone(), wide));
+            continue;
+        }
         let packed = PackedRows::from_values(&codec, &wide)
             .map_err(|why| format!("{}: {codec:?}: {why}", binding.leaf))?;
-        entries.push((
-            binding.leaf.clone(),
-            WeightData::Packed(packed.as_bytes().to_vec()),
-        ));
+        bound
+            .packed_owned
+            .push((binding.leaf.clone(), packed.as_bytes().to_vec(), codec));
     }
-    Ok(Weights { codec, entries })
+    Ok(bound)
 }
 
 /// `[out, k, k, in]`'s kernel position `(row, column)` as a contiguous

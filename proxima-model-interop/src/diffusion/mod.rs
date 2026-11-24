@@ -25,7 +25,7 @@ pub use dit::{
     build_single_block, head_norm_count,
 };
 pub use host::{Decoder, Denoiser};
-pub use load::{Checkpoint, WeightData, Weights, load_weights};
+pub use load::{Checkpoint, load_weights};
 pub use png::{PngImage, full_scale, read_png, write_png};
 pub use settings::DiffusionSettings;
 pub use vae::{ConvTaps, VaeConfig, VaeOutput, build_vae_decode, build_window_same};

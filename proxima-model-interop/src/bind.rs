@@ -1212,6 +1212,57 @@ impl<'file> BoundWeights<'file> {
     pub fn expert_ranges(&self) -> &[(alloc::string::String, Vec<&'file [u8]>, Codec)] {
         &self.expert_ranges
     }
+
+    /// Every bound weight as a named block a plan reads: the owned buffers,
+    /// then the borrowed packed blocks, then the owned packed bytes re-wrapped
+    /// in their own codec. The one weight loop every consumer shares.
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::UnsupportedCodec`] when an owned packed entry's codec
+    /// has no block form.
+    pub fn blocks(
+        &self,
+    ) -> Result<Vec<(&str, proxima_tensor::cpu::QuantizedBlock<'_>)>, InteropError> {
+        let owned = self.owned.iter().map(|(name, data)| {
+            Ok((
+                name.as_str(),
+                proxima_tensor::cpu::QuantizedBlock::from(data.as_slice()),
+            ))
+        });
+        let packed = self.packed.iter().map(|(name, block)| Ok((name.as_str(), *block)));
+        let rewrapped = self.packed_owned.iter().map(|(name, bytes, kind)| {
+            as_block(*kind, bytes)
+                .map(|block| (name.as_str(), block))
+                .ok_or(InteropError::UnsupportedCodec {
+                    codec: crate::error::codec_name(*kind),
+                })
+        });
+        owned.chain(packed).chain(rewrapped).collect()
+    }
+
+    /// Adds one owned packed entry, `bytes` encoded in `codec`, for a caller
+    /// assembling its own bind outside this module.
+    #[must_use]
+    pub fn with_packed_owned(
+        mut self,
+        name: impl Into<alloc::string::String>,
+        bytes: Vec<u8>,
+        codec: Codec,
+    ) -> Self {
+        self.packed_owned.push((name.into(), bytes, codec));
+        self
+    }
+
+    /// Every bound weight name, whichever of the four stores holds it.
+    #[must_use]
+    pub fn names(&self) -> BTreeSet<&str> {
+        let owned = self.owned.iter().map(|(name, _)| name.as_str());
+        let packed = self.packed.iter().map(|(name, _)| name.as_str());
+        let rewrapped = self.packed_owned.iter().map(|(name, _, _)| name.as_str());
+        let ranges = self.expert_ranges.iter().map(|(name, _, _)| name.as_str());
+        owned.chain(packed).chain(rewrapped).chain(ranges).collect()
+    }
 }
 
 /// Retargets every `Op::Input` leaf this bind pass recoded to the bound

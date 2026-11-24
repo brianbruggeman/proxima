@@ -1874,34 +1874,15 @@ impl<'file> LoadedModel<'file> {
         hoisted: &[Hoisted],
     ) -> Result<(), InteropError> {
         let kept = |name: &str| !hoisted.iter().any(|rows| host_rows::table_name(rows) == name);
-        for (name, data) in self.weights.owned.iter().filter(|(name, _)| kept(name)) {
-            named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
-        }
-        for (name, block) in self.weights.packed.iter().filter(|(name, _)| kept(name)) {
-            if let Some((low_bytes, low_kind)) = self.hobbit_low_stacks.get(name.as_str()) {
-                let block = crate::bind::as_block(*low_kind, low_bytes).ok_or(
-                    InteropError::UnsupportedCodec {
+        for (name, block) in self.weights.blocks()?.into_iter().filter(|(name, _)| kept(name)) {
+            let block = match self.hobbit_low_stacks.get(name) {
+                Some((low_bytes, low_kind)) => crate::bind::as_block(*low_kind, low_bytes)
+                    .ok_or(InteropError::UnsupportedCodec {
                         codec: crate::error::codec_name(*low_kind),
-                    },
-                )?;
-                named_blocks.push((name.as_str(), block));
-                continue;
-            }
-            named_blocks.push((name.as_str(), *block));
-        }
-        for (name, bytes, kind) in self.weights.packed_owned.iter().filter(|(name, _, _)| kept(name)) {
-            if let Some((low_bytes, low_kind)) = self.hobbit_low_stacks.get(name.as_str()) {
-                let block = crate::bind::as_block(*low_kind, low_bytes).ok_or(
-                    InteropError::UnsupportedCodec {
-                        codec: crate::error::codec_name(*low_kind),
-                    },
-                )?;
-                named_blocks.push((name.as_str(), block));
-                continue;
-            }
-            let block = crate::bind::as_block(*kind, bytes)
-                .ok_or(InteropError::UnsupportedCodec { codec: crate::error::codec_name(*kind) })?;
-            named_blocks.push((name.as_str(), block));
+                    })?,
+                None => block,
+            };
+            named_blocks.push((name, block));
         }
         Ok(())
     }
@@ -1964,24 +1945,7 @@ impl<'file> LoadedModel<'file> {
 
     /// Every bound weight name, hoisted or not.
     fn all_weight_names(&self) -> BTreeSet<&str> {
-        self.weights
-            .owned
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .chain(self.weights.packed.iter().map(|(name, _)| name.as_str()))
-            .chain(
-                self.weights
-                    .packed_owned
-                    .iter()
-                    .map(|(name, _, _)| name.as_str()),
-            )
-            .chain(
-                self.weights
-                    .expert_ranges
-                    .iter()
-                    .map(|(name, _, _)| name.as_str()),
-            )
-            .collect()
+        self.weights.names()
     }
 
     /// This checkpoint's own declared KV/SSM cache leaf names, derived from

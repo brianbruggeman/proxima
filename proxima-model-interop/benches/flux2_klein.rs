@@ -36,11 +36,12 @@ mod bench {
     use criterion::{BenchmarkGroup, Criterion, measurement::WallTime};
     use proxima_model_interop::diffusion::{
         Checkpoint, ConvTaps, Decoder, Denoiser, DiffusionSettings, DitConfig, DitInputs,
-        Graph as ModelGraph, VaeConfig, Weights, attention_scale, build_dit, build_double_block,
+        Graph as ModelGraph, VaeConfig, attention_scale, build_dit, build_double_block,
         build_single_block, build_vae_decode, build_window_same, head_norm_count,
     };
     use proxima_model_interop::{
-        LoadedModel, ServingConfig, ServingSettings, architecture_from_hf_config, parse_hf_config,
+        BoundWeights, LoadedModel, ServingConfig, ServingSettings, architecture_from_hf_config,
+        parse_hf_config,
     };
     use proxima_numeric::{NumericError, NumericFormat, PackedRows, Philox};
     use proxima_telemetry::error;
@@ -117,11 +118,8 @@ mod bench {
 
     /// A weightless program (attention, upsample) as a stage: no checkpoint
     /// leaves to bind, its host leaves resident.
-    fn bare_weights() -> Outcome<Weights> {
-        Ok(Weights {
-            codec: diffusion_settings()?.vae_weights,
-            entries: Vec::new(),
-        })
+    fn bare_weights() -> Outcome<BoundWeights<'static>> {
+        Ok(BoundWeights::new(&[]))
     }
 
     /// Deterministic normal noise packed in `format`: denormals and an
@@ -1093,10 +1091,10 @@ mod bench {
 
         use omega::config::{DenseMmaInputLayout, RuntimeConfig};
         use omega::metal::OpGpuTiming;
-        use proxima_model_interop::ServingConfig;
         use proxima_model_interop::diffusion::{
-            Checkpoint, Decoder, DiffusionSettings, Graph as ModelGraph, WeightData, Weights,
+            Checkpoint, Decoder, DiffusionSettings, Graph as ModelGraph,
         };
+        use proxima_model_interop::{BoundWeights, ServingConfig};
         use proxima_numeric::DType;
         use proxima_numeric::codec::Codec;
         use proxima_tensor::spec::project_rows;
@@ -1342,10 +1340,7 @@ mod bench {
                 .map_err(context("control weight"))?
                 .as_bytes()
                 .to_vec();
-            let weights = Weights {
-                codec,
-                entries: vec![(String::from("control.weight"), WeightData::Packed(bytes))],
-            };
+            let weights = BoundWeights::new(&[]).with_packed_owned("control.weight", bytes, codec);
             with_tiles(tiles, |config| {
                 // the arena cap scales with symbols[0], the plan's row count
                 let mut stage = Decoder::with_weights(

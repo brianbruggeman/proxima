@@ -21,9 +21,9 @@ use proxima_tensor::op::NodeId;
 use proxima_tensor::{Evaluated, QuantizedBlock};
 
 use crate::generate::BackendRuntime;
-use crate::{ContextLength, ServingConfig};
+use crate::{BoundWeights, ContextLength, ServingConfig};
 
-use super::{Checkpoint, Graph, WeightData, Weights, load_weights};
+use super::{Checkpoint, Graph, load_weights};
 
 type Inputs<'a> = &'a [(&'a str, QuantizedBlock<'a>)];
 
@@ -32,8 +32,7 @@ type Inputs<'a> = &'a [(&'a str, QuantizedBlock<'a>)];
 struct Stage {
     runtime: BackendRuntime,
     graph: Graph,
-    weights: Weights,
-    widened: Widened,
+    weights: BoundWeights<'static>,
     symbols: Vec<u64>,
     output: NodeId,
     /// Profile runs plan on runtimes of their own, built beside the stage's:
@@ -58,19 +57,18 @@ fn resident_names<'a>(
     weight_names.chain(owned).collect()
 }
 
-fn resident_of<'a>(weights: &'a Weights, graph: &'a Graph, inputs: Inputs<'_>) -> BTreeSet<&'a str> {
+fn resident_of<'a>(
+    weights: &'a BoundWeights<'static>,
+    graph: &'a Graph,
+    inputs: Inputs<'_>,
+) -> BTreeSet<&'a str> {
     let input_names: Vec<&str> = inputs.iter().map(|(name, _)| *name).collect();
     resident_names(
-        weights.entries.iter().map(|(name, _)| name.as_str()),
+        weights.names().into_iter(),
         graph.hosts.iter().map(|host| host.name.as_str()),
         &input_names,
     )
 }
-
-/// The host-element form of every plain weight the stage owns that is not already in it, one slot
-/// per weight entry, positionally. A native leaf and a packed weight hold `None`: their own bytes
-/// are bound in place. Host leaves carry their own widened form.
-type Widened = Vec<Option<PackedRows>>;
 
 pub(super) fn widened(name: &str, rows: &PackedRows) -> Result<Option<PackedRows>, String> {
     if rows.format().is_host_element() {
@@ -79,18 +77,6 @@ pub(super) fn widened(name: &str, rows: &PackedRows) -> Result<Option<PackedRows
     rows.to_host_element()
         .map(Some)
         .map_err(|why| format!("{name}: {why}"))
-}
-
-fn widen_leaves(weights: &Weights, graph: &Graph) -> Result<Widened, String> {
-    graph.check_faults()?;
-    weights
-        .entries
-        .iter()
-        .map(|(name, data)| match data {
-            WeightData::Plain(rows) => widened(name, rows),
-            WeightData::Packed(_) => Ok(None),
-        })
-        .collect()
 }
 
 /// A leaf's bytes in the host element, bound as the decoded-values block the backends read. A
@@ -130,35 +116,13 @@ pub(super) fn host_checked<'a>(
 /// The stage's own weights and host leaves, then the caller's per-call blocks;
 /// a host leaf the caller supplies replaces the placeholder.
 fn name_blocks<'a>(
-    weights: &'a Weights,
+    weights: &'a BoundWeights<'static>,
     graph: &'a Graph,
-    widened: &'a Widened,
     inputs: Inputs<'a>,
 ) -> Result<Vec<(&'a str, QuantizedBlock<'a>)>, String> {
-    if widened.len() != weights.entries.len() {
-        return Err(format!(
-            "{} widened slots for {} weight entries",
-            widened.len(),
-            weights.entries.len()
-        ));
-    }
-    let mut named = Vec::with_capacity(weights.entries.len() + graph.hosts.len() + inputs.len());
-    for ((name, data), wide) in weights.entries.iter().zip(widened) {
-        if inputs.iter().any(|(input, _)| input == name) {
-            continue;
-        }
-        let block = match data {
-            WeightData::Packed(bytes) => host_checked(
-                name,
-                QuantizedBlock::Packed {
-                    codec: weights.codec,
-                    bytes: bytes.as_slice(),
-                },
-            )?,
-            WeightData::Plain(rows) => leaf_block(name, rows, wide.as_ref())?,
-        };
-        named.push((name.as_str(), block));
-    }
+    let mut named = weights.blocks().map_err(|why| why.to_string())?;
+    named.retain(|(name, _)| !inputs.iter().any(|(input, _)| input == name));
+    named.reserve(graph.hosts.len() + inputs.len());
     for host in &graph.hosts {
         if !inputs.iter().any(|(input, _)| *input == host.name) {
             let block = leaf_block(&host.name, &host.values, host.widened.as_ref())?;
@@ -188,19 +152,18 @@ impl Stage {
         graph: Graph,
         output: NodeId,
         symbols: &[u64],
-        weights: Weights,
+        weights: BoundWeights<'static>,
         config: &ServingConfig<'_>,
     ) -> Result<Self, String> {
+        graph.check_faults()?;
         let tokens = symbols
             .first()
             .ok_or_else(|| String::from("a stage needs its token count as the first symbol"))?;
         let mut staged = *config;
         staged.context_length =
             ContextLength::Within(u32::try_from(*tokens).map_err(|why| why.to_string())?);
-        let widened = widen_leaves(&weights, &graph)?;
         Ok(Self {
             runtime: BackendRuntime::new(&staged),
-            widened,
             graph,
             weights,
             symbols: symbols.to_vec(),
@@ -214,7 +177,7 @@ impl Stage {
 
     fn evaluate(&mut self, inputs: Inputs<'_>, outputs: &[NodeId]) -> Result<Evaluated, String> {
         let resident = resident_of(&self.weights, &self.graph, inputs);
-        let named = name_blocks(&self.weights, &self.graph, &self.widened, inputs)?;
+        let named = name_blocks(&self.weights, &self.graph, inputs)?;
         self.runtime
             .evaluate_segment(
                 &self.graph.program,
@@ -232,7 +195,7 @@ impl Stage {
     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
     fn evaluate_fresh(&mut self, inputs: Inputs<'_>) -> Result<Evaluated, String> {
         let resident = resident_of(&self.weights, &self.graph, inputs);
-        let named = name_blocks(&self.weights, &self.graph, &self.widened, inputs)?;
+        let named = name_blocks(&self.weights, &self.graph, inputs)?;
         self.capture
             .evaluate_segment(
                 &self.graph.program,
@@ -251,7 +214,7 @@ impl Stage {
         inputs: Inputs<'_>,
     ) -> Result<(Evaluated, Vec<omega::metal::OpGpuTiming>), String> {
         let resident = resident_of(&self.weights, &self.graph, inputs);
-        let named = name_blocks(&self.weights, &self.graph, &self.widened, inputs)?;
+        let named = name_blocks(&self.weights, &self.graph, inputs)?;
         self.profile
             .evaluate_segment_op_timed(
                 &self.graph.program,
@@ -309,7 +272,7 @@ impl Denoiser {
         graph: Graph,
         velocity: NodeId,
         symbols: &[u64],
-        weights: Weights,
+        weights: BoundWeights<'static>,
         config: &ServingConfig<'_>,
     ) -> Result<Self, String> {
         let stage = Stage::with_weights(graph, velocity, symbols, weights, config)?;
@@ -402,7 +365,7 @@ impl Decoder {
         graph: Graph,
         image: NodeId,
         symbols: &[u64],
-        weights: Weights,
+        weights: BoundWeights<'static>,
         config: &ServingConfig<'_>,
     ) -> Result<Self, String> {
         let stage = Stage::with_weights(graph, image, symbols, weights, config)?;
