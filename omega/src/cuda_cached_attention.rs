@@ -171,7 +171,8 @@ pub(crate) fn render_attention(
         )
     };
     let mut source = String::new();
-    preamble(crate::cuda::target::Target::CUDA, &mut source, "float");
+    let header_element = if reads.narrow() { crate::cuda::target::Target::CUDA.bfloat_type } else { reads.compute };
+    preamble(crate::cuda::target::Target::CUDA, &mut source, header_element);
     source.push_str(&cache_helpers(&reads));
     source.push_str(helpers);
     let runtime_bounds = cached_attention_runtime_bounds(&resolved.kind);
@@ -330,6 +331,12 @@ pub(crate) struct KvReads {
     value: CacheRead,
 }
 
+impl KvReads {
+    fn narrow(&self) -> bool {
+        self.key.format.is_some() || self.value.format.is_some()
+    }
+}
+
 fn cache_read(format: Option<&Codec>, compute: &'static str) -> Option<CacheRead> {
     let Some(format) = format else {
         return Some(CacheRead { element: compute, format: None });
@@ -386,7 +393,6 @@ fn cache_helpers(reads: &KvReads) -> String {
         .map(|(layout, _)| layout)
         .collect();
     if !layouts.is_empty() {
-        text.push_str(&format!("#include <{}>\n", crate::cuda::target::Target::CUDA.bf16_header));
         text.push_str("typedef unsigned char uchar;\ntypedef unsigned short ushort;\ntypedef unsigned int uint;\n");
     }
     let mut named: Vec<String> = Vec::new();

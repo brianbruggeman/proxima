@@ -6242,13 +6242,12 @@ fn cuda_cached_attention_reads_every_narrow_scalar_cache_like_the_cpu_over_its_d
             )
             .expect("omega::backend plans the decoded cache on cpu");
             let cpu = execute_plan_named(&mut cpu_plan, &reference_named).expect("cpu runs the decoded cache");
-            let narrow_named: Vec<(&str, QuantizedBlock<'_>)> = owned
-                .iter()
-                .map(|(name, data)| match packed_leaves.iter().find(|(leaf, _)| leaf == name) {
-                    Some((_, bytes)) => (name.as_str(), QuantizedBlock::Packed { codec: *format, bytes }),
-                    None => (name.as_str(), QuantizedBlock::Float32(data.as_slice())),
-                })
-                .collect();
+            let mut narrow_named = as_named_blocks(&owned);
+            for (name, block) in &mut narrow_named {
+                if let Some((_, bytes)) = packed_leaves.iter().find(|(leaf, _)| leaf == name) {
+                    *block = QuantizedBlock::Packed { codec: *format, bytes };
+                }
+            }
             let mut cuda_plan = plan_named(
                 Engine::Gpu,
                 Some(GpuDriver::Cuda),
