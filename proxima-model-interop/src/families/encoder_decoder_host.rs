@@ -389,7 +389,7 @@ impl Bound {
             Device::Metal(policy) => {
                 let blocks: Vec<(&str, QuantizedBlock<'_>)> = named
                     .iter()
-                    .map(|(name, data)| (*name, QuantizedBlock::Float32(data)))
+                    .map(|(name, data)| (*name, QuantizedBlock::from(*data)))
                     .collect();
                 let plan = omega::plan_named(
                     &self.program,
