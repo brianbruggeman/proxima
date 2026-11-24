@@ -234,13 +234,6 @@ pub struct SubRule {
 }
 
 impl EncodeRule {
-    /// The scale this rule fits to one block of `input`, before the scale field narrows it: the
-    /// statistic over the divisor under the rule's [`ScaleArithmetic`].
-    #[must_use]
-    pub fn fitted_scale<const ELEMENTS: usize>(&self, input: &[f32; ELEMENTS]) -> f32 {
-        crate::block_codec::fitted_scale(self, input)
-    }
-
     /// Whether the code is a small float chosen by [`CodeRounding::NearestCodeValue`] or
     /// [`CodeRounding::NearestEvenQuotient`], with one scale per run of elements.
     #[must_use]

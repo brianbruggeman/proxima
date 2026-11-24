@@ -4886,7 +4886,7 @@ fn fake_quantize_blocks(activation: &[f32], scale_through_fp16: bool, arithmetic
         .as_chunks::<32>().0.iter()
         .zip(packed.chunks_exact(usize::from(layout.block_bytes)))
         .flat_map(|(group, block)| {
-            let step = rule.fitted_scale(group);
+            let step = proxima_numeric::block_codec::fitted_scale(&rule, group);
             // llama.cpp stores the q8_1 scale as half2 ds (ggml-common.h:265, mmq.cuh:41), so the device rounds it to f16
             let used = if scale_through_fp16 { half::f16::from_f32(step).to_f32() } else { step };
             block[codes..].iter().map(move |code| f32::from(*code as i8) * used)

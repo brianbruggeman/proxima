@@ -1113,8 +1113,10 @@ fn code_of(layout: &BlockLayout, rule: &EncodeRule, scale: f32, inverse: f32, va
     }
 }
 
-/// The scale the rule fits to `input` before the scale field narrows it.
-pub(crate) fn fitted_scale<const ELEMENTS: usize>(rule: &EncodeRule, input: &[f32; ELEMENTS]) -> f32 {
+/// The scale the rule fits to `input` before the scale field narrows it: the statistic over the
+/// divisor under the rule's [`ScaleArithmetic`].
+#[must_use]
+pub fn fitted_scale<const ELEMENTS: usize>(rule: &EncodeRule, input: &[f32; ELEMENTS]) -> f32 {
     fit_scale(rule, input).0
 }
 
