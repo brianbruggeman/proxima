@@ -539,8 +539,8 @@ mod dit_shape {
                     .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
                     .and_then(|digits| digits.parse::<usize>().ok())
                     .unwrap_or(0);
-                for index in at.saturating_sub(14)..=(at + 1).min(graph.program.len() - 1) {
-                    eprintln!("node {index}: {:?}", graph.program[index]);
+                for (index, node) in graph.program.iter().enumerate().take(at + 2).skip(at.saturating_sub(14)) {
+                    eprintln!("node {index}: {node:?}");
                 }
                 panic!("{why}");
             }
@@ -979,8 +979,8 @@ mod vae_shape {
                     .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
                     .and_then(|digits| digits.parse::<usize>().ok())
                     .unwrap_or(0);
-                for index in at.saturating_sub(6)..=(at + 1).min(graph.program.len() - 1) {
-                    eprintln!("node {index}: {:?}", graph.program[index]);
+                for (index, node) in graph.program.iter().enumerate().take(at + 2).skip(at.saturating_sub(6)) {
+                    eprintln!("node {index}: {node:?}");
                 }
                 panic!("{why}");
             }
@@ -1018,14 +1018,14 @@ mod vae_bind {
                     .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
                     .and_then(|digits| digits.parse::<usize>().ok())
                     .unwrap_or(0);
-                for index in at.saturating_sub(6)..=(at + 1).min(graph.program.len() - 1) {
-                    eprintln!("node {index}: {:?}", graph.program[index]);
+                for (index, node) in graph.program.iter().enumerate().take(at + 2).skip(at.saturating_sub(6)) {
+                    eprintln!("node {index}: {node:?}");
                 }
                 panic!("{why}");
             }
         };
-        for index in 50..=56 {
-            eprintln!("p{index}: {:?}", graph.program[index]);
+        for (index, node) in graph.program.iter().enumerate().take(57).skip(50) {
+            eprintln!("p{index}: {node:?}");
         }
         let bound = proxima_tensor::bind(
             &graph.program,

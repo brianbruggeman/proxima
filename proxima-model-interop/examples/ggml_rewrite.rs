@@ -67,9 +67,12 @@ fn convert(source: &Path, target: &Path) -> Result<()> {
             got => bail!("truncated tensor header ({got} bytes)"),
         }
         input.read_exact(&mut head[4..])?;
-        let n_dims = i32::from_le_bytes(head[0..4].try_into().expect("4"));
-        let length = i32::from_le_bytes(head[4..8].try_into().expect("4"));
-        let ttype = i32::from_le_bytes(head[8..12].try_into().expect("4"));
+        let [dims_bytes, length_bytes, type_bytes] = head.as_chunks::<4>().0 else {
+            bail!("tensor header is not three words");
+        };
+        let n_dims = i32::from_le_bytes(*dims_bytes);
+        let length = i32::from_le_bytes(*length_bytes);
+        let ttype = i32::from_le_bytes(*type_bytes);
         if !(0..=4).contains(&n_dims) {
             bail!("tensor rank {n_dims} out of range");
         }
