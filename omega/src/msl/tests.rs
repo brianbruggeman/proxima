@@ -2197,6 +2197,13 @@ pub(super) fn default_dequant_target() -> FloatLayout {
     EmitKnobs::default().grouped_gemm_formats().dequant_out
 }
 
+#[cfg(feature = "metal-tiled-gemm")]
+pub(super) fn default_weight_stage_bytes() -> u64 {
+    layout_render::hardware_stage_type(&default_dequant_target())
+        .expect("the default dequant target has a hardware type")
+        .bytes
+}
+
 #[cfg(any(feature = "metal-tiled-gemm", feature = "metal-grouped-gemm"))]
 pub(super) fn widened_scalar_codec() -> Codec {
     let target = default_dequant_target();
@@ -4663,11 +4670,11 @@ fn dynamic_tgmem_kernel_argument_and_launch_length_always_agree() {
         assert!(declared, "{label}: the default declares the argument");
         assert_eq!(
             bytes,
-            tiled_gemm_shared_bytes(TiledGemmTile::CONFIGURED),
+            tiled_gemm_shared_bytes(TiledGemmTile::CONFIGURED, default_weight_stage_bytes()),
             "{label}: the default binds the array's size"
         );
         assert_eq!(
-            tiled_gemm_shared_bytes(TiledGemmTile::CONFIGURED),
+            tiled_gemm_shared_bytes(TiledGemmTile::CONFIGURED, default_weight_stage_bytes()),
             8192,
             "the 64 x 32 x 32 tile is ggml's 8192 bytes"
         );

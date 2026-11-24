@@ -74,23 +74,25 @@ impl TiledGemmTile {
     /// is worth more than the re-read it saves. [`Self::tiles`] cuts the token
     /// extent into whole column tiles, rounding the boundary up.
     #[cfg(any(test, feature = "metal-tiled-gemm"))]
-    pub(crate) fn for_feature_extent(feature_extent: u64) -> Self {
+    pub(crate) fn for_feature_extent(feature_extent: u64, weight_bytes: u64) -> Self {
         let configured = Self::CONFIGURED;
         let mut tile = Self {
             block_m: round_up_edge(feature_extent).clamp(TILE_MIN_EDGE, configured.block_m),
             block_n: configured.block_n,
             block_k: configured.block_k,
         };
-        while tile.block_m > TILE_MIN_EDGE && tile.threadgroup_bytes() > TILE_THREADGROUP_BYTES {
+        while tile.block_m > TILE_MIN_EDGE
+            && tile.threadgroup_bytes(weight_bytes) > TILE_THREADGROUP_BYTES
+        {
             tile.block_m -= TILE_MIN_EDGE;
         }
         tile
     }
 
-    /// Bytes of the threadgroup staging store this tile declares: the `half`
-    /// weight tile and the `float` activation tile side by side, or the
-    /// `float` output staging the writeback aliases over them, whichever is
-    /// larger.
+    /// Bytes of the threadgroup staging store this tile declares: the weight
+    /// tile (`weight_bytes` per element, the dequant target's width) and the
+    /// `float` activation tile side by side, or the `float` output staging
+    /// the writeback aliases over them, whichever is larger.
     ///
     /// The output term is ONE COLUMN HALF, not the whole tile: the writeback
     /// restages the accumulators a column half at a time (each simdgroup's own
@@ -101,9 +103,9 @@ impl TiledGemmTile {
     /// keep resident, which measured slower than every traffic saving the
     /// wider tile bought.
     #[cfg(any(test, feature = "metal-tiled-gemm"))]
-    pub(crate) fn threadgroup_bytes(self) -> u64 {
+    pub(crate) fn threadgroup_bytes(self, weight_bytes: u64) -> u64 {
         let weight_and_activation =
-            self.block_m * self.block_k * 2 + self.block_n * self.block_k * 4;
+            self.block_m * self.block_k * weight_bytes + self.block_n * self.block_k * 4;
         let output = self.block_m * (self.block_n / 2) * 4;
         if weight_and_activation > output {
             weight_and_activation
@@ -132,13 +134,15 @@ fn round_up_edge(edge: u64) -> u64 {
 mod tests {
     use super::*;
 
+    const WEIGHT_STAGE_BYTES: u64 = 2;
+
     #[test]
     fn a_configured_tile_is_a_legal_geometry() {
         let tile = TiledGemmTile::CONFIGURED;
         assert!(tile.block_m >= TILE_MIN_EDGE && tile.block_m.is_multiple_of(TILE_MIN_EDGE));
         assert!(tile.block_n >= TILE_MIN_EDGE && tile.block_n.is_multiple_of(TILE_MIN_EDGE));
         assert!(tile.block_k.is_multiple_of(TILE_MIN_EDGE));
-        assert!(tile.threadgroup_bytes() <= TILE_THREADGROUP_BYTES);
+        assert!(tile.threadgroup_bytes(WEIGHT_STAGE_BYTES) <= TILE_THREADGROUP_BYTES);
     }
 
     /// The convolution this rule exists for: `128` features over a million
@@ -148,7 +152,7 @@ mod tests {
     #[test]
     fn a_narrow_feature_axis_never_widens_past_the_configured_tile() {
         let configured = TiledGemmTile::CONFIGURED;
-        let tile = TiledGemmTile::for_feature_extent(128);
+        let tile = TiledGemmTile::for_feature_extent(128, WEIGHT_STAGE_BYTES);
         assert_eq!(tile.block_m, configured.block_m);
         assert_eq!(tile.block_n, configured.block_n);
         assert_eq!(tile.block_k, configured.block_k);
@@ -163,7 +167,7 @@ mod tests {
     /// rows of work.
     #[test]
     fn a_feature_axis_below_the_configured_edge_narrows_to_it() {
-        let tile = TiledGemmTile::for_feature_extent(32);
+        let tile = TiledGemmTile::for_feature_extent(32, WEIGHT_STAGE_BYTES);
         assert_eq!(tile.block_m, 32);
         assert_eq!(tile.tiles(32, 1_048_576).0, 1);
     }
@@ -173,7 +177,7 @@ mod tests {
     #[test]
     fn a_wide_feature_axis_keeps_the_configured_row_edge() {
         let configured = TiledGemmTile::CONFIGURED;
-        let tile = TiledGemmTile::for_feature_extent(27_648);
+        let tile = TiledGemmTile::for_feature_extent(27_648, WEIGHT_STAGE_BYTES);
         assert_eq!(tile.block_m, configured.block_m);
         assert_eq!(tile.block_n, configured.block_n);
     }
@@ -183,10 +187,10 @@ mod tests {
     /// zero-height one.
     #[test]
     fn a_feature_axis_below_one_fragment_rounds_up() {
-        let tile = TiledGemmTile::for_feature_extent(3);
+        let tile = TiledGemmTile::for_feature_extent(3, WEIGHT_STAGE_BYTES);
         assert_eq!(tile.block_m, TILE_MIN_EDGE);
         assert!(tile.block_n >= TILE_MIN_EDGE);
-        assert!(tile.threadgroup_bytes() <= TILE_THREADGROUP_BYTES);
+        assert!(tile.threadgroup_bytes(WEIGHT_STAGE_BYTES) <= TILE_THREADGROUP_BYTES);
     }
 
     /// The boundary column keeps the configured edge and rounds up to a whole
@@ -196,7 +200,7 @@ mod tests {
     #[test]
     fn a_token_boundary_rounds_up_to_whole_column_tiles() {
         let configured = TiledGemmTile::CONFIGURED;
-        let tile = TiledGemmTile::for_feature_extent(128);
+        let tile = TiledGemmTile::for_feature_extent(128, WEIGHT_STAGE_BYTES);
         assert_eq!(tile.block_n, configured.block_n);
         for (tokens, expected) in [
             (16u64, 1u64),
@@ -222,11 +226,11 @@ mod tests {
             (TILED_GEMM_BLOCK_M / TILE_MIN_EDGE) * (TILED_GEMM_BLOCK_N / TILE_MIN_EDGE);
         for feature_extent in [3u64, 16, 32, 128, 256, 512, 3072, 27_648] {
             for token_extent in [64u64, 4608, 16_384, 1_052_676] {
-                let tile = TiledGemmTile::for_feature_extent(feature_extent);
+                let tile = TiledGemmTile::for_feature_extent(feature_extent, WEIGHT_STAGE_BYTES);
                 assert!(
-                    tile.threadgroup_bytes() <= TILE_THREADGROUP_BYTES,
+                    tile.threadgroup_bytes(WEIGHT_STAGE_BYTES) <= TILE_THREADGROUP_BYTES,
                     "{feature_extent}x{token_extent}: {tile:?} needs {} bytes",
-                    tile.threadgroup_bytes()
+                    tile.threadgroup_bytes(WEIGHT_STAGE_BYTES)
                 );
                 let fragments = (tile.block_m / TILE_MIN_EDGE) * (tile.block_n / TILE_MIN_EDGE);
                 assert!(

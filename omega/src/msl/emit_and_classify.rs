@@ -3635,6 +3635,9 @@ pub enum TiledGemmRejection {
     /// decode runs only where configuration names one, so every other model keeps its route) or the
     /// weight is a gathered expert slab, whose grouped decode does not widen.
     ScalarWeightNotWidened { codec: &'static str },
+    /// The resolved dequant target has no Metal hardware type, so the weight tile has no element
+    /// type to be declared or sized in.
+    WeightStageHasNoHardwareType,
     /// `reduce_op`/`init` are not the plain `Add`-from-`Zero` shape
     /// `simdgroup_matrix` accumulation requires.
     NotAddZeroReduce,
@@ -3934,10 +3937,13 @@ pub(super) fn classify_tiled_gemm(
         // An expert-grouped launch cuts its token axis by the route, not by
         // `N`, so it keeps the configured tile; every dense matmul takes the
         // tile its own output shape can hold.
+        let weight_bytes = layout_render::hardware_stage_type(&knobs.grouped_gemm_formats().dequant_out)
+            .ok_or(TiledGemmRejection::WeightStageHasNoHardwareType)?
+            .bytes;
         let tile = if gathered.is_some() {
             TiledGemmTile::CONFIGURED
         } else {
-            TiledGemmTile::for_feature_extent(feature_extent)
+            TiledGemmTile::for_feature_extent(feature_extent, weight_bytes)
         };
         Ok(TiledGemmBlock {
             weight,
@@ -4511,7 +4517,9 @@ pub(super) fn tiled_gemm_grid2d_spec(
             output_axes,
             knobs,
         ) {
-            tile.threadgroup_bytes()
+            tile.threadgroup_bytes(
+                weight_stage_type(resolved.node, &knobs.grouped_gemm_formats().dequant_out)?.bytes,
+            )
         } else {
             0
         },

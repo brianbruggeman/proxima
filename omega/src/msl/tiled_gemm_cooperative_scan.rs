@@ -69,6 +69,17 @@ impl ActivationStaging {
     }
 }
 
+/// The Metal type of the tiled weight stage: the dequant target's hardware type.
+/// Fails with `RenderKindMismatch` when `layout` has no Metal hardware type.
+#[cfg(feature = "metal-tiled-gemm")]
+pub(super) fn weight_stage_type(node: NodeId, layout: &FloatLayout) -> Result<layout_render::HardwareType, EmitError> {
+    layout_render::hardware_stage_type(layout).ok_or(EmitError::RenderKindMismatch {
+        node,
+        expected: "weight staging layout with a metal hardware type",
+        found: "unmapped layout",
+    })
+}
+
 /// `simdgroup_matrix`-tiled Q4_K x F32 GEMM (`docs/discipline.md` ROW 109,
 /// superseding ROW 107's single-simdgroup design) -- ports
 /// `ggml-metal.metal:6500-6600`'s `kernel_mul_mm` GEOMETRY, not just its
@@ -302,21 +313,25 @@ pub(super) fn push_tiled_gemm_body(
     let act_element_type = staging.element();
     let act_simdgroup_type = staging.matrix();
     let slim_tgmem_active = metal.tiled_gemm_slim_tgmem;
-    let weight_tile_bytes = weight_tile_elems * 2;
+    let weight_stage = weight_stage_type(node, &metal.grouped_gemm_formats.dequant_out)?;
+    let weight_element = weight_stage.scalar;
+    let weight_tile_bytes = weight_tile_elems * weight_stage.bytes;
     if slim_tgmem_active {
         if !metal.tiled_gemm_dynamic_tgmem {
             source.push_str(&format!(
                 "    threadgroup uchar tg_shared[{}];\n",
-                tiled_gemm_shared_bytes(block.tile)
+                tiled_gemm_shared_bytes(block.tile, weight_stage.bytes)
             ));
         }
-        source.push_str("    threadgroup half *weight_tile = (threadgroup half *)tg_shared;\n");
+        source.push_str(&format!(
+            "    threadgroup {weight_element} *weight_tile = (threadgroup {weight_element} *)tg_shared;\n"
+        ));
         source.push_str(&format!(
             "    threadgroup {act_element_type} *act_tile = (threadgroup {act_element_type} *)(tg_shared + {weight_tile_bytes});\n"
         ));
     } else {
         source.push_str(&format!(
-            "    threadgroup half weight_tile[{weight_tile_elems}];\n"
+            "    threadgroup {weight_element} weight_tile[{weight_tile_elems}];\n"
         ));
         source.push_str(&format!(
             "    threadgroup {act_element_type} act_tile[{act_tile_elems}];\n"
@@ -383,7 +398,7 @@ pub(super) fn push_tiled_gemm_body(
             [token_axis, feature_axis],
             metal,
             grid2d_active,
-            &staging,
+            (&staging, &weight_stage),
         );
     } else {
         if wide_weight_stage_eligible {
@@ -397,7 +412,7 @@ pub(super) fn push_tiled_gemm_body(
                 half_width,
                 total_halves,
                 half_units,
-                &decode,
+                (&decode, &weight_stage),
             );
         }
 
@@ -406,7 +421,7 @@ pub(super) fn push_tiled_gemm_body(
             "    for ({k0_counter_type} k0 = 0; k0 < u.reduction_total; k0 += {block_k}) {{\n"
         ));
         if wide_weight_stage_eligible {
-            push_wide_weight_stage_body(source, &decode, block_k, half_units);
+            push_wide_weight_stage_body(source, (&decode, &weight_stage), block_k, half_units);
         } else {
             // Staged by ROW rather than by flat index: `block_threads` (128)
             // exceeds `block_m` (64) with the default sizing, so the first
@@ -444,7 +459,7 @@ pub(super) fn push_tiled_gemm_body(
                     push_weight_decode(
                         source,
                         "                        ",
-                        &decode,
+                        (&decode, &weight_stage),
                         "blk",
                         &format!("slot + {run_offset}u"),
                         "decoded",
@@ -460,8 +475,9 @@ pub(super) fn push_tiled_gemm_body(
             }
             source.push_str("            } else {\n");
             let weight_fill_index = format!("w_row * {block_k} + fill_k");
+            let weight_zero = weight_stage.zero_literal();
             source.push_str(&format!(
-                "                for (long fill_k = 0; fill_k < {block_k}; ++fill_k) {{ weight_tile[{weight_fill_index}] = 0.0h; }}\n"
+                "                for (long fill_k = 0; fill_k < {block_k}; ++fill_k) {{ weight_tile[{weight_fill_index}] = {weight_zero}; }}\n"
             ));
             source.push_str("            }\n");
             source.push_str("        }\n");
@@ -545,7 +561,8 @@ pub(super) fn push_tiled_gemm_body(
             "        for (int sub_k = 0; sub_k < {sub_k_steps}; ++sub_k) {{\n"
         ));
         source.push_str(&format!(
-            "            simdgroup_half8x8 a_frag[{thread_mat_m}];\n"
+            "            {} a_frag[{thread_mat_m}];\n",
+            weight_stage.matrix()
         ));
         source.push_str(&format!(
             "{FULL_UNROLL}\n            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
@@ -653,13 +670,13 @@ pub(super) fn mm_layout_geometry_supported(tile: TiledGemmTile) -> bool {
 }
 
 /// Bytes of the slim threadgroup backing store of [`push_tiled_gemm_body`]: the
-/// `half` weight tile and the `float` activation tile side by side, or the `float`
-/// output tile aliased over them, whichever is larger. The one number the
-/// kernel's declared array and `Grid2DSpec::threadgroup_bytes` both read
-/// ([`TiledGemmTile::threadgroup_bytes`]).
+/// weight tile (`weight_bytes` per element) and the `float` activation tile side
+/// by side, or the `float` output tile aliased over them, whichever is larger.
+/// The one number the kernel's declared array and `Grid2DSpec::threadgroup_bytes`
+/// both read ([`TiledGemmTile::threadgroup_bytes`]).
 #[cfg(feature = "metal-tiled-gemm")]
-pub(super) fn tiled_gemm_shared_bytes(tile: TiledGemmTile) -> u64 {
-    tile.threadgroup_bytes()
+pub(super) fn tiled_gemm_shared_bytes(tile: TiledGemmTile, weight_bytes: u64) -> u64 {
+    tile.threadgroup_bytes(weight_bytes)
 }
 
 /// The K-reduction loop of [`push_tiled_gemm_body`] in ggml's own tile layout
@@ -690,8 +707,9 @@ fn push_mm_layout_k_loop(
     axes: [u16; 2],
     metal: &crate::identity::MetalOnlyExtras,
     grid2d_active: bool,
-    staging: &ActivationStaging,
+    stages: (&ActivationStaging, &layout_render::HardwareType),
 ) {
+    let (staging, weight_stage) = stages;
     let [token_axis, feature_axis] = axes;
     let weight = block.weight;
     let other = block.other;
@@ -720,7 +738,7 @@ fn push_mm_layout_k_loop(
             "    device const float *mm_act_ptr = in{other} + mm_act_base;\n"
         ));
     }
-    source.push_str("    simdgroup_half8x8 ma[4];\n");
+    source.push_str(&format!("    {} ma[4];\n", weight_stage.matrix()));
     source.push_str(&format!("    {} mb[2];\n", staging.matrix()));
     source.push_str(&format!(
         "    for ({k0_counter_type} k0 = 0; k0 < u.reduction_total; k0 += {block_k}) {{\n"
@@ -728,7 +746,7 @@ fn push_mm_layout_k_loop(
     push_weight_decode(
         source,
         "        ",
-        decode,
+        (decode, weight_stage),
         "wws_blk0",
         "wws_slot0",
         "decoded",
@@ -744,7 +762,7 @@ fn push_mm_layout_k_loop(
     }
     push_mm_layout_activation_stage(source, block, unit_stride, staging);
     source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
-    push_mm_layout_multiply(source, staging);
+    push_mm_layout_multiply(source, (staging, weight_stage));
     source.push_str("    }\n");
     source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
 }
@@ -805,7 +823,7 @@ fn push_weight_cursor_assign(
 }
 
 /// Decodes the [`DECODE_RUN_ELEMENTS`] elements at the cursor `(block_expr,
-/// slot_expr)` into a fresh `half out_var[16]`, ahead of whatever barrier
+/// slot_expr)` into a fresh weight-stage `out_var[16]`, ahead of whatever barrier
 /// fences the previous step's multiplies (ggml's own order: `kernel_mul_mm`
 /// dequantizes, then waits, then stores), so the device reads of one
 /// simdgroup overlap the multiplies of its slower peers.
@@ -813,12 +831,14 @@ fn push_weight_cursor_assign(
 pub(super) fn push_weight_decode(
     source: &mut String,
     indent: &str,
-    decode: &TiledDecode,
+    stage: (&TiledDecode, &layout_render::HardwareType),
     block_expr: &str,
     slot_expr: &str,
     out_var: &str,
 ) {
-    source.push_str(&format!("{indent}half {out_var}[{DECODE_RUN_ELEMENTS}];\n"));
+    let (decode, weight_stage) = stage;
+    let element = weight_stage.scalar;
+    source.push_str(&format!("{indent}{element} {out_var}[{DECODE_RUN_ELEMENTS}];\n"));
     source.push_str(&format!(
         "{indent}{};\n",
         decode.call(block_expr, slot_expr, out_var)
@@ -914,9 +934,13 @@ fn push_mm_layout_activation_stage(
 /// unrolled. `acc[(i % 4) * 2 + i / 4]` is ggml's flat `mc[i]` renamed to the
 /// `[feature][token]` index the write-back reads.
 #[cfg(feature = "metal-tiled-gemm")]
-fn push_mm_layout_multiply(source: &mut String, staging: &ActivationStaging) {
+fn push_mm_layout_multiply(source: &mut String, stages: (&ActivationStaging, &layout_render::HardwareType)) {
+    let (staging, weight_stage) = stages;
     let unroll = "_Pragma(\"clang loop unroll(full)\")";
-    source.push_str("        threadgroup const half *lsma = weight_tile + 4 * 64 * (sgitg % 2);\n");
+    source.push_str(&format!(
+        "        threadgroup const {} *lsma = weight_tile + 4 * 64 * (sgitg % 2);\n",
+        weight_stage.scalar
+    ));
     source.push_str(&format!(
         "        threadgroup const {} *lsmb = act_tile + 2 * 64 * (sgitg / 2);\n",
         staging.element()
@@ -974,8 +998,10 @@ fn push_wide_weight_stage_setup(
     half_width: u64,
     total_halves: u64,
     half_units: u64,
-    decode: &TiledDecode,
+    stage: (&TiledDecode, &layout_render::HardwareType),
 ) {
+    let (decode, weight_stage) = stage;
+    let weight_zero = weight_stage.zero_literal();
     let chunks_times_two = num_chunks * 2;
     for unit in 0..half_units {
         let h_offset = unit * block_threads_const();
@@ -1025,7 +1051,7 @@ fn push_wide_weight_stage_setup(
         source.push_str("        } else {\n");
         let zero_fill_index = format!("wws_row{unit} * {block_k} + wws_koff{unit} + z");
         source.push_str(&format!(
-            "            for (long z = 0; z < {half_width}; ++z) {{ weight_tile[{zero_fill_index}] = 0.0h; }}\n"
+            "            for (long z = 0; z < {half_width}; ++z) {{ weight_tile[{zero_fill_index}] = {weight_zero}; }}\n"
         ));
         source.push_str("        }\n");
         source.push_str("    }\n");
@@ -1074,21 +1100,22 @@ fn fragment_load_offset_stride(
 #[cfg(feature = "metal-tiled-gemm")]
 fn push_wide_weight_stage_body(
     source: &mut String,
-    decode: &TiledDecode,
+    stage: (&TiledDecode, &layout_render::HardwareType),
     block_k: u64,
     half_units: u64,
 ) {
+    let (decode, weight_stage) = stage;
     for unit in 0..half_units {
         source.push_str(&format!("        if (wws_active{unit}) {{\n"));
         push_weight_decode(
             source,
             "            ",
-            decode,
+            stage,
             &format!("wws_blk{unit}"),
             &format!("wws_slot{unit}"),
             "wws_decoded",
         );
-        push_wide_weight_stage_half4_store(source, unit, block_k);
+        push_wide_weight_stage_vector_store(source, weight_stage, unit, block_k);
         push_block_cursor_advance(
             source,
             "            ",
@@ -1101,18 +1128,19 @@ fn push_wide_weight_stage_body(
     }
 }
 
-/// Writes the 16 decoded values of `wws_decoded` as four `half4` vector stores
-/// into `weight_tile`, the same value expressions
+/// Writes the 16 decoded values of `wws_decoded` as four weight-stage vector
+/// stores into `weight_tile`, the same value expressions
 /// [`push_tiled_gemm_body`]'s non-wide arm writes per element, grouped
-/// 4-at-a-time into one vector store instead of 16 separate scalar `half`
+/// 4-at-a-time into one vector store instead of 16 separate scalar
 /// writes.
 #[cfg(feature = "metal-tiled-gemm")]
-fn push_wide_weight_stage_half4_store(source: &mut String, unit: u64, block_k: u64) {
+fn push_wide_weight_stage_vector_store(source: &mut String, weight_stage: &layout_render::HardwareType, unit: u64, block_k: u64) {
+    let vector = weight_stage.vector();
     for quad in 0..DECODE_RUN_ELEMENTS / 4 {
         let base = quad * 4;
         let target = format!("wws_row{unit} * {block_k} + wws_koff{unit} + {base}");
         source.push_str(&format!(
-            "            *(threadgroup half4 *)&weight_tile[{target}] = half4(wws_decoded[{base}], wws_decoded[{}], wws_decoded[{}], wws_decoded[{}]);\n",
+            "            *(threadgroup {vector} *)&weight_tile[{target}] = {vector}(wws_decoded[{base}], wws_decoded[{}], wws_decoded[{}], wws_decoded[{}]);\n",
             base + 1,
             base + 2,
             base + 3,
