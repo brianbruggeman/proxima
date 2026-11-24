@@ -1101,6 +1101,52 @@ fn first_divergence(left: &[u64], right: &[u64]) -> Option<usize> {
     common.or_else(|| (left.len() != right.len()).then(|| left.len().min(right.len())))
 }
 
+const DIVERGENCE_IDS_BEFORE: usize = 4;
+const DIVERGENCE_IDS_FROM: usize = 8;
+
+fn divergence_window(ids: &[u64], position: usize) -> &[u64] {
+    let end = position.saturating_add(DIVERGENCE_IDS_FROM).min(ids.len());
+    let start = position.saturating_sub(DIVERGENCE_IDS_BEFORE).min(end);
+    ids.get(start..end).unwrap_or_default()
+}
+
+fn divergence_note(ours: &[u64], theirs: &[u64], position: usize) -> String {
+    format!(
+        "first divergence at {position}: proxima {:?} llama {:?}",
+        divergence_window(ours, position),
+        divergence_window(theirs, position)
+    )
+}
+
+fn join_ids(ids: &[u32]) -> String {
+    ids.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
+}
+
+fn render_prompt_ids(ids: &[u32]) -> String {
+    format!("{}\n", join_ids(ids))
+}
+
+fn render_token_ids_line(request: &str, ids: &[u64]) -> String {
+    format!("llama_server token_ids request={request} ids={ids:?}\n")
+}
+
+fn append_llama_token_ids(path: &Path, cold: &LlamaResponse, warm: &LlamaResponse) -> Result<(), HarnessError> {
+    let text = format!("{}{}", render_token_ids_line("cold", &cold.ids), render_token_ids_line("warm", &warm.ids));
+    let mut file = fs::OpenOptions::new().append(true).open(path).map_err(io_error(path))?;
+    file.write_all(text.as_bytes()).map_err(io_error(path))
+}
+
+fn write_prompt_ids(out: &Path, prompts: &BTreeMap<Prompt, PromptData>) -> Result<(), HarnessError> {
+    let directory = out.join("prompts");
+    fs::create_dir_all(&directory).map_err(io_error(&directory))?;
+    for (prompt, data) in prompts {
+        let path = directory.join(format!("{}.ids", prompt.name()));
+        fs::write(&path, render_prompt_ids(&data.ids)).map_err(io_error(&path))?;
+        println!("prompt {} ids {} written to {}", prompt.name(), data.ids.len(), path.display());
+    }
+    Ok(())
+}
+
 fn llama_evidence(row: Option<&Row>) -> Option<&LlamaEvidence> {
     match &row?.evidence {
         Evidence::Llama(evidence) => Some(evidence),
@@ -1168,7 +1214,7 @@ fn evaluate(row: &Row, peer: Option<&Row>, facts: &Facts) -> Parity {
     });
     let i4 = pair(&|detail, evidence| match first_divergence(&detail.ids, &evidence.warm.ids) {
         None => Check::Held,
-        Some(position) => Check::Failed(format!("first divergence at {position}")),
+        Some(position) => Check::Failed(divergence_note(&detail.ids, &evidence.warm.ids, position)),
     });
 
     let expected_types = row.cell.kv.llama_types();
@@ -1264,7 +1310,7 @@ fn evaluate_inproc(row: &Row, server_peer: Option<&Row>, facts: &Facts) -> Parit
     });
     let i4 = match (evidence, server) {
         (Some(found), Some(peer)) => first_divergence(&found.detail.ids, &peer.warm.ids)
-            .map_or(Check::Held, |position| Check::Failed(format!("first divergence at {position}"))),
+            .map_or(Check::Held, |position| Check::Failed(divergence_note(&found.detail.ids, &peer.warm.ids, position))),
         (None, _) => Check::Failed("no llama-arm output".to_owned()),
         (_, None) => without_peer(),
     };
@@ -1969,6 +2015,7 @@ fn run_llama(context: &RunContext, cell: &Cell, row: &mut Row) -> Result<(), Har
     row.exit_code = server.stop();
     let (cold, warm) = outcome?;
     let log_text = fs::read_to_string(&context.log_path).map_err(io_error(&context.log_path))?;
+    append_llama_token_ids(&context.log_path, &cold, &warm)?;
     row.footprint_bytes = parse_footprint_bytes(&log_text).ok();
     row.process = parse_process_times(&log_text);
     row.metrics = Metrics {
@@ -2001,7 +2048,7 @@ fn run_proxima(context: &RunContext, cell: &Cell, binary: &Path, row: &mut Row) 
     );
     command.env(
         "PROXIMA_PROMPT_IDS",
-        context.prompt.ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(","),
+        join_ids(&context.prompt.ids),
     );
     for (key, value) in cell.kv.proxima_env() {
         command.env(key, value);
@@ -2572,6 +2619,7 @@ fn run(config: &Config) -> Result<(), HarnessError> {
     let logs = config.out.join("logs");
     fs::create_dir_all(&logs).map_err(io_error(&logs))?;
     let (model_sha256, prompts) = load_prompts(config)?;
+    write_prompt_ids(&config.out, &prompts)?;
     let llama_identity = arm_identity(&config.llama)?;
     let facts = Facts {
         model_path: config.model.display().to_string(),
@@ -4711,8 +4759,42 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         ids[40] = 9_999;
         let proxima = proxima_row(ids, 27);
         let failing = evaluate(&proxima, Some(&llama), &facts()).failing();
-        assert_eq!(failing, vec!["I4 first divergence at 40".to_owned()]);
+        assert_eq!(
+            failing,
+            vec!["I4 first divergence at 40: proxima [1036, 1037, 1038, 1039, 9999, 1041, 1042, 1043, 1044, 1045, 1046, 1047] llama [1036, 1037, 1038, 1039, 1040, 1041, 1042, 1043, 1044, 1045, 1046, 1047]".to_owned()]
+        );
         assert_eq!(divergence_text(&proxima, Some(&llama)), "40");
+    }
+
+    #[test]
+    fn divergence_note_at_the_first_id_has_no_leading_context() {
+        let ours = [203, 51, 7, 8, 9, 10, 11, 12, 13, 14];
+        let theirs = [204, 51, 7, 8, 9, 10, 11, 12, 13, 14];
+        assert_eq!(
+            divergence_note(&ours, &theirs, 0),
+            "first divergence at 0: proxima [203, 51, 7, 8, 9, 10, 11, 12] llama [204, 51, 7, 8, 9, 10, 11, 12]"
+        );
+    }
+
+    #[test]
+    fn divergence_note_at_three_keeps_three_ids_before_and_a_short_tail() {
+        let ours = [1, 2, 3, 40, 5, 6];
+        let theirs = [1, 2, 3, 41, 5];
+        assert_eq!(
+            divergence_note(&ours, &theirs, 3),
+            "first divergence at 3: proxima [1, 2, 3, 40, 5, 6] llama [1, 2, 3, 41, 5]"
+        );
+    }
+
+    #[test]
+    fn prompt_ids_render_as_one_comma_separated_line() {
+        assert_eq!(render_prompt_ids(&[2, 105, 2364]), "2,105,2364\n");
+        assert_eq!(render_prompt_ids(&[]), "\n");
+    }
+
+    #[test]
+    fn llama_token_ids_use_the_proxima_child_line_shape() {
+        assert_eq!(render_token_ids_line("warm", &[236_776, 5213]), "llama_server token_ids request=warm ids=[236776, 5213]\n");
     }
 
     #[test]
@@ -4964,7 +5046,10 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         other[40] = 7;
         let server = llama_row(ids);
         let inproc = inproc_row(other, PINNED_LLAMA_BUILD);
-        assert_eq!(evaluate(&inproc, Some(&server), &facts()).failing(), vec!["I4 first divergence at 40".to_owned()]);
+        assert_eq!(
+            evaluate(&inproc, Some(&server), &facts()).failing(),
+            vec!["I4 first divergence at 40: proxima [1036, 1037, 1038, 1039, 7, 1041, 1042, 1043, 1044, 1045, 1046, 1047] llama [1036, 1037, 1038, 1039, 1040, 1041, 1042, 1043, 1044, 1045, 1046, 1047]".to_owned()]
+        );
         assert_eq!(divergence_text(&inproc, Some(&server)), "40");
     }
 
