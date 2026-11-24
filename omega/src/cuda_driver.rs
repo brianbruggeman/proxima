@@ -4339,16 +4339,16 @@ mod tests {
                 let start = (block * 4 + run) * 32;
                 let run_values = &values[start..start + 32];
                 let amax = run_values.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
-                let scale = amax / 127.0f32;
+                let scale = amax / 127.0;
                 let scale_bits = half::f16::from_f32(scale).to_bits().to_le_bytes();
                 let codes = 16 + run * 32..16 + run * 32 + 32;
                 let mut gpu_sum = 0i32;
                 let mut cpu_sum = 0i32;
                 for (offset, value) in run_values.iter().enumerate() {
                     let (gpu_expected, cpu_expected) = if amax == 0.0 {
-                        (0.0f32, 0.0f32)
+                        (0.0, 0.0)
                     } else {
-                        ((value / scale).round(), (value * (1.0f32 / scale)).round())
+                        ((value / scale).round(), (value * (1.0 / scale)).round())
                     };
                     let gpu_code = gpu_block[codes.start + offset] as i8;
                     let cpu_code = cpu_block[codes.start + offset] as i8;
@@ -4373,18 +4373,16 @@ mod tests {
     const NEAR_TIE_WIDE_PEAK_BITS: [u32; 6] = [0x3d32_ff98, 0x3d95_2a54, 0x3dd0_d4dc, 0x3e06_3fb2, 0x3e24_14f6, 0x3e41_ea3a];
     const NEAR_TIE_WIDE_PEAK_RECIPROCAL_CODES: [i8; 6] = [2, 3, 4, 5, 6, 7];
     const NEAR_TIE_WIDE_PEAK_QUOTIENT_CODES: [i8; 6] = [1, 2, 3, 4, 5, 6];
-    const WIDE_PEAK: f32 = 3.7;
 
     fn near_tie_values() -> Vec<f32> {
         let mut values = activation_values();
         values[..64].fill(0.0);
         values[0] = 1.0;
-        values[32] = WIDE_PEAK;
-        for (lane, bits) in NEAR_TIE_UNIT_PEAK_BITS.iter().enumerate() {
-            values[1 + lane] = f32::from_bits(*bits);
-        }
-        for (lane, bits) in NEAR_TIE_WIDE_PEAK_BITS.iter().enumerate() {
-            values[33 + lane] = f32::from_bits(*bits);
+        values[32] = 3.7;
+        for (first, ties) in [(1, NEAR_TIE_UNIT_PEAK_BITS), (33, NEAR_TIE_WIDE_PEAK_BITS)] {
+            for (lane, bits) in ties.iter().enumerate() {
+                values[first + lane] = f32::from_bits(*bits);
+            }
         }
         values
     }
