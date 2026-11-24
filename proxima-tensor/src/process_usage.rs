@@ -79,6 +79,24 @@ pub fn resident_and_footprint_bytes() -> Result<(u64, u64), io::Error> {
     Ok((info.ri_resident_size, info.ri_phys_footprint))
 }
 
+/// Resident set and the anonymous-plus-shared share of it right now, in bytes (`/proc/self/status`):
+/// the memory this process holds that is not a clean file mapping, the nearest linux reading of
+/// the macOS physical footprint.
+#[cfg(target_os = "linux")]
+pub fn resident_and_footprint_bytes() -> Result<(u64, u64), io::Error> {
+    let status = std::fs::read_to_string("/proc/self/status")?;
+    let field = |name: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix(':'))
+            .and_then(|rest| rest.split_whitespace().next()?.parse::<u64>().ok())
+            .map(|kibibytes| kibibytes.saturating_mul(1024))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("{name} missing from /proc/self/status")))
+    };
+    let footprint = field("RssAnon")?.saturating_add(field("RssShmem")?);
+    Ok((field("VmRSS")?, footprint))
+}
+
 /// Peak resident set of this process so far, in bytes.
 #[cfg(windows)]
 pub fn peak_rss_bytes() -> Result<u64, io::Error> {
@@ -131,6 +149,14 @@ mod tests {
     fn peak_rss_of_a_running_test_process_is_at_least_a_megabyte() {
         let peak = peak_rss_bytes().expect("peak rss must be readable for the current process");
         assert!(peak > 1 << 20, "peak rss {peak} bytes implausibly small");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_running_process_holds_resident_memory_and_a_footprint() {
+        let (resident, footprint) = resident_and_footprint_bytes().expect("resident size must be readable");
+        assert!(resident > 1 << 20, "resident {resident} bytes implausibly small");
+        assert!(footprint > 0, "footprint {footprint} must be nonzero");
     }
 
     #[test]
