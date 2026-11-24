@@ -60,11 +60,11 @@ Whisper transcribes today. `Model::load` and `Model::transcribe` (`proxima-model
 
   | model | device | omega | whisper.cpp v1.9.5 | ratio |
   |---|---|---|---|---|
-  | tiny | Metal | 1.24 s (n=3 median, 2026-11-24, same window) | 0.34 s (n=3 median) | about 3.6x |
+  | tiny | Metal | 0.46-0.47 s warm (2026-11-24, same window) | 0.30-0.32 s greedy (0.34-0.35 s defaults) | about 1.5x vs greedy |
   | tiny | CPU | 20.92 s | 0.506 s | 41.3x |
   | large-v3-turbo | Metal | 62.14 s (not re-measured) | 1.318 s | 47.2x |
   | large-v3-turbo | CPU | 150.92 s | 1.318 s | 114.5x |
 
-  On tiny/Metal the gap is encode (720-737 ms against 30-37 ms, about 22x) and mel (117-123 ms against 4.5-4.7 ms, about 26x); decode is 8.7-8.8 ms/token, down from 63.8 before the decode reuse landed. The owner's bar is about 300 ms for tiny; the 5% bar is 0.357 s. [Page 07 section 5](./07-comparisons.md#5-whispercpp) has the commits, the load under each run and the caveats.
+  The tiny comparison is against whisper.cpp greedy, because omega's decode is greedy; the defaults run (beam 5, best-of-5) does more decode work. On tiny/Metal the gap is mel (133-137 ms against 4.5-4.6 ms, about 29x), decode (150-155 ms against 43 ms, about 3.5x) and encode (94-95 ms against 36-38 ms, about 2.6x). The owner's bar is about 300 ms for tiny; the 5% bar against greedy is 0.325 s, and omega is about 1.43x over. The turbo rows are not re-measured; in the same window omega on CPU took 6.62 s for tiny, so the 20.92 s row is older. [Page 07 section 5](./07-comparisons.md#5-whispercpp) has the commits, the load under each run and the caveats.
 
 Next: [06: diffusion](./06-diffusion.md) does the same for image generation: the adaLN and attention pieces exist and are differentiable; the scheduler and the VAE decode do not.
