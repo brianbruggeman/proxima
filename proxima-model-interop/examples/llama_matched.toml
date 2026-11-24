@@ -5,3 +5,4 @@ kv_cache_value_quant = "f16"
 attention_decomposition = "flash_where_admitted"
 seed = 1
 ignore_eos = true
+gpu_layers = -1

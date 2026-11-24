@@ -30,19 +30,19 @@ use std::time::Instant;
 
 use conflaguration::Settings as _;
 use memmap2::{Mmap, MmapOptions};
-#[cfg(feature = "gpu")]
-use omega::backend::GpuDriver;
-use proxima_gguf::parse_complete;
-use proxima_model_interop::{
-    ContextLength, GPU_LAYERS_ALL, LoadedModel, Phase, PromptCacheConfig, ServingConfig,
-    ServingSettings, SpeculativeSettings, TokenEvent,
-};
 #[cfg(all(
     feature = "metal",
     feature = "metal-attn-variants",
     target_os = "macos"
 ))]
 use omega::AttentionDecomposition;
+#[cfg(feature = "gpu")]
+use omega::backend::GpuDriver;
+use proxima_gguf::parse_complete;
+use proxima_model_interop::{
+    ContextLength, LoadedModel, Phase, PromptCacheConfig, ServingConfig, ServingSettings,
+    SpeculativeSettings, TokenEvent,
+};
 use proxima_numeric::NumericFormat;
 #[cfg(feature = "instrument")]
 use proxima_telemetry::export::Exporter;
@@ -379,7 +379,7 @@ fn main() {
         ignore_eos: base.ignore_eos,
         warm_model_buffers_at_load,
         speculative,
-        gpu_layers: GPU_LAYERS_ALL,
+        gpu_layers: base.gpu_layers,
         numeric_policy,
         kv_cache_key_quant: base.kv_cache_key_quant,
         kv_cache_value_quant: base.kv_cache_value_quant,
@@ -416,8 +416,8 @@ fn main() {
             ContextLength::Native => serving_config.ubatch_size as usize,
             ContextLength::Within(rows) | ContextLength::Extrapolate(rows) => rows as usize,
         };
-        let warm_chunk_rows = (serving_config.ubatch_size as usize)
-            .min((context_rows.saturating_sub(2) / 2).max(1));
+        let warm_chunk_rows =
+            (serving_config.ubatch_size as usize).min((context_rows.saturating_sub(2) / 2).max(1));
         let warmed_rows = model
             .warm_prefill(&serving_config, warm_chunk_rows)
             .expect("compile the chunk pipelines and build their plans");
@@ -571,8 +571,8 @@ fn main() {
             Some(ids) => model.generate_from_ids(ids, max_tokens, &serving_config, &mut on_token),
             None => model.generate_streaming(prompt, max_tokens, serving_config, &mut on_token),
         };
-        let (token_ids, text, stopped_by_eos) = generated
-            .expect("greedy decode on the real gemma4-E2B checkpoint");
+        let (token_ids, text, stopped_by_eos) =
+            generated.unwrap_or_else(|error| panic!("greedy decode of {model_file}: {error:?}"));
         let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
         let cpu_after = process_cpu_ms();
         let cpu_user_ms = cpu_after.0 - cpu_before.0;
@@ -710,6 +710,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{counts_toward_decode_span, decode_step_ms_per_token, start_prompt_label};
+    use proxima_model_interop::ServingSettings as Settings;
 
     /// run_index=0 step_time lines and the run=done line from a real 128-token
     /// F32 run of the 26-token chat prompt (sb1 `prox-short-F32-r1.log`).
@@ -760,6 +761,24 @@ mod tests {
         assert!(!counts_toward_decode_span(true, 0));
         assert!(!counts_toward_decode_span(false, 0));
         assert!(counts_toward_decode_span(false, 1));
+    }
+
+    const MATCHED_TOML: &str = include_str!("llama_matched.toml");
+
+    fn lowered_gpu_layers(toml: &str) -> i32 {
+        let settings: Settings = conflaguration::from_toml_str(toml).expect("serving toml parses");
+        settings.as_serving_config(&[]).gpu_layers
+    }
+
+    #[test]
+    fn checked_in_toml_requests_whole_model_offload() {
+        assert_eq!(lowered_gpu_layers(MATCHED_TOML), -1);
+    }
+
+    #[test]
+    fn configured_cpu_gpu_layers_reach_the_serving_config() {
+        let toml = MATCHED_TOML.replace("gpu_layers = -1", "gpu_layers = 0");
+        assert_eq!(lowered_gpu_layers(&toml), 0);
     }
 
     #[test]
