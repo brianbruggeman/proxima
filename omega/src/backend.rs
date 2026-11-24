@@ -332,7 +332,7 @@ impl GpuDriver {
         }
         [key, value]
             .into_iter()
-            .find(|format| !format.is_identity_of(&NumericFormat::Float32))
+            .find(|format| !format.is_identity_of(&NumericFormat::default()))
             .map_or(Ok(()), |format| {
                 Err(format!(
                     "the {} driver's cached attention does not read a {format:?} cache",
@@ -2491,7 +2491,7 @@ mod tests {
         let hip = GpuDriver::Hip { wave: None, device: 0 };
         for driver in [GpuDriver::Cuda, hip] {
             for format in &NumericFormat::ALL {
-                let reads = format.is_identity_of(&NumericFormat::Float32);
+                let reads = format.is_identity_of(&NumericFormat::default());
                 let answer = driver.admits_kv_cache(format, format);
                 assert_eq!(answer.is_ok(), reads, "{} {format:?}", driver.name());
                 if let Err(message) = answer {

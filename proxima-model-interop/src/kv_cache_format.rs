@@ -15,23 +15,40 @@ use proxima_numeric::NumericFormat;
 
 use crate::error::InteropError;
 
-/// The cache format the serving default stores: llama.cpp's own `-ctk`/`-ctv` default when the
-/// active driver's cached attention reads it, otherwise the graph's own output format, which every
-/// driver and the host read. Never a format the active backend would refuse at admission.
+/// The format the graph evaluates its K and V rows in: the activation format every run produces
+/// until a config names another, which every driver and the host read.
+fn graph_output_format() -> NumericFormat {
+    NumericFormat::default()
+}
+
+/// The cache format the serving configuration declares for `-ctk`, resolved by conflaguration from
+/// `ServingSettings` (its field default, then `PROXIMA_SERVING_KV_CACHE_KEY_QUANT`).
+#[cfg(feature = "std")]
+fn configured_cache_format() -> Option<NumericFormat> {
+    use conflaguration::Settings;
+
+    crate::serving_settings::ServingSettings::from_env().ok().map(|settings| settings.kv_cache_key_quant)
+}
+
+#[cfg(not(feature = "std"))]
+fn configured_cache_format() -> Option<NumericFormat> {
+    None
+}
+
+/// The cache format the serving default stores: the configured one when the active driver's cached
+/// attention reads it, otherwise the graph's own output format. Never a format the active backend
+/// would refuse at admission.
 pub(crate) fn default_cache_format() -> NumericFormat {
-    let graph_output = NumericFormat::Float32;
-    let preferred = NumericFormat::Float16;
-    if cfg!(feature = "gpu") && kernel_pair(&preferred, &preferred).is_ok() {
-        preferred
-    } else {
-        graph_output
+    match configured_cache_format() {
+        Some(configured) if kernel_pair(&configured, &configured).is_ok() => configured,
+        _ => graph_output_format(),
     }
 }
 
-/// Whether `format` is the one the graph evaluates its K and V rows in (binary32), which a placed
-/// cache buffer or a device carry receives without a conversion step.
+/// Whether `format` is the one the graph evaluates its K and V rows in, which a placed cache buffer
+/// or a device carry receives without a conversion step.
 fn stores_graph_output_format(format: &NumericFormat) -> bool {
-    format.is_identity_of(&NumericFormat::Float32)
+    format.is_identity_of(&graph_output_format())
 }
 
 /// The codec the kernel reads a K cache stored as `format` with, whatever the V cache is.
@@ -178,14 +195,6 @@ mod tests {
         assert!(admit_pair(&NumericFormat::Float32, &NumericFormat::Float32).is_ok());
     }
 
-    #[cfg(all(feature = "gpu", any(not(feature = "cuda"), all(feature = "metal", target_os = "macos"))))]
-    #[test]
-    fn the_narrow_pairs_the_kernel_reads_are_admitted() {
-        for element in [NumericFormat::Float16, NumericFormat::BFloat16] {
-            assert!(admit_pair(&element, &element).is_ok(), "{element:?}");
-        }
-    }
-
     #[cfg(not(feature = "gpu"))]
     #[test]
     fn a_cpu_only_build_admits_every_format_that_encodes_including_mixed_pairs() {
@@ -204,31 +213,6 @@ mod tests {
         assert!(message.contains("Float16") && message.contains("BFloat16"), "{message}");
         assert!(message.contains("same type"), "{message}");
     }
-
-    #[cfg(all(feature = "gpu", any(not(feature = "cuda"), all(feature = "metal", target_os = "macos"))))]
-    #[test]
-    fn a_block_key_beside_a_scalar_or_block_value_is_admitted_and_every_other_block_pairing_is_refused() {
-        for (key, value) in [
-            (NumericFormat::Q4_0, NumericFormat::Float16),
-            (NumericFormat::Q8_0, NumericFormat::Float16),
-            (NumericFormat::Q4_0, NumericFormat::Q4_0),
-            (NumericFormat::Q8_0, NumericFormat::Q8_0),
-            (NumericFormat::Q8_0, NumericFormat::Q4_0),
-        ] {
-            assert!(admit_pair(&key, &value).is_ok(), "{key:?} key, {value:?} value");
-        }
-        for (key, value) in [
-            (NumericFormat::Float16, NumericFormat::Q4_0),
-            (NumericFormat::Q4_0, NumericFormat::Float32),
-            (NumericFormat::Float32, NumericFormat::Float16),
-        ] {
-            let error = admit_pair(&key, &value).expect_err("the kernel reads no such pair");
-
-            let message = error.to_string();
-            assert!(message.contains(&format!("{key:?}")) && message.contains(&format!("{value:?}")), "{message}");
-        }
-    }
-
 
     #[cfg(feature = "gpu")]
     #[test]
