@@ -398,6 +398,13 @@ fn emit_sizing_consts() {
         out.push_str(&format!(
             "pub const CUDA_TILED_CONTRACTION_MIN_TOKENS: u64 = {cuda_tiled_min_tokens};\n"
         ));
+        let cuda_grouped_min_tokens = require_nonzero(
+            "contraction.grouped_min_tokens",
+            resolve_int(&root, "contraction", "grouped_min_tokens"),
+        );
+        out.push_str(&format!(
+            "pub const CUDA_GROUPED_CONTRACTION_MIN_TOKENS: u64 = {cuda_grouped_min_tokens};\n"
+        ));
     }
 
     if env::var_os("CARGO_FEATURE_METAL_TILED_GEMM").is_some() {

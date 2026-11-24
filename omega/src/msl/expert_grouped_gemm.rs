@@ -1240,7 +1240,7 @@ pub(super) fn push_expert_grouped_gemm_body(
     feature = "metal-grouped-gemm",
     all(feature = "metal", target_os = "macos")
 ))]
-pub(crate) const ROUTE_COMPACTION_MISMATCH_FAULT: u32 = u32::MAX;
+pub(crate) use crate::route_compaction::ROUTE_COMPACTION_MISMATCH_FAULT;
 
 /// Words of the route-compaction buffer ahead of the per-expert tables: word 0
 /// is the total entry count the prepass wrote, the check the GEMM makes before
@@ -1251,7 +1251,7 @@ pub(crate) const ROUTE_COMPACTION_MISMATCH_FAULT: u32 = u32::MAX;
 /// indirect slot of its own row-tile count.
 #[cfg(feature = "metal-grouped-gemm")]
 pub(super) const GROUPED_ROUTE_HEADER_WORDS: u64 =
-    1 + 3 * crate::sized::GROUPED_GEMM_COMPACTED_MAX_ROW_TILES;
+    crate::route_compaction::header_words(crate::sized::GROUPED_GEMM_COMPACTED_MAX_ROW_TILES);
 
 /// Row tiles of output features `resolved` launches, the index of its indirect
 /// slot in the compaction header.
@@ -1292,7 +1292,7 @@ pub(crate) fn route_compaction_indirect_offset(
 /// per-expert tile counts.
 #[cfg(all(feature = "metal-grouped-gemm", any(test, all(feature = "metal", target_os = "macos"))))]
 fn grouped_tile_table_words(tokens: u64, experts: u64) -> u64 {
-    experts + grouped_tile_upper_bound(tokens, experts)
+    crate::route_compaction::tile_table_words(tokens, experts, GROUPED_TILE_TOKENS)
 }
 
 /// Threads of each prepass threadgroup: a simdgroup per expert,
@@ -1355,7 +1355,7 @@ pub(super) fn grouped_token_total(resolved: &BoundOp, block: &TiledGemmBlock) ->
 /// tile of the whole route, plus one partial tile per expert.
 #[cfg(feature = "metal-grouped-gemm")]
 pub(super) fn grouped_tile_upper_bound(tokens: u64, experts: u64) -> u64 {
-    tokens.div_ceil(GROUPED_TILE_TOKENS) + experts
+    crate::route_compaction::tile_upper_bound(tokens, experts, GROUPED_TILE_TOKENS)
 }
 
 /// Threadgroups of each prepass dispatch: the route cut into chunks of
@@ -1379,11 +1379,13 @@ pub(super) fn grouped_prepass_threadgroups(tokens: u64) -> u64 {
     any(test, all(feature = "metal", target_os = "macos"))
 ))]
 pub(super) fn grouped_compaction_words(tokens: u64, experts: u64) -> u64 {
-    GROUPED_ROUTE_HEADER_WORDS
-        + 2 * experts
-        + tokens
-        + grouped_tile_table_words(tokens, experts)
-        + grouped_prepass_threadgroups(tokens) * experts
+    crate::route_compaction::compaction_words(
+        GROUPED_ROUTE_HEADER_WORDS,
+        tokens,
+        experts,
+        GROUPED_TILE_TOKENS,
+        grouped_prepass_threadgroups(tokens),
+    )
 }
 
 #[cfg(feature = "metal-grouped-gemm")]

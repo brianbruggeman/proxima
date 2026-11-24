@@ -98,6 +98,12 @@ lane_run_bytes = 0
 # when the `cuda` feature is active. 2 is the first count that is more than one row.
 cuda_tiled_min_tokens = 2
 
+# the CUDA expert-grouped form (`cuda::grouped_gemm`) runs once at least this many routed token
+# rows share one dispatch; below it the cooperative gathered reduce runs. emitted only when the
+# `cuda` feature is active. 64 is `[tiled_gemm] min_tokens`: the grouped path pays a prepass launch
+# and a tile per expert, which the same row count repays on Metal.
+grouped_min_tokens = 64
+
 [tiled_gemm]
 # below this many activation rows (tokens) in one dispatch, the row-blocked
 # packed-matmul kernel (`push_packed_row_blocked_body`) runs instead of the

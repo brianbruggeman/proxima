@@ -85,6 +85,8 @@ pub mod error;
 mod grid;
 #[cfg(feature = "alloc")]
 mod identity;
+#[cfg(any(feature = "cuda", feature = "metal-grouped-gemm", all(feature = "metal", target_os = "macos"), test))]
+mod route_compaction;
 #[cfg(feature = "alloc")]
 mod lowering;
 #[cfg(all(feature = "metal", target_os = "macos"))]

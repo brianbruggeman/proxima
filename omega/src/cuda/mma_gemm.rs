@@ -21,6 +21,7 @@ use proxima_tensor::{
 };
 use proxima_numeric::{DType, NumericPolicy};
 
+use super::grouped_gemm::{GroupedRoute, push_grouped_tile_origin};
 use super::int8_gemm::{INT8_FEATURE_TILE, INT8_TOKEN_TILE, Int8Gemm, int8_gemm_plan, push_int8_gemm_body};
 use super::{
     Codec, EmitError, PQ2_0_BLOCK_BYTES, PQ2_0_BLOCK_ELEMENTS, Q1_0_BLOCK_BYTES,
@@ -88,8 +89,17 @@ pub(super) const fn mma_contraction_limits() -> ContractionLimits {
 }
 
 /// The contraction grant of the tensor-core path, shared by `mma_gemm_plan` and `crate::cuda::executes`.
+/// The grouped form is not granted here: the driver has no launch for the two-kernel route yet.
 pub(super) const fn mma_contraction_grant(base: Executes) -> Executes {
     base.with(Form::TiledContraction).with_contraction(mma_contraction_limits())
+}
+
+/// What the grouped emitter plans against: the tiled grant plus [`Form::GroupedContraction`] at `[contraction] grouped_min_tokens`.
+pub(super) const fn grouped_contraction_grant(base: Executes) -> Executes {
+    base.with(Form::TiledContraction).with(Form::GroupedContraction).with_contraction(ContractionLimits {
+        tiled_min_tokens: crate::sized::CUDA_TILED_CONTRACTION_MIN_TOKENS,
+        grouped_min_tokens: crate::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS,
+    })
 }
 
 /// `Some` when this reduce is a plain `weight * activation` sum with more than
@@ -98,6 +108,17 @@ pub(super) fn mma_gemm_plan(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
+) -> Option<MmaGemm> {
+    mma_gemm_plan_for(resolved, quantized, numeric_policy, &mma_contraction_grant(Executes::BASE), ContractionForm::Tiled)
+}
+
+/// [`mma_gemm_plan`] for the contraction `form` that `grant` decides for this op.
+pub(super) fn mma_gemm_plan_for(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    numeric_policy: NumericPolicy,
+    grant: &Executes,
+    form: ContractionForm,
 ) -> Option<MmaGemm> {
     let BoundOpKind::Reduce {
         keep: Keep::Reduce,
@@ -124,7 +145,8 @@ pub(super) fn mma_gemm_plan(
     let weight_layout = &operands[weight].1;
     let eligible = resolved.dtype == DType::FLOAT32
         && epilogue_broadcast_axes.is_empty()
-        && contraction.gathered_operands == 0
+        && (contraction.gathered_operands == 0) == (form == ContractionForm::Tiled)
+        && (form == ContractionForm::Tiled || (contraction.gathered_operands == 1 && operands[weight].2.is_some()))
         && flat_packed_rows(resolved, quantized)
         && reduce_is_cooperative(resolved, quantized, numeric_policy)
         && !reduction_dims(resolved, output_axes).is_empty()
@@ -134,7 +156,7 @@ pub(super) fn mma_gemm_plan(
         return None;
     }
     let activation_layout = &operands[activation].1;
-    let tiled = contraction_form(&contraction, &mma_contraction_grant(Executes::BASE)) == ContractionForm::Tiled;
+    let tiled = contraction_form(&contraction, grant) == form;
     let ProductContraction {
         feature_positions,
         token_positions,
@@ -142,8 +164,9 @@ pub(super) fn mma_gemm_plan(
     } = contraction;
     let int8 = int8_gemm_plan(resolved, codec, numeric_policy, activation_layout, output_axes, prequantized);
     let served = prequantized.is_none() || int8.is_some();
-    let several_tokens = tiled || prequantized.is_some();
-    (served && !feature_positions.is_empty() && !token_positions.is_empty() && several_tokens).then_some(
+    let tiled_form = form == ContractionForm::Tiled;
+    let several_tokens = tiled || (tiled_form && prequantized.is_some());
+    (served && (tiled_form || int8.is_none()) && !feature_positions.is_empty() && !token_positions.is_empty() && several_tokens).then_some(
         MmaGemm {
             weight,
             activation,
@@ -355,6 +378,7 @@ pub(super) fn push_mma_gemm_body(
     resolved: &BoundOp,
     plan: &MmaGemm,
     element_type: &str,
+    route: Option<&GroupedRoute>,
 ) -> Result<(), EmitError> {
     let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
         return Err(EmitError::RenderKindMismatch {
@@ -379,6 +403,11 @@ pub(super) fn push_mma_gemm_body(
     let single = plan.single_activation;
 
     push_tile_origin(source, plan, FEATURE_TILE, TOKEN_TILE);
+    let first = if route.is_some() { "0" } else { "token_first" };
+    let limit = if route.is_some() { "tile_count" } else { "token_total" };
+    if let Some(route) = route {
+        push_grouped_tile_origin(source, route, TOKEN_TILE);
+    }
     source.push_str("    const int load_row = tid >> 2;
 ");
     source.push_str("    const int load_segment = (tid & 3) * 8;
@@ -388,12 +417,13 @@ pub(super) fn push_mma_gemm_body(
     source.push_str("    const bool feature_ok = load_feature < feature_total;
 ");
     for rep in 0..ACT_REPS {
+        let token_source = if route.is_some() { format!("(long long)tile_list[load_token{rep}]") } else { format!("load_token{rep}") };
         source.push_str(&format!(
-            "    const long long load_token{rep} = token_first + load_row + {};
-    const bool token_ok{rep} = load_token{rep} < token_total;
+            "    const long long load_token{rep} = {first} + load_row + {};
+    const bool token_ok{rep} = load_token{rep} < {limit};
     long long token_offset{rep} = u.operand_base[{activation}];
     if (token_ok{rep}) {{
-        long long token_rest = load_token{rep};
+        long long token_rest = {token_source};
 ",
             rep * FEATURE_TILE
         ));
@@ -407,8 +437,9 @@ pub(super) fn push_mma_gemm_body(
         source.push_str("    }
 ");
     }
+    let expert_term = route.map_or_else(String::new, |route| format!(" + grouped_expert * u.gather_element_stride[{}]", route.slot));
     source.push_str(&format!(
-        "    const long long weight_row = u.operand_base[{weight}] + load_feature * u.reduction_total;\n"
+        "    const long long weight_row = u.operand_base[{weight}]{expert_term} + load_feature * u.reduction_total;\n"
     ));
 
     source.push_str(&format!(
@@ -602,7 +633,7 @@ pub(super) fn push_mma_gemm_body(
             };
             for tile in 0..WARP_TILES {
                 source.push_str(&format!(
-                    "                if (token_first + warp_token * {WARP_TOKENS} + {} < token_total) {{
+                    "                if ({first} + warp_token * {WARP_TOKENS} + {} < {limit}) {{
                     const int token_row = warp_token * {WARP_TOKENS} + {} + group;
                     mma_m16n8k8(scratch{tile}, a_low, a_high, *(const unsigned int *)&act_high[token_row][{k_base}]);
 {}                }}
@@ -629,7 +660,7 @@ pub(super) fn push_mma_gemm_body(
         }
         for tile in 0..WARP_TILES {
             source.push_str(&format!(
-                "            if (token_first + warp_token * {WARP_TOKENS} + {} < token_total) {{
+                "            if ({first} + warp_token * {WARP_TOKENS} + {} < {limit}) {{
 ",
                 tile * 8
             ));
@@ -675,6 +706,12 @@ pub(super) fn push_mma_gemm_body(
             ));
         }
     }
+    let local_token = "warp_token * 64 + tile * 8 + quad * 2 + (slot & 1)";
+    let token_expr = if route.is_some() {
+        format!("(({local_token}) < tile_count ? (long long)tile_list[{local_token}] : token_total)")
+    } else {
+        format!("token_first + {local_token}")
+    };
     push_output_write(
         source,
         resolved,
@@ -682,7 +719,7 @@ pub(super) fn push_mma_gemm_body(
         element_type,
         "        const int tile = index >> 2;\n        const int slot = index & 3;\n",
         "feature_first + warp_feature * 16 + group + (slot >> 1) * 8",
-        "token_first + warp_token * 64 + tile * 8 + quad * 2 + (slot & 1)",
+        &token_expr,
     )
 }
 

@@ -92,6 +92,7 @@ mod plane_dot;
 mod radix_dot;
 mod sub_block_dot;
 pub(crate) mod mma_gemm;
+mod grouped_gemm;
 mod row_tile;
 mod split_attention;
 mod staged_matvec;
@@ -106,6 +107,7 @@ pub(crate) use block_quantize::{consumer_missing, producer_missing};
 #[cfg(any(test, feature = "cuda-driver"))]
 use block_quantize::block_quantize_groups;
 use int8_gemm::INT8_MMA_INSTRUCTION;
+use grouped_gemm::{GroupedGemm, compaction_buffer_words, grouped_entry, grouped_gemm_plan, pair, prepass_entry, prepass_source};
 use mma_gemm::{
     GEMM_THREADS, MMA_F16_HELPER, MMA_GEMM_HELPERS, MMA_INSTRUCTION, mma_contraction_grant, mma_gemm_plan, mma_gemm_threads, push_mma_gemm_body,
     reads_prequantized_activation,
@@ -293,7 +295,7 @@ pub(crate) fn emit_on_target(
         BoundOpKind::Elementwise { .. } => render_elementwise(target, resolved, &entry, &quantized)?,
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
-        } => render_reduce(target, resolved, &entry, &quantized, numeric_policy, device)?,
+        } => render_reduce(target, resolved, &entry, &quantized, numeric_policy, device, None)?,
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => render_scan(target, resolved, &entry, &quantized)?,
@@ -358,6 +360,52 @@ pub(crate) fn emit_on_target(
         extra_outputs,
         prologue,
     })
+}
+
+/// The route prepass and the grouped tensor-core kernel of an expert-grouped contraction on a known
+/// device, with the words of the route-compaction buffer to bind after the kernels' own bindings.
+/// `None` when the op does not take the form. The driver does not launch the pair yet, so
+/// [`executes`] does not grant [`Form::GroupedContraction`].
+///
+/// # Errors
+/// Whatever rendering the grouped kernel returns.
+pub fn emit_cuda_grouped_on_device(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    device: EmitDevice,
+) -> Result<Option<([CudaKernel; 2], usize)>, EmitError> {
+    emit_grouped_on_target(Target::CUDA, resolved, packed_operands, numeric_policy, device)
+}
+
+/// The two kernels of the expert-grouped contraction form, and the words of the route-compaction
+/// buffer the host binds after the kernels' own bindings: the route prepass first, then the grouped
+/// tensor-core kernel launched at the worst-case tile count. `None` for an op that does not take the form.
+///
+/// # Errors
+/// Whatever rendering the grouped kernel returns.
+pub(crate) fn emit_grouped_on_target(
+    target: Target,
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    device: EmitDevice,
+) -> Result<Option<([CudaKernel; 2], usize)>, EmitError> {
+    if !target.card_asm || !resolved.launches() {
+        return Ok(None);
+    }
+    validate(resolved)?;
+    let quantized = operand_codecs(resolved, packed_operands);
+    let Some(plan) = grouped_gemm_plan(resolved, &quantized, numeric_policy) else {
+        return Ok(None);
+    };
+    let base = entry_name(target, resolved, packed_operands, &quantized, numeric_policy, device);
+    let entry = grouped_entry(&base);
+    let mut source = render_reduce(target, resolved, &entry, &quantized, numeric_policy, device, Some(&plan))?;
+    let prepass = prepass_entry(&entry);
+    source.push_str(&prepass_source(resolved, &plan, &prepass)?);
+    let kernels = pair(source, [prepass, entry], resolved, &plan, dispatch_bindings(resolved))?;
+    Ok(Some((kernels, compaction_buffer_words(&plan))))
 }
 
 /// A pre-quantized activation is readable only by the int8 gemm and the external-activation staged
@@ -3890,6 +3938,7 @@ fn render_reduce(
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
     device: EmitDevice,
+    grouped: Option<&GroupedGemm>,
 ) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
         reduce_op,
@@ -3928,22 +3977,25 @@ fn render_reduce(
     let staged = target
         .card_asm
         .then(|| staged_matvec_plan(resolved, quantized, numeric_policy, device))
-        .flatten();
-    let gemm = target
+        .flatten()
+        .filter(|_| grouped.is_none());
+    let planned = target
         .card_asm
         .then(|| mma_gemm_plan(resolved, quantized, numeric_policy))
         .flatten()
-        .filter(|_| staged.is_none());
+        .filter(|_| staged.is_none() && grouped.is_none());
+    let gemm = grouped.map(|plan| &plan.gemm).or(planned.as_ref());
+    let route = grouped.map(|plan| &plan.route);
     let mut source = String::new();
     preamble(target, &mut source, element_type);
     if gemm.is_some() {
         source.push_str(MMA_INSTRUCTION);
         source.push_str(MMA_GEMM_HELPERS);
-        if gemm.as_ref().is_some_and(|plan| plan.codec == Codec::Float16) {
+        if gemm.is_some_and(|plan| plan.codec == Codec::Float16) {
             source.push_str(MMA_F16_HELPER);
         }
     }
-    if let Some(int8) = gemm.as_ref().and_then(|plan| plan.int8.as_ref()) {
+    if let Some(int8) = gemm.and_then(|plan| plan.int8.as_ref()) {
         source.push_str(INT8_MMA_INSTRUCTION);
         source.push_str(&int8.dot.helpers);
     }
@@ -3984,6 +4036,13 @@ fn render_reduce(
         entry,
         element_type,
     );
+    if route.is_some() {
+        source = source.replacen(
+            "unsigned int* __restrict__ fault\n",
+            "unsigned int* __restrict__ fault,\n    const unsigned int* __restrict__ route_compaction\n",
+            1,
+        );
+    }
 
     if let Some(plan) = &staged {
         source = source.replacen(
@@ -4012,7 +4071,7 @@ fn render_reduce(
             &format!("__global__ void __launch_bounds__({GEMM_THREADS}, 2) "),
             1,
         );
-        push_mma_gemm_body(&mut source, resolved, &plan, element_type)?;
+        push_mma_gemm_body(&mut source, resolved, plan, element_type, route)?;
     } else if let Some(tile_index) = target
         .card_asm
         .then(|| row_tile_axis(resolved, quantized, numeric_policy))
@@ -6123,6 +6182,100 @@ mod tests {
         assert!(source.contains(&kernel.entry));
     }
 
+    fn dense_expert_free_op(rows: u32, width: u32, tokens: u32) -> BoundOp {
+        let mut program = Vec::new();
+        let weight = append(
+            &mut program,
+            Op::Input { dtype: DType::FLOAT32, shape: vec![Extent::Static(rows), Extent::Static(width)], name: None },
+        );
+        let activation = append(
+            &mut program,
+            Op::Input { dtype: DType::FLOAT32, shape: vec![Extent::Static(tokens), Extent::Static(width)], name: None },
+        );
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                    (activation, IndexMap::Affine(map::projection(3, &[1, 2]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: Some("dense_product".into()),
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("dense reduce infers");
+        bind(&program, &shapes, &[NodeId((program.len() - 1) as u32)], proxima_numeric::NumericPolicy::default())
+            .expect("dense reduce lowers")
+            .into_iter()
+            .next()
+            .expect("one bound emitted")
+    }
+
+    fn grouped_pair(bound: &BoundOp) -> Option<([CudaKernel; 2], usize)> {
+        let mut packed = BTreeMap::new();
+        packed.insert(bound.operands()[0].0, Codec::Q8_0);
+        emit_cuda_grouped_on_device(bound, &packed, NumericPolicy::llama_relaxed(), EmitDevice::default()).expect("grouped emit succeeds")
+    }
+
+    #[test]
+    fn a_gathered_q8_0_expert_product_above_the_grouped_minimum_renders_a_prepass_and_a_grouped_kernel() {
+        let slots = u32::try_from(crate::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS).expect("minimum fits") + 8;
+        let bound = stacked_expert_op(8, 128, 512, slots);
+        let (kernels, words) = grouped_pair(&bound).expect("the grouped form is taken");
+        let [prepass, grouped] = kernels;
+        assert!(prepass.entry.ends_with("_route_prepass"), "{}", prepass.entry);
+        assert!(prepass.entry.starts_with(&grouped.entry), "the prepass shares the grouped kernel's name");
+        assert!(grouped.entry.contains("_grp1"), "{}", grouped.entry);
+        assert_eq!(prepass.source, grouped.source, "both entries live in one module");
+        assert!(grouped.source.contains("mma_m16n8k8("), "the grouped kernel runs the shared tile loop");
+        assert!(grouped.source.contains("const unsigned int *tile_list"), "activation rows come through the compacted list");
+        assert!(grouped.source.contains("tile_expert_base + tile_index"), "the slice names its expert from the tile table");
+        assert!(grouped.source.contains("grouped_expert * u.gather_element_stride[0]"), "the weight is read at the slice's expert");
+        assert!(prepass.source.contains("__ballot_sync"), "the prepass ranks rows by ballot");
+        assert!(words > 0);
+    }
+
+    #[test]
+    fn the_dense_product_keeps_the_tiled_mma_kernel_and_takes_no_grouped_form() {
+        let bound = dense_expert_free_op(128, 512, 200);
+        let mut packed = BTreeMap::new();
+        packed.insert(bound.operands()[0].0, Codec::Q8_0);
+        let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed()).expect("dense emit succeeds");
+        assert!(kernel.entry.contains("_mma16x8x8"), "{}", kernel.entry);
+        assert!(!kernel.entry.contains("_grp1"), "{}", kernel.entry);
+        assert!(grouped_pair(&bound).is_none());
+    }
+
+    #[test]
+    fn a_gathered_product_below_the_grouped_minimum_keeps_the_cooperative_reduce() {
+        let bound = stacked_expert_op(8, 128, 512, 8);
+        assert!(grouped_pair(&bound).is_none());
+        let mut packed = BTreeMap::new();
+        packed.insert(bound.operands()[0].0, Codec::Q8_0);
+        let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed()).expect("emit succeeds");
+        assert!(!kernel.entry.contains("_mma"), "{}", kernel.entry);
+        assert!(!kernel.entry.contains("_grp1"), "{}", kernel.entry);
+    }
+
+    #[test]
+    fn the_cuda_grant_does_not_name_the_grouped_form_until_the_driver_launches_it() {
+        assert!(!executes(&Target::CUDA).forms.contains(Form::GroupedContraction));
+    }
+
     #[test]
     fn a_stacked_q8_0_expert_product_without_the_activation_grant_declines_the_staged_plan() {
         let bound = stacked_expert_op(32, 512, 1024, 8);
@@ -6438,7 +6591,7 @@ mod tests {
     #[test]
     fn render_reduce_rejects_an_elementwise_bound_op() {
         let bound = elementwise_tanh_op(8);
-        let error = render_reduce(Target::CUDA, &bound, "entry", &[None], NumericPolicy::bit_exact(), EmitDevice::default())
+        let error = render_reduce(Target::CUDA, &bound, "entry", &[None], NumericPolicy::bit_exact(), EmitDevice::default(), None)
             .expect_err("an elementwise chain is not a Reduce fold");
         assert!(matches!(
             error,
@@ -6467,7 +6620,7 @@ mod tests {
         };
         epilogue_broadcast_axes.push(1);
 
-        let source = render_reduce(Target::CUDA, &bound, "entry", &[None], NumericPolicy::llama_relaxed(), EmitDevice::default())
+        let source = render_reduce(Target::CUDA, &bound, "entry", &[None], NumericPolicy::llama_relaxed(), EmitDevice::default(), None)
             .expect("broadcast emits");
         assert!(source.contains("broadcast_out_strides[2]"));
         assert!(source.contains("broadcast_full_coord[1]"));
@@ -6477,7 +6630,7 @@ mod tests {
             "the broadcast must assign its result; a bare shuffle leaves lanes 1..31 holding partial sums"
         );
 
-        let hip_source = render_reduce(Target::HIP, &bound, "entry", &[None], NumericPolicy::llama_relaxed(), EmitDevice::default())
+        let hip_source = render_reduce(Target::HIP, &bound, "entry", &[None], NumericPolicy::llama_relaxed(), EmitDevice::default(), None)
             .expect("hip broadcast emits");
         assert!(hip_source.contains("#define PROXIMA_ALL_LANES 0xffffffffffffffffull"));
         assert!(hip_source.contains("    accumulator = __shfl_sync(PROXIMA_ALL_LANES, accumulator, 0);\n"));
