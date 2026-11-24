@@ -68,7 +68,10 @@ fn numeric_reason(error: &NumericError) -> &'static str {
             "input is not a whole number of blocks"
         }
         NumericError::NonFinite { .. } => "the format has no encoding for a non-finite value",
+        NumericError::NonFiniteInput { .. } => "the input held a non-finite value",
+        NumericError::EmptyRun { .. } => "a run compared with no elements",
         NumericError::PolicyTooStrict { .. } => "numeric policy too strict",
+        NumericError::FormatMismatch { .. } => "two runs in different formats cannot be compared",
     }
 }
 

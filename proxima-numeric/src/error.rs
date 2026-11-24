@@ -53,8 +53,17 @@ pub enum NumericError {
         found: usize,
         elements: usize,
     },
+    #[error("cannot compare a {left} run with a {right} run; the formats differ")]
+    FormatMismatch {
+        left: &'static str,
+        right: &'static str,
+    },
     #[error("{format} has no encoding for a non-finite value")]
     NonFinite { format: &'static str },
+    #[error("{what} held a non-finite value (NaN or infinity) in its input")]
+    NonFiniteInput { what: &'static str },
+    #[error("{what} needs at least one element; the run is empty")]
+    EmptyRun { what: &'static str },
     #[error("numeric policy {granted:?} does not grant {rewrite:?}, which needs {required:?}")]
     PolicyTooStrict {
         rewrite: NumericRewrite,

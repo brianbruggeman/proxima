@@ -109,6 +109,9 @@ fn map_error(error: NumericError) -> QuantError {
         | NumericError::BlockSizeMismatch { .. }
         | NumericError::NoDecoder { .. }
         | NumericError::LevelOutOfTable { .. }
+        | NumericError::FormatMismatch { .. }
+        | NumericError::NonFiniteInput { .. }
+        | NumericError::EmptyRun { .. }
         | NumericError::PolicyTooStrict { .. } => QuantError::UnsupportedBlockLayout {
             reason: "the shared encoder reported an error a block layout cannot cause",
         },

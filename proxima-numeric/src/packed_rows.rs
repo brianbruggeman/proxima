@@ -319,11 +319,30 @@ impl PackedRows {
         out.resize(self.elements, 0.0);
         self.decode_range(0, out)
     }
+
+    /// This run re-encoded in [`NumericFormat::host_element`]: one decode and one encode now, so
+    /// no later view of the bytes needs either.
+    ///
+    /// # Errors
+    /// Whatever [`Self::decode_all`] or the encode reports.
+    pub fn to_host_element(&self) -> Result<Self, NumericError> {
+        let mut values = Vec::new();
+        self.decode_all(&mut values)?;
+        Self::from_values(&NumericFormat::host_element(), &values)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::float_layout::NAMED_LAYOUTS;
+
+    fn every_format() -> impl Iterator<Item = NumericFormat> {
+        NAMED_LAYOUTS
+            .iter()
+            .map(|(layout, _)| NumericFormat::Scalar(*layout))
+            .chain(NumericFormat::ALL)
+    }
 
     fn activations(count: usize) -> Vec<f32> {
         (0..count)
@@ -425,5 +444,60 @@ mod tests {
         let mut rows = PackedRows::new(&NumericFormat::Float32).expect("encodes");
 
         assert!(rows.extend_from(&donor, 0, 32).is_err());
+    }
+
+    #[test]
+    fn only_the_decoders_own_scalar_layout_is_the_host_element() {
+        let host = NumericFormat::host_element();
+        let (native, other): (Vec<NumericFormat>, Vec<NumericFormat>) =
+            every_format().partition(NumericFormat::is_host_element);
+
+        assert!(host.is_host_element());
+        assert!(!native.is_empty());
+        assert!(!other.is_empty());
+        assert!(native.iter().all(|format| format.is_identity_of(&host)));
+        assert!(other.iter().all(|format| !format.is_identity_of(&host)));
+    }
+
+    #[test]
+    fn every_format_re_encodes_to_the_host_element_with_the_values_it_decoded() {
+        let values = activations(64);
+        let mut compared = 0;
+        for format in every_format() {
+            let Ok(rows) = PackedRows::from_values(&format, &values) else {
+                continue;
+            };
+            let mut decoded = Vec::new();
+            rows.decode_all(&mut decoded).expect("the run decodes");
+
+            let host = rows.to_host_element().expect("the run re-encodes");
+            let mut again = Vec::new();
+            host.decode_all(&mut again).expect("the host run decodes");
+
+            assert!(host.format().is_host_element());
+            assert_eq!(again.len(), decoded.len());
+            assert!(
+                again
+                    .iter()
+                    .zip(&decoded)
+                    .all(|(left, right)| left.to_bits() == right.to_bits()
+                        || (left.is_nan() && right.is_nan())),
+                "{format:?} changed a value"
+            );
+            compared += 1;
+        }
+        assert!(compared > 0, "no format encoded the run");
+    }
+
+    #[test]
+    fn a_host_element_run_keeps_its_bytes() {
+        let values = activations(64);
+        let native = PackedRows::from_values(&NumericFormat::host_element(), &values)
+            .expect("host element encodes");
+
+        let kept = native.to_host_element().expect("host element re-encodes");
+
+        assert!(!kept.as_bytes().is_empty());
+        assert_eq!(kept.as_bytes(), native.as_bytes());
     }
 }

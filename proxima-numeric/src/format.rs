@@ -26,6 +26,7 @@
 use crate::block_layout::{BlockLayout, Field, Plane};
 use crate::dtype::DType;
 use crate::float_layout::FloatLayout;
+use crate::float_layout_codec::SOURCE_LAYOUT;
 
 /// The level set a code selects, when it is not the code's own [`FloatLayout`] value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -343,6 +344,18 @@ impl NumericFormat {
             (Self::Scalar(layout), Self::Scalar(wider)) => layout.is_identity_of(wider),
             _ => false,
         }
+    }
+
+    /// The format the slice decoders emit: the element a decoded view holds.
+    #[must_use]
+    pub const fn host_element() -> Self {
+        Self::Scalar(SOURCE_LAYOUT)
+    }
+
+    /// Whether a run in this format already is the decoded element, bit for bit.
+    #[must_use]
+    pub const fn is_host_element(&self) -> bool {
+        self.is_identity_of(&Self::host_element())
     }
 
     /// The block's own scale layout, `None` for a scalar format (which *is* its own value).

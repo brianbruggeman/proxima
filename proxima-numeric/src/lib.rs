@@ -46,6 +46,8 @@ pub mod block_layout;
 pub mod codec {
     pub use crate::format::NumericFormat as Codec;
 }
+#[cfg(feature = "alloc")]
+pub mod compare;
 pub mod convert;
 pub mod decode;
 pub mod dtype;
