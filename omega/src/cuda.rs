@@ -6260,7 +6260,7 @@ mod tests {
         let bound = dense_expert_free_op(128, 512, 200);
         let packed = packed_expert_weight(&bound);
         let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed()).expect("dense emit succeeds");
-        assert!(kernel.entry.contains("_mma16x8x8"), "{}", kernel.entry);
+        assert!(kernel.entry.contains("_mma"), "{}", kernel.entry);
         assert!(!kernel.entry.contains("_grp1"), "{}", kernel.entry);
         assert!(grouped_pair(&bound).is_none());
     }

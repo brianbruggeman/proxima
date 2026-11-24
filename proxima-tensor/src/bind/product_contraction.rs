@@ -15,6 +15,8 @@ pub struct ProductContraction {
     pub token_total: u64,
     pub reduction_extent: u64,
     pub gathered_operands: usize,
+    /// Whether the weight operand is the one that reads through a gather.
+    pub weight_gathered: bool,
 }
 
 /// Whether `body` is exactly one multiply of operands `first` and `second`, in either order.
@@ -131,6 +133,7 @@ pub fn product_contraction(bound: &BoundOp, weight: usize) -> Option<ProductCont
         token_total: split.token_total,
         reduction_extent: split.reduction_extent,
         gathered_operands: gathered_operand_count(bound),
+        weight_gathered: weight_operand.2.is_some(),
     })
 }
 
@@ -146,7 +149,7 @@ pub enum ContractionForm {
 }
 
 /// The one choice between tiled, grouped and row-wise execution: a gathered
-/// weight whose route follows the token axes takes the grouped form, a dense weight the
+/// weight, the only gathered operand, whose route follows the token axes takes the grouped form, a dense weight the
 /// tiled one, each only when `executes` grants the form and the token rows
 /// reach its minimum.
 #[must_use]
@@ -155,7 +158,9 @@ pub fn contraction_form(facts: &ProductContraction, executes: &Executes) -> Cont
         return ContractionForm::Rowwise;
     };
     if facts.gathered_operands > 0 {
-        let grouped = executes.forms.contains(Form::GroupedContraction)
+        let grouped = facts.gathered_operands == 1
+            && facts.weight_gathered
+            && executes.forms.contains(Form::GroupedContraction)
             && facts.token_total >= limits.grouped_min_tokens;
         return if grouped { ContractionForm::Grouped } else { ContractionForm::Rowwise };
     }
@@ -410,6 +415,21 @@ mod tests {
             .with(Form::TiledContraction)
             .with_contraction(ContractionLimits::tiled_only(1));
         assert_eq!(contraction_form(&facts, &tiled_only), ContractionForm::Rowwise);
+    }
+
+    #[test]
+    fn a_gathered_weight_is_flagged_and_a_second_gathered_operand_is_rowwise() {
+        let facts = facts_of(&gathered_program(), 0);
+        assert!(facts.weight_gathered);
+        let two = ProductContraction { gathered_operands: 2, ..facts };
+        assert_eq!(contraction_form(&two, &contraction_executes(2)), ContractionForm::Rowwise);
+    }
+
+    #[test]
+    fn a_gathered_activation_with_a_dense_weight_is_rowwise() {
+        let facts = facts_of(&gathered_program(), 0);
+        let activation_gathered = ProductContraction { weight_gathered: false, ..facts };
+        assert_eq!(contraction_form(&activation_gathered, &contraction_executes(2)), ContractionForm::Rowwise);
     }
 
     #[test]

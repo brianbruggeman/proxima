@@ -146,7 +146,7 @@ pub(super) fn mma_gemm_plan_for(
     let eligible = resolved.dtype == DType::FLOAT32
         && epilogue_broadcast_axes.is_empty()
         && (contraction.gathered_operands == 0) == (form == ContractionForm::Tiled)
-        && (form == ContractionForm::Tiled || (contraction.gathered_operands == 1 && operands[weight].2.is_some()))
+        && (form == ContractionForm::Tiled || (contraction.gathered_operands == 1 && contraction.weight_gathered))
         && flat_packed_rows(resolved, quantized)
         && reduce_is_cooperative(resolved, quantized, numeric_policy)
         && !reduction_dims(resolved, output_axes).is_empty()
