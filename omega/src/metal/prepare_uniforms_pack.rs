@@ -409,6 +409,10 @@ fn prepare_bound(
     if std::env::var_os("PROXIMA_DISABLE_TWIN_ELEMENTWISE_FUSION").is_none() {
         resolved = fuse_twin_elementwise(resolved, program);
     }
+    // last rewrite of the bound ops: every matcher above (cached attention, twin fusion, packed
+    // layout correction) has already read the original axes, and everything below (schedule,
+    // retirement, kernel selection, emission, dispatch) sees one coalesced view of each fold
+    coalesce_reduce_dims(&mut resolved);
     #[cfg(feature = "instrument")]
     counter!(PREPARE_OPTIMIZE_TICKS, elapsed_ticks(optimize_started));
 
@@ -460,6 +464,22 @@ fn prepare_bound(
         #[cfg(feature = "instrument")]
         repeat_verify_pairs,
     })
+}
+
+/// Replaces each `Keep::Reduce` fold with its [`coalesce_dims`] form, so a contraction the binder
+/// spelled over several narrow axes (a conv's `(g, c)` and `(t, in_g, in_c)` factoring) reaches
+/// kernel selection as the one wide fold it addresses. Only the view is rewritten: node ids and
+/// buffers are untouched. Runs after `correct_packed_matmul_layouts`, so a packed weight's
+/// corrected strides are what the contiguity check reads.
+fn coalesce_reduce_dims(resolved: &mut [BoundOp]) {
+    for bound in resolved.iter_mut() {
+        if !matches!(bound.kind, BoundOpKind::Reduce { .. }) {
+            continue;
+        }
+        if let Some(coalesced) = coalesce_dims(bound) {
+            *bound = coalesced;
+        }
+    }
 }
 
 pub(super) fn live_block_inputs(
