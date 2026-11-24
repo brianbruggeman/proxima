@@ -2181,6 +2181,11 @@ fn q4k_row_blocked_non_add_reduce_keeps_the_per_element_path() {
 #[cfg(feature = "metal-tiled-gemm")]
 pub(super) const TILED_ADMITTED_TOKENS: u32 = crate::sized::TILED_GEMM_MIN_TOKENS as u32;
 
+/// a feature extent that fills the configured tile's `block_m`; any smaller extent clamps the tile
+/// below the geometry the mm layout requires.
+#[cfg(feature = "metal-tiled-gemm")]
+pub(super) const TILED_FULL_TILE_FEATURES: u32 = TiledGemmTile::CONFIGURED.block_m as u32;
+
 /// Batch depth that fills the dense tile grid to the build's own minimum, so a one-tile fixture is
 /// admitted by the grid gate (`DenseBatchedGemmRejection::GridBelowMinimum`) the way a real batched
 /// product is.
@@ -4510,7 +4515,7 @@ fn mm_layout_loads_fragments_untransposed_and_stores_the_accumulators_transposed
 fn mm_layout_reads_a_unit_stride_activation_at_k0_and_a_strided_one_through_the_accessor() {
     let (unit_bound, unit_weight) = real_shaped_tiled_gemm_op(TILED_ADMITTED_TOKENS, 1536, 128);
     let unit_codecs = BTreeMap::from([(unit_weight, Codec::Q4K)]);
-    let strided_bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
+    let strided_bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, TILED_FULL_TILE_FEATURES);
     let strided_codecs = BTreeMap::from([(strided_bound.operands()[0].0, Codec::Q4K)]);
     let render = |bound: &BoundOp, codecs: &BTreeMap<NodeId, Codec>, wide_activation: bool| {
         let knobs = EmitKnobs::default()
@@ -10097,7 +10102,7 @@ mod tiled_decode_description {
     }
 
     fn dense_source(codec: Codec, schedule: &EmitKnobs) -> String {
-        let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
+        let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, TILED_FULL_TILE_FEATURES);
         let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
         emit_with_knobs(&bound, &packed, NumericPolicy::default(), schedule)
             .unwrap_or_else(|error| panic!("{codec:?} emits a tiled kernel: {error}"))
@@ -10225,7 +10230,7 @@ mod tiled_decode_description {
     async fn a_described_codec_at_prefill_width_is_admitted_and_stages_through_its_own_description(
         #[case] codec: Codec,
     ) {
-        let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
+        let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, TILED_FULL_TILE_FEATURES);
         let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
         let block = tiled_gemm_block(
             &bound,
@@ -12393,7 +12398,14 @@ fn router_bf16_tile_stages_weights_and_activations_with_wide_loads() {
     assert!(source.contains("= bfloat(0.0f); }"), "{source}");
     assert!(source.contains("float2x4 a_value = *((device const float2x4 *)("), "the activation loads as one float2x4\n{source}");
     assert!(source.contains("*((threadgroup matrix<bfloat, 2, 4> *)a_dst) = matrix<bfloat, 2, 4>(a_value);"), "one bf16 store as wide as the tile type times the lanes\n{source}");
-    assert!(!source.contains("for (long idx = tiitg; idx < 1024;"), "no strided scalar activation loop\n{source}");
+    let tile = TiledGemmTile::CONFIGURED;
+    let act_tile_elems = tile.block_n * tile.block_k;
+    let block_threads = (TILED_GEMM_NSG as u64) * SIMD_WIDTH;
+    let scalar_stage = format!(
+        "for (long idx = tiitg; idx < {act_tile_elems}; idx += {block_threads}) {{\n            long a_col = idx / {};",
+        tile.block_k
+    );
+    assert!(!source.contains(&scalar_stage), "no strided scalar activation loop\n{source}");
     if let Ok(dir) = std::env::var("PROXIMA_STAGE_DUMP_DIR") {
         std::fs::write(format!("{dir}/dense_router_bf16_stage.metal"), &source).expect("writes the router MSL dump");
     }
