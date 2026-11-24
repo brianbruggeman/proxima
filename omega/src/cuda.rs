@@ -6301,6 +6301,38 @@ mod tests {
         }
     }
 
+
+    fn int8_grouped_codecs() -> impl Iterator<Item = Codec> {
+        grouped_codecs().filter(|codec| is_int8_weight(*codec))
+    }
+
+    fn int8_grouped_pair(bound: &BoundOp, codec: Codec) -> Option<([CudaKernel; 2], usize)> {
+        let mut packed = packed_expert_weight(bound, codec);
+        packed.insert(bound.operands()[1].0, Codec::Q8_1Grouped);
+        let policy = NumericPolicy::llama_relaxed().with_activation_quantization(true);
+        emit_cuda_grouped_on_device(bound, &packed, policy, EmitDevice::default()).expect("grouped emit succeeds")
+    }
+
+    #[test]
+    fn a_gathered_expert_product_over_a_prequantized_activation_renders_the_grouped_kernel_on_the_int8_tile() {
+        let slots = u32::try_from(crate::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS).expect("minimum fits") + 8;
+        let bound = stacked_expert_op(8, 128, 512, slots);
+        assert!(int8_grouped_codecs().count() > 0, "the int8 table accepts codecs");
+        for codec in int8_grouped_codecs() {
+            let (kernels, words) = int8_grouped_pair(&bound, codec).unwrap_or_else(|| panic!("the grouped form is taken for {codec:?}"));
+            let [prepass, grouped] = kernels;
+            assert!(prepass.entry.ends_with("_route_prepass"), "{}", prepass.entry);
+            assert!(grouped.entry.contains("_grp1"), "{}", grouped.entry);
+            assert!(grouped.source.contains("mma_s8("), "{codec:?}: the int8 mma is the tile");
+            assert!(grouped.source.contains("act_tile"), "{codec:?}: the activation stages as int8 codes");
+            assert!(!grouped.source.contains("act_high"), "{codec:?}: no float activation tile");
+            assert!(grouped.source.contains("tile_list[token]"), "{codec:?}: activation rows come through the compacted list");
+            assert!(grouped.source.contains("grouped_expert * u.gather_element_stride[0]"), "{codec:?}: the weight is read at the slice's expert");
+            assert!(prepass.source.contains("__ballot_sync"), "{codec:?}: the prepass ranks rows by ballot");
+            assert!(words > 0);
+        }
+    }
+
     #[test]
     fn the_plain_emit_of_a_grouped_product_is_the_grouped_kernel_with_its_prepass_as_the_prologue() {
         let slots = u32::try_from(crate::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS).expect("minimum fits") + 8;

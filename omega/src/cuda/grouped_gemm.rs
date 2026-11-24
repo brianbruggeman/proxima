@@ -14,7 +14,7 @@ use proxima_numeric::NumericPolicy;
 use proxima_tensor::{BoundOp, BoundOpKind, ContractionForm, Executes, product_contraction};
 
 use super::mma_gemm::{
-    FEATURE_TILE, GEMM_THREADS, MmaGemm, TOKEN_TILE, grouped_contraction_grant, mma_gemm_plan_for, weight_slot,
+    GEMM_THREADS, MmaGemm, gemm_tiles, grouped_contraction_grant, mma_gemm_plan_for, weight_slot,
 };
 use super::{Codec, CudaGridSpec, CudaKernel, EmitError, gather_slots};
 use crate::lowering::Binding;
@@ -98,6 +98,7 @@ pub(super) fn prepass_source(resolved: &BoundOp, plan: &GroupedGemm, entry: &str
     let slot = plan.route.slot;
     let weight = plan.gemm.weight;
     let header = COUNT_HEADER_WORDS;
+    let (_, token_tile) = gemm_tiles(&plan.gemm);
     let mut fetch = String::new();
     fetch.push_str(&format!(
         "            long long rest = entry;\n            long long gather_off = u.gather_index_base[{slot}];\n"
@@ -130,7 +131,7 @@ pub(super) fn prepass_source(resolved: &BoundOp, plan: &GroupedGemm, entry: &str
         "            }}\n            fetched{weight} = live ? max((long long)0, min(fetched{weight}, u.gather_extent[{slot}] - 1)) : -1ll;\n            tally += __popc(__ballot_sync(PROXIMA_ALL_LANES, fetched{weight} == expert));\n        }}\n        if (lane == 0) {{ route_compaction[{header}ll + expert] = tally; }}\n    }}\n    __syncthreads();\n"
     ));
     source.push_str(&format!(
-        "    if (tid == 0) {{\n        unsigned int running = 0u;\n        unsigned int tile_running = 0u;\n        for (long long expert = 0; expert < experts; ++expert) {{\n            const unsigned int rows = route_compaction[{header}ll + expert];\n            const unsigned int expert_tiles = (rows + {TOKEN_TILE}u - 1u) / {TOKEN_TILE}u;\n            route_compaction[{header}ll + experts + expert] = running;\n            route_compaction[tile_start_base + expert] = tile_running;\n            for (unsigned int tile = 0u; tile < expert_tiles; ++tile) {{ route_compaction[tile_expert_base + tile_running + tile] = (unsigned int)expert; }}\n            tile_running += expert_tiles;\n            running += rows;\n        }}\n        route_compaction[0] = running;\n    }}\n    __syncthreads();\n"
+        "    if (tid == 0) {{\n        unsigned int running = 0u;\n        unsigned int tile_running = 0u;\n        for (long long expert = 0; expert < experts; ++expert) {{\n            const unsigned int rows = route_compaction[{header}ll + expert];\n            const unsigned int expert_tiles = (rows + {token_tile}u - 1u) / {token_tile}u;\n            route_compaction[{header}ll + experts + expert] = running;\n            route_compaction[tile_start_base + expert] = tile_running;\n            for (unsigned int tile = 0u; tile < expert_tiles; ++tile) {{ route_compaction[tile_expert_base + tile_running + tile] = (unsigned int)expert; }}\n            tile_running += expert_tiles;\n            running += rows;\n        }}\n        route_compaction[0] = running;\n    }}\n    __syncthreads();\n"
     ));
     source.push_str(&format!(
         "    for (long long expert = warp; expert < experts; expert += warps) {{\n        unsigned int placed = 0u;\n        const unsigned int offset = route_compaction[{header}ll + experts + expert];\n        for (long long base = 0; base < tokens; base += 32) {{\n            const long long entry = base + lane;\n            const bool live = entry < tokens;\n{fetch}            fetched{weight} = live ? max((long long)0, min(fetched{weight}, u.gather_extent[{slot}] - 1)) : -1ll;\n            const bool hit = fetched{weight} == expert;\n            const unsigned int votes = __ballot_sync(PROXIMA_ALL_LANES, hit);\n            if (hit) {{ route_compaction[list_base + offset + placed + __popc(votes & ((1u << lane) - 1u))] = (unsigned int)entry; }}\n            placed += __popc(votes);\n        }}\n    }}\n}}\n"
@@ -144,7 +145,7 @@ fn push_fault(source: &mut String, weight: usize, slot: usize) {
 
 /// Words of the compaction buffer the host binds after the kernel's own bindings.
 pub(super) fn compaction_buffer_words(plan: &GroupedGemm) -> usize {
-    compaction_words(COUNT_HEADER_WORDS, plan.tokens, plan.experts, TOKEN_TILE as u64, 0) as usize
+    compaction_words(COUNT_HEADER_WORDS, plan.tokens, plan.experts, gemm_tiles(&plan.gemm).1 as u64, 0) as usize
 }
 
 pub(super) fn grouped_threads(resolved: &BoundOp, plan: &GroupedGemm) -> u64 {
@@ -152,7 +153,8 @@ pub(super) fn grouped_threads(resolved: &BoundOp, plan: &GroupedGemm) -> u64 {
         return 0;
     };
     let features: u64 = plan.gemm.feature_positions.iter().map(|&position| resolved.extents[output_axes[position] as usize]).product();
-    features.div_ceil(FEATURE_TILE as u64) * tile_upper_bound(plan.tokens, plan.experts, TOKEN_TILE as u64) * GEMM_THREADS
+    let (feature_tile, token_tile) = gemm_tiles(&plan.gemm);
+    features.div_ceil(feature_tile as u64) * tile_upper_bound(plan.tokens, plan.experts, token_tile as u64) * GEMM_THREADS
 }
 
 pub(super) fn prepass_grid(resolved: &BoundOp) -> Result<CudaGridSpec, EmitError> {

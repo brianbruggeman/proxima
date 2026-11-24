@@ -10,11 +10,12 @@ use alloc::format;
 use alloc::string::String;
 
 use proxima_numeric::block_layout::BlockLayout;
-use proxima_tensor::{BoundOp, Layout};
+use proxima_tensor::{BoundOp, BoundOpKind, Layout};
 use proxima_numeric::{NumericPolicy};
 
 use super::block_dot::{BlockDot, ChunkTerms, DOT_ELEMENTS, block_dot_i8};
 use super::block_quantize::consumer_missing;
+use super::grouped_gemm::{GroupedRoute, push_grouped_tile_origin};
 use super::mma_gemm::{MmaGemm, push_output_write, push_tile_origin};
 use super::{Codec, EmitError, reduction_dims};
 
@@ -202,8 +203,9 @@ fn activation_term_statements(int8: &Int8Gemm, scale: &str) -> (String, String, 
     (declare, compute, store)
 }
 
-fn push_stage_weight(source: &mut String, plan: &MmaGemm, int8: &Int8Gemm) {
+fn push_stage_weight(source: &mut String, plan: &MmaGemm, int8: &Int8Gemm, route: Option<&GroupedRoute>) {
     let weight = plan.weight;
+    let expert_term = route.map_or_else(String::new, |route| format!(" + grouped_expert * u.gather_element_stride[{}]", route.slot));
     let (weight_declare, weight_compute, weight_store) = weight_scale_statements(int8);
     let (name, elements, block_bytes) = (&int8.dot.name, int8.dot.elements, int8.dot.block_bytes);
     let (chunks, items) = (int8.chunks, int8.chunks * INT8_FEATURE_TILE);
@@ -215,7 +217,7 @@ fn push_stage_weight(source: &mut String, plan: &MmaGemm, int8: &Int8Gemm) {
          \x20           int words[8] = {{0, 0, 0, 0, 0, 0, 0, 0}};\n\
 {weight_declare}\
          \x20           if (feature < feature_total) {{\n\
-         \x20               const long long element = u.operand_base[{weight}] + feature * u.reduction_total + slab_first + chunk * 32;\n\
+         \x20               const long long element = u.operand_base[{weight}]{expert_term} + feature * u.reduction_total + slab_first + chunk * 32;\n\
          \x20               const unsigned char *block = in{weight} + (element / {elements}) * {block_bytes};\n\
          \x20               {name}_i8x32(block, (unsigned int)(element % {elements}) / 32u, words);\n\
 {weight_compute}\
@@ -228,7 +230,32 @@ fn push_stage_weight(source: &mut String, plan: &MmaGemm, int8: &Int8Gemm) {
     ));
 }
 
-fn push_stage_activation(source: &mut String, activation: usize, int8: &Int8Gemm) {
+/// The C statements that bound a staged token row and declare `group`, the first 32-element group of its slab: dense rows address by token count, routed rows through the compacted list and the operand strides.
+fn activation_group_statements(plan: &MmaGemm, output_axes: &[u16], route: Option<&GroupedRoute>) -> (String, String, String) {
+    let activation = plan.activation;
+    if route.is_none() {
+        return (
+            "token_first + token_local".to_owned(),
+            "token_total".to_owned(),
+            "                const long long group = token * (u.reduction_total / 32) + slab_first / 32 + chunk;\n".to_owned(),
+        );
+    }
+    let mut statements = format!(
+        "                long long token_rest = (long long)tile_list[token];\n                long long token_element = u.operand_base[{activation}];\n"
+    );
+    for &position in plan.token_positions.iter().rev() {
+        let axis = output_axes[position];
+        statements.push_str(&format!(
+            "                token_element += (token_rest % u.output_extents[{position}]) * u.operand_strides[{activation}][{axis}]; token_rest /= u.output_extents[{position}];\n"
+        ));
+    }
+    statements.push_str("                const long long group = (token_element + slab_first) / 32 + chunk;\n");
+    ("token_local".to_owned(), "tile_count".to_owned(), statements)
+}
+
+fn push_stage_activation(source: &mut String, plan: &MmaGemm, output_axes: &[u16], int8: &Int8Gemm, route: Option<&GroupedRoute>) {
+    let activation = plan.activation;
+    let (token_expr, token_limit, group_statements) = activation_group_statements(plan, output_axes, route);
     let (chunks, layout) = (int8.chunks, &int8.activation);
     let items = chunks * INT8_TOKEN_TILE;
     let block = activation_block_offset(layout, "group");
@@ -239,12 +266,12 @@ fn push_stage_activation(source: &mut String, activation: usize, int8: &Int8Gemm
         "        for (int item = tid; item < {items}; item += {INT8_THREADS}) {{\n\
          \x20           const int token_local = item / {chunks};\n\
          \x20           const int chunk = item % {chunks};\n\
-         \x20           const long long token = token_first + token_local;\n\
+         \x20           const long long token = {token_expr};\n\
          \x20           uint4 low = make_uint4(0u, 0u, 0u, 0u);\n\
          \x20           uint4 high = make_uint4(0u, 0u, 0u, 0u);\n\
 {act_declare}\
-         \x20           if (token < token_total) {{\n\
-         \x20               const long long group = token * (u.reduction_total / 32) + slab_first / 32 + chunk;\n\
+         \x20           if (token < {token_limit}) {{\n\
+{group_statements}\
          \x20               const unsigned char *bytes = in{activation} + {block};\n\
          {codes}\
          \x20               low = activation_low;\n\
@@ -375,21 +402,38 @@ pub(super) fn push_int8_gemm_body(
     plan: &MmaGemm,
     int8: &Int8Gemm,
     element_type: &str,
+    route: Option<&GroupedRoute>,
 ) -> Result<(), EmitError> {
+    let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "keep::reduce fold",
+            found: resolved.kind.name(),
+        });
+    };
     push_tile_origin(source, plan, INT8_FEATURE_TILE, INT8_TOKEN_TILE);
+    if let Some(route) = route {
+        push_grouped_tile_origin(source, route, INT8_TOKEN_TILE);
+    }
     push_declarations(source, int8);
     let slab = int8.chunks * DOT_ELEMENTS;
     source.push_str(&format!(
         "    for (long long slab_first = 0; slab_first < u.reduction_total; slab_first += {slab}) {{\n"
     ));
-    push_stage_weight(source, plan, int8);
-    push_stage_activation(source, plan.activation, int8);
+    push_stage_weight(source, plan, int8, route);
+    push_stage_activation(source, plan, output_axes, int8, route);
     source.push_str("        __syncthreads();\n");
     match int8.dot.chunk_terms {
         Some(terms) => push_compute_terms(source, int8.chunks, terms),
         None => push_compute(source, int8.chunks),
     }
     source.push_str("        __syncthreads();\n    }\n");
+    let local_token = "warp_token * 32 + col * 8 + quad * 2 + pair";
+    let token_expr = if route.is_some() {
+        format!("(({local_token}) < tile_count ? (long long)tile_list[{local_token}] : token_total)")
+    } else {
+        format!("token_first + {local_token}")
+    };
     push_output_write(
         source,
         resolved,
@@ -397,6 +441,6 @@ pub(super) fn push_int8_gemm_body(
         element_type,
         "        const int row = index >> 3;\n        const int col = (index >> 1) & 3;\n        const int pair = index & 1;\n",
         "feature_first + warp_feature * 32 + row * 8 + group",
-        "token_first + warp_token * 32 + col * 8 + quad * 2 + pair",
+        &token_expr,
     )
 }

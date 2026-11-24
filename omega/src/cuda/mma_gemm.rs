@@ -167,7 +167,7 @@ pub(super) fn mma_gemm_plan_for(
     let served = prequantized.is_none() || int8.is_some();
     let tiled_form = form == ContractionForm::Tiled;
     let several_tokens = tiled || (tiled_form && prequantized.is_some());
-    (served && (tiled_form || int8.is_none()) && !feature_positions.is_empty() && !token_positions.is_empty() && several_tokens).then_some(
+    (served && !feature_positions.is_empty() && !token_positions.is_empty() && several_tokens).then_some(
         MmaGemm {
             weight,
             activation,
@@ -389,7 +389,7 @@ pub(super) fn push_mma_gemm_body(
         });
     };
     if let Some(int8) = &plan.int8 {
-        return push_int8_gemm_body(source, resolved, plan, int8, element_type);
+        return push_int8_gemm_body(source, resolved, plan, int8, element_type, route);
     }
     let shape = codec_shape(plan.codec).ok_or(EmitError::CudaUnsupportedCodec {
         node: resolved.node,
