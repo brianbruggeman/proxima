@@ -390,6 +390,16 @@ fn emit_sizing_consts() {
         "pub const UNIFORM_CACHE_ENTRIES: u64 = {uniform_cache_entries};\n"
     ));
 
+    if env::var_os("CARGO_FEATURE_CUDA").is_some() {
+        let cuda_tiled_min_tokens = require_nonzero(
+            "contraction.cuda_tiled_min_tokens",
+            resolve_int(&root, "contraction", "cuda_tiled_min_tokens"),
+        );
+        out.push_str(&format!(
+            "pub const CUDA_TILED_CONTRACTION_MIN_TOKENS: u64 = {cuda_tiled_min_tokens};\n"
+        ));
+    }
+
     if env::var_os("CARGO_FEATURE_METAL_TILED_GEMM").is_some() {
         let min_tokens = require_nonzero(
             "tiled_gemm.min_tokens",

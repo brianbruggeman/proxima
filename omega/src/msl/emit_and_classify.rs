@@ -3662,9 +3662,6 @@ pub enum TiledGemmRejection {
     /// The token group holds more axes than the grouped kernel decomposes a
     /// flat token index into (`GROUPED_MAX_TOKEN_AXES`).
     GatheredTokenAxesTooMany { axes: usize },
-    /// The route index has a nonzero stride on an axis outside the token
-    /// group, so one token would name several experts.
-    GatheredIndexNotTokenOnly,
     /// The activation is not unit-stride along the reduction axis, which the
     /// grouped kernel's vector loads of an activation row assume.
     GatheredActivationNotUnitStride,
@@ -3804,7 +3801,7 @@ pub(super) fn classify_tiled_gemm(
         // limit" was this fold, not yet written).
         let weight_layout = &resolved.operands()[weight].1;
         let other_layout = &resolved.operands()[other].1;
-        let (token_axes, feature_axes) = split_tiled_axes(resolved, weight, other, output_axes, gathered.is_some())?;
+        let (contraction, token_axes, feature_axes) = split_tiled_axes(resolved, weight, output_axes)?;
         if token_axes.is_empty() || feature_axes.is_empty() {
             return Err(TiledGemmRejection::AxisOwnershipAmbiguous);
         }
@@ -3852,7 +3849,7 @@ pub(super) fn classify_tiled_gemm(
             return Err(TiledGemmRejection::AxisGroupNotContiguous);
         }
         if let Some(gather) = gathered.as_mut() {
-            expert_route_follows_token_axes(resolved, weight, &token_axes)?;
+            grouped_token_axes_fit(&token_axes)?;
             gather.route_flat = resolved.operands()[weight]
                 .2
                 .as_ref()
@@ -3871,13 +3868,9 @@ pub(super) fn classify_tiled_gemm(
                 return Err(TiledGemmRejection::GatheredActivationNotUnitStride);
             }
         }
-        let token_extent: u64 = token_axes
-            .iter()
-            .map(|&axis| resolved.extents[axis as usize])
-            .product();
-        if token_extent < crate::sized::TILED_GEMM_MIN_TOKENS {
+        if contraction_form(&contraction, &with_contraction_grants(Executes::BASE)) == ContractionForm::Rowwise {
             return Err(TiledGemmRejection::TokenExtentBelowMinimum {
-                token_extent,
+                token_extent: contraction.token_total,
                 min_tokens: crate::sized::TILED_GEMM_MIN_TOKENS,
             });
         }
@@ -3906,35 +3899,18 @@ pub(super) fn classify_tiled_gemm(
     }
 }
 
-/// A dense product's axis ownership is the shared derivation; only a gathered
-/// weight adds routed axes, where the expert route (not the weight stride)
-/// makes an axis a token axis.
+/// Axis ownership, routed axes included, is the shared derivation.
 #[cfg(feature = "metal-tiled-gemm")]
 fn split_tiled_axes(
     resolved: &BoundOp,
     weight: usize,
-    other: usize,
     output_axes: &[u16],
-    gathered: bool,
-) -> Result<(Vec<u16>, Vec<u16>), TiledGemmRejection> {
-    if !gathered {
-        let contraction = product_contraction(resolved, weight).ok_or(TiledGemmRejection::AxisOwnershipAmbiguous)?;
-        let axes_at = |positions: &[usize]| positions.iter().map(|&position| output_axes[position]).collect();
-        return Ok((axes_at(&contraction.token_positions), axes_at(&contraction.feature_positions)));
-    }
-    let weight_layout = &resolved.operands()[weight].1;
-    let other_layout = &resolved.operands()[other].1;
-    let mut token_axes: Vec<u16> = Vec::new();
-    let mut feature_axes: Vec<u16> = Vec::new();
-    for &axis in output_axes {
-        let routed = expert_route_stride(resolved, weight, axis) != 0;
-        match (weight_layout.stride(axis) == 0, other_layout.stride(axis) == 0, routed) {
-            (true, false, _) | (true, true, true) => token_axes.push(axis),
-            (false, true, false) => feature_axes.push(axis),
-            _ => return Err(TiledGemmRejection::AxisOwnershipAmbiguous),
-        }
-    }
-    Ok((token_axes, feature_axes))
+) -> Result<(ProductContraction, Vec<u16>, Vec<u16>), TiledGemmRejection> {
+    let contraction = product_contraction(resolved, weight).ok_or(TiledGemmRejection::AxisOwnershipAmbiguous)?;
+    let axes_at = |positions: &[usize]| -> Vec<u16> { positions.iter().map(|&position| output_axes[position]).collect() };
+    let token_axes = axes_at(&contraction.token_positions);
+    let feature_axes = axes_at(&contraction.feature_positions);
+    Ok((contraction, token_axes, feature_axes))
 }
 
 /// Whether the weight is a gathered expert slab the grouped tiled path can
@@ -3979,31 +3955,16 @@ fn expert_route_stride(resolved: &BoundOp, weight: usize, axis: u16) -> i64 {
         .map_or(0, |lookup| lookup.index_layout.stride(axis))
 }
 
-/// The grouped scan names one expert per flat token, so the route index may
-/// move along the token axes only and must be constant along every other axis
-/// (feature and reduce included). Token axes beyond `GROUPED_MAX_TOKEN_AXES`
-/// are refused: the kernel decomposes a flat token into one coordinate each.
+/// The grouped kernel decomposes a flat token into one coordinate per token axis,
+/// so a token group wider than `GROUPED_MAX_TOKEN_AXES` is refused.
 #[cfg(feature = "metal-tiled-gemm")]
-fn expert_route_follows_token_axes(
-    resolved: &BoundOp,
-    weight: usize,
-    token_axes: &[u16],
-) -> Result<(), TiledGemmRejection> {
+fn grouped_token_axes_fit(token_axes: &[u16]) -> Result<(), TiledGemmRejection> {
     if token_axes.len() > GROUPED_MAX_TOKEN_AXES {
         return Err(TiledGemmRejection::GatheredTokenAxesTooMany {
             axes: token_axes.len(),
         });
     }
-    if resolved.operands()[weight].2.is_none() {
-        return Err(TiledGemmRejection::GatheredIndexNotTokenOnly);
-    }
-    let follows_token_only = (0..resolved.extents.len() as u16)
-        .all(|axis| token_axes.contains(&axis) || expert_route_stride(resolved, weight, axis) == 0);
-    if follows_token_only {
-        Ok(())
-    } else {
-        Err(TiledGemmRejection::GatheredIndexNotTokenOnly)
-    }
+    Ok(())
 }
 
 /// `true` only when [`push_tiled_gemm_body`] actually renders its `Codec::

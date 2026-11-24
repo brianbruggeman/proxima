@@ -75,7 +75,7 @@ use proxima_tensor::{
     BoundOp, BoundOpKind, ComposedBody, Keep, Layout, Lookup, NodeId, ReduceInit, ScalarOp, is_product_of,
 };
 #[cfg(feature = "metal-tiled-gemm")]
-use proxima_tensor::product_contraction;
+use proxima_tensor::{ContractionForm, Executes, ProductContraction, contraction_form, product_contraction};
 #[cfg(test)]
 use proxima_tensor::StepArg;
 use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
@@ -141,6 +141,8 @@ mod packed_layout;
 mod q4_0_planes;
 #[macro_use]
 mod tiled_gemm_cooperative_scan;
+#[cfg(feature = "metal-tiled-gemm")]
+mod contraction_grant;
 mod expert_grouped_gemm;
 mod index_narrowing;
 pub mod encode_render;
@@ -168,6 +170,8 @@ pub(crate) use emit_and_classify::validate_attention_variant_storage;
 pub use emit_and_classify::*;
 pub use emit_knobs::{EmitKnobs, ReductionLiteral};
 pub use expert_grouped_gemm::GroupedGemmFormats;
+#[cfg(feature = "metal-tiled-gemm")]
+pub(crate) use contraction_grant::with_contraction_grants;
 pub use kernel_types_identity::*;
 pub use signature_tokens_prelude::CachedAttentionForm;
 pub use signature_tokens_prelude::context_chunks_for;

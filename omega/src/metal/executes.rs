@@ -1,5 +1,8 @@
 use proxima_tensor::{Executes, Form};
 
+#[cfg(feature = "metal-tiled-gemm")]
+use crate::msl::with_contraction_grants;
+
 /// What the Metal renderer executes, as the value the binder admits fusions by.
 ///
 /// Composes [`proxima_tensor::Executes`], the same value `crate::cuda::executes`
@@ -23,9 +26,17 @@ pub fn executes() -> Executes {
         .with(Form::GatedDeltaNet)
         .with(Form::MoeTopK)
         .with(Form::TopFractionSelect);
-    if cfg!(feature = "metal-moe-mul-mat-id") {
+    let granted = if cfg!(feature = "metal-moe-mul-mat-id") {
         granted.with(Form::RoundBatchedReduce)
     } else {
+        granted
+    };
+    #[cfg(feature = "metal-tiled-gemm")]
+    {
+        with_contraction_grants(granted)
+    }
+    #[cfg(not(feature = "metal-tiled-gemm"))]
+    {
         granted
     }
 }

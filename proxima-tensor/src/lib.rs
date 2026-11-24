@@ -270,14 +270,14 @@ pub use align::AlignedBuffer;
 pub use bind::bind_with_top_fraction;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use bind::{
-    ActivationLimits, BodyStep, BoundOp, BoundOpBuilder, BoundOpKind, CachedAttentionArithmetic, ComposedBody, DeviceLimits, DeviceMemory, Executes, Form, FormSet, Layout, Lookup,
+    ActivationLimits, BodyStep, BoundOp, BoundOpBuilder, BoundOpKind, CachedAttentionArithmetic, ComposedBody, ContractionLimits, DeviceLimits, DeviceMemory, Executes, Form, FormSet, Layout, Lookup,
     MoeWeighting, Refusal, StepArg, bind,
     bind_unfused, bind_with_fusion, bind_with_fusion_for, bind_without_reduce_epilogue_fusion, block_node_ids,
     correct_packed_matmul_layouts, dead_resolved_nodes, decode_split_shape_fits, fuse_twin_elementwise, index_node_ids,
     node_last_reader, node_retirement, op_read_nodes, prune_dead, refit_cached_attention_rows, touches_changed,
 };
 #[cfg(any(feature = "std", feature = "alloc"))]
-pub use bind::{ProductContraction, changed_nodes, gathered_operand_count, is_product_of, product_contraction, refit_cached_attention_at, touched_positions};
+pub use bind::{ContractionForm, ProductContraction, contraction_form, changed_nodes, gathered_operand_count, is_product_of, product_contraction, refit_cached_attention_at, touched_positions};
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use bind::{
     ACTIVATION_GROUP_ELEMENTS, Missing, activation_is_flat, collapsed_extent, derive_activation_quantize, is_derived,

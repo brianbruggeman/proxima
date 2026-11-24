@@ -92,6 +92,12 @@ level_stage_budget_bytes = 32768
 # per-process, 0 or a power of two `<= 32`, via `PROXIMA_PACKED_LANE_RUN_BYTES`.
 lane_run_bytes = 0
 
+[contraction]
+# the CUDA tensor-core tiled path (`mma_gemm_plan`) runs once at least this many
+# activation rows share a weight; a single row keeps the matvec body. emitted only
+# when the `cuda` feature is active. 2 is the first count that is more than one row.
+cuda_tiled_min_tokens = 2
+
 [tiled_gemm]
 # below this many activation rows (tokens) in one dispatch, the row-blocked
 # packed-matmul kernel (`push_packed_row_blocked_body`) runs instead of the

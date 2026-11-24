@@ -31,6 +31,13 @@ pub enum Form {
     /// alone says only that the renderer produces the quantized activation, not
     /// that anything consumes it as an int8 dot.
     Int8DotReduce,
+    /// A [`Reduce`](Self::Reduce) of `Add` over a plain product of a dense weight and an
+    /// activation, executed as a tiled matrix-matrix kernel once enough token rows share the
+    /// weight. Whether a given op qualifies is [`contraction_form`](super::contraction_form).
+    TiledContraction,
+    /// The same product over a gathered expert weight whose route follows the token axes,
+    /// executed as one tiled kernel per expert over the tokens routed to it.
+    GroupedContraction,
 }
 
 impl Form {
@@ -179,6 +186,42 @@ impl ActivationLimits {
     }
 }
 
+/// Token-row minimums below which a contraction stays row-wise, one per form, carried
+/// in [`Executes`] so plan identity hashes them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ContractionLimits {
+    pub tiled_min_tokens: u64,
+    pub grouped_min_tokens: u64,
+}
+
+impl ContractionLimits {
+    /// Limits for a backend that grants only [`Form::TiledContraction`].
+    #[must_use]
+    pub const fn tiled_only(tiled_min_tokens: u64) -> Self {
+        Self {
+            tiled_min_tokens,
+            grouped_min_tokens: u64::MAX,
+        }
+    }
+
+    /// The tighter of two limits, field by field.
+    #[must_use]
+    pub const fn intersect(self, other: Self) -> Self {
+        Self {
+            tiled_min_tokens: if self.tiled_min_tokens > other.tiled_min_tokens {
+                self.tiled_min_tokens
+            } else {
+                other.tiled_min_tokens
+            },
+            grouped_min_tokens: if self.grouped_min_tokens > other.grouped_min_tokens {
+                self.grouped_min_tokens
+            } else {
+                other.grouped_min_tokens
+            },
+        }
+    }
+}
+
 /// What one backend renders, as a value.
 ///
 /// Composes the same subset shape as `proxima_numeric::NumericPolicy::grants`
@@ -196,6 +239,9 @@ pub struct Executes {
     /// Bounds on [`Form::Int8DotReduce`]; `None` when the backend has no int8
     /// dot, so a neutral value never reads as "unlimited".
     pub activation: Option<ActivationLimits>,
+    /// Minimum token rows for [`Form::TiledContraction`] and [`Form::GroupedContraction`];
+    /// `None` when the backend renders neither.
+    pub contraction: Option<ContractionLimits>,
 }
 
 impl Executes {
@@ -215,6 +261,7 @@ impl Executes {
             .with(Form::TopFractionSelect),
         limits: DeviceLimits::UNIFIED,
         activation: None,
+        contraction: None,
     };
 
     /// The unfused algebra only.
@@ -222,6 +269,7 @@ impl Executes {
         forms: FormSet::BASE,
         limits: DeviceLimits::UNIFIED,
         activation: None,
+        contraction: None,
     };
 
     #[must_use]
@@ -230,6 +278,7 @@ impl Executes {
             forms: self.forms.with(form),
             limits: self.limits,
             activation: self.activation,
+            contraction: self.contraction,
         }
     }
 
@@ -239,6 +288,7 @@ impl Executes {
             forms: self.forms.without(form),
             limits: self.limits,
             activation: self.activation,
+            contraction: self.contraction,
         }
     }
 
@@ -249,6 +299,19 @@ impl Executes {
             forms: self.forms,
             limits: DeviceLimits { memory },
             activation: self.activation,
+            contraction: self.contraction,
+        }
+    }
+
+    /// Sets the token-row minimums the contraction forms are admitted at; the forms
+    /// themselves are granted with [`Executes::with`].
+    #[must_use]
+    pub const fn with_contraction(self, limits: ContractionLimits) -> Self {
+        Self {
+            forms: self.forms,
+            limits: self.limits,
+            activation: self.activation,
+            contraction: Some(limits),
         }
     }
 
@@ -259,6 +322,7 @@ impl Executes {
             forms: self.forms.with(Form::Int8DotReduce),
             limits: self.limits,
             activation: Some(limits),
+            contraction: self.contraction,
         }
     }
 
@@ -273,6 +337,10 @@ impl Executes {
             forms: self.forms.intersect(other.forms),
             limits: self.limits.intersect(other.limits),
             activation: match (self.activation, other.activation) {
+                (Some(left), Some(right)) => Some(left.intersect(right)),
+                _ => None,
+            },
+            contraction: match (self.contraction, other.contraction) {
                 (Some(left), Some(right)) => Some(left.intersect(right)),
                 _ => None,
             },

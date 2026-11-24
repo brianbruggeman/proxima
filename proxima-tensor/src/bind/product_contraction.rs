@@ -6,7 +6,12 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductContraction {
     pub feature_positions: Vec<usize>,
+    /// Every output position the activation owns or the expert route moves along.
     pub token_positions: Vec<usize>,
+    /// The subset of `token_positions` the gathered weight's expert route moves
+    /// along, whether or not the activation strides them too: the routed token
+    /// axes. Empty for a dense weight.
+    pub routed_positions: Vec<usize>,
     pub token_total: u64,
     pub reduction_extent: u64,
     pub gathered_operands: usize,
@@ -32,30 +37,65 @@ fn is_plain_product(body: &ComposedBody) -> bool {
     is_product_of(body, 0, 1)
 }
 
+struct AxisSplit {
+    feature_positions: Vec<usize>,
+    token_positions: Vec<usize>,
+    routed_positions: Vec<usize>,
+    token_total: u64,
+    reduction_extent: u64,
+}
+
+fn route_stride(route: Option<&Layout>, axis: u16) -> i64 {
+    route.map_or(0, |layout| layout.stride(axis))
+}
+
+/// A position the route moves along is a routed token position; an axis neither operand strides but the route does is a token position too.
+/// A route that moves along any axis outside the token positions would name
+/// several experts for one token, so that shape is refused.
 fn split_axes(
     extents: &[u64],
     output_axes: &[u16],
     weight_layout: &Layout,
     activation_layout: &Layout,
-) -> Option<(Vec<usize>, Vec<usize>, u64, u64)> {
+    route: Option<&Layout>,
+) -> Option<AxisSplit> {
     let mut feature_positions = Vec::new();
     let mut token_positions = Vec::new();
+    let mut routed_positions = Vec::new();
     for (position, &axis) in output_axes.iter().enumerate() {
-        match (weight_layout.stride(axis) != 0, activation_layout.stride(axis) != 0) {
-            (true, false) => feature_positions.push(position),
-            (false, true) => token_positions.push(position),
+        let routed = route_stride(route, axis) != 0;
+        match (weight_layout.stride(axis) != 0, activation_layout.stride(axis) != 0, routed) {
+            (true, false, false) => feature_positions.push(position),
+            (false, true, _) => {
+                token_positions.push(position);
+                if routed {
+                    routed_positions.push(position);
+                }
+            }
+            (false, false, true) => {
+                token_positions.push(position);
+                routed_positions.push(position);
+            }
             _ => return None,
         }
     }
-    let token_total = token_positions
-        .iter()
-        .map(|&position| extents[output_axes[position] as usize])
-        .product();
+    let token_axes: Vec<u16> = token_positions.iter().map(|&position| output_axes[position]).collect();
+    let follows_tokens = (0..extents.len() as u16).all(|axis| token_axes.contains(&axis) || route_stride(route, axis) == 0);
+    if !follows_tokens {
+        return None;
+    }
+    let token_total = token_axes.iter().map(|&axis| extents[axis as usize]).product();
     let reduction_extent = (0..extents.len() as u16)
         .filter(|dim| !output_axes.contains(dim))
         .map(|dim| extents[dim as usize])
         .product();
-    Some((feature_positions, token_positions, token_total, reduction_extent))
+    Some(AxisSplit {
+        feature_positions,
+        token_positions,
+        routed_positions,
+        token_total,
+        reduction_extent,
+    })
 }
 
 /// `Some` for a `Keep::Reduce` add-from-zero whose body is one multiply of
@@ -81,20 +121,49 @@ pub fn product_contraction(bound: &BoundOp, weight: usize) -> Option<ProductCont
     if !is_plain_product(bound.element_body()) || weight > 1 {
         return None;
     }
-    let (weight_layout, activation_layout) = if weight == 0 {
-        (&first.1, &second.1)
-    } else {
-        (&second.1, &first.1)
-    };
-    let (feature_positions, token_positions, token_total, reduction_extent) =
-        split_axes(&bound.extents, output_axes, weight_layout, activation_layout)?;
+    let (weight_operand, activation_operand) = if weight == 0 { (first, second) } else { (second, first) };
+    let route = weight_operand.2.as_ref().map(|lookup| &lookup.index_layout);
+    let split = split_axes(&bound.extents, output_axes, &weight_operand.1, &activation_operand.1, route)?;
     Some(ProductContraction {
-        feature_positions,
-        token_positions,
-        token_total,
-        reduction_extent,
+        feature_positions: split.feature_positions,
+        token_positions: split.token_positions,
+        routed_positions: split.routed_positions,
+        token_total: split.token_total,
+        reduction_extent: split.reduction_extent,
         gathered_operands: gathered_operand_count(bound),
     })
+}
+
+/// How a backend executes one product contraction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContractionForm {
+    /// One tiled kernel over a dense weight shared by several token rows.
+    Tiled,
+    /// One tiled kernel per expert over the tokens routed to it.
+    Grouped,
+    /// Neither: each output row is reduced on its own.
+    Rowwise,
+}
+
+/// The one choice between tiled, grouped and row-wise execution: a gathered
+/// weight whose route follows the token axes takes the grouped form, a dense weight the
+/// tiled one, each only when `executes` grants the form and the token rows
+/// reach its minimum.
+#[must_use]
+pub fn contraction_form(facts: &ProductContraction, executes: &Executes) -> ContractionForm {
+    let Some(limits) = executes.contraction else {
+        return ContractionForm::Rowwise;
+    };
+    if facts.gathered_operands > 0 {
+        let grouped = executes.forms.contains(Form::GroupedContraction)
+            && facts.token_total >= limits.grouped_min_tokens;
+        return if grouped { ContractionForm::Grouped } else { ContractionForm::Rowwise };
+    }
+    if executes.forms.contains(Form::TiledContraction) && facts.token_total >= limits.tiled_min_tokens {
+        ContractionForm::Tiled
+    } else {
+        ContractionForm::Rowwise
+    }
 }
 
 #[cfg(test)]
@@ -111,7 +180,30 @@ mod tests {
     }
 
     fn dense_split(extents: &[u64], weight_strides: &[i64], activation_strides: &[i64]) -> Option<(Vec<usize>, Vec<usize>, u64, u64)> {
-        split_axes(extents, &[0, 1], &layout(weight_strides), &layout(activation_strides))
+        split_axes(extents, &[0, 1], &layout(weight_strides), &layout(activation_strides), None)
+            .map(|split| (split.feature_positions, split.token_positions, split.token_total, split.reduction_extent))
+    }
+
+    #[test]
+    fn a_route_moving_along_a_token_axis_reports_it_routed() {
+        let route = layout(&[0, 1, 0]);
+        let split = split_axes(&[8, 4, 32], &[0, 1], &layout(&[32, 0, 1]), &layout(&[0, 0, 1]), Some(&route)).expect("routed");
+        assert_eq!(split.feature_positions, vec![0]);
+        assert_eq!(split.token_positions, vec![1]);
+        assert_eq!(split.routed_positions, vec![1]);
+        assert_eq!(split.token_total, 4);
+    }
+
+    #[test]
+    fn a_route_moving_along_a_feature_axis_is_refused() {
+        let route = layout(&[1, 1, 0]);
+        assert!(split_axes(&[8, 4, 32], &[0, 1], &layout(&[32, 0, 1]), &layout(&[0, 0, 1]), Some(&route)).is_none());
+    }
+
+    #[test]
+    fn a_route_moving_along_the_reduction_axis_is_refused() {
+        let route = layout(&[0, 1, 1]);
+        assert!(split_axes(&[8, 4, 32], &[0, 1], &layout(&[32, 0, 1]), &layout(&[0, 0, 1]), Some(&route)).is_none());
     }
 
     #[test]
@@ -238,8 +330,7 @@ mod tests {
         assert_eq!(product_contraction(&bound, 1).expect("a decode product").token_total, 1);
     }
 
-    #[test]
-    fn a_bound_gathered_weight_counts_one_gathered_operand() {
+    fn gathered_program() -> Vec<Op> {
         let dtype = activation_dtype();
         let mut program = Vec::new();
         let stack = append(
@@ -280,9 +371,68 @@ mod tests {
                 name: None,
             }),
         );
-        let bound = bound_contraction(&program);
+        program
+    }
+
+    #[test]
+    fn a_bound_gathered_weight_counts_one_gathered_operand() {
+        let bound = bound_contraction(&gathered_program());
         assert_eq!(gathered_operand_count(&bound), 1);
         assert_eq!(product_contraction(&bound, 0).expect("a gathered product").gathered_operands, 1);
+    }
+
+    fn contraction_executes(min_tokens: u64) -> Executes {
+        Executes::BASE
+            .with(Form::TiledContraction)
+            .with(Form::GroupedContraction)
+            .with_contraction(ContractionLimits {
+                tiled_min_tokens: min_tokens,
+                grouped_min_tokens: min_tokens,
+            })
+    }
+
+    fn facts_of(program: &[Op], weight: usize) -> ProductContraction {
+        product_contraction(&bound_contraction(program), weight).expect("a product contraction")
+    }
+
+    #[test]
+    fn a_gathered_weight_with_routed_token_axes_is_grouped_under_a_granting_executor() {
+        let facts = facts_of(&gathered_program(), 0);
+        assert_eq!(facts.routed_positions, vec![0]);
+        assert_eq!(contraction_form(&facts, &contraction_executes(2)), ContractionForm::Grouped);
+    }
+
+    #[test]
+    fn a_gathered_weight_is_rowwise_under_an_executor_that_grants_neither_form() {
+        let facts = facts_of(&gathered_program(), 0);
+        assert_eq!(contraction_form(&facts, &Executes::BASE), ContractionForm::Rowwise);
+        let tiled_only = Executes::BASE
+            .with(Form::TiledContraction)
+            .with_contraction(ContractionLimits::tiled_only(1));
+        assert_eq!(contraction_form(&facts, &tiled_only), ContractionForm::Rowwise);
+    }
+
+    #[test]
+    fn a_gathered_weight_below_the_grouped_minimum_is_rowwise() {
+        let facts = facts_of(&gathered_program(), 0);
+        assert_eq!(contraction_form(&facts, &contraction_executes(3)), ContractionForm::Rowwise);
+    }
+
+    #[test]
+    fn a_dense_product_below_the_tiled_minimum_is_rowwise_and_at_it_is_tiled() {
+        let executes = contraction_executes(4);
+        let below = facts_of(&contraction_program(3), 1);
+        let at = facts_of(&contraction_program(4), 1);
+        assert_eq!(contraction_form(&below, &executes), ContractionForm::Rowwise);
+        assert_eq!(contraction_form(&at, &executes), ContractionForm::Tiled);
+    }
+
+    #[test]
+    fn a_dense_product_is_rowwise_without_the_tiled_grant() {
+        let facts = facts_of(&contraction_program(4), 1);
+        assert_eq!(contraction_form(&facts, &Executes::BASE), ContractionForm::Rowwise);
+        let limits_only = Executes::BASE.with_contraction(ContractionLimits::tiled_only(1));
+        assert_eq!(contraction_form(&facts, &limits_only), ContractionForm::Rowwise);
     }
 
     #[test]

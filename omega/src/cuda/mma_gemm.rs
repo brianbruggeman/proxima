@@ -15,7 +15,10 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use proxima_tensor::{BoundOp, BoundOpKind, Keep, ProductContraction, ReduceInit, ScalarOp, product_contraction};
+use proxima_tensor::{
+    BoundOp, BoundOpKind, ContractionForm, ContractionLimits, Executes, Form, Keep, ProductContraction, ReduceInit, ScalarOp,
+    contraction_form, product_contraction,
+};
 use proxima_numeric::{DType, NumericPolicy};
 
 use super::int8_gemm::{INT8_FEATURE_TILE, INT8_TOKEN_TILE, Int8Gemm, int8_gemm_plan, push_int8_gemm_body};
@@ -79,6 +82,16 @@ fn codec_shape(codec: Codec) -> Option<CodecShape> {
     })
 }
 
+/// The token-row minimum the tiled form is admitted at, from `[contraction] cuda_tiled_min_tokens`.
+pub(super) const fn mma_contraction_limits() -> ContractionLimits {
+    ContractionLimits::tiled_only(crate::sized::CUDA_TILED_CONTRACTION_MIN_TOKENS)
+}
+
+/// The contraction grant of the tensor-core path, shared by `mma_gemm_plan` and `crate::cuda::executes`.
+pub(super) const fn mma_contraction_grant(base: Executes) -> Executes {
+    base.with(Form::TiledContraction).with_contraction(mma_contraction_limits())
+}
+
 /// `Some` when this reduce is a plain `weight * activation` sum with more than
 /// one token row. A single token row keeps the matvec body.
 pub(super) fn mma_gemm_plan(
@@ -121,15 +134,15 @@ pub(super) fn mma_gemm_plan(
         return None;
     }
     let activation_layout = &operands[activation].1;
+    let tiled = contraction_form(&contraction, &mma_contraction_grant(Executes::BASE)) == ContractionForm::Tiled;
     let ProductContraction {
         feature_positions,
         token_positions,
-        token_total,
         ..
     } = contraction;
     let int8 = int8_gemm_plan(resolved, codec, numeric_policy, activation_layout, output_axes, prequantized);
     let served = prequantized.is_none() || int8.is_some();
-    let several_tokens = token_total > 1 || prequantized.is_some();
+    let several_tokens = tiled || prequantized.is_some();
     (served && !feature_positions.is_empty() && !token_positions.is_empty() && several_tokens).then_some(
         MmaGemm {
             weight,

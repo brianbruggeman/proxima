@@ -107,7 +107,7 @@ pub(crate) use block_quantize::{consumer_missing, producer_missing};
 use block_quantize::block_quantize_groups;
 use int8_gemm::INT8_MMA_INSTRUCTION;
 use mma_gemm::{
-    GEMM_THREADS, MMA_F16_HELPER, MMA_GEMM_HELPERS, MMA_INSTRUCTION, mma_gemm_plan, mma_gemm_threads, push_mma_gemm_body,
+    GEMM_THREADS, MMA_F16_HELPER, MMA_GEMM_HELPERS, MMA_INSTRUCTION, mma_contraction_grant, mma_gemm_plan, mma_gemm_threads, push_mma_gemm_body,
     reads_prequantized_activation,
 };
 use row_tile::{ROW_TILE, push_row_tiled_cooperative_body, row_tile_axis};
@@ -4582,10 +4582,10 @@ pub fn executes(target: &Target) -> Executes {
         .with(Form::MoeTopK)
         .with(Form::ReduceEpilogue);
     let forms = if target.card_asm {
-        base.with(Form::CachedAttention).with_int8_dot(ActivationLimits {
+        mma_contraction_grant(base.with(Form::CachedAttention).with_int8_dot(ActivationLimits {
             max_reduction: staged_matvec::MAX_STAGED_REDUCTION,
             output_total_max: u64::from(u32::MAX),
-        })
+        }))
     } else {
         base
     };
