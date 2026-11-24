@@ -20,12 +20,18 @@ pub(crate) const fn tile_upper_bound(tokens: u64, experts: u64, tile_tokens: u64
     tokens.div_ceil(tile_tokens) + experts
 }
 
-#[cfg(any(feature = "cuda", all(feature = "metal-grouped-gemm", any(test, all(feature = "metal", target_os = "macos")))))]
+#[cfg(any(
+    feature = "cuda",
+    all(feature = "metal-grouped-gemm", any(test, all(feature = "metal", target_os = "macos")))
+))]
 pub(crate) const fn tile_table_words(tokens: u64, experts: u64, tile_tokens: u64) -> u64 {
     experts + tile_upper_bound(tokens, experts, tile_tokens)
 }
 
-#[cfg(any(feature = "cuda", all(feature = "metal-grouped-gemm", any(test, all(feature = "metal", target_os = "macos")))))]
+#[cfg(any(
+    feature = "cuda",
+    all(feature = "metal-grouped-gemm", any(test, all(feature = "metal", target_os = "macos")))
+))]
 pub(crate) const fn compaction_words(
     header: u64,
     tokens: u64,
