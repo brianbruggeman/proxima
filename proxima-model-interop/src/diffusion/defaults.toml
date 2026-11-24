@@ -1,0 +1,10 @@
+# the diffusion stages' numeric formats, as proxima-numeric format names.
+# `DiffusionSettings::resolved` layers `PROXIMA_DIFFUSION_<FIELD>` over these.
+
+# how each stage's activations are stored between ops
+dit_activation = "float32"
+vae_activation = "float32"
+
+# how each stage's checkpoint weights are packed for the backend
+dit_weights = "float16"
+vae_weights = "float16"
