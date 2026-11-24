@@ -91,7 +91,7 @@ use core::future::Future;
 
 use proxima_numeric::DType;
 use proxima_primitives::pipe::Pipe;
-use proxima_tensor::map::IndexMap;
+use proxima_tensor::map::{AxisIndex, IndexMap, IndexPattern};
 use proxima_tensor::op::{Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 use proxima_tensor::shape::{self, Shapes};
 
@@ -835,8 +835,8 @@ fn route_contribution(
         IndexMap::Computed {
             indices,
             index_map,
+            base,
             gathered_dim,
-            ..
         } => {
             if !expr::is_pure_projection(index_map) {
                 return Err(AutogradError::NonProjectionIndexMap {
@@ -844,14 +844,84 @@ fn route_contribution(
                     operand: *operand_node,
                 });
             }
-            gathered_of[operand_node.0 as usize].push(GatheredContribution {
-                values: contribution,
-                indices: *indices,
-                gathered_dim: *gathered_dim,
-            });
+            let leaf = matches!(original_program[operand_node.0 as usize], Op::Input { .. });
+            let transpose = if leaf {
+                None
+            } else {
+                gather_transpose(
+                    program,
+                    dtype,
+                    shapes,
+                    contribution,
+                    (*indices, index_map, base, *gathered_dim),
+                    (*operand_node, iter_rank),
+                )
+            };
+            match transpose {
+                Some(routed) => accumulate(
+                    program,
+                    grad_of,
+                    dtype,
+                    shapes.of(*operand_node).len() as u16,
+                    operand_node.0 as usize,
+                    routed,
+                ),
+                None => gathered_of[operand_node.0 as usize].push(GatheredContribution {
+                    values: contribution,
+                    indices: *indices,
+                    gathered_dim: *gathered_dim,
+                }),
+            }
         }
     }
     Ok(())
+}
+
+/// The transpose of a gather read: a `Reduce(Add)` scatter of `contribution`
+/// (at the consumer's iteration space) over the same `indices`, landing on the
+/// operand's own shape. `None` when a non-gathered `base` axis is not a plain
+/// unit-coefficient projection, which the scatter's output shape needs; the
+/// caller then records the sparse [`GatheredContribution`] instead.
+fn gather_transpose(
+    program: &mut Vec<Op>,
+    dtype: DType,
+    shapes: &Shapes,
+    contribution: NodeId,
+    (indices, index_map, base, gathered_dim): (NodeId, &IndexPattern, &IndexPattern, u16),
+    (operand_node, iter_rank): (NodeId, u16),
+) -> Option<NodeId> {
+    let operand_shape = shapes.of(operand_node);
+    let destination = u32::try_from(*operand_shape.get(usize::from(gathered_dim))?).ok()?;
+    let non_scattered: Vec<(u16, AxisIndex)> = base
+        .axes
+        .iter()
+        .enumerate()
+        .filter(|(position, _)| *position != usize::from(gathered_dim))
+        .map(|(position, axis)| Some((u16::try_from(position).ok()?, axis.clone())))
+        .collect::<Option<_>>()?;
+    let plain = non_scattered.iter().all(|(_, axis)| {
+        axis.offset == 0 && matches!(axis.terms.as_slice(), [term] if term.coeff == 1)
+    });
+    if !plain {
+        return None;
+    }
+    let out_map = IndexMap::scatter(
+        indices,
+        index_map.clone(),
+        iter_rank,
+        &non_scattered,
+        gathered_dim,
+        destination,
+    );
+    Some(expr::reduce(
+        program,
+        dtype,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        contribution,
+        expr::identity(iter_rank),
+        out_map,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1993,6 +2063,88 @@ mod scatter_tests {
             "loss = sum(scattered) makes grad_out all-ones, so every source position (collision \
              or not) receives grad_out[idx[s]] = 1"
         );
+    }
+
+    /// `x -> sq = x*x -> g = sq[idx] (a gather of a NON-leaf) -> loss =
+    /// sum(g)` with `idx = [2, 0, 2, 1]`: the gather's transpose must carry
+    /// the gradient on into `x` (`d loss / dx = [2*x0, 2*x1, 4*x2, 0]`, row 2
+    /// read twice), checked against central difference on the forward
+    /// program. The program is `scatter_sum_program`'s, extended.
+    #[proxima::test]
+    async fn gather_of_a_non_leaf_carries_gradient_to_the_leaf_by_central_difference() {
+        let (mut program, x, idx, _scatter_loss, idx_values) =
+            scatter_sum_program([2.0, 0.0, 2.0, 1.0]);
+        let dtype = program[x.0 as usize].dtype();
+        let squared = expr::binary(
+            &mut program,
+            dtype,
+            ScalarOp::Multiply,
+            (x, expr::identity(1)),
+            (x, expr::identity(1)),
+        );
+        let gather_map = IndexMap::Computed {
+            indices: idx,
+            index_map: map::projection(1, &[0]),
+            base: map::IndexPattern {
+                iter_rank: 1,
+                axes: vec![map::AxisIndex::default()],
+            },
+            gathered_dim: 0,
+        };
+        let gathered = expr::unary(
+            &mut program,
+            dtype,
+            ScalarOp::Identity,
+            (squared, gather_map),
+        );
+        let loss = expr::reduce(
+            &mut program,
+            dtype,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            gathered,
+            expr::identity(1),
+            expr::broadcast(1),
+        );
+        let x_values = [0.5, -1.25, 2.0, 0.75];
+
+        let differentiated =
+            differentiate(&program, loss).expect("gather of a non-leaf differentiates");
+        let grad_x = differentiated
+            .gradient_of_named("x")
+            .expect("x feeds the loss through the gather's transpose");
+        let evaluated = proxima_tensor::cpu::evaluate_named(
+            &differentiated.program,
+            &[],
+            &[("x", &x_values), ("idx", &idx_values)],
+            &[grad_x],
+        )
+        .expect("gather adjoint program evaluates");
+        let analytic = evaluated.get(grad_x).expect("grad_x requested").0;
+
+        let loss_at = |perturbed: &[_]| {
+            let evaluated = proxima_tensor::cpu::evaluate_named(
+                &program,
+                &[],
+                &[("x", perturbed), ("idx", &idx_values)],
+                &[loss],
+            )
+            .expect("forward program evaluates");
+            evaluated.get(loss).expect("loss requested").0[0]
+        };
+        let step = 0.01;
+        for position in 0..x_values.len() {
+            let mut up = x_values;
+            up[position] += step;
+            let mut down = x_values;
+            down[position] -= step;
+            let numeric = (loss_at(&up) - loss_at(&down)) / (2.0 * step);
+            assert!(
+                (analytic[position] - numeric).abs() < 1e-2,
+                "x[{position}]: analytic {} vs central difference {numeric}",
+                analytic[position]
+            );
+        }
     }
 
     /// Same forward program, checked against the model-agnostic oracle:

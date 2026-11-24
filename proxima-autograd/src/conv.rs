@@ -1,62 +1,35 @@
 //! `conv2d` and `conv1d`, spelled as a graph-building function over
 //! [`proxima_tensor::op::Op`] — never a new `Op`/`ScalarOp`/[`IndexMap`]
-//! variant, and never the two-term-affine window
-//! `proxima-onnx/src/lower.rs`'s `window_materialize` builds for forward-only
-//! inference.
+//! variant.
+//!
+//! # The window is one two-term affine read
+//!
+//! The windowed source is a single `Elementwise` read of the (padded) source
+//! through the operand map `stride*out + dilation*kernel` (two terms in one
+//! axis), the same read `proxima-onnx/src/lower.rs`'s `window_materialize1d`
+//! and `stft_log_mel`'s `"{hop}*f+t->ft"` framing build. A stamp
+//! (`Constant(1.0)` over `[out, kernel]`) pins the two window axes' extents.
+//! The window is laid out `[n, out, c, kernel]` and the weight is `[co, c,
+//! kernel]`, so the reduce axes `(c, kernel)` are the trailing axes of both
+//! operands and fold as one contiguous `K = c*kernel` dot product.
 //!
 //! [`crate::adjoint::differentiate`] differentiates an `Elementwise` read
-//! through a window operand map (`stride*out + dilation*kernel`, two terms in
-//! one axis) by the same mask composition this module builds forward
-//! (`crate::affine_scatter`), but a window on a `Reduce`'s own `in_map` still
-//! raises [`crate::error::AutogradError::NonProjectionOperandMap`]; this
-//! module avoids both by never putting a window in an operand map.
+//! through a window operand map by scatter-adding the gradient along the same
+//! map (`crate::affine_scatter`, reached from `route_contribution`), so
+//! gradient keeps flowing through a stacked pair of layers. That backward
+//! composition is a mask over the source axis; the forward program has no
+//! operand wider than `n*out*c*kernel`.
 //!
-//! # Why a mask-composed window, not a `IndexMap::Computed` gather
+//! # Padding
 //!
-//! An earlier version of this module built the window as a chain of two
-//! [`IndexMap::Computed`] gathers (graph-time-known `out*stride + kernel`
-//! indices, the same [`Op::Iota`]-built-index mechanism
-//! `proxima-onnx/src/lower.rs`'s `pad_axis`/`slice_axis_range` use). That
-//! composes correctly for a *single* conv layer's weight gradient, but
-//! `crate::adjoint`'s private `route_contribution`'s `IndexMap::Computed` arm
-//! deliberately stops at recording a [`crate::adjoint::GatheredContribution`]
-//! rather than scattering it back into `grad_of` (that function's own doc:
-//! "the step this crate stops short of"). So the backward walk never resumes
-//! past a gathered operand — fine for an embedding table (a leaf `Input`,
-//! nothing upstream needs its own gradient), fatal for a *stacked* conv net,
-//! where the second layer's "image" is the first layer's own output and
-//! *does* have an upstream (the first layer's weight) that needs the chain
-//! rule to keep going.
-//!
-//! This module instead builds the window as `proxima-onnx`'s own
-//! `convtranspose2d_scatter` (`proxima-onnx/src/lower.rs:2171`)
-//! **mask-composition** idiom, read in
-//! the gather direction instead of the scatter direction: widen the
-//! iteration space by two axes (`out_position`, `kernel_position`), multiply
-//! the source by a `0.0`/`1.0` [`ScalarOp::Equal`] mask built from
-//! `source_position == out_position*stride + kernel_position` (three
-//! [`Op::Iota`]s plus `Multiply`/`Add`/`Equal`, mirroring
-//! `proxima-onnx/src/lower.rs`'s `scatter_mask_axis`), then `Reduce(Add)`
-//! away the original source axis. Every operand read in this composition —
-//! `source` included — is a pure single-term `IndexMap::Affine` projection,
-//! so [`crate::adjoint`]'s ordinary `Elementwise`/`Reduce` rules apply with
-//! no gather-specific carve-out, and gradient keeps flowing back through
-//! `source` exactly as far as the rest of the program needs it to. The extra
-//! cost versus a true gather is `O(source_extent)` per spatial axis (a
-//! multiply-and-reduce over every source position, only one of which is ever
-//! nonzero) instead of `O(1)`, at the size this module targets (28x28
-//! MNIST-scale images) — cheap enough measured against a from-scratch
-//! backward derivation, and zero new `Op`/`ScalarOp`/`IndexMap` either way.
-//!
-//! `masked_window_axis` (private) does the whole trick, once per spatial axis:
-//! given a source tensor and one of its axes, it returns a tensor with that
-//! axis reduced away and replaced by two new trailing axes `(out_position,
-//! kernel_position)`. [`conv2d`] calls it twice (height, then width) to build
-//! the classic im2col window `[n, c, out_h, kernel_h, out_w, kernel_w]`, then
-//! an ordinary `Elementwise(Multiply)` against the weight and `Reduce(Add)`
-//! over `(ci, kh, kw)` — exactly `proxima-onnx`'s own `conv2d_core`
-//! composition, with the window built by mask-composition instead of a
-//! window-shaped `IndexMap`.
+//! A read past the source extent is a shape error, so zero padding is a
+//! materialised `[n, c, length + 2*padding]` tensor: a `Reduce(Add)` scatter
+//! at `position + padding` (`pad_signal`), whose adjoint
+//! (`differentiate_scatter`) is a gather of the upstream gradient and resumes
+//! the backward walk. `proxima-onnx`'s `pad_axis` is a clamped
+//! [`IndexMap::Computed`] gather: its backward stops at a recorded
+//! [`crate::adjoint::GatheredContribution`] and never reaches a stacked
+//! layer's weight, so it is not reused here.
 //!
 //! No pooling here: the architecture this module was built for (see
 //! `tests/real_mnist_conv_training.rs`) uses stride to downsample instead of
@@ -68,7 +41,7 @@
 use alloc::vec::Vec;
 
 use proxima_numeric::DType;
-use proxima_tensor::map::{self, IndexMap};
+use proxima_tensor::map::{self, AxisIndex, AxisTerm, IndexMap};
 use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 
 use crate::expr;
@@ -113,9 +86,8 @@ pub fn conv2d_output_shape(
 /// differentiable through [`crate::adjoint::differentiate`] (image, weight,
 /// and bias all included, and the image gradient keeps propagating into
 /// whatever built `image` — see this module's own doc for why that matters
-/// for a stacked conv net) because the window is built by mask-composition
-/// rather than a two-term affine `window_axis` or an unresumable
-/// `IndexMap::Computed` gather.
+/// for a stacked conv net) because the window is one two-term affine read
+/// rather than an unresumable `IndexMap::Computed` gather.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn conv2d(
@@ -129,24 +101,34 @@ pub fn conv2d(
     stride_h: u64,
     stride_w: u64,
 ) -> Option<NodeId> {
-    let (_, _, height, width) = image_shape;
     let (_, _, kernel_h, kernel_w) = weight_shape;
     let (_, _, out_h, out_w) = conv2d_output_shape(image_shape, weight_shape, stride_h, stride_w)?;
 
-    // image axes: n=0, c=1, h=2, w=3 -- window h first (axis 2), reducing it
-    // away and landing the two new axes (oy, ky) at the end: [n, c, w, oy, ky].
-    let windowed_h = masked_window_axis(
-        program, dtype, image, 4, 2, height, out_h, kernel_h, stride_h, 1, 0,
-    );
-    // windowed_h axes: n=0, c=1, w=2, oy=3, ky=4 -- window w next (now axis
-    // 2), landing [n, c, oy, ky, ox, kx].
-    let windowed = masked_window_axis(
-        program, dtype, windowed_h, 5, 2, width, out_w, kernel_w, stride_w, 1, 0,
+    // window iteration space: 0=n 1=oy 2=ox 3=c 4=ky 5=kx, image read
+    // [n, c, stride_h*oy + ky, stride_w*ox + kx]
+    let window_pattern = map::IndexPattern {
+        iter_rank: 6,
+        axes: alloc::vec![
+            unit_axis(0),
+            unit_axis(3),
+            window_axis(1, 4, stride_h, 1)?,
+            window_axis(2, 5, stride_w, 1)?,
+        ],
+    };
+    let stamp = window_stamp(program, dtype, &[out_h, out_w, kernel_h, kernel_w]);
+    let windowed = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (image, IndexMap::Affine(window_pattern)),
+        (stamp, IndexMap::Affine(map::projection(6, &[1, 2, 4, 5]))),
     );
 
-    // shared iteration space: 0=n 1=co 2=ci 3=oy 4=ky 5=ox 6=kx
+    // shared iteration space: 0=n 1=co 2=oy 3=ox 4=ci 5=ky 6=kx; the reduce
+    // axes (ci, ky, kx) trail both the window [n, oy, ox, ci, ky, kx] and the
+    // weight [co, ci, ky, kx]
     let windowed_pattern = IndexMap::Affine(map::projection(7, &[0, 2, 3, 4, 5, 6]));
-    let weight_pattern = IndexMap::Affine(map::projection(7, &[1, 2, 4, 6]));
+    let weight_pattern = IndexMap::Affine(map::projection(7, &[1, 4, 5, 6]));
     let product = expr::binary(
         program,
         dtype,
@@ -155,7 +137,7 @@ pub fn conv2d(
         (weight, weight_pattern),
     );
 
-    let out_map = IndexMap::Affine(map::projection(7, &[0, 1, 3, 5]));
+    let out_map = IndexMap::Affine(map::projection(7, &[0, 1, 2, 3]));
     let reduced = expr::reduce(
         program,
         dtype,
@@ -212,12 +194,12 @@ pub fn conv1d_output_shape(
 
 /// `Conv1d`, `group = 1`: `[n, ci, l]` signal, `[co, ci, k]` weight, optional
 /// `[co]` bias, `[n, co, out_l]` result. The one-spatial-axis case of
-/// [`conv2d`]: the same mask-composed window (`masked_window_axis`, never a
-/// window on a `Reduce`'s `in_map`) read once, then `Multiply` against the
-/// weight and `Reduce(Add)` over `(ci, k)`. Padding and dilation live in the
-/// mask, so signal, weight and bias all differentiate through
-/// [`crate::adjoint::differentiate`], and a stacked pair of layers carries the
-/// gradient back to the first layer's weight.
+/// [`conv2d`]: the same two-term affine window (an `Elementwise` read, never a
+/// window on a `Reduce`'s `in_map`), then `Multiply` against the weight and
+/// `Reduce(Add)` over `(ci, k)`. Dilation is the kernel-axis coefficient and
+/// padding is `pad_signal`'s scatter, so signal, weight and bias all
+/// differentiate through [`crate::adjoint::differentiate`], and a stacked pair
+/// of layers carries the gradient back to the first layer's weight.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn conv1d(
@@ -237,14 +219,31 @@ pub fn conv1d(
     let (_, _, out_length) =
         conv1d_output_shape(signal_shape, weight_shape, stride, padding, dilation)?;
 
-    // signal axes n=0 c=1 l=2 -> windowed [n, c, o, k]
-    let windowed = masked_window_axis(
-        program, dtype, signal, 3, 2, length, out_length, kernel, stride, dilation, padding,
+    let padded = pad_signal(program, dtype, signal, padding, length)?;
+
+    // window iteration space: 0=n 1=o 2=c 3=k, signal read [n, c, stride*o + dilation*k]
+    let window_pattern = map::IndexPattern {
+        iter_rank: 4,
+        axes: alloc::vec![
+            unit_axis(0),
+            unit_axis(2),
+            window_axis(1, 3, stride, dilation)?
+        ],
+    };
+    let stamp = window_stamp(program, dtype, &[out_length, kernel]);
+    let windowed = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (padded, IndexMap::Affine(window_pattern)),
+        (stamp, IndexMap::Affine(map::projection(4, &[1, 3]))),
     );
 
-    // shared iteration space: 0=n 1=co 2=ci 3=o 4=k
+    // shared iteration space: 0=n 1=co 2=o 3=ci 4=k; the reduce axes (ci, k)
+    // are the trailing axes of both the window [n, o, ci, k] and the weight
+    // [co, ci, k], so the sum folds as one contiguous K = ci*k dot product
     let windowed_pattern = IndexMap::Affine(map::projection(5, &[0, 2, 3, 4]));
-    let weight_pattern = IndexMap::Affine(map::projection(5, &[1, 2, 4]));
+    let weight_pattern = IndexMap::Affine(map::projection(5, &[1, 3, 4]));
     let product = expr::binary(
         program,
         dtype,
@@ -259,7 +258,7 @@ pub fn conv1d(
         ReduceInit::Zero,
         product,
         expr::identity(5),
-        IndexMap::Affine(map::projection(5, &[0, 1, 3])),
+        IndexMap::Affine(map::projection(5, &[0, 1, 2])),
     );
 
     let result = match bias {
@@ -275,171 +274,136 @@ pub fn conv1d(
     Some(result)
 }
 
-/// Replaces `source`'s axis `windowed_axis` (out of `source_rank` total, with
-/// static extent `source_extent`) with two new trailing axes `(out_position,
-/// kernel_position)`, `Reduce(Add)`-ing the original axis away under a
-/// `source_position == out_position*stride + kernel_position` mask so only
-/// the one matching term ever survives. Every other axis is carried straight
-/// through in its original relative order. See this module's own doc for why
-/// this reads `source` through a plain pure-projection [`IndexMap::Affine`]
-/// (not a gather) -- gradient keeps flowing into `source` exactly the way an
-/// ordinary `Multiply` + `Reduce(Add)` composition always does.
-#[allow(clippy::too_many_arguments)]
-fn masked_window_axis(
+fn unit_axis(axis: u16) -> AxisIndex {
+    AxisIndex {
+        terms: core::iter::once(AxisTerm::projection(axis)).collect(),
+        offset: 0,
+        len: None,
+    }
+}
+
+fn count_constant(program: &mut Vec<Op>, dtype: DType, count: u64) -> NodeId {
+    expr::constant(program, dtype, count as f32)
+}
+
+/// `[n, c, length + 2*padding]`: the clamped-gather-times-mask pad
+/// `proxima-onnx`'s `pad_axis` builds, so every backend already runs it. The
+/// gather reads `Identity(signal)` rather than `signal` so the operand is a
+/// non-leaf node: `crate::adjoint` scatter-adds the gradient of a gather of a
+/// non-leaf node into it, while a gathered leaf only records a sparse
+/// contribution. Returns `signal` untouched when `padding` is zero.
+fn pad_signal(
     program: &mut Vec<Op>,
     dtype: DType,
-    source: NodeId,
-    source_rank: usize,
-    windowed_axis: usize,
-    source_extent: u64,
-    out_extent: u64,
-    kernel_extent: u64,
-    stride: u64,
-    dilation: u64,
+    signal: NodeId,
     padding: u64,
-) -> NodeId {
-    let widened_rank = source_rank + 2;
-    let widened_rank_u16 = widened_rank as u16;
-    let out_position_axis = source_rank as u16;
-    let kernel_position_axis = out_position_axis + 1;
-
-    let mask = window_mask(
-        program,
-        source_extent,
-        out_extent,
-        kernel_extent,
-        (stride, dilation, padding),
-    );
-    let source_axes: Vec<u16> = (0..source_rank as u16).collect();
-    let source_pattern = IndexMap::Affine(map::projection(widened_rank_u16, &source_axes));
-    let mask_pattern = IndexMap::Affine(map::projection(
-        widened_rank_u16,
-        &[
-            windowed_axis as u16,
-            out_position_axis,
-            kernel_position_axis,
-        ],
-    ));
-
-    let masked = expr::binary(
-        program,
-        dtype,
-        ScalarOp::Multiply,
-        (source, source_pattern),
-        (mask, mask_pattern),
-    );
-
-    let keep_axes: Vec<u16> = (0..widened_rank_u16)
-        .filter(|&axis| axis != windowed_axis as u16)
-        .collect();
-    let out_map = IndexMap::Affine(map::projection(widened_rank_u16, &keep_axes));
-    expr::reduce(
-        program,
-        dtype,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        masked,
-        expr::identity(widened_rank_u16),
-        out_map,
-    )
-}
-
-/// `mask[source_position, out_position, kernel_position] = (source_position
-/// == out_position*stride + kernel_position*dilation - padding)` -- the exact
-/// `Iota`/`Multiply`/`Add`/`Equal` composition
-/// `proxima-onnx/src/lower.rs`'s `scatter_mask_axis` builds for
-/// `ConvTranspose`'s general case. `dilation` scales the kernel position and
-/// `padding` shifts it down, so a padded source position matches nothing and
-/// reads as zero (`dilation` 1 and `padding` 0 add no ops).
-fn window_mask(
-    program: &mut Vec<Op>,
-    source_extent: u64,
-    out_extent: u64,
-    kernel_extent: u64,
-    (stride, dilation, padding): (u64, u64, u64),
-) -> NodeId {
-    let source_position = op::append(
-        program,
-        Op::Iota {
-            dtype: DType::FLOAT32,
-            extent: Extent::Static(source_extent as u32),
-        },
-    );
-    let out_position = op::append(
-        program,
-        Op::Iota {
-            dtype: DType::FLOAT32,
-            extent: Extent::Static(out_extent as u32),
-        },
-    );
-    let kernel_position = op::append(
-        program,
-        Op::Iota {
-            dtype: DType::FLOAT32,
-            extent: Extent::Static(kernel_extent as u32),
-        },
-    );
-
-    let kernel_offset = offset_kernel_positions(program, kernel_position, dilation, padding);
-    let stride_const = expr::constant(program, DType::FLOAT32, stride as f32);
-    let scaled_out = expr::binary(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        (out_position, expr::identity(1)),
-        (stride_const, expr::broadcast(1)),
-    );
-    let combined = expr::binary(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        (scaled_out, IndexMap::Affine(map::projection(2, &[0]))),
-        (kernel_offset, IndexMap::Affine(map::projection(2, &[1]))),
-    );
-
-    expr::binary(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Equal,
-        (source_position, IndexMap::Affine(map::projection(3, &[0]))),
-        (combined, IndexMap::Affine(map::projection(3, &[1, 2]))),
-    )
-}
-
-/// `kernel_position * dilation - padding` over the kernel axis, skipping each
-/// op when it would be the identity so `conv2d`'s graph stays unchanged.
-fn offset_kernel_positions(
-    program: &mut Vec<Op>,
-    kernel_position: NodeId,
-    dilation: u64,
-    padding: u64,
-) -> NodeId {
-    let dilated = match dilation {
-        1 => kernel_position,
-        _ => {
-            let dilation_const = expr::constant(program, DType::FLOAT32, dilation as f32);
-            expr::binary(
-                program,
-                DType::FLOAT32,
-                ScalarOp::Multiply,
-                (kernel_position, expr::identity(1)),
-                (dilation_const, expr::broadcast(1)),
-            )
-        }
-    };
-    match padding {
-        0 => dilated,
-        _ => {
-            let padding_const = expr::constant(program, DType::FLOAT32, -(padding as f32));
-            expr::binary(
-                program,
-                DType::FLOAT32,
-                ScalarOp::Add,
-                (dilated, expr::identity(1)),
-                (padding_const, expr::broadcast(1)),
-            )
-        }
+    length: u64,
+) -> Option<NodeId> {
+    if padding == 0 {
+        return Some(signal);
     }
+    let padded = u32::try_from(length + 2 * padding).ok()?;
+    let position = op::append(
+        program,
+        Op::Iota {
+            dtype,
+            extent: Extent::Static(padded),
+        },
+    );
+    let before = count_constant(program, dtype, padding);
+    let shifted = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Subtract,
+        (position, expr::identity(1)),
+        (before, expr::broadcast(1)),
+    );
+    let zero = expr::constant(program, dtype, 0.0);
+    let clamped_low = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Maximum,
+        (shifted, expr::identity(1)),
+        (zero, expr::broadcast(1)),
+    );
+    let last = count_constant(program, dtype, length.saturating_sub(1));
+    let clamped_index = expr::binary(
+        program,
+        DType::INT32,
+        ScalarOp::Minimum,
+        (clamped_low, expr::identity(1)),
+        (last, expr::broadcast(1)),
+    );
+    let below = expr::constant(program, dtype, -1.0);
+    let valid_low = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Greater,
+        (shifted, expr::identity(1)),
+        (below, expr::broadcast(1)),
+    );
+    let extent = count_constant(program, dtype, length);
+    let valid_high = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Greater,
+        (extent, expr::broadcast(1)),
+        (shifted, expr::identity(1)),
+    );
+    let mask = expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (valid_low, expr::identity(1)),
+        (valid_high, expr::identity(1)),
+    );
+
+    let operand = expr::unary(
+        program,
+        dtype,
+        ScalarOp::Identity,
+        (signal, expr::identity(3)),
+    );
+    let base = map::IndexPattern {
+        iter_rank: 3,
+        axes: alloc::vec![unit_axis(0), unit_axis(1), AxisIndex::default()],
+    };
+    let gather_map = IndexMap::Computed {
+        indices: clamped_index,
+        index_map: map::projection(3, &[2]),
+        base,
+        gathered_dim: 2,
+    };
+    let gathered = expr::unary(program, dtype, ScalarOp::Identity, (operand, gather_map));
+    Some(expr::binary(
+        program,
+        dtype,
+        ScalarOp::Multiply,
+        (gathered, expr::identity(3)),
+        (mask, IndexMap::Affine(map::projection(3, &[2]))),
+    ))
+}
+
+/// A window term `stride*out_axis + dilation*kernel_axis` on one operand axis.
+fn window_axis(out_axis: u16, kernel_axis: u16, stride: u64, dilation: u64) -> Option<AxisIndex> {
+    Some(AxisIndex {
+        terms: [
+            AxisTerm::scaled(out_axis, i32::try_from(stride).ok()?),
+            AxisTerm::scaled(kernel_axis, i32::try_from(dilation).ok()?),
+        ]
+        .into_iter()
+        .collect(),
+        offset: 0,
+        len: None,
+    })
+}
+
+/// `Constant(1.0)` of the given extents. The two-term window read names no
+/// iteration axis of its own extent, so this stamp (the same device
+/// `stft_log_mel`'s framing and `proxima-onnx`'s `window_materialize1d` use)
+/// is the operand that pins `out` and `kernel` through plain projections.
+fn window_stamp(program: &mut Vec<Op>, dtype: DType, extents: &[u64]) -> NodeId {
+    expr::broadcast_anchor(program, dtype, extents, 1.0)
 }
 
 #[cfg(test)]
@@ -538,12 +502,9 @@ mod tests {
         }
     }
 
-    /// Forward-only (no `differentiate`, so nothing keeps the window mask
-    /// chain's operands alive past the fold) at stride 2 -- isolates whether
-    /// `bind.rs`'s masked-window elimination, which only ever fires on a
-    /// pure-forward graph (a differentiated graph's own backward reads the
-    /// mask's value, keeping it `held` past the point the elimination would
-    /// need it gone), agrees with a hand-computed stride-2 window.
+    /// Forward-only (no `differentiate`) at stride 2 -- isolates the
+    /// two-term window read from any backward machinery and checks it
+    /// against a hand-computed stride-2 window.
     /// `image` is `0..24` row-major over a `1x1x5x5` tensor:
     /// ```text
     ///  0  1  2  3  4
@@ -622,7 +583,7 @@ mod tests {
     /// Plain nested-loop reference convolution -- `[n, ci, h, w]` image,
     /// `[co, ci, kh, kw]` weight, valid (no padding) -- used only to check
     /// `conv2d`'s own output against an implementation that shares none of
-    /// its machinery (no mask, no `Iota`, no `IndexMap`).
+    /// its machinery (no window map, no `Iota`, no `IndexMap`).
     #[allow(clippy::too_many_arguments)]
     fn brute_force_conv2d(
         image: &[f32],
@@ -664,10 +625,9 @@ mod tests {
         (out, out_h, out_w)
     }
 
-    /// Two stacked `conv2d` layers, forward-only (no `differentiate`, so the
-    /// window mask chain is genuinely eliminated rather than kept alive by a
-    /// backward read of its value -- see `forward_only_stride_two_matches_hand_computed_values`'s
-    /// own doc), multi-channel, stride 2 on both layers, against
+    /// Two stacked `conv2d` layers, forward-only (no `differentiate`; see
+    /// `forward_only_stride_two_matches_hand_computed_values`'s own doc),
+    /// multi-channel, stride 2 on both layers, against
     /// `brute_force_conv2d` chained twice by hand -- the exact shape
     /// `real_mnist_conv_training.rs`'s own `build_eval_network` uses.
     #[proxima::test]
@@ -1344,13 +1304,12 @@ mod tests {
     /// `image`/`weight`/`bias`, the same oracle
     /// `proxima-autograd/tests/training_loop.rs`'s
     /// `central_difference_matches_the_analytic_gradient_on_every_parameter`
-    /// uses: it has no notion of "convolution" or "mask-composed window", it
-    /// simply differentiates the actual forward program numerically, so it
-    /// is a correct check for this composition regardless of how the window
-    /// was built. Checks `image` too, not only `weight`/`bias`: this
-    /// module's whole reason for choosing mask-composition over a gather
-    /// chain is that `image`'s own gradient must keep flowing (see this
-    /// module's own doc), so a passing check here is the proof, not just a
+    /// uses: it has no notion of "convolution" or "window", it simply
+    /// differentiates the actual forward program numerically, so it is a
+    /// correct check for this composition regardless of how the window was
+    /// built. Checks `image` too, not only `weight`/`bias`: `image`'s own
+    /// gradient must keep flowing through the window read (see this module's
+    /// own doc), so a passing check here is the proof, not just a
     /// nice-to-have.
     #[proxima::test]
     async fn conv2d_gradient_matches_central_difference_on_every_parameter() {
@@ -1965,6 +1924,50 @@ mod tests {
         }
     }
 
+    /// Whisper's encoder stem (80 mel channels in, 384 out, kernel 3, padding
+    /// 1, length 3000): the program must contain no node with two axes as
+    /// long as the output, i.e. no `source x out` mask or window tensor.
+    #[test]
+    fn conv1d_at_whisper_stem_shape_builds_no_source_by_output_tensor() {
+        for stride in [1u64, 2] {
+            let mut program = Vec::new();
+            let signal = leaf(&mut program, "signal", static_extents(&[1, 80, 3000]));
+            let weight = leaf(&mut program, "weight", static_extents(&[384, 80, 3]));
+            let dtype = program[signal.0 as usize].dtype();
+            conv1d(
+                &mut program,
+                dtype,
+                signal,
+                (1, 80, 3000),
+                weight,
+                (384, 80, 3),
+                None,
+                stride,
+                1,
+                1,
+            )
+            .expect("kernel 3 fits a 3000-long signal at padding 1");
+
+            let shapes = proxima_tensor::shape::infer(&program, &[])
+                .expect("whisper-stem conv1d program infers");
+            let out_length = 3000 / stride;
+            let widest = (0..program.len())
+                .map(|index| {
+                    let shape = shapes.of(NodeId(index as u32));
+                    let long_axes = shape.iter().filter(|&&extent| extent >= out_length).count();
+                    (long_axes, shape.to_vec())
+                })
+                .max_by_key(|(long_axes, _)| *long_axes)
+                .expect("program has nodes");
+            assert!(
+                widest.0 <= 1,
+                "stride {stride}: node of shape {:?} has {} axes of extent >= {out_length}",
+                widest.1,
+                widest.0
+            );
+        }
+    }
+
     fn static_extents(dims: &[u32]) -> Vec<Extent> {
         dims.iter().map(|&dim| Extent::Static(dim)).collect()
     }
@@ -2099,8 +2102,8 @@ mod tests {
 
     /// A stride-1 padded layer feeds a stride-2
     /// layer, so the second layer's input is the first layer's output and the
-    /// gradient must keep flowing into `weight1` through the mask-composed
-    /// window (a gather window would stop there).
+    /// gradient must keep flowing into `weight1` through the affine window
+    /// read and the scatter pad (a gather window would stop there).
     #[proxima::test]
     async fn conv1d_gradient_matches_central_difference_stride_2_stacked() {
         let mut program = Vec::new();
