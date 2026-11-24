@@ -52,7 +52,7 @@ impl EncodeDialect for CudaEncode {
 
     fn kernel_open(&self, name: &str, input: &str, storage: &str) -> String {
         format!(
-            "extern \"C\" __global__ void {name}_kernel(const {input} *input, {storage} *output) {{\n    unsigned int gid = blockIdx.x * blockDim.x + threadIdx.x;\n"
+            "extern \"C\" __global__ void {name}_kernel(const {input} *input, {storage} *output, unsigned int threads) {{\n    unsigned int gid = blockIdx.x * blockDim.x + threadIdx.x;\n    if (gid >= threads) return;\n"
         )
     }
 

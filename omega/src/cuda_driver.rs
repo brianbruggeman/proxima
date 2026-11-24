@@ -23,6 +23,7 @@ use cudarc::driver::{
     CudaContext, CudaEvent, CudaFunction, CudaModule, CudaSlice, CudaStream, CudaView, DriverError, LaunchArgs, LaunchConfig,
     PushKernelArg,
 };
+use crate::encode_render::{EncodeRows, RenderedEncode, row_bytes};
 use cudarc::nvrtc::sys as nvrtc_sys;
 use cudarc::nvrtc::result as nvrtc_result;
 use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
@@ -752,6 +753,46 @@ impl CudaDriver {
     pub fn allocated_bytes(&self) -> Option<u64> {
         let (free, total) = self.memory_info().ok()?;
         Some((total.saturating_sub(free) as u64).saturating_sub(self.baseline_used_bytes))
+    }
+
+    /// Encodes `rows` of the device binary32 `source` into `destination` at `rows.byte_offset`
+    /// with the kernel `rendered` was rendered as for `format`: Metal's encode dispatch contract.
+    /// Bytes outside the packed range are untouched. The caller owns synchronizing the stream.
+    ///
+    /// # Errors
+    /// [`CudaDriverError::BindingContract`] when the rows are not whole blocks of `format`, are not
+    /// whole threads, do not fit `source` or `destination`, or `Row` is not one host row element.
+    pub fn encode_rows<Row: cudarc::driver::DeviceRepr>(
+        &self,
+        rendered: &RenderedEncode,
+        format: &NumericFormat,
+        source: &CudaSlice<Row>,
+        destination: &mut CudaSlice<u8>,
+        rows: EncodeRows,
+    ) -> Result<(), CudaDriverError> {
+        if row_bytes() != Some(core::mem::size_of::<Row>()) {
+            return Err(CudaDriverError::BindingContract);
+        }
+        let range = rows.byte_range(format).ok_or(CudaDriverError::BindingContract)?;
+        let threads = rows.threads(rendered.elements_per_thread);
+        if threads * rendered.elements_per_thread != rows.element_count || rows.element_count > source.len() || range.end > destination.len() {
+            return Err(CudaDriverError::BindingContract);
+        }
+        let count = u32::try_from(threads).map_err(|_| CudaDriverError::InputTooLarge(threads))?;
+        let kernel = encode_kernel(rendered, threads)?;
+        let function = self.function_for(&kernel)?;
+        let mut window = destination.slice_mut(range);
+        let mut args = self.stream.launch_builder(&function);
+        args.arg(source);
+        args.arg(&mut window);
+        args.arg(&count);
+        let config = LaunchConfig {
+            grid_dim: (launch_blocks(&kernel.grid)?, 1, 1),
+            block_dim: (kernel.grid.block_width_or_default() as u32, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe { args.launch(config) }?;
+        Ok(())
     }
 
     fn function_for(&self, kernel: &CudaKernel) -> Result<CudaFunction, CudaDriverError> {
@@ -4183,6 +4224,19 @@ $DONE:
     ret;
 }
 "#;
+
+fn encode_kernel(rendered: &RenderedEncode, threads: usize) -> Result<CudaKernel, CudaDriverError> {
+    let node = NodeId(0);
+    Ok(CudaKernel {
+        source: rendered.source.clone(),
+        entry: rendered.entry.clone(),
+        bindings: vec![Binding::Input(node), Binding::Output(node)],
+        grid: CudaGridSpec::launch(node, threads as u64, None, "encode_rows").map_err(|_| CudaDriverError::IdleLaunch)?,
+        extra_outputs: Vec::new(),
+        prologue: Vec::new(),
+        route_compaction_words: 0,
+    })
+}
 
 /// The x-dimension block count of `grid`'s launch, or an error rather than the
 /// silent truncation of an `as u32` cast: `emit_cuda` already rejects a grid

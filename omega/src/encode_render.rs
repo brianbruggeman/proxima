@@ -127,12 +127,23 @@ fn scalar_encode_kernel(dialect: &dyn EncodeDialect, layout: FloatLayout, name: 
     Some(RenderedEncode { source, entry: format!("{name}_kernel"), elements_per_thread: 1, bytes_per_thread: bytes })
 }
 
-/// The token of one host row element: the binary32 layout is the one scalar format the hardware stores in a whole word.
-fn row_token() -> Option<&'static str> {
+/// The layout of one host row element: the one scalar format the hardware stores in a whole word.
+fn row_layout() -> Option<FloatLayout> {
     NumericFormat::every().find_map(|format| match format {
-        NumericFormat::Scalar(layout) if usize::from(layout.width()) == u32::BITS as usize => hardware_type(&layout),
+        NumericFormat::Scalar(layout) if usize::from(layout.width()) == u32::BITS as usize => Some(layout),
         _ => None,
     })
+}
+
+/// The token of one host row element.
+fn row_token() -> Option<&'static str> {
+    hardware_type(&row_layout()?)
+}
+
+/// Bytes of one host row element, what a source buffer's element must measure.
+#[must_use]
+pub fn row_bytes() -> Option<usize> {
+    row_layout().map(|layout| usize::from(layout.width()) / usize::from(BYTE_BITS))
 }
 
 /// The kernel that runs `function` (named `name`) over one block per thread.
