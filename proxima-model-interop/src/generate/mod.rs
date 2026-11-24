@@ -355,6 +355,9 @@ mod thread_index_census_tests;
 #[cfg(test)]
 mod verify_bound_tests;
 mod warm_buffers;
+mod warm_load;
+#[cfg(test)]
+mod warm_load_tests;
 mod warm_prefill;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod warm_prefill_tests;
@@ -377,6 +380,7 @@ use kv_ring::{
 pub use load_model::*;
 pub(crate) use pregather::*;
 pub use prewarm::{PrewarmReport, PrewarmSkip};
+pub use warm_load::LoadWarm;
 use prewarm_gate::PrewarmGate;
 use prewarm_queue::PrewarmQueue;
 use prompt_cache::PromptCache;

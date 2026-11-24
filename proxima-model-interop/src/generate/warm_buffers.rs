@@ -10,7 +10,6 @@
 //! skip the cases where decode would drop the mapping anyway.
 
 use super::*;
-#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
 use crate::serving::GPU_LAYERS_ALL;
 
 /// Whether a warm-up should run for this configuration: the setting is on,
@@ -18,7 +17,6 @@ use crate::serving::GPU_LAYERS_ALL;
 /// (the routed pre-gather path unregisters it, see
 /// `LoadedModel::drive_serving_loop`, so warming it would build a
 /// whole-checkpoint buffer that is dropped before use).
-#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
 pub(super) fn should_warm(serving_config: &ServingConfig<'_>, routed_experts: bool) -> bool {
     let pre_gather = moe_pre_gather_enabled(serving_config.moe_pre_gather, routed_experts);
     let mapping_dropped = pre_gather && !serving_config.moe_monolithic_high_mmap;
@@ -33,7 +31,6 @@ impl LoadedModel<'_> {
     /// [`ServingConfig::warm_model_buffers_at_load`] asks for it. Returns how
     /// many buffers were declared; `Ok(0)` when the setting is off or the
     /// configuration does not keep the mapping.
-    #[cfg(all(feature = "metal", target_os = "macos"))]
     pub fn warm_resident_buffers(
         &self,
         serving_config: &ServingConfig<'_>,
@@ -41,13 +38,25 @@ impl LoadedModel<'_> {
         if !should_warm(serving_config, self.has_experts) {
             return Ok(0);
         }
-        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        self.warm_driver_buffers()
+    }
+
+    /// Metal declares its mapping and resident buffers in one waited command
+    /// buffer; a driver with nothing to declare yet reports zero.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    fn warm_driver_buffers(&self) -> Result<usize, InteropError> {
+        #[cfg(feature = "metal-output-placement")]
         {
             let mut serving = proxima_primitives::driver::block_on(self.serving.lock());
             serving.metal_mut().warm().map_err(InteropError::from)
         }
-        #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+        #[cfg(not(feature = "metal-output-placement"))]
         omega::metal::warm_resident_buffers().map_err(InteropError::from)
+    }
+
+    #[cfg(not(all(feature = "metal", target_os = "macos")))]
+    fn warm_driver_buffers(&self) -> Result<usize, InteropError> {
+        Ok(0)
     }
 }
 

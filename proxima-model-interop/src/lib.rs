@@ -192,7 +192,7 @@ pub use expert_slab::{
 #[cfg(feature = "std")]
 pub use generate::{
     AsyncTokenProducer, CachePath, CacheReport, ColdTier, DecodeMetrics, EvictionRule, LoadedModel,
-    MissReason, Phase, PrefixState, PrewarmReport, PrewarmSkip, SpeculativeDecodeStats,
+    LoadWarm, MissReason, Phase, PrefixState, PrewarmReport, PrewarmSkip, SpeculativeDecodeStats,
     SpeculativeTypeStats, TokenEvent,
 };
 #[cfg(feature = "std")]

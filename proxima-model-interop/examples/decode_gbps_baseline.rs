@@ -40,7 +40,7 @@ use omega::AttentionDecomposition;
 use omega::backend::GpuDriver;
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{
-    ContextLength, LoadedModel, Phase, PromptCacheConfig, ServingConfig, ServingSettings,
+    ContextLength, LoadWarm, LoadedModel, Phase, PromptCacheConfig, ServingConfig, ServingSettings,
     SpeculativeSettings, TokenEvent,
 };
 use proxima_numeric::NumericFormat;
@@ -396,26 +396,14 @@ fn main() {
     let model = LoadedModel::load_with_serving(&parsed, &bytes, &serving_config)
         .unwrap_or_else(|error| panic!("bind {model_file}: {error:?}"));
 
-    #[cfg(all(feature = "metal", target_os = "macos"))]
-    {
-        let warm_started = Instant::now();
-        let warmed_buffers = model
-            .warm_resident_buffers(&serving_config)
-            .expect("declare the model buffers to the driver");
-        let context_rows = match serving_config.context_length {
-            ContextLength::Native => serving_config.ubatch_size as usize,
-            ContextLength::Within(rows) | ContextLength::Extrapolate(rows) => rows as usize,
-        };
-        let warm_chunk_rows =
-            (serving_config.ubatch_size as usize).min((context_rows.saturating_sub(2) / 2).max(1));
-        let warmed_rows = model
-            .warm_prefill(&serving_config, warm_chunk_rows)
-            .expect("compile the chunk pipelines and build their plans");
-        eprintln!(
-            "decode_gbps_baseline warm_model_buffers={warm_model_buffers_at_load} warmed_buffers={warmed_buffers} warmed_rows={warmed_rows} warm_ms={:.3}",
-            warm_started.elapsed().as_secs_f64() * 1000.0
-        );
-    }
+    let warm_started = Instant::now();
+    let LoadWarm { buffers: warmed_buffers, rows: warmed_rows } = model
+        .warm_at_load(&serving_config)
+        .expect("warm the model at load");
+    eprintln!(
+        "decode_gbps_baseline warm_model_buffers={warm_model_buffers_at_load} warmed_buffers={warmed_buffers} warmed_rows={warmed_rows} warm_ms={:.3}",
+        warm_started.elapsed().as_secs_f64() * 1000.0
+    );
 
     // plain text default; `PROXIMA_PROMPT` overrides it verbatim and this example adds or
     // infers no template markers.

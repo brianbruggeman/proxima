@@ -1,8 +1,8 @@
-//! PROXIMAOMEGA-61: what ragd's thread-per-request serving shape costs. The
+//! PROXIMAOMEGA-61: what a downstream server's thread-per-request serving shape costs. The
 //! model loads once on the main thread (and is warmed there, as
 //! `decode_gbps_baseline` does); then `PROXIMA_REQUESTS` identical requests
 //! are served. Arm A (default) gives each request a fresh `std::thread::spawn`
-//! joined before the next, the shape of ragd's proxima provider. Arm B
+//! joined before the next, the shape of a downstream server's proxima provider. Arm B
 //! (`PROXIMA_SAME_THREAD=1`) serves every request on one long-lived spawned
 //! thread. Model loading and the `run=done` fields follow
 //! `decode_gbps_baseline.rs`; this example still reads its own legacy
@@ -26,7 +26,7 @@ use conflaguration::Settings as _;
 use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{
-    GPU_LAYERS_ALL, LoadedModel, Phase, PromptCacheConfig, ServingConfig, SpeculativeSettings,
+    GPU_LAYERS_ALL, LoadWarm, LoadedModel, Phase, PromptCacheConfig, ServingConfig, SpeculativeSettings,
     TokenEvent,
 };
 use proxima_numeric::NumericFormat;
@@ -210,17 +210,14 @@ fn main() -> Result<()> {
         .map_err(|error| anyhow!("parse gguf header of {model_file}: {error:?}"))?;
     let model = LoadedModel::load_with_serving(&parsed, &bytes, &serving_config)
         .map_err(|error| anyhow!("bind {model_file}: {error:?}"))?;
-    #[cfg(all(feature = "metal", target_os = "macos"))]
-    {
-        let warm_started = Instant::now();
-        let warmed_buffers = model
-            .warm_resident_buffers(&serving_config)
-            .map_err(|error| anyhow!("declare the model buffers to the driver: {error:?}"))?;
-        eprintln!(
-            "serve_thread_per_request warmed_buffers={warmed_buffers} warm_ms={:.3}",
-            warm_started.elapsed().as_secs_f64() * 1000.0
-        );
-    }
+    let warm_started = Instant::now();
+    let LoadWarm { buffers: warmed_buffers, rows: warmed_rows } = model
+        .warm_at_load(&serving_config)
+        .map_err(|error| anyhow!("warm the model at load: {error:?}"))?;
+    eprintln!(
+        "serve_thread_per_request warmed_buffers={warmed_buffers} warmed_rows={warmed_rows} warm_ms={:.3}",
+        warm_started.elapsed().as_secs_f64() * 1000.0
+    );
     eprintln!(
         "serve_thread_per_request run=loaded footprint_after_load_bytes={} {}",
         footprint_bytes(),
