@@ -1281,8 +1281,8 @@ impl Default for ServingConfig<'static> {
             // cache in all four cells. A build with no cached-attention kernel keeps binary32 because
             // its cache is the graph's own output; kv_cache_format::admit_pair there admits any format
             // that encodes, and the host rounds each row through the format's codec at the write.
-            kv_cache_key_quant: if cfg!(feature = "gpu") { NumericFormat::Float16 } else { NumericFormat::Float32 },
-            kv_cache_value_quant: if cfg!(feature = "gpu") { NumericFormat::Float16 } else { NumericFormat::Float32 },
+            kv_cache_key_quant: kv_cache_format::default_cache_format(),
+            kv_cache_value_quant: kv_cache_format::default_cache_format(),
             flash_attention: false,
             batch_size: DEFAULT_BATCH_SIZE,
             ubatch_size: DEFAULT_UBATCH_SIZE,
@@ -1647,9 +1647,11 @@ mod tests {
             "-c unset resolves to the limit"
         );
         assert_eq!(config.parallel_sequences, 1, "-np 1");
-        let expected = if cfg!(feature = "gpu") { NumericFormat::Float16 } else { NumericFormat::Float32 };
-        assert_eq!(config.kv_cache_key_quant, expected, "-ctk is llama.cpp's default");
-        assert_eq!(config.kv_cache_value_quant, expected, "-ctv is llama.cpp's default");
+        assert_eq!(config.kv_cache_key_quant, config.kv_cache_value_quant, "-ctk and -ctv default together");
+        assert!(
+            kv_cache_format::admit_pair(&config.kv_cache_key_quant, &config.kv_cache_value_quant).is_ok(),
+            "the default cache is one the active backend reads"
+        );
         assert!(!config.flash_attention, "-fa off");
         assert_eq!(config.batch_size, 2048, "-b 2048");
         assert_eq!(config.ubatch_size, 512, "-ub 512");

@@ -7,13 +7,26 @@
 //! only the binary32 cache the graph itself produces.
 
 use alloc::format;
-#[cfg(feature = "gpu")]
+#[cfg(all(feature = "std", feature = "gpu", feature = "metal-output-placement", target_os = "macos"))]
 use alloc::string::ToString;
 use alloc::string::String;
 
 use proxima_numeric::NumericFormat;
 
 use crate::error::InteropError;
+
+/// The cache format the serving default stores: llama.cpp's own `-ctk`/`-ctv` default when the
+/// active driver's cached attention reads it, otherwise the graph's own output format, which every
+/// driver and the host read. Never a format the active backend would refuse at admission.
+pub(crate) fn default_cache_format() -> NumericFormat {
+    let graph_output = NumericFormat::Float32;
+    let preferred = NumericFormat::Float16;
+    if cfg!(feature = "gpu") && kernel_pair(&preferred, &preferred).is_ok() {
+        preferred
+    } else {
+        graph_output
+    }
+}
 
 /// Whether `format` is the one the graph evaluates its K and V rows in (binary32), which a placed
 /// cache buffer or a device carry receives without a conversion step.
@@ -32,18 +45,24 @@ fn kernel_codec(format: &NumericFormat) -> Result<Option<NumericFormat>, String>
     omega::cached_attention_key_codec_for(format).map_err(|error| error.to_string())
 }
 
-/// The kernel's answer for a K and V stored as different formats.
+/// The active driver's answer for a K and V stored as different formats; a build with no driver
+/// compiled reads the cache on the host.
 #[cfg(feature = "gpu")]
 fn kernel_pair(key: &NumericFormat, value: &NumericFormat) -> Result<(), String> {
-    omega::cached_attention_kv_codecs_for(key, value)
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    match omega::backend::GpuDriver::for_target() {
+        Some(driver) => driver.admits_kv_cache(key, value),
+        None => host_pair(key, value),
+    }
 }
 
 /// Without a cached-attention kernel the host reads the cache: each row is encoded through the
 /// format's own codec at the write (the host store is `PackedRows`), so any format that encodes is read.
 #[cfg(not(feature = "gpu"))]
 fn kernel_pair(key: &NumericFormat, value: &NumericFormat) -> Result<(), String> {
+    host_pair(key, value)
+}
+
+fn host_pair(key: &NumericFormat, value: &NumericFormat) -> Result<(), String> {
     for format in [key, value] {
         let encodes = stores_graph_output_format(format)
             || proxima_numeric::FormatCodec::for_format(format).is_some_and(|codec| codec.can_encode());
@@ -159,7 +178,7 @@ mod tests {
         assert!(admit_pair(&NumericFormat::Float32, &NumericFormat::Float32).is_ok());
     }
 
-    #[cfg(feature = "gpu")]
+    #[cfg(all(feature = "gpu", any(not(feature = "cuda"), all(feature = "metal", target_os = "macos"))))]
     #[test]
     fn the_narrow_pairs_the_kernel_reads_are_admitted() {
         for element in [NumericFormat::Float16, NumericFormat::BFloat16] {
@@ -186,7 +205,7 @@ mod tests {
         assert!(message.contains("same type"), "{message}");
     }
 
-    #[cfg(feature = "gpu")]
+    #[cfg(all(feature = "gpu", any(not(feature = "cuda"), all(feature = "metal", target_os = "macos"))))]
     #[test]
     fn a_block_key_beside_a_scalar_or_block_value_is_admitted_and_every_other_block_pairing_is_refused() {
         for (key, value) in [
@@ -208,6 +227,55 @@ mod tests {
             let message = error.to_string();
             assert!(message.contains(&format!("{key:?}")) && message.contains(&format!("{value:?}")), "{message}");
         }
+    }
+
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn admission_is_exactly_the_active_drivers_answer_over_every_format_pair() {
+        let Some(driver) = omega::backend::GpuDriver::for_target() else {
+            return;
+        };
+        for key in &NumericFormat::ALL {
+            for value in &NumericFormat::ALL {
+                assert_eq!(
+                    admit_pair(key, value).is_ok(),
+                    driver.admits_kv_cache(key, value).is_ok(),
+                    "{key:?} key, {value:?} value"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn the_default_cache_format_is_one_the_active_backend_admits() {
+        let format = default_cache_format();
+        assert!(admit_pair(&format, &format).is_ok(), "{format:?}");
+    }
+
+    #[cfg(all(feature = "gpu", feature = "cuda", not(all(feature = "metal", target_os = "macos"))))]
+    #[test]
+    fn a_cuda_build_admits_only_the_graph_output_format_and_defaults_to_it() {
+        for format in &NumericFormat::ALL {
+            assert_eq!(
+                admit_pair(format, format).is_ok(),
+                stores_graph_output_format(format),
+                "{format:?}"
+            );
+        }
+        assert!(stores_graph_output_format(&default_cache_format()));
+    }
+
+    #[cfg(all(feature = "gpu", feature = "cuda", not(all(feature = "metal", target_os = "macos"))))]
+    #[test]
+    fn a_refused_cache_format_names_the_backend_and_the_format() {
+        let refused = NumericFormat::ALL
+            .iter()
+            .find(|format| !stores_graph_output_format(format))
+            .expect("a format other than the graph output exists");
+        let message = admit_pair(refused, refused).expect_err("refused").to_string();
+        assert!(message.contains("cuda") && message.contains(&format!("{refused:?}")), "{message}");
     }
 
     #[cfg(feature = "std")]
