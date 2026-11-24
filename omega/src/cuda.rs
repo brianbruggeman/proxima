@@ -6308,7 +6308,8 @@ mod tests {
 
     fn int8_grouped_pair(bound: &BoundOp, codec: Codec) -> Option<([CudaKernel; 2], usize)> {
         let mut packed = packed_expert_weight(bound, codec);
-        packed.insert(bound.operands()[1].0, Codec::Q8_1Grouped);
+        let activation = Codec::ALL.into_iter().find(|codec| codec.is_quantized_activation()).expect("a quantized activation codec");
+        packed.insert(bound.operands()[1].0, activation);
         let policy = NumericPolicy::llama_relaxed().with_activation_quantization(true);
         emit_cuda_grouped_on_device(bound, &packed, policy, EmitDevice::default()).expect("grouped emit succeeds")
     }
@@ -6325,7 +6326,7 @@ mod tests {
             assert!(grouped.entry.contains("_grp1"), "{}", grouped.entry);
             assert!(grouped.source.contains("mma_s8("), "{codec:?}: the int8 mma is the tile");
             assert!(grouped.source.contains("act_tile"), "{codec:?}: the activation stages as int8 codes");
-            assert!(!grouped.source.contains("act_high"), "{codec:?}: no float activation tile");
+            assert!(!grouped.source.contains("act_high"), "{codec:?}: no wide activation tile");
             assert!(grouped.source.contains("tile_list[token]"), "{codec:?}: activation rows come through the compacted list");
             assert!(grouped.source.contains("grouped_expert * u.gather_element_stride[0]"), "{codec:?}: the weight is read at the slice's expert");
             assert!(prepass.source.contains("__ballot_sync"), "{codec:?}: the prepass ranks rows by ballot");
