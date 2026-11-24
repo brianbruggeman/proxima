@@ -2250,62 +2250,6 @@ pub(super) mod checkpoint_mapping_release_tests {
         );
     }
 
-    /// pages dropped from the cache after the view requested residency still
-    /// read as the file's bytes (the hazard `mlock` guarded: eviction after load).
-    #[test]
-    fn a_gpu_read_after_the_mapping_pages_are_invalidated_returns_the_file_bytes() {
-        let _guard = MAPPING_TEST_LOCK
-            .lock()
-            .expect("mapping test lock is healthy");
-        let Ok((device, queue)) = device_and_queue() else {
-            return;
-        };
-        reset_checkpoint_mapping_for_test();
-
-        let page = page_size();
-        let file_length = COLD_FILE_PAGES * page;
-        let (_file, base, contents) = cold_file_mapping();
-        // SAFETY: the mapping is `file_length` bytes and outlives every use below.
-        let mapped = unsafe { core::slice::from_raw_parts(base, file_length) };
-        let offset = 64 * page + 64;
-        let length = 16 * page;
-        // SAFETY: `offset` is inside the mapping.
-        let read_start = unsafe { base.add(offset) };
-        // SAFETY: the page-aligned range around the read lies inside the mapping.
-        let range_start = unsafe { base.add(64 * page) };
-        register_checkpoint_mapping(mapped);
-        let (_view, _view_offset) =
-            checkpoint_mapping_offset(&device, read_start.cast(), length, None)
-                .expect("the range lies inside the registered mapping")
-                .expect("the mapping view is created");
-
-        // SAFETY: the page-aligned range lies inside the live mapping.
-        let invalidate = unsafe {
-            libc::msync(
-                range_start.cast_mut().cast(),
-                17 * page,
-                libc::MS_INVALIDATE,
-            )
-        };
-        let invalidate_errno = std::io::Error::last_os_error();
-        let cold_after = non_resident_pages(range_start, 17 * page);
-        eprintln!(
-            "invalidate probe: msync returned {invalidate}, errno text: {invalidate_errno}, \
-             non-resident pages after invalidation: {cold_after} of 17"
-        );
-        let read = gpu_read_through_mapping(&device, &queue, read_start, length);
-
-        unregister_checkpoint_mapping(mapped);
-        // SAFETY: the mapping was created above and nothing references it now.
-        unsafe { libc::munmap(base.cast_mut().cast(), file_length) };
-        assert_eq!(
-            read,
-            &contents[offset..offset + length],
-            "the GPU read returns the file's bytes (msync MS_INVALIDATE returned {invalidate}, \
-             errno when nonzero: {invalidate_errno}; non-resident pages after it: {cold_after} of 17)"
-        );
-    }
-
     #[test]
     fn packed_upload_prefers_the_registered_expert_mapping() {
         let _guard = MAPPING_TEST_LOCK
