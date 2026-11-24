@@ -124,7 +124,7 @@ if [[ "$code" -ne 0 ]] && grep -q 'metric ttft_us_warm: no values' <<<"$out"; th
 "$TOOL" render "$BASE" > "$SCRATCH/render1.md"
 "$TOOL" render "$BASE" > "$SCRATCH/render2.md"
 if cmp -s "$SCRATCH/render1.md" "$SCRATCH/render2.md" && [[ -s "$SCRATCH/render1.md" ]]; then ok; else fail "render deterministic" "two renders differ or are empty"; fi
-SHA="$(shasum -a 256 "$BASE" | cut -d' ' -f1)"
+SHA="$(if command -v shasum >/dev/null; then shasum -a 256 "$BASE"; else sha256sum "$BASE"; fi | cut -d" " -f1)"
 check_eq "render lines citing the sha" "0" "$(tail -n +3 "$SCRATCH/render1.md" | grep -vc " runs=$BASE@$SHA\$")"
 check_eq "render marks p99 =max at n=20" "1" "$(grep -c '^| metal | ttft_us_cold .*=max.*=max' "$SCRATCH/render1.md" )"
 check_eq "render leaves p95 unmarked at n=20" "0" "$(grep '^| metal | ttft_us_cold ' "$SCRATCH/render1.md" | cut -d'|' -f6 | grep -c '=max')"
