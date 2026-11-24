@@ -6,8 +6,8 @@
 //! llama.cpp's; the llama.cpp greedy-id gate is
 //! `proxima-model-interop/tests/gemma4_attn_split_decode_oracle.rs`.
 //!
-//! The program is the gemma4-shaped two-layer two-range cached forward
-//! (`gemma4_rows_support`): a sliding layer (head_dim 256, window 512) and a
+//! The program is the sliding-and-global two-layer two-range cached forward
+//! (`sliding_global_rows_support`): a sliding layer (head_dim 256, window 512) and a
 //! global layer (head_dim 512), eight query heads on one kv head. It is swept
 //! over `K in {2, 5, 17, 49}` new rows and the cached lengths
 //! `{31, 33, 199, 511, 1099, 2047}` (capacity buckets of 32 to 2048, so every
@@ -45,9 +45,9 @@ use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::{BFloat8, BoundOp, BoundOpKind, Interpreter, NodeId, Op, bind_with_fusion, block_node_ids, infer};
 use proxima_numeric::{NumericPolicy};
 
-mod gemma4_rows_support;
+mod sliding_global_rows_support;
 mod support;
-use gemma4_rows_support::{Fixture, Geometry, bucket_for, fixture_with};
+use sliding_global_rows_support::{Fixture, Geometry, bucket_for, fixture_with};
 use support::{
     as_named_blocks, attention_probe_roots, production_numeric_policy, sampled_attention_against_device,
 };

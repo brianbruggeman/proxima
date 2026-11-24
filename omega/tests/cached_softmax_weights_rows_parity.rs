@@ -1,6 +1,6 @@
 //! The K-row `CachedSoftmaxWeights` lowering against the unfused chain it
 //! replaces, on the device. Under `bit_exact` the recognizer binds the
-//! gemma4-shaped two-range program's attention as `CachedSoftmaxWeights` at K
+//! sliding-and-global two-range program's attention as `CachedSoftmaxWeights` at K
 //! new rows (`metal-attn-split-rows`); the same program planned with the
 //! cached-attention fusion off runs the literal 13-op chain per layer.
 //!
@@ -32,9 +32,9 @@
 use proxima_tensor::{BoundOpKind, NodeId, bind_with_fusion, infer};
 use proxima_numeric::{NumericPolicy};
 
-mod gemma4_rows_support;
+mod sliding_global_rows_support;
 mod support;
-use gemma4_rows_support::{VOCAB, bucket_for, fixture};
+use sliding_global_rows_support::{VOCAB, bucket_for, fixture};
 use support::as_named_blocks;
 
 const VERIFY_ROWS: [usize; 9] = [1, 2, 3, 4, 5, 8, 9, 17, 49];

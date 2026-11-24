@@ -39,8 +39,8 @@ use std::time::Duration;
     feature = "metal-attn-variants",
     target_os = "macos"
 ))]
-#[path = "../tests/gemma4_rows_support/mod.rs"]
-mod gemma4_rows_support;
+#[path = "../tests/sliding_global_rows_support/mod.rs"]
+mod sliding_global_rows_support;
 
 #[cfg(all(
     feature = "metal",
@@ -67,7 +67,7 @@ const CACHED_CAPACITIES: [usize; 6] = [512, 4096, 16384, 32768, 65536, 131072];
     target_os = "macos"
 ))]
 fn bench_single_row_attention(criterion: &mut Criterion) {
-    use gemma4_rows_support::{Geometry, fixture_with};
+    use sliding_global_rows_support::{Geometry, fixture_with};
     use support::{as_named_blocks, production_numeric_policy};
 
     let policy = production_numeric_policy();

@@ -10,10 +10,10 @@
 use proxima_tensor::QuantizedBlock;
 use proxima_test::alloc_count::{CountingAllocator, allocations};
 
-mod gemma4_rows_support;
+mod sliding_global_rows_support;
 mod support;
 
-use gemma4_rows_support::{Geometry, fixture_with};
+use sliding_global_rows_support::{Geometry, fixture_with};
 use support::{as_named_blocks, production_numeric_policy};
 
 #[global_allocator]

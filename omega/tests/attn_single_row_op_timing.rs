@@ -11,10 +11,10 @@
 ))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-mod gemma4_rows_support;
+mod sliding_global_rows_support;
 mod support;
 
-use gemma4_rows_support::{Geometry, fixture_with};
+use sliding_global_rows_support::{Geometry, fixture_with};
 use support::{as_named_blocks, production_numeric_policy};
 
 fn attention_totals(timings: &[omega::metal::OpGpuTiming]) -> (u64, usize, u64) {

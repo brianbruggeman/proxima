@@ -2,7 +2,7 @@
 //! `cached_attention_row_tiled_parity.rs` assumes about its fixture, proven on
 //! the CPU so a Metal run is never the first time they are checked.
 //!
-//! On the sliding-and-global two-layer program (`gemma4_rows_support`) at the
+//! On the sliding-and-global two-layer program (`sliding_global_rows_support`) at the
 //! speculative-verify and prefill shapes, and on a two-query-group shape,
 //! with the production policy plus the flash narrowing the Metal driver grants:
 //! - both attention ops bind as `CachedAttention` and emit the row-tiled kernel
@@ -29,10 +29,10 @@ use proxima_tensor::{
     BoundOp, BoundOpKind, Interpreter, Op, bind_with_fusion, block_node_ids, infer,
 };
 
-mod gemma4_rows_support;
+mod sliding_global_rows_support;
 mod row_tiled_kernel_model;
 mod support;
-use gemma4_rows_support::{Fixture, Geometry, bucket_for, fixture_with};
+use sliding_global_rows_support::{Fixture, Geometry, bucket_for, fixture_with};
 use row_tiled_kernel_model::{Inputs, Shape, Tiling, model};
 use support::production_numeric_policy;
 

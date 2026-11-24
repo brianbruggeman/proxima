@@ -1,8 +1,7 @@
-//! The gemma4-shaped two-layer two-range cached program the row-tiled
+//! The sliding-and-global two-layer two-range cached program the row-tiled
 //! attention gates share: a sliding layer (head_dim 256, window 512) and a
-//! global layer (head_dim 512, unwindowed), eight query heads on one kv head
-//! each, the attention geometry of an eight-head decoder with one kv head at the dimensions the row-tiled
-//! kernel is sized for. Every named input is generated from the program's own
+//! global layer (head_dim 512, unwindowed), eight query heads on one kv head,
+//! at the dimensions the row-tiled kernel is sized for. Every named input is generated from the program's own
 //! inferred shapes, RoPE tables are real rotary angles at the absolute
 //! positions of the new rows, and the cache holds `cached_len` live rows
 //! followed by the zero padding of its capacity bucket.
@@ -235,9 +234,9 @@ pub fn fixture_with(rows: usize, cached_len: usize, geometry: Geometry) -> Fixtu
             SharedExpertWidth::NONE,
             None,
         )
-        .expect("the gemma4-shaped two-range program lowers");
+        .expect("the sliding-and-global two-range program lowers");
     let symbols = vec![rows as u64, bucket_for(cached_len) as u64];
-    let shapes = infer(&program, &symbols).expect("the gemma4-shaped program infers");
+    let shapes = infer(&program, &symbols).expect("the sliding-and-global program infers");
 
     let mut named = Vec::new();
     for (position, op) in program.iter().enumerate() {
