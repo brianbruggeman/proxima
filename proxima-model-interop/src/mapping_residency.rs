@@ -76,6 +76,7 @@ impl PassClock {
 /// a fake vector with holes exercises the same counting rule the real probe
 /// uses.
 #[must_use]
+#[cfg(any(test, feature = "test-support"))]
 pub fn count_missing_pages(residency: &[i8]) -> usize {
     residency
         .iter()
@@ -87,6 +88,7 @@ pub fn count_missing_pages(residency: &[i8]) -> usize {
 /// `bytes_len`-byte mapping. A pure function over the same `mincore` output
 /// shape [`count_missing_pages`] already tests against a hand-built vector.
 #[must_use]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn missing_byte_ranges(
     residency: &[i8],
     page: usize,
@@ -112,6 +114,7 @@ pub(crate) fn missing_byte_ranges(
 /// per page in the same order [`count_missing_pages`] expects. A probe that
 /// cannot run proves nothing about residency, so a `mincore` failure reports
 /// every page as missing.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn probe_residency(bytes: &[u8]) -> Vec<i8> {
     if bytes.is_empty() {
         return Vec::new();
