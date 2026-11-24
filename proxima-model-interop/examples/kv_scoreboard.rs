@@ -88,7 +88,7 @@
 //!   --prox new=PATH_A --prox old=PATH_B --rounds 5
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CString, c_char, c_void};
 use std::fmt::{Display, Write as _};
 use std::fs::{self, File};
@@ -120,7 +120,8 @@ const STOP_GRACE: Duration = Duration::from_secs(2);
 const MAX_TOKENS: usize = 128;
 const LLAMA_KV_PAD: usize = 256;
 const BASE_PORT: u16 = 18_200;
-const BUSY_PATTERN: &str = "cargo|rustc|nextest|kv_scoreboard|llama-server";
+const UNKNOWN_BUILD: &str = "unknown";
+const BUSY_PROGRAMS: [&str; 5] = ["cargo", "cargo-nextest", "rustc", "kv_scoreboard", "llama-server"];
 
 /// The benchmark's serving configuration: the checked-in granite/llama-matched
 /// TOML, overlaid by `PROXIMA_SERVING_*` when the caller sets one.
@@ -905,16 +906,46 @@ fn gate_step(
     GateStep::Waiting
 }
 
-/// Lines of `pgrep -lf` output that are other people's work: everything except this process,
-/// its parent and the pgrep itself.
-fn busy_from_pgrep(output: &str, own_pid: u32, parent_pid: u32) -> Vec<String> {
+/// One process-table row: pid, parent pid, program name.
+struct ProcessRow<'text> {
+    pid: u32,
+    parent: u32,
+    program: &'text str,
+}
+
+fn process_rows(output: &str) -> Vec<ProcessRow<'_>> {
     output
         .lines()
-        .filter(|line| {
-            let pid = line.split_whitespace().next().and_then(|digits| digits.parse::<u32>().ok());
-            pid.is_some_and(|pid| pid != own_pid && pid != parent_pid) && !line.contains("pgrep")
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let parent = fields.next()?.parse().ok()?;
+            let program = fields.next()?.rsplit('/').next()?;
+            Some(ProcessRow { pid, parent, program })
         })
-        .map(|line| line.chars().take(120).collect())
+        .collect()
+}
+
+fn ancestry(rows: &[ProcessRow<'_>], pid: u32) -> BTreeSet<u32> {
+    let mut chain = BTreeSet::from([pid]);
+    let mut current = pid;
+    while let Some(row) = rows.iter().find(|row| row.pid == current) {
+        if !chain.insert(row.parent) {
+            break;
+        }
+        current = row.parent;
+    }
+    chain
+}
+
+/// Busy-list programs, matched by exact program name, that are other people's work: everything
+/// on the list except this process and its ancestors.
+fn busy_from_process_table(output: &str, own_pid: u32) -> Vec<String> {
+    let rows = process_rows(output);
+    let own = ancestry(&rows, own_pid);
+    rows.iter()
+        .filter(|row| !own.contains(&row.pid) && BUSY_PROGRAMS.contains(&row.program))
+        .map(|row| format!("{} {}", row.pid, row.program))
         .collect()
 }
 
@@ -1725,11 +1756,9 @@ fn file_sha256(path: &Path) -> Result<String, HarnessError> {
 }
 
 fn own_busy_processes() -> Vec<String> {
-    let output = Command::new("pgrep").args(["-lf", BUSY_PATTERN]).output();
+    let output = Command::new("ps").args(["-eo", "pid,ppid,comm"]).output();
     let text = output.map(|output| String::from_utf8_lossy(&output.stdout).into_owned()).unwrap_or_default();
-    // SAFETY: getppid takes no arguments and cannot fail.
-    let parent = unsafe { libc::getppid() };
-    busy_from_pgrep(&text, std::process::id(), u32::try_from(parent).unwrap_or(0))
+    busy_from_process_table(&text, std::process::id())
 }
 
 fn wait_for_quiet(config: &GateConfig) -> GateOutcome {
@@ -4462,13 +4491,24 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         assert_eq!(gate_step(&mut state, 500, f64::NAN, &[], &gate_config()), GateStep::GaveUp("load1 NaN did not hold below 4 for 30 s".to_owned()));
     }
 
+    const PROCESS_TABLE: &str = "  PID  PPID COMM\n    1     0 systemd\n   90     1 cargo\n  100    90 kv_scoreboard\n  150     1 bash\n  201   150 cargo\n  305   150 ps\n  411     1 llama-server\n  500     1 vim\n";
+
     #[test]
-    fn pgrep_output_drops_this_process_its_parent_and_pgrep() {
-        let output = "100 /bin/kv_scoreboard --out x\n90 zsh -c kv_scoreboard\n201 cargo nextest run\n305 pgrep -lf cargo\n411 llama-server -m blob\n";
-        let busy = busy_from_pgrep(output, 100, 90);
-        assert_eq!(busy.len(), 2);
-        assert!(busy[0].starts_with("201 cargo"));
-        assert!(busy[1].starts_with("411 llama-server"));
+    fn process_table_drops_this_process_and_its_ancestors() {
+        let busy = busy_from_process_table(PROCESS_TABLE, 100);
+        assert_eq!(busy, vec!["201 cargo".to_owned(), "411 llama-server".to_owned()]);
+    }
+
+    #[test]
+    fn process_table_matches_program_names_not_command_lines() {
+        let table = "  10     1 bash\n  20    10 scoreboard_run\n  30     1 tail\n";
+        assert!(busy_from_process_table(table, 20).is_empty());
+    }
+
+    #[test]
+    fn process_table_survives_a_parent_loop() {
+        let table = "  10    20 cargo\n  20    10 kv_scoreboard\n";
+        assert!(busy_from_process_table(table, 20).is_empty());
     }
 
     fn facts() -> Facts {
