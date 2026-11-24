@@ -109,6 +109,7 @@ fn fixture_with_cache(rows: u64, cached_len: u64, window: Option<u32>, attention
             None,
             false,
             SharedExpertWidth::NONE,
+            None,
         )
         .expect("the flint-shaped sink prefill program builds");
     let mut roots = vec![logits];

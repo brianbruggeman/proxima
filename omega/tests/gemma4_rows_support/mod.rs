@@ -233,6 +233,7 @@ pub fn fixture_with(rows: usize, cached_len: usize, geometry: Geometry) -> Fixtu
             None,
             false,
             SharedExpertWidth::NONE,
+            None,
         )
         .expect("the gemma4-shaped two-range program lowers");
     let symbols = vec![rows as u64, bucket_for(cached_len) as u64];

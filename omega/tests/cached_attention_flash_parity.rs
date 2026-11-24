@@ -108,6 +108,7 @@ fn fixture_with_ring(rows: u64, cached_len: u64, window: Option<u32>, head_dim: 
             None,
             ring,
             SharedExpertWidth::NONE,
+            None,
         )
         .expect("the flint-shaped flash prefill program builds");
     let ring_extent = u64::from(window.unwrap_or(0));

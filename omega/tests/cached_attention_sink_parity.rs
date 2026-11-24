@@ -102,6 +102,7 @@ fn fixture(cached_len: u64, attention_sinks: bool) -> Fixture {
             None,
             false,
             SharedExpertWidth::NONE,
+            None,
         )
         .expect("the flint-shaped sink decode program builds");
     let mut roots = vec![logits];
