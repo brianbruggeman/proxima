@@ -3,6 +3,7 @@ use alloc::borrow::Cow;
 use proxima_numeric::float_layout::FloatLayout;
 use proxima_numeric::{RowBlockShape, row_block_shape};
 
+use super::layout_render::hardware_stage_type;
 use super::*;
 
 /// MSL source for one `Q2_K` element. The byte layout and index arithmetic
@@ -1286,7 +1287,7 @@ pub const Q5_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q5_0::QK5_0;
 /// Same non-K-quant, flat, one-element-per-block shape `Q8_0`/`Q4_0`
 /// take: never the row-blocked (`classify_packed_row_block`) path; the
 /// tiled-GEMM path reads it through its `tiled_decode` description
-/// ([`F16_DEQUANT_HALF16_MSL`], staged as 32-element blocks), and every other
+/// ([`DecodeSource::Scalar`], staged as 32-element blocks), and every other
 /// path uses the generic per-element accessor.
 pub const FLOAT16_BLOCK_BYTES: usize = proxima_gguf::quant::f16::BLOCK_BYTES;
 
@@ -1585,19 +1586,6 @@ static inline void q8_0_dequant_half16(device const uchar *block, uint slot, thr
 }
 "#;
 
-/// `Float16`'s entry in the tiled decode description: llama.cpp's
-/// `dequantize_f16` ("not dequantizing -- we are simply fitting the template").
-/// The weight is a flat `half` array, so `slot` is a plain element offset from
-/// `block` and any 2-byte aligned origin is valid; the description stages it in
-/// 32-element, 64-byte blocks only so the stager's block cursor has a unit to
-/// advance by.
-pub const F16_DEQUANT_HALF16_MSL: &str = r#"
-static inline void f16_dequant_half16(device const uchar *block, uint slot, thread half *out) {
-    device const half *src = (device const half *)(block + 2u * slot);
-    for (uint i = 0u; i < 16u; ++i) { out[i] = src[i]; }
-}
-"#;
-
 /// `Q4_K`'s entry in the tiled decode description: the sub-block header decoded
 /// once ([`Q4K_UNPACK_MSL`]'s `q4k_header_for`) and the nibbles extracted eight at
 /// a time by its `q4k_run8` word loads, so a 16-element chunk costs one header and
@@ -1842,6 +1830,12 @@ pub(crate) enum DecodeSource {
     /// preamble already defines for the codec (rendered there from the codec's `BlockLayout` and
     /// `LevelTable`), so the description carries only that accessor's name.
     Element(&'static str, &'static Codec),
+    /// The weight is a flat array of one scalar layout, so `slot` is a plain element offset from
+    /// `block` and any element-aligned origin is valid; the identity copy is rendered with the
+    /// element type and byte stride [`hardware_stage_type`] gives that layout (llama.cpp's
+    /// `dequantize_f16`, "not dequantizing -- we are simply fitting the template"); the 32-element,
+    /// 64-byte block of `Float16` only gives the stager's block cursor a unit to advance by.
+    Scalar(FloatLayout),
 }
 
 impl TiledDecode {
@@ -1878,6 +1872,7 @@ impl TiledDecode {
                 source.push_str(&self.word_variant_msl().unwrap_or_default());
                 Cow::Owned(source)
             }
+            DecodeSource::Scalar(layout) => Cow::Owned(scalar_identity_decode_msl(self.function, &layout)),
         }
     }
 
@@ -1919,6 +1914,18 @@ impl TiledDecode {
         }
         format!("    bool {WORD_ALIGNED_FLAG} = (((ulong){weight_bytes}) & 3ul) == 0ul;\n")
     }
+}
+
+/// The identity decode of a flat scalar array into `thread` memory; empty for a layout with no
+/// Metal type, which the compiler then rejects at the call site rather than a silent fallback.
+fn scalar_identity_decode_msl(function: &str, layout: &FloatLayout) -> String {
+    let Some(stage) = hardware_stage_type(layout) else {
+        return String::new();
+    };
+    let (scalar, stride) = (stage.scalar, stage.bytes);
+    format!(
+        "\nstatic inline void {function}(device const uchar *block, uint slot, thread {scalar} *out) {{\n    device const {scalar} *src = (device const {scalar} *)(block + {stride}u * slot);\n    for (uint i = 0u; i < 16u; ++i) {{ out[i] = src[i]; }}\n}}\n"
+    )
 }
 
 /// The kernel-level uniform a decode call selects its word-aligned variant on: the weight
@@ -1982,12 +1989,15 @@ pub(crate) const fn tiled_decode(codec: Codec) -> Option<TiledDecode> {
             "q6k_dequant_half16",
             Q6K_DEQUANT_HALF16_MSL,
         )),
-        Codec::Float16 => Some(TiledDecode::new(
-            STAGED_K_STEP_ELEMENTS as usize,
-            STAGED_K_STEP_ELEMENTS as usize * FLOAT16_BLOCK_BYTES,
-            "f16_dequant_half16",
-            F16_DEQUANT_HALF16_MSL,
-        )),
+        Codec::Float16 => match codec.element_layout() {
+            Some(layout) => Some(TiledDecode::with_source(
+                STAGED_K_STEP_ELEMENTS as usize,
+                STAGED_K_STEP_ELEMENTS as usize * FLOAT16_BLOCK_BYTES,
+                "f16_dequant_half16",
+                DecodeSource::Scalar(layout),
+            )),
+            None => None,
+        },
         Codec::Iq4Xs => Some(TiledDecode::with_source(
             IQ4_XS_BLOCK_ELEMENTS,
             IQ4_XS_BLOCK_BYTES,
@@ -2418,5 +2428,29 @@ mod row_block_step_bytes_tests {
         assert_eq!(codec_row_block_step_bytes(NumericFormat::Q8_0), 272);
         assert_eq!(codec_row_block_step_bytes(NumericFormat::Q4_0), 144);
         assert_eq!(codec_row_block_step_bytes(NumericFormat::Q5_0), 176);
+    }
+}
+
+#[cfg(test)]
+mod scalar_decode_tests {
+    use super::{Codec, DecodeSource, tiled_decode};
+
+    #[test]
+    fn scalar_decode_renders_the_identity_copy_the_constant_it_replaced_spelled() {
+        let expected = r#"
+static inline void f16_dequant_half16(device const uchar *block, uint slot, thread half *out) {
+    device const half *src = (device const half *)(block + 2u * slot);
+    for (uint i = 0u; i < 16u; ++i) { out[i] = src[i]; }
+}
+"#;
+
+        let scalar_decodes = Codec::ALL
+            .iter()
+            .filter_map(|codec| tiled_decode(*codec))
+            .filter(|decode| matches!(decode.source, DecodeSource::Scalar(_)))
+            .collect::<Vec<_>>();
+
+        assert_eq!(scalar_decodes.len(), 1, "exactly one codec stages a flat scalar array");
+        assert_eq!(scalar_decodes[0].msl(), expected);
     }
 }

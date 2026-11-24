@@ -21,10 +21,12 @@ pub(crate) const F32_INFINITY_BITS: u32 = 0x7f80_0000;
 pub(crate) const F32_QUIET_BIT: u32 = 1 << 22;
 pub(crate) const F32_ABS_MASK: u32 = 0x7fff_ffff;
 
-const HARDWARE_TYPES: [(u8, u8, Specials, i16, &str, u64); 3] = [
-    (8, 23, Specials::InfinityOnOverflow, 127, "float", 4),
-    (5, 10, Specials::InfinityOnOverflow, 15, "half", 2),
-    (8, 7, Specials::InfinityOnOverflow, 127, "bfloat", 2),
+type HardwareRow = (u8, u8, Specials, i16, &'static str, u64, Option<&'static str>);
+
+const HARDWARE_TYPES: [HardwareRow; 3] = [
+    (8, 23, Specials::InfinityOnOverflow, 127, "float", 4, Some("f")),
+    (5, 10, Specials::InfinityOnOverflow, 15, "half", 2, Some("h")),
+    (8, 7, Specials::InfinityOnOverflow, 127, "bfloat", 2, None),
 ];
 
 /// A Metal scalar type a [`FloatLayout`] equals field by field: its name and the bytes one
@@ -33,9 +35,23 @@ const HARDWARE_TYPES: [(u8, u8, Specials, i16, &str, u64); 3] = [
 pub struct HardwareType {
     pub scalar: &'static str,
     pub bytes: u64,
+    zero_suffix: Option<&'static str>,
 }
 
 impl HardwareType {
+    fn from_row(row: &HardwareRow) -> Self {
+        Self { scalar: row.4, bytes: row.5, zero_suffix: row.6 }
+    }
+    /// The zero literal of this type: `0.0h` for `half`, `0.0f` for `float`, and the scalar cast
+    /// of `0.0f` for a type Metal gives no literal suffix.
+    #[must_use]
+    pub fn zero_literal(&self) -> String {
+        match self.zero_suffix {
+            Some(suffix) => format!("0.0{suffix}"),
+            None => format!("({})0.0f", self.scalar),
+        }
+    }
+
     /// The 4-wide vector type, e.g. `half4`.
     #[must_use]
     pub fn vector(&self) -> String {
@@ -62,14 +78,14 @@ impl HardwareType {
 pub fn hardware_stage_type(layout: &FloatLayout) -> Option<HardwareType> {
     HARDWARE_TYPES
         .iter()
-        .find(|(exponent_bits, mantissa_bits, specials, bias, _, _)| {
+        .find(|(exponent_bits, mantissa_bits, specials, bias, _, _, _)| {
             *exponent_bits == layout.exponent_bits
                 && *mantissa_bits == layout.mantissa_bits
                 && *specials == layout.specials
                 && *bias == layout.bias()
                 && layout.sign == SignEncoding::Magnitude
         })
-        .map(|entry| HardwareType { scalar: entry.4, bytes: entry.5 })
+        .map(HardwareType::from_row)
 }
 
 /// The Metal scalar type name of [`hardware_stage_type`].
@@ -1360,4 +1376,19 @@ fn run_element_msl(layout: &BlockLayout, name: &str, lane: usize) -> String {
         ));
     }
     text
+}
+
+#[cfg(test)]
+mod hardware_type_tests {
+    use super::{HARDWARE_TYPES, HardwareType};
+
+    #[test]
+    fn zero_literal_takes_the_suffix_column_and_casts_a_type_with_no_suffix() {
+        let types = HARDWARE_TYPES.iter().map(HardwareType::from_row).collect::<Vec<_>>();
+
+        let literals = types.iter().map(HardwareType::zero_literal).collect::<Vec<_>>();
+
+        assert_eq!(literals[..2], ["0.0f", "0.0h"]);
+        assert_eq!(literals[2], format!("({})0.0f", types[2].scalar));
+    }
 }
