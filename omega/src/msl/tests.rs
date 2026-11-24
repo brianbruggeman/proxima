@@ -12595,3 +12595,87 @@ fn router_dense_k_loop_is_versioned_on_hoisted_uniform_predicates() {
     assert_eq!(source.matches("for (int sub_k = 0;").count(), 2, "the MMA renders once per loop\n{source}");
     assert!(!source[fast_loop..guarded_loop].contains("k0 + w_part_k +"), "the fast loop carries no k guard");
 }
+
+#[cfg(any(feature = "metal-tiled-gemm", feature = "metal-grouped-gemm"))]
+mod tiled_gemm_kernel_text_pin {
+    use super::*;
+
+    const BLESS_ENV: &str = "PROXIMA_BLESS_TILED_GEMM_FIXTURES";
+
+    fn fixture_path(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tiled_gemm_kernels")
+            .join(format!("{name}.msl"))
+    }
+
+    fn assert_pinned(name: &str, source: &str) {
+        let path = fixture_path(name);
+        if std::env::var_os(BLESS_ENV).is_some() {
+            std::fs::create_dir_all(path.parent().expect("fixture has a directory")).expect("fixture directory is writable");
+            std::fs::write(&path, source).expect("fixture is writable");
+        }
+        let pinned = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("fixture {} is readable: {error}", path.display()));
+        let first_difference = source.lines().zip(pinned.lines()).position(|(got, want)| got != want);
+        assert!(source == pinned, "{name}: first differing line {first_difference:?}, lengths {} vs {}", source.len(), pinned.len());
+    }
+
+    /// The first codec of each decode class the tiled stager reads: the flat scalar array already
+    /// in the dequant target, and one per block width, so no codec is named here.
+    fn decode_classes() -> BTreeMap<String, Codec> {
+        let target = default_dequant_target();
+        let mut classes = BTreeMap::new();
+        for codec in Codec::ALL {
+            let Some(decode) = tiled_decode(codec) else { continue };
+            let class = match decode.source {
+                DecodeSource::Scalar(stored) if stored.same_format(&target) => "scalar_weight".to_string(),
+                DecodeSource::Scalar(_) => continue,
+                _ => format!("block{}", decode.block_elements),
+            };
+            classes.entry(class).or_insert(codec);
+        }
+        classes
+    }
+
+    #[cfg(feature = "metal-tiled-gemm")]
+    fn tiled_schedules() -> [(&'static str, EmitKnobs); 4] {
+        [
+            ("mm_layout", EmitKnobs::default()),
+            ("reach64", EmitKnobs::default().with_coord_index32(false)),
+            ("wide_staging", EmitKnobs::default().with_tiled_gemm_mm_layout(false)),
+            ("row_major_staging", EmitKnobs::default().with_tiled_gemm_wide_weight_stage(false)),
+        ]
+    }
+
+    #[cfg(feature = "metal-tiled-gemm")]
+    #[test]
+    fn the_tiled_kernel_text_is_pinned() {
+        let (bound, weight_node) = real_shaped_tiled_gemm_op(TILED_ADMITTED_TOKENS, 1536, 128);
+        let mut pinned = 0;
+        for (class, codec) in decode_classes() {
+            for (schedule, knobs) in tiled_schedules() {
+                let packed = BTreeMap::from([(weight_node, codec)]);
+                let source = emit_with_knobs(&bound, &packed, NumericPolicy::default(), &knobs).expect("tiled kernel emits").source;
+                assert!(source.contains("weight_tile"), "{class} {schedule} did not take the tiled path:\n{source}");
+                assert_pinned(&format!("{class}_{schedule}"), &source);
+                pinned += 1;
+            }
+        }
+        assert!(pinned > 0, "no decode class was pinned");
+    }
+
+    #[cfg(feature = "metal-grouped-gemm")]
+    #[test]
+    fn the_expert_grouped_kernel_text_is_pinned() {
+        let bound = gathered_matmul_op(300, 8, 192, 512);
+        let knobs = EmitKnobs::default().with_coord_index32(false);
+        let mut pinned = 0;
+        for (class, codec) in decode_classes() {
+            let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
+            let source = emit_with_knobs(&bound, &packed, NumericPolicy::default(), &knobs).expect("grouped kernel emits").source;
+            assert!(source.contains("weight_tile"), "{class} did not take the grouped path:\n{source}");
+            assert_pinned(&format!("grouped_{class}"), &source);
+            pinned += 1;
+        }
+        assert!(pinned > 0, "no decode class was pinned");
+    }
+}
