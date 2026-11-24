@@ -130,10 +130,7 @@ impl<'file> WeightSource<'_, 'file> {
     }
 
     #[cfg(all(feature = "metal", target_os = "macos"))]
-    pub(super) fn prove_other_shards_resident(
-        &self,
-        registered: &[u8],
-    ) -> Result<crate::mapping_residency::ResidencyRung, InteropError> {
+    pub(super) fn advise_other_shards(&self, registered: &[u8]) {
         let others: &[HfShard<'file>] = match self {
             Self::Gguf => &[],
             Self::Directory { shards, .. } => shards,
@@ -141,13 +138,7 @@ impl<'file> WeightSource<'_, 'file> {
         others
             .iter()
             .filter(|shard| !core::ptr::eq(shard.1, registered))
-            .try_fold(
-                crate::mapping_residency::ResidencyRung::Prefault,
-                |rung, shard| {
-                    crate::mapping_residency::prove_resident(shard.1)
-                        .map(|report| rung.max(report.rung))
-                },
-            )
+            .for_each(|shard| crate::mapping_residency::advise_will_need(shard.1));
     }
 
     pub(super) fn checkpoint_bytes(&self, file_bytes: &[u8]) -> usize {

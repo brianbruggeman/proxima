@@ -15,7 +15,7 @@ pub struct LadderStage {
     pub note: Option<String>,
 }
 
-/// Prefault, a second immediate prefault, `MADV_WILLNEED` and `mlock` applied
+/// Prefault, a second immediate prefault and `MADV_WILLNEED` applied
 /// in sequence to one mapping, each timed and `mincore`-checked, so the rung
 /// that resolves a hole pattern is visible instead of guessed.
 ///
@@ -23,9 +23,7 @@ pub struct LadderStage {
 /// The prefault pool failing to build or a chunk failing to report.
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub fn residency_ladder(bytes: &[u8]) -> Result<Vec<LadderStage>, InteropError> {
-    use crate::mapping_residency::{
-        count_missing_pages, lock_resident, missing_byte_ranges, probe_residency,
-    };
+    use crate::mapping_residency::{count_missing_pages, missing_byte_ranges, probe_residency};
 
     let stage = |label: &'static str, started: std::time::Instant, note: Option<String>| {
         let residency = probe_residency(bytes);
@@ -42,7 +40,7 @@ pub fn residency_ladder(bytes: &[u8]) -> Result<Vec<LadderStage>, InteropError> 
         }
     };
 
-    let mut stages = Vec::with_capacity(4);
+    let mut stages = Vec::with_capacity(3);
     let started = std::time::Instant::now();
     crate::loader::prefault(bytes)?;
     stages.push(stage("stage 1: prefault", started, None));
@@ -65,10 +63,6 @@ pub fn residency_ladder(bytes: &[u8]) -> Result<Vec<LadderStage>, InteropError> 
         .err()
         .map(|error| format!("madvise(WILLNEED) failed: {error}"));
     stages.push(stage("stage 3: madvise(WILLNEED)", started, advise_failure));
-
-    let started = std::time::Instant::now();
-    lock_resident(bytes);
-    stages.push(stage("stage 4: mlock", started, None));
     Ok(stages)
 }
 

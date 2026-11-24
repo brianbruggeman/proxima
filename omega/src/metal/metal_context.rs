@@ -18,12 +18,15 @@ use super::resident_nocopy_cache::{
     FAULT_BUFFER_POOL, RESIDENT_BUFFERS, UNIFORM_BUFFERS, UNIFORM_CACHE_CLOCK,
 };
 use super::shared_transient::{ARENA_TRANSIENT, ATTENTION_SCRATCH_TRANSIENT};
-use super::warm_resident_buffers::{WARM_RESIDENCY_SET, warm_active_context};
+use super::warm_resident_buffers::{
+    MAPPING_RESIDENCY, WARM_RESIDENCY_SET, release_all_mapping_residency, warm_active_context,
+};
 use super::{MetalBuffer, NodeId};
 
 type ResidentBuffers = BTreeMap<String, (usize, usize, MetalBuffer)>;
 type UniformBuffers = BTreeMap<Vec<u8>, (MetalBuffer, u64)>;
 type FaultBuffers = BTreeMap<usize, Vec<MetalBuffer>>;
+type MappingResidency = BTreeMap<String, Retained<ProtocolObject<dyn MTLResidencySet>>>;
 type ExpertSources = BTreeMap<(usize, NodeId), (u64, StagedExpertSource)>;
 
 /// independent model residency, retaining uploads between activations.
@@ -45,6 +48,7 @@ pub struct MetalContext {
     queue: Option<Retained<ProtocolObject<dyn MTLCommandQueue>>>,
     device: Option<MetalDevice>,
     residency: Option<Retained<ProtocolObject<dyn MTLResidencySet>>>,
+    mapping_residency: MappingResidency,
     #[cfg(feature = "instrument")]
     capture_dumps: Vec<CaptureDumpEntry>,
     #[cfg(feature = "instrument")]
@@ -83,7 +87,10 @@ impl MetalContext {
     /// dropping a model released its Metal buffers.
     #[must_use]
     pub fn transient_handles(&self) -> (Weak<MetalBuffer>, Weak<MetalBuffer>) {
-        (self.arena_transient.clone(), self.attention_transient.clone())
+        (
+            self.arena_transient.clone(),
+            self.attention_transient.clone(),
+        )
     }
 
     /// warms this context's resident buffers on its own queue: activates itself,
@@ -127,6 +134,8 @@ impl MetalContext {
         ACTIVE_QUEUE.with(|queue| mem::swap(&mut self.queue, &mut *queue.borrow_mut()));
         ACTIVE_DEVICE.with(|device| mem::swap(&mut self.device, &mut *device.borrow_mut()));
         WARM_RESIDENCY_SET.with(|set| mem::swap(&mut self.residency, &mut *set.borrow_mut()));
+        MAPPING_RESIDENCY
+            .with(|held| mem::swap(&mut self.mapping_residency, &mut *held.borrow_mut()));
         self.swap_caches();
         self.swap_scratch();
     }
@@ -194,6 +203,7 @@ impl MetalContextGuard<'_> {
             CAPTURE_LIVE_PENDING.with(|pending| pending.borrow_mut().clear());
         }
         EXPERT_SOURCE_CACHE.with(|cache| cache.borrow_mut().clear());
+        release_all_mapping_residency();
         NOCOPY_BUFFERS.with(|cache| cache.borrow_mut().clear());
         RESIDENT_BUFFERS.with(|cache| cache.borrow_mut().clear());
         CHECKPOINT_MAPPING.with(|mapping| *mapping.borrow_mut() = None);

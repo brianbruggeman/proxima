@@ -1,4 +1,4 @@
-//! Stages a second immediate prefault, an `MADV_WILLNEED` and an `mlock`
+//! Stages a second immediate prefault and an `MADV_WILLNEED`
 //! against one real checkpoint mapping in sequence, timing and
 //! `mincore`-checking each rung. A near-zero elapsed time for a stage over a
 //! multi-GB mapping (a real touch is >= 500 ms) means that stage's touch was

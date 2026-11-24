@@ -7764,7 +7764,6 @@ not read this cache format; only the single-row decode kernel reads it from the 
                                 runtime.plan_misses,
                                 runtime.plan_refits,
                                 runtime.arena_allocated_bytes(),
-                                self.mapping_residency_rung,
                             );
                             // This arm's `kv_cache.{layer}.*` blocks are ordinary
                             // named blocks folded into `metal_stage`'s weight
@@ -8620,7 +8619,6 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         runtime.plan_misses,
                         runtime.plan_refits,
                         runtime.arena_allocated_bytes(),
-                        self.mapping_residency_rung,
                     );
                     #[cfg(all(feature = "metal", target_os = "macos"))]
                     if _step == 0 {

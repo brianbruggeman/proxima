@@ -39,43 +39,33 @@ pub(super) const fn checkpoint_has_experts(expert_count: u32) -> bool {
 }
 
 /// What [`LoadedModel::install_checkpoint_mapping`] hands a loader: the
-/// serving context that owns the no-copy mapping registration and the
-/// residency rung the proof reached. Both are cfg-gated, so a build without
-/// them carries an empty value.
+/// serving context that owns the no-copy mapping registration. It is
+/// cfg-gated, so a build without it carries an empty value.
 struct MappingInstall<'file> {
     file_bytes: &'file [u8],
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     serving_context: ServingContext,
-    #[cfg(all(feature = "metal", target_os = "macos"))]
-    rung: crate::mapping_residency::ResidencyRung,
 }
 
 impl<'file> LoadedModel<'file> {
-    /// Fits, proves resident and registers `file_bytes` as the checkpoint
+    /// Fits, advises and registers `file_bytes` as the checkpoint
     /// mapping, for every loader that serves weights as borrowed views of it.
     /// `source` names the other shards a directory checkpoint maps; `None` is
     /// a single-file checkpoint whose mapped size is `file_bytes.len()`.
     ///
     /// # Errors
     ///
-    /// The fit gate's refusal, or [`crate::mapping_residency::prove_resident`]'s.
+    /// The fit gate's refusal.
     fn install_checkpoint_mapping(
         file_bytes: &'file [u8],
         source: Option<&WeightSource<'_, 'file>>,
     ) -> Result<MappingInstall<'file>, InteropError> {
-        // ROW 533's own mechanism (`proxima-tensor/docs/discipline.md`): a
-        // non-resident page behind the no-copy `MTLBuffer`
-        // `register_checkpoint_mapping` installs below reads as zero rather
-        // than faulting, silently. `crate::mapping_residency::prove_resident`
-        // is the gate that turns that into a typed refusal instead --
-        // `PROXIMA_MAPPING_FIT_OVERRIDE=1` skips only the size-vs-host-limit
-        // half of it, for a measurement run.
-        // the rung is carried into `Self`'s own `mapping_residency_rung`
-        // field, so `run_decode_loop_observed_seeded`/
-        // `run_decode_loop_placed_kv` can thread THIS load's rung into
-        // `emit_token_breakdown_metal` instead of reading a shared global.
+        // the fit gate refuses a mapping the host cannot hold;
+        // `PROXIMA_MAPPING_FIT_OVERRIDE=1` skips it, for a measurement run.
+        // residency of the pages the GPU reads is omega's residency set, taken
+        // when the no-copy buffer is created, not a load-time pass.
         #[cfg(all(feature = "metal", target_os = "macos"))]
-        let rung = {
+        {
             if std::env::var_os("PROXIMA_MAPPING_FIT_OVERRIDE").is_none()
                 && let Ok(facts) = omega::metal::system_memory_facts()
             {
@@ -90,20 +80,11 @@ impl<'file> LoadedModel<'file> {
                 });
                 crate::memory_fit::fit_mapping_bytes(mapped_bytes, limit)?;
             }
-            let residency_report = crate::mapping_residency::prove_resident(file_bytes)?;
-            #[cfg(feature = "instrument")]
-            info!(
-                mapping_prefault_ms = residency_report.prefault_ms,
-                mapping_resident_pages = residency_report.resident_pages,
-                mapping_missing_pages = residency_report.missing_pages,
-                "checkpoint_mapping_residency: proved resident before metal no-copy registration"
-            );
-            let other_shards = source.map_or(
-                Ok(crate::mapping_residency::ResidencyRung::Prefault),
-                |weights| weights.prove_other_shards_resident(file_bytes),
-            )?;
-            residency_report.rung.max(other_shards)
-        };
+            crate::mapping_residency::advise_will_need(file_bytes);
+            if let Some(weights) = source {
+                weights.advise_other_shards(file_bytes);
+            }
+        }
         #[cfg(not(all(feature = "metal", target_os = "macos")))]
         let _ = (file_bytes, source);
         // registers `file_bytes` -- the checkpoint's own mmap, page-aligned
@@ -124,8 +105,6 @@ impl<'file> LoadedModel<'file> {
             file_bytes,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             serving_context,
-            #[cfg(all(feature = "metal", target_os = "macos"))]
-            rung,
         })
     }
 
@@ -3091,8 +3070,6 @@ impl<'file> LoadedModel<'file> {
         let mapping_install = Self::install_checkpoint_mapping(file_bytes, Some(&source))?;
         #[cfg(not(all(feature = "metal", target_os = "macos")))]
         let _ = mapping_install;
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        let mapping_residency_rung = mapping_install.rung;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let serving_context = mapping_install.serving_context;
         // `crate::memory_fit`'s own load-time gate needs these three sums
@@ -3241,8 +3218,6 @@ impl<'file> LoadedModel<'file> {
                 table_bytes: table_weight_bytes,
                 ssm_state_bytes: step_state.as_ref().map_or(0, |state| state.ssm_state_bytes),
             },
-            #[cfg(all(feature = "metal", target_os = "macos"))]
-            mapping_residency_rung,
             vocab,
             program_hash: program_hash(&bound.program),
             moe_high_decisions: core::sync::atomic::AtomicU64::new(0),
@@ -3449,8 +3424,6 @@ impl<'file> LoadedModel<'file> {
                     context.register_checkpoint_mapping(self.checkpoint_mapping);
                     context
                 },
-                #[cfg(all(feature = "metal", target_os = "macos"))]
-                rung: self.mapping_residency_rung,
             },
         )
     }
@@ -3543,8 +3516,6 @@ impl<'file> LoadedModel<'file> {
                 table_bytes: 0,
                 ssm_state_bytes: 0,
             },
-            #[cfg(all(feature = "metal", target_os = "macos"))]
-            mapping_residency_rung: install.rung,
             vocab,
             program_hash: program_hash(&program),
             moe_high_decisions: core::sync::atomic::AtomicU64::new(0),

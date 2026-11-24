@@ -158,8 +158,17 @@ fn encode_text(
     let unmap_started = Instant::now();
     drop(checkpoint);
     eprintln!(
-        "text_drop: model {model_millis} ms, checkpoint (munlock + munmap) {} ms",
+        "text_drop: model {model_millis} ms, checkpoint (munmap) {} ms",
         unmap_started.elapsed().as_millis()
+    );
+    #[cfg(feature = "instrument")]
+    eprintln!(
+        "text_weight_paths: mapping_offset_uploads {}, block_offset_bound_bytes {}, misaligned_mapping_offset_copies {}, block_copied_bytes {}, block_nocopy_bound_bytes {}",
+        omega::metal::MAPPING_OFFSET_UPLOADS.get(),
+        omega::metal::BLOCK_OFFSET_BOUND_BYTES.get(),
+        omega::metal::MISALIGNED_MAPPING_OFFSET_COPIES.get(),
+        omega::metal::BLOCK_COPIED_BYTES.get(),
+        omega::metal::BLOCK_NOCOPY_BOUND_BYTES.get(),
     );
     Ok(joined)
 }

@@ -1018,23 +1018,6 @@ pub enum InteropError {
         budget_bytes: u64,
     },
 
-    /// `crate::mapping_residency::prove_resident` touched every page of the
-    /// checkpoint mapping ([`crate::loader::prefault`]) and re-checked with
-    /// `mincore(2)` once, and `bytes_missing` of `bytes_total` mapped bytes
-    /// were still not resident -- the exact silent-zero-read hazard ROW 533
-    /// named (`proxima-tensor/docs/discipline.md`): a no-copy GPU mapping
-    /// reads a non-resident page as zero rather than faulting, so this
-    /// fails the load instead of letting `omega::backend::register_checkpoint_mapping`
-    /// hand a partially-resident mapping to the first dispatch.
-    #[cfg(all(feature = "metal", target_os = "macos"))]
-    #[error(
-        "checkpoint mapping still has {bytes_missing} of {bytes_total} bytes non-resident after prefault"
-    )]
-    MappingNotResident {
-        bytes_missing: u64,
-        bytes_total: u64,
-    },
-
     /// `PROXIMA_DISPATCH` (`generate::decode::resolve_dispatch_type_override`'s
     /// own doc) was set to a value other than `serial`/`concurrent`
     /// (case-insensitive) or was not valid Unicode. An explicit error here

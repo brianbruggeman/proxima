@@ -371,3 +371,5 @@ divergence (`18.175670623` in the exact-activation diagnostic), so CUDA is
 executable but not yet correctness-sealed.
 
 | 2026-09-11 | traced the first material amplification to reciprocal node `35` and tested one Newton refinement | node `34` square-root drift is `3.7252903e-9`; direct Vulkan reciprocal differs from host reciprocal of the Vulkan input by `3.8146973e-6`. Newton refinement produced no change in node-35 or final-logit results, so the control was reverted | one provenance probe and one controlled refinement run; WGPU parity `12/12`; no core dump created | local Vulkan adapter |
+
+| 2026-11-24 | PROXNUM-693 e3: the load-path residency ladder was replaced by `posix_madvise(WILLNEED)` plus a Metal residency set that holds the checkpoint mapping buffer; the cold-page test `a_gpu_read_through_a_cold_checkpoint_mapping_returns_the_file_bytes` is the proof the ladder removal keeps | removed passes measured prefault 0.22-0.25 s, mincore 0.21-0.22 s, mlock 0.54-0.64 s and a locked unmap of 1.0 s | `~/.cache/kvgate/proxnum693/e2-*.log` | Apple M1 Max |

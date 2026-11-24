@@ -1,3 +1,6 @@
+#[cfg(test)]
+use super::warm_resident_buffers::release_all_mapping_residency;
+use super::warm_resident_buffers::{release_mapping_residency, request_mapping_residency};
 use super::*;
 use proxima_numeric::float_layout::FloatLayout;
 
@@ -214,17 +217,24 @@ mod sha256_hex_tests {
 
     #[test]
     fn non_empty_msl_source_hashes_to_a_real_digest() {
-        let source = "#include <metal_stdlib>\nkernel void add_f32(device float* out [[buffer(0)]]) {}\n";
+        let source =
+            "#include <metal_stdlib>\nkernel void add_f32(device float* out [[buffer(0)]]) {}\n";
         let digest = sha256_hex(source.as_bytes());
         assert_eq!(digest.len(), 64, "sha256 hex is 64 chars");
-        assert_ne!(digest, EMPTY_INPUT_SHA256, "non-empty source must not hash to the empty digest");
+        assert_ne!(
+            digest, EMPTY_INPUT_SHA256,
+            "non-empty source must not hash to the empty digest"
+        );
     }
 
     #[test]
     fn empty_msl_source_is_skipped_not_hashed() {
         let digest = sha256_hex(b"");
         assert_eq!(digest, EMPTY_SOURCE_SKIPPED);
-        assert_ne!(digest, EMPTY_INPUT_SHA256, "empty input must never log the empty digest");
+        assert_ne!(
+            digest, EMPTY_INPUT_SHA256,
+            "empty input must never log the empty digest"
+        );
     }
 }
 
@@ -1520,9 +1530,7 @@ pub fn register_expert_mapping(bytes: &[u8]) {
     let changed = previous != Some(identity);
     if changed {
         EXPERT_SOURCE_CACHE.with(|cache| cache.borrow_mut().clear());
-        NOCOPY_BUFFERS.with(|cache| {
-            cache.borrow_mut().remove(EXPERT_MAPPING_NOCOPY_NAME);
-        });
+        evict_mapping_buffer(EXPERT_MAPPING_NOCOPY_NAME);
     }
 }
 
@@ -1538,9 +1546,7 @@ pub fn unregister_expert_mapping(bytes: &[u8]) {
     }
     if matched {
         EXPERT_SOURCE_CACHE.with(|cache| cache.borrow_mut().clear());
-        NOCOPY_BUFFERS.with(|cache| {
-            cache.borrow_mut().remove(EXPERT_MAPPING_NOCOPY_NAME);
-        });
+        evict_mapping_buffer(EXPERT_MAPPING_NOCOPY_NAME);
     }
 }
 
@@ -1571,9 +1577,7 @@ pub fn register_checkpoint_mapping(bytes: &[u8]) {
     // `checkpoint_mapping_offset` upload is a fresh, correctly-checked
     // entry rather than a `ResidentNameRebound` error against a mapping
     // this function itself just superseded.
-    NOCOPY_BUFFERS.with(|cache| {
-        cache.borrow_mut().remove(CHECKPOINT_MAPPING_NOCOPY_NAME);
-    });
+    evict_mapping_buffer(CHECKPOINT_MAPPING_NOCOPY_NAME);
 }
 
 /// Advises the kernel that pages covering a checkpoint byte range are not
@@ -1711,9 +1715,7 @@ pub fn unregister_checkpoint_mapping(bytes: &[u8]) {
         }
     });
     if matched {
-        NOCOPY_BUFFERS.with(|cache| {
-            cache.borrow_mut().remove(CHECKPOINT_MAPPING_NOCOPY_NAME);
-        });
+        evict_mapping_buffer(CHECKPOINT_MAPPING_NOCOPY_NAME);
     }
 }
 
@@ -1810,7 +1812,21 @@ pub(super) fn mapping_buffer(
 ) -> Result<MetalBuffer, MetalError> {
     let page = page_size();
     let rounded_length = mapping_length.div_ceil(page) * page;
-    upload_block_no_copy(device, name, base as *const c_void, rounded_length)
+    let cached = NOCOPY_BUFFERS.with(|cache| cache.borrow().contains_key(name));
+    let buffer = upload_block_no_copy(device, name, base as *const c_void, rounded_length)?;
+    if !cached {
+        request_mapping_residency(device, name, &buffer)?;
+    }
+    Ok(buffer)
+}
+
+/// Drops the cached no-copy buffer for a mapping `name`, taking it out of
+/// the residency set first so the set never outlives the mapping.
+fn evict_mapping_buffer(name: &str) {
+    release_mapping_residency(name);
+    NOCOPY_BUFFERS.with(|cache| {
+        cache.borrow_mut().remove(name);
+    });
 }
 
 pub(super) fn expert_mapping_offset(
@@ -1867,6 +1883,7 @@ pub(super) fn reset_checkpoint_mapping_for_test() {
     CHECKPOINT_MAPPING.with(|mapping| *mapping.borrow_mut() = None);
     EXPERT_MAPPING_LENGTH.store(0, Ordering::Release);
     EXPERT_MAPPING_BASE.store(0, Ordering::Relaxed);
+    release_all_mapping_residency();
     NOCOPY_BUFFERS.with(|cache| {
         cache.borrow_mut().remove(CHECKPOINT_MAPPING_NOCOPY_NAME);
         cache.borrow_mut().remove(EXPERT_MAPPING_NOCOPY_NAME);
@@ -1880,12 +1897,24 @@ pub(super) mod checkpoint_mapping_release_tests {
     use std::sync::Mutex;
 
     use super::{
+        CHECKPOINT_MAPPING_NOCOPY_NAME, MISALIGNED_MAPPING_OFFSET_COPIES,
         checkpoint_mapping_offset, clear_expert_source_cache, device_and_queue,
         expert_mapping_offset, mapping_buffer_allocated_bytes, mapping_offset_is_aligned,
-        page_size, MISALIGNED_MAPPING_OFFSET_COPIES,
-        register_checkpoint_mapping, register_expert_mapping, reset_checkpoint_mapping_for_test,
-        unregister_checkpoint_mapping, unregister_expert_mapping, upload_packed_bytes,
+        page_size, register_checkpoint_mapping, register_expert_mapping,
+        reset_checkpoint_mapping_for_test, unregister_checkpoint_mapping,
+        unregister_expert_mapping, upload_packed_bytes,
     };
+    use crate::metal::warm_resident_buffers::{
+        WARM_RESIDENCY_SET, held_mapping_residency_allocations, held_residency_allocations,
+    };
+    use objc2::runtime::ProtocolObject;
+    use objc2_foundation::NSObjectProtocol;
+    use objc2_metal::{
+        MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
+        MTLDevice, MTLResourceOptions,
+    };
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
 
     static MAPPING_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1927,16 +1956,26 @@ pub(super) mod checkpoint_mapping_release_tests {
         // (now-stale) identity must not disturb B's live mapping.
         unregister_checkpoint_mapping(model_a_bytes);
         assert!(
-            checkpoint_mapping_offset(&device, model_b_bytes.as_ptr().cast(), model_b_bytes.len(), None)
-                .is_some(),
+            checkpoint_mapping_offset(
+                &device,
+                model_b_bytes.as_ptr().cast(),
+                model_b_bytes.len(),
+                None
+            )
+            .is_some(),
             "model B's own mapping must survive a stale release of model A's superseded one"
         );
 
         // model B's own drop releases its own, still-current identity.
         unregister_checkpoint_mapping(model_b_bytes);
         assert!(
-            checkpoint_mapping_offset(&device, model_b_bytes.as_ptr().cast(), model_b_bytes.len(), None)
-                .is_none(),
+            checkpoint_mapping_offset(
+                &device,
+                model_b_bytes.as_ptr().cast(),
+                model_b_bytes.len(),
+                None
+            )
+            .is_none(),
             "releasing the CURRENTLY registered identity must actually clear it"
         );
     }
@@ -1959,9 +1998,10 @@ pub(super) mod checkpoint_mapping_release_tests {
         let arena = &mapping_bytes[16..101];
 
         register_expert_mapping(mapping_bytes);
-        let (_buffer, offset) = expert_mapping_offset(&device, arena.as_ptr().cast(), arena.len(), None)
-            .expect("the arena lies inside the registered expert mapping")
-            .expect("the whole expert mapping binds without copying");
+        let (_buffer, offset) =
+            expert_mapping_offset(&device, arena.as_ptr().cast(), arena.len(), None)
+                .expect("the arena lies inside the registered expert mapping")
+                .expect("the whole expert mapping binds without copying");
         assert_eq!(offset, 16);
         assert_eq!(mapping_buffer_allocated_bytes(), (0, page as u64));
 
@@ -2023,16 +2063,182 @@ pub(super) mod checkpoint_mapping_release_tests {
         let (_view, aligned_offset) =
             upload_packed_bytes(&device, &mapping_bytes[8..72], Some("aligned.weight"))
                 .expect("aligned tensor uploads");
-        assert_eq!(aligned_offset, 8, "an aligned tensor stays a view into the mapping");
+        assert_eq!(
+            aligned_offset, 8,
+            "an aligned tensor stays a view into the mapping"
+        );
         assert_eq!(MISALIGNED_MAPPING_OFFSET_COPIES.get(), copies_before);
 
         let (_copy, odd_offset) =
             upload_packed_bytes(&device, &mapping_bytes[3..67], Some("odd.weight"))
                 .expect("misaligned tensor still uploads");
-        assert_eq!(odd_offset, 0, "a misaligned tensor is copied into its own buffer");
+        assert_eq!(
+            odd_offset, 0,
+            "a misaligned tensor is copied into its own buffer"
+        );
         assert!(MISALIGNED_MAPPING_OFFSET_COPIES.get() > copies_before);
 
         unregister_checkpoint_mapping(mapping_bytes);
+    }
+
+    /// the mapping's no-copy buffer joins the residency set when the GPU
+    /// first receives it, once, and leaves it when the mapping is unregistered.
+    #[test]
+    fn mapping_buffer_joins_the_residency_set_once_and_leaves_on_unregister() {
+        let _guard = MAPPING_TEST_LOCK
+            .lock()
+            .expect("mapping test lock is healthy");
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        if !device.respondsToSelector(objc2::sel!(newResidencySetWithDescriptor:error:)) {
+            return;
+        }
+        reset_checkpoint_mapping_for_test();
+        WARM_RESIDENCY_SET.with(|slot| *slot.borrow_mut() = None);
+
+        let page = page_size();
+        let mapping = AlignedBuffer::new(page / core::mem::size_of::<u32>(), page)
+            .expect("page-aligned fixture for a checkpoint mapping");
+        let mapping_bytes =
+            unsafe { core::slice::from_raw_parts(mapping.as_ptr().cast::<u8>(), page) };
+        register_checkpoint_mapping(mapping_bytes);
+
+        upload_packed_bytes(&device, &mapping_bytes[8..72], Some("first.weight"))
+            .expect("first tensor uploads as a view");
+        upload_packed_bytes(&device, &mapping_bytes[72..136], Some("second.weight"))
+            .expect("second tensor uploads as a view");
+        assert_eq!(
+            held_mapping_residency_allocations(),
+            vec![(CHECKPOINT_MAPPING_NOCOPY_NAME.to_string(), 1)],
+            "two views of one mapping hold one set of one allocation"
+        );
+        assert_eq!(
+            held_residency_allocations(),
+            None,
+            "the warm set is not touched by a mapping"
+        );
+
+        unregister_checkpoint_mapping(mapping_bytes);
+        assert_eq!(held_mapping_residency_allocations(), vec![]);
+    }
+
+    const COLD_FILE_PAGES: usize = 512;
+
+    /// reads `length` file bytes at `offset` through the GPU: a blit from the
+    /// registered mapping's no-copy view into a shared buffer.
+    fn gpu_read_through_mapping(
+        device: &ProtocolObject<dyn MTLDevice>,
+        queue: &ProtocolObject<dyn MTLCommandQueue>,
+        address: *const u8,
+        length: usize,
+    ) -> Vec<u8> {
+        let (view, view_offset) = checkpoint_mapping_offset(device, address.cast(), length, None)
+            .expect("the range lies inside the registered mapping")
+            .expect("the mapping view is created");
+        let destination = device
+            .newBufferWithLength_options(length, MTLResourceOptions::StorageModeShared)
+            .expect("device hands out a shared destination buffer");
+        let command_buffer = queue
+            .commandBuffer()
+            .expect("queue hands out a command buffer");
+        let blit = command_buffer
+            .blitCommandEncoder()
+            .expect("command buffer hands out a blit encoder");
+        // SAFETY: both ranges lie inside their buffers; the view offset is 8-aligned.
+        unsafe {
+            blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                &view,
+                view_offset,
+                &destination,
+                0,
+                length,
+            );
+        }
+        blit.endEncoding();
+        command_buffer.commit();
+        command_buffer.waitUntilCompleted();
+        // SAFETY: the buffer is shared, `length` bytes long, and the GPU is done with it.
+        unsafe { core::slice::from_raw_parts(destination.contents().as_ptr().cast::<u8>(), length) }
+            .to_vec()
+    }
+
+    fn non_resident_pages(address: *const u8, length: usize) -> usize {
+        let pages = length / page_size();
+        let mut states = vec![0 as libc::c_char; pages];
+        // SAFETY: `address..address+length` is a live page-aligned mapping and
+        // `states` holds one byte per page.
+        let status = unsafe { libc::mincore(address.cast(), length, states.as_mut_ptr()) };
+        assert_eq!(status, 0, "mincore reads the mapping's residency");
+        states
+            .iter()
+            .filter(|state| **state & libc::MINCORE_INCORE as libc::c_char == 0)
+            .count()
+    }
+
+    /// the contract that replaced `mlock` (commit 0a6ba7df23, ROW 533): a
+    /// no-copy view over pages the kernel never loaded reads the file's bytes.
+    #[test]
+    fn a_gpu_read_through_a_cold_checkpoint_mapping_returns_the_file_bytes() {
+        let _guard = MAPPING_TEST_LOCK
+            .lock()
+            .expect("mapping test lock is healthy");
+        let Ok((device, queue)) = device_and_queue() else {
+            return;
+        };
+        reset_checkpoint_mapping_for_test();
+
+        let page = page_size();
+        let file_length = COLD_FILE_PAGES * page;
+        let contents: Vec<u8> = (0..file_length)
+            .map(|index| (index.wrapping_mul(2_654_435_761) >> 13) as u8 ^ (index >> 9) as u8)
+            .collect();
+        let mut file = tempfile::tempfile().expect("a temp file for the checkpoint bytes");
+        // F_NOCACHE keeps the written pages out of the page cache.
+        // SAFETY: the descriptor is the live temp file's.
+        let cache_off = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1) };
+        assert_eq!(cache_off, 0, "F_NOCACHE accepted on the temp file");
+        file.write_all(&contents)
+            .expect("write the checkpoint bytes");
+        file.sync_all().expect("flush the checkpoint bytes to disk");
+        // SAFETY: a fresh read-only shared mapping of the whole file.
+        let base = unsafe {
+            libc::mmap(
+                core::ptr::null_mut(),
+                file_length,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        assert_ne!(base, libc::MAP_FAILED, "map the temp file");
+        let base = base.cast::<u8>();
+        // SAFETY: the mapping is `file_length` bytes and outlives every use below.
+        let mapped = unsafe { core::slice::from_raw_parts(base, file_length) };
+
+        let offset = 64 * page + 64;
+        let length = 16 * page;
+        // SAFETY: `offset` is inside the mapping.
+        let read_start = unsafe { base.add(offset) };
+        // SAFETY: the page-aligned range around the read lies inside the mapping.
+        let cold_in_read = non_resident_pages(unsafe { base.add(64 * page) }, 17 * page);
+        assert!(
+            cold_in_read > 0,
+            "the read range must hold non-resident pages or this test proves nothing"
+        );
+        register_checkpoint_mapping(mapped);
+
+        let read = gpu_read_through_mapping(&device, &queue, read_start, length);
+
+        unregister_checkpoint_mapping(mapped);
+        // SAFETY: the mapping was created above and nothing references it now.
+        unsafe { libc::munmap(base.cast(), file_length) };
+        assert_eq!(
+            read,
+            &contents[offset..offset + length],
+            "the GPU read returns the file's bytes"
+        );
     }
 
     #[test]

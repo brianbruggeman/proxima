@@ -532,7 +532,7 @@ pub(super) fn emit_token_breakdown(breakdown: &TokenBreakdown) {
 /// dispatch), so it stays a separate parameter instead of a struct field.
 // each parameter is an independent per-step diagnostic snapshot (metal
 // stage totals, plan-cache-lookup ticks, cache lengths/hits/misses, arena
-// bytes, residency rung) with no natural grouping struct -- bundling them
+// bytes) with no natural grouping struct -- bundling them
 // into one would just relocate the field count, not reduce it.
 #[allow(clippy::too_many_arguments)]
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -545,7 +545,6 @@ pub(super) fn emit_token_breakdown_metal(
     plan_misses: usize,
     plan_refits: usize,
     arena_allocated_bytes: (usize, usize, usize),
-    mapping_residency_rung: crate::mapping_residency::ResidencyRung,
 ) {
     let ms = |ticks: u64| ticks_to_nanos(ticks) as f64 / 1e6;
     let kind_filter = kind_filter_from_env();
@@ -585,7 +584,6 @@ pub(super) fn emit_token_breakdown_metal(
         resident_reuses = metal_stage.resident_reuses,
         mapping_offset_uploads = metal_stage.mapping_offset_uploads,
         mapping_rebound_blocks = metal_stage.mapping_rebound_blocks,
-        mapping_residency_rung = mapping_residency_rung.as_str(),
         expert_mapping_candidate_uploads = metal_stage.expert_mapping_candidate_uploads,
         expert_mapping_missed_uploads = metal_stage.expert_mapping_missed_uploads,
         nocopy_cache_len = omega::metal::nocopy_cache_len() as u64,
@@ -914,24 +912,6 @@ pub struct LoadedModel<'file> {
     /// reader.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub(super) checkpoint_weight_bytes: crate::memory_fit::WeightClassBytes,
-    /// The rung [`crate::mapping_residency::prove_resident`] resolved on
-    /// for THIS load ([`Self::load`]'s `Prefault` default when the load
-    /// path never calls it, [`Self::load_from_safetensors`]) --
-    /// [`Self::run_decode_loop_observed_seeded`]/
-    /// [`Self::run_decode_loop_placed_kv`] pass this straight into
-    /// `emit_token_breakdown_metal` every step, replacing the ambient
-    /// `ACHIEVED_RUNG` global that used to leak the last-loaded model's
-    /// rung into every `LoadedModel` in the process.
-    ///
-    /// Read only from `emit_token_breakdown_metal`'s own `instrument`-gated
-    /// call site (`generate/decode.rs`) -- same reasoning as
-    /// [`crate::mapping_residency::ResidencyRung::as_str`]'s own
-    /// `cfg_attr`, which this field needs independently since a struct
-    /// field's dead-code lint is judged on its own, not inherited from a
-    /// method that happens to read it.
-    #[cfg(all(feature = "metal", target_os = "macos"))]
-    #[cfg_attr(not(feature = "instrument"), allow(dead_code))]
-    pub(super) mapping_residency_rung: crate::mapping_residency::ResidencyRung,
     pub(super) vocab: Vocab,
     pub(super) program: Vec<Op>,
     pub(super) program_hash: u64,

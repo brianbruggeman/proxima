@@ -17,13 +17,13 @@
 //! a caller needs only part of the set.
 
 use super::*;
+use core::mem;
 use objc2::rc::Retained;
 use objc2::sel;
 use objc2_foundation::NSObjectProtocol;
-use objc2_metal::{
-    MTLCommandQueue, MTLResidencySet, MTLResidencySetDescriptor, MTLResourceUsage,
-};
+use objc2_metal::{MTLCommandQueue, MTLResidencySet, MTLResidencySetDescriptor, MTLResourceUsage};
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 thread_local! {
@@ -33,6 +33,13 @@ thread_local! {
     /// set in, so the set follows the model that built it.
     pub(super) static WARM_RESIDENCY_SET: RefCell<Option<Retained<ProtocolObject<dyn MTLResidencySet>>>> =
         const { RefCell::new(None) };
+
+    /// One residency set per registered mapping buffer, keyed by its
+    /// no-copy cache name. Lives and dies with that cache entry, and an
+    /// active [`MetalContext`] swaps it with the cache, so the set follows
+    /// the mapping it covers.
+    pub(super) static MAPPING_RESIDENCY: RefCell<BTreeMap<String, Retained<ProtocolObject<dyn MTLResidencySet>>>> =
+        const { RefCell::new(BTreeMap::new()) };
 }
 
 /// Wraps `MTLResidencySet` (macOS 15+): adds every buffer, `commit`s, attaches
@@ -46,8 +53,20 @@ fn request_residency(
     queue: &ProtocolObject<dyn MTLCommandQueue>,
     buffers: &[MetalBuffer],
 ) -> Result<bool, MetalError> {
-    if !device.respondsToSelector(sel!(newResidencySetWithDescriptor:error:)) {
+    let Some(set) = attached_residency_set(device, queue, buffers)? else {
         return Ok(false);
+    };
+    WARM_RESIDENCY_SET.with(|slot| *slot.borrow_mut() = Some(set));
+    Ok(true)
+}
+
+fn attached_residency_set(
+    device: &ProtocolObject<dyn MTLDevice>,
+    queue: &ProtocolObject<dyn MTLCommandQueue>,
+    buffers: &[MetalBuffer],
+) -> Result<Option<Retained<ProtocolObject<dyn MTLResidencySet>>>, MetalError> {
+    if !device.respondsToSelector(sel!(newResidencySetWithDescriptor:error:)) {
+        return Ok(None);
     }
     let descriptor = MTLResidencySetDescriptor::new();
     // SAFETY: initialCapacity is a sizing hint the driver may exceed.
@@ -64,14 +83,62 @@ fn request_residency(
     set.commit();
     queue.addResidencySet(&set);
     set.requestResidency();
-    WARM_RESIDENCY_SET.with(|slot| *slot.borrow_mut() = Some(set));
-    Ok(true)
+    Ok(Some(set))
+}
+
+/// Gives a mapping buffer its own residency set, keyed by the mapping's
+/// cache name, so a GPU read through the registered mapping never meets a
+/// non-resident page. Called where the GPU first receives the mapping, and
+/// apart from the warm set so `warm` never reads it as a finished warm. A
+/// no-op on an OS without residency sets.
+pub(super) fn request_mapping_residency(
+    device: &ProtocolObject<dyn MTLDevice>,
+    name: &str,
+    buffer: &MetalBuffer,
+) -> Result<(), MetalError> {
+    let (_, queue) = device_and_queue()?;
+    if let Some(set) = attached_residency_set(device, &queue, core::slice::from_ref(buffer))? {
+        MAPPING_RESIDENCY.with(|held| held.borrow_mut().insert(name.to_string(), set));
+    }
+    Ok(())
+}
+
+/// Detaches and drops the residency set held for mapping `name`, before the
+/// mapping is replaced or unregistered, so no set outlives its mapping.
+pub(super) fn release_mapping_residency(name: &str) {
+    let released = MAPPING_RESIDENCY.with(|held| held.borrow_mut().remove(name));
+    detach_residency_sets(released.into_iter());
+}
+
+/// Detaches and drops every mapping residency set the active context holds.
+pub(super) fn release_all_mapping_residency() {
+    let released = MAPPING_RESIDENCY.with(|held| mem::take(&mut *held.borrow_mut()));
+    detach_residency_sets(released.into_values());
+}
+
+fn detach_residency_sets(
+    sets: impl Iterator<Item = Retained<ProtocolObject<dyn MTLResidencySet>>>,
+) {
+    if let Ok((_, queue)) = device_and_queue() {
+        sets.for_each(|set| queue.removeResidencySet(&set));
+    }
+}
+
+/// Allocation counts of the mapping residency sets held now, by name. Test-only.
+#[cfg(test)]
+pub(super) fn held_mapping_residency_allocations() -> Vec<(String, usize)> {
+    MAPPING_RESIDENCY.with(|held| {
+        held.borrow()
+            .iter()
+            .map(|(name, set)| (name.clone(), set.allocationCount()))
+            .collect()
+    })
 }
 
 /// Allocations in the residency set the last warm requested, `None` when no
 /// set is held. Test-only: callers never need to read the set back.
 #[cfg(test)]
-fn held_residency_allocations() -> Option<usize> {
+pub(super) fn held_residency_allocations() -> Option<usize> {
     WARM_RESIDENCY_SET.with(|slot| slot.borrow().as_ref().map(|set| set.allocationCount()))
 }
 
@@ -120,7 +187,8 @@ pub fn warm_resident_buffers() -> Result<usize, MetalError> {
 /// Warm for the active [`MetalContext`]: idempotent while its residency set is
 /// held, and the set attaches to the context's queue, created here if absent.
 pub(super) fn warm_active_context() -> Result<usize, MetalError> {
-    let held = WARM_RESIDENCY_SET.with(|slot| slot.borrow().as_ref().map(|set| set.allocationCount()));
+    let held =
+        WARM_RESIDENCY_SET.with(|slot| slot.borrow().as_ref().map(|set| set.allocationCount()));
     if let Some(count) = held {
         return Ok(count);
     }
@@ -131,10 +199,15 @@ pub(super) fn warm_active_context() -> Result<usize, MetalError> {
     ACTIVE_QUEUE.with(|slot| {
         let mut slot = slot.borrow_mut();
         if slot.is_none() {
-            *slot = Some(device.newCommandQueue().ok_or_else(|| MetalError::DriverRefusedObject {
-                object: "command queue",
-                reason: "device returned none".to_string(),
-            })?);
+            *slot =
+                Some(
+                    device
+                        .newCommandQueue()
+                        .ok_or_else(|| MetalError::DriverRefusedObject {
+                            object: "command queue",
+                            reason: "device returned none".to_string(),
+                        })?,
+                );
         }
         Ok::<(), MetalError>(())
     })?;
@@ -239,7 +312,11 @@ mod tests {
                 "the held residency set carries one allocation per warmed buffer"
             );
         } else {
-            assert_eq!(held_residency_allocations(), None, "no residency sets on this OS");
+            assert_eq!(
+                held_residency_allocations(),
+                None,
+                "no residency sets on this OS"
+            );
         }
     }
 }
@@ -265,13 +342,21 @@ mod context_tests {
             let _active = context.activate();
             let page = page_size();
             for (index, name) in WEIGHT_NAMES.iter().enumerate() {
-                let weight: Vec<u8> = (0..page * (index + 1)).map(|byte| (byte % 251) as u8).collect();
+                let weight: Vec<u8> = (0..page * (index + 1))
+                    .map(|byte| (byte % 251) as u8)
+                    .collect();
                 upload_resident_copy(&device, name, weight.as_ptr().cast(), weight.len())
                     .expect("a resident weight uploads");
             }
         }
-        assert_eq!(context.warm().expect("warming two real buffers succeeds"), 2);
-        assert_eq!(context.warm().expect("a second warm returns the held set"), 2);
+        assert_eq!(
+            context.warm().expect("warming two real buffers succeeds"),
+            2
+        );
+        assert_eq!(
+            context.warm().expect("a second warm returns the held set"),
+            2
+        );
         Some(context)
     }
 
@@ -297,7 +382,11 @@ mod context_tests {
             let own_queue = queue_identity(context.queue().expect("warm gave the context a queue"));
             let _active = context.activate();
             let (_device, queue) = device_and_queue().expect("device while active");
-            assert_eq!(queue_identity(&queue), own_queue, "the active queue is the context's");
+            assert_eq!(
+                queue_identity(&queue),
+                own_queue,
+                "the active queue is the context's"
+            );
             if _device.respondsToSelector(sel!(newResidencySetWithDescriptor:error:)) {
                 assert_eq!(held_residency_allocations(), Some(2));
             }
@@ -309,8 +398,16 @@ mod context_tests {
         on_fresh_thread(|context| {
             let own_queue = queue_identity(context.queue().expect("warm gave the context a queue"));
             let (_device, queue) = device_and_queue().expect("device while inactive");
-            assert_ne!(queue_identity(&queue), own_queue, "the thread queue is not the context's");
-            assert_eq!(held_residency_allocations(), None, "the set sits in the context, not the thread");
+            assert_ne!(
+                queue_identity(&queue),
+                own_queue,
+                "the thread queue is not the context's"
+            );
+            assert_eq!(
+                held_residency_allocations(),
+                None,
+                "the set sits in the context, not the thread"
+            );
         });
     }
 }
