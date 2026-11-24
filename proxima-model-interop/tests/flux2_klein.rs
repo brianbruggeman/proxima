@@ -1,16 +1,210 @@
 //! Acceptance tests for the flux2-klein spec (`specs/flux2-klein/SPEC.md`). The library code
 //! under test is generic; the reference dumps are what name the model.
 
+/// The kernel extent the checkpoint-free shape tests give `VaeConfig::window`.
+/// `DiffusionSettings` carries no window; the real value is read from the
+/// checkpoint (`Checkpoint::window_extent("decoder.conv_in.weight")`, as the
+/// gated decode tests do), and the flux2-klein decoder's convolutions are 3x3,
+/// so shape-only tests use that extent -- the one place it is spelled.
+#[cfg(feature = "std")]
+fn shape_only_window() -> u32 {
+    3
+}
+
+/// Decodes a `PackedRows` into host elements; the `?` returns the caller's `String` error.
+macro_rules! decoded {
+    ($rows:expr) => {{
+        let mut values = Vec::new();
+        $rows.decode_all(&mut values).map_err(|why| why.to_string())?;
+        values
+    }};
+}
+
+/// A measurement `compare` returned, decoded; the `?` returns the caller's `String` error.
+macro_rules! measured {
+    ($result:expr) => {{
+        let rows = $result.map_err(|why| why.to_string())?;
+        decoded!(rows)
+    }};
+}
+
+/// Host-element rows over a slice of decoded values.
+macro_rules! host_rows {
+    ($values:expr) => {
+        ::proxima_numeric::PackedRows::from_values(
+            &::proxima_numeric::NumericFormat::host_element(),
+            $values,
+        )
+        .map_err(|why| why.to_string())?
+    };
+}
+
+/// `(rms_rel, cosine)` of two runs of decoded values.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+macro_rules! stats {
+    ($actual:expr, $reference:expr) => {{
+        let (actual, reference) = (host_rows!($actual), host_rows!($reference));
+        let rms = measured!(::proxima_numeric::compare::rms_rel(&actual, &reference));
+        let cosine = measured!(::proxima_numeric::compare::cosine(&actual, &reference));
+        (rms[0], cosine[0])
+    }};
+}
+
+/// The cosine of two runs of decoded values.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+macro_rules! cosine_of {
+    ($actual:expr, $reference:expr) => {{
+        let (actual, reference) = (host_rows!($actual), host_rows!($reference));
+        let cosine = measured!(::proxima_numeric::compare::cosine(&actual, &reference));
+        cosine[0]
+    }};
+}
+
+/// `(psnr, cosine)` of two runs of decoded values on a unit full scale.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+macro_rules! fidelity {
+    ($actual:expr, $reference:expr) => {{
+        let (actual, reference) = (host_rows!($actual), host_rows!($reference));
+        let full_scale = host_rows!(&[1.0]);
+        let signal = measured!(::proxima_numeric::compare::psnr(&actual, &reference, &full_scale));
+        let cosine = measured!(::proxima_numeric::compare::cosine(&actual, &reference));
+        (signal[0], cosine[0])
+    }};
+}
+
+/// `(min, max, mean)` of decoded values.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+macro_rules! summary {
+    ($values:expr) => {{
+        let values = $values;
+        let low = values.iter().copied().reduce(|low, value| low.min(value)).ok_or("no values")?;
+        let high = values.iter().copied().reduce(|high, value| high.max(value)).ok_or("no values")?;
+        let moments = measured!(::proxima_numeric::compare::mean_std(&host_rows!(values)));
+        (low, high, moments[0])
+    }};
+}
+
+/// A reference dump decoded to host elements; the `?` returns the caller's `String` error.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+macro_rules! dump_values {
+    ($path:expr) => {{
+        let rows = crate::oracle::read_dump($path)?;
+        decoded!(rows)
+    }};
+}
+
+/// The dump `$key` names in `data/flux2_oracle.toml`, found under `$dir`, decoded.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+macro_rules! named_values {
+    ($dir:expr, $key:expr) => {
+        dump_values!(&$dir.join(crate::oracle::file("dumps", $key)?))
+    };
+}
+
+/// Channel-major values (`index = token + tokens * channel`) as token-major; a reshape, so any
+/// element type.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn token_major_and<T: Copy>(channel_major: &[T], tokens: usize, channels: usize) -> Vec<T> {
+    (0..tokens * channels)
+        .map(|index| channel_major[(index / channels) + tokens * (index % channels)])
+        .collect()
+}
+
+/// The reference dumps: their names and the parity tolerances come from
+/// `data/flux2_oracle.toml`; their element format is `DiffusionSettings::reference_format`.
+mod oracle {
+    use std::fmt::Display;
+    #[cfg(feature = "std")]
+    use std::fs;
+    #[cfg(feature = "std")]
+    use std::path::Path;
+    use std::str::FromStr;
+
+    #[cfg(feature = "std")]
+    use proxima_model_interop::diffusion::DiffusionSettings;
+    #[cfg(feature = "std")]
+    use proxima_numeric::PackedRows;
+    use proxima_numeric::{FloatLayout, NumericFormat};
+
+    const ORACLE: &str = include_str!("data/flux2_oracle.toml");
+    const FALLBACK: &str = "*";
+
+    fn table() -> Result<toml::Table, String> {
+        ORACLE.parse().map_err(|why: toml::de::Error| why.to_string())
+    }
+
+    /// Whether `measured` is within the `[tolerances]` entry `key`, read in `measured`'s type.
+    pub fn within<T: PartialOrd + FromStr>(measured: T, key: &str) -> Result<bool, String>
+    where
+        T::Err: Display,
+    {
+        let bound: T = file("tolerances", key)?
+            .parse()
+            .map_err(|why: T::Err| format!("flux2_oracle.toml [tolerances] {key}: {why}"))?;
+        Ok(measured <= bound)
+    }
+
+    pub fn file(section: &str, key: &str) -> Result<String, String> {
+        let table = table()?;
+        let entries = table
+            .get(section)
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| format!("flux2_oracle.toml has no [{section}] section"))?;
+        let direct = entries.get(key).and_then(toml::Value::as_str).map(str::to_owned);
+        let pattern = entries
+            .get(FALLBACK)
+            .and_then(toml::Value::as_str)
+            .map(|template| template.replace("{name}", key));
+        direct
+            .or(pattern)
+            .ok_or_else(|| format!("flux2_oracle.toml [{section}] names no file for {key}"))
+    }
+
+    #[cfg(feature = "std")]
+    pub fn read_dump(path: &Path) -> Result<PackedRows, String> {
+        let format = DiffusionSettings::try_resolved()
+            .map_err(|why| why.to_string())?
+            .reference_format;
+        let bytes = fs::read(path).map_err(|why| format!("{}: {why}", path.display()))?;
+        PackedRows::from_bytes(&format, bytes)
+            .map_err(|why| format!("{}: {why}", path.display()))
+    }
+
+    pub fn host_layout() -> Result<FloatLayout, String> {
+        NumericFormat::host_element()
+            .element_layout()
+            .ok_or_else(|| String::from("the host element is a scalar format"))
+    }
+}
+
+#[cfg(feature = "std")]
+mod activation {
+    use proxima_model_interop::diffusion::DiffusionSettings;
+    use proxima_numeric::DType;
+
+    pub fn dit() -> Result<DType, String> {
+        DiffusionSettings::try_resolved()
+            .map_err(|why| why.to_string())?
+            .dit_activation_dtype()
+    }
+
+    pub fn vae() -> Result<DType, String> {
+        DiffusionSettings::try_resolved()
+            .map_err(|why| why.to_string())?
+            .vae_activation_dtype()
+    }
+}
+
+#[cfg(feature = "std")]
 mod philox {
     use std::env;
-    use std::fs;
     use std::path::PathBuf;
 
-    use proxima_numeric::{Philox, RngError, RngKind};
+    use proxima_numeric::{NumericFormat, PackedRows, Philox, RngError, RngKind, compare};
 
     const SEED: u64 = 42;
     const LATENT_VALUES: usize = 64 * 64 * 128;
-    const TOLERANCE: f32 = 1e-5;
+    const HEAD: usize = 16;
 
     type Outcome = Result<(), String>;
 
@@ -22,55 +216,61 @@ mod philox {
         Ok(PathBuf::from(home).join(".cache/kvgate/proxnum588/ref"))
     }
 
-    fn reference_noise() -> Result<Vec<f32>, String> {
-        let path = reference_dir()?.join("noise.f32");
-        let bytes = fs::read(&path).map_err(|why| format!("fixture {}: {why}", path.display()))?;
-        let (words, _) = bytes.as_chunks::<4>();
-        Ok(words.iter().map(|word| f32::from_le_bytes(*word)).collect())
+    fn reference_noise() -> Result<PackedRows, String> {
+        crate::oracle::read_dump(&reference_dir()?.join(crate::oracle::file("dumps", "noise")?))
     }
 
-    fn ours() -> Result<Vec<f32>, String> {
+    fn ours(format: &NumericFormat) -> Result<PackedRows, String> {
         let selected: RngKind = "philox".parse().map_err(|why: RngError| why.to_string())?;
-        Ok(selected.generator(SEED).normal(LATENT_VALUES))
+        PackedRows::from_values(format, &selected.generator(SEED).normal(LATENT_VALUES))
+            .map_err(|why| why.to_string())
     }
 
-    fn max_abs_diff(left: &[f32], right: &[f32]) -> f32 {
-        left.iter().zip(right).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max)
+    fn head(rows: &PackedRows) -> Result<PackedRows, String> {
+        let mut kept = rows.clone();
+        kept.truncate(HEAD).map_err(|why| why.to_string())?;
+        Ok(kept)
     }
 
     #[test]
     fn the_first_sixteen_values_of_seed_42_match_the_reference_dump() -> Outcome {
         let reference = reference_noise()?;
-        let generated = ours()?;
-        let worst = max_abs_diff(&generated[..16], &reference[..16]);
-        assert!(worst <= TOLERANCE, "max abs diff {worst}");
+        let generated = ours(reference.format())?;
+        let gap = compare::max_abs_diff(&head(&generated)?, &head(&reference)?);
+        let worst = measured!(gap)[0];
+        assert!(crate::oracle::within(worst, "philox")?, "max abs diff {worst}");
         Ok(())
     }
 
     #[test]
     fn all_524288_values_of_seed_42_match_the_reference_dump() -> Outcome {
         let reference = reference_noise()?;
-        let generated = ours()?;
-        assert_eq!(reference.len(), LATENT_VALUES);
-        assert_eq!(generated.len(), LATENT_VALUES);
-        let worst = max_abs_diff(&generated, &reference);
-        println!("max abs diff {worst}; ours {:?}; ref {:?}", &generated[..4], &reference[..4]);
-        assert!(worst <= TOLERANCE, "max abs diff {worst}");
+        let generated = ours(reference.format())?;
+        assert_eq!(reference.elements(), LATENT_VALUES);
+        assert_eq!(generated.elements(), LATENT_VALUES);
+        let worst = measured!(compare::max_abs_diff(&generated, &reference))[0];
+        let (ours_values, reference_values) = (decoded!(generated), decoded!(reference));
+        println!(
+            "max abs diff {worst}; ours {:?}; ref {:?}",
+            &ours_values[..4],
+            &reference_values[..4]
+        );
+        assert!(crate::oracle::within(worst, "philox")?, "max abs diff {worst}");
         Ok(())
     }
 
     #[test]
-    fn the_latent_is_standard_normal_and_unsupported_generators_are_refused_by_name() {
+    fn the_latent_is_standard_normal_and_unsupported_generators_are_refused_by_name() -> Outcome {
         let generated = Philox::new(SEED).normal(LATENT_VALUES);
-        let count = generated.len() as f64;
-        let mean = generated.iter().map(|v| f64::from(*v)).sum::<f64>() / count;
-        let spread = generated.iter().map(|v| (f64::from(*v) - mean).powi(2)).sum::<f64>() / count;
+        let moments = measured!(compare::mean_std(&host_rows!(&generated)));
+        let (mean, spread) = (moments[0], moments[1]);
         assert!((-0.01..=0.01).contains(&mean), "mean {mean}");
-        assert!((0.99..=1.01).contains(&spread.sqrt()), "std {}", spread.sqrt());
+        assert!((0.99..=1.01).contains(&spread), "std {spread}");
         for name in ["std_default", "cpu"] {
             let refused = name.parse::<RngKind>();
             assert_eq!(refused, Err(RngError::Unimplemented { name }));
         }
+        Ok(())
     }
 }
 
@@ -79,7 +279,9 @@ mod scheduler {
     use std::fs;
     use std::path::PathBuf;
 
-    use proxima_numeric::{FloatLayout, FlowMatchSchedule, StepRule, euler_step, step};
+    use std::num::ParseFloatError;
+
+    use proxima_numeric::{FlowMatchSchedule, PackedRows, StepRule, euler_step, step};
 
     const IMAGE_TOKENS: u32 = 4096;
     const STEPS: u32 = 4;
@@ -94,17 +296,18 @@ mod scheduler {
         Ok(PathBuf::from(home).join(".cache/kvgate/proxnum588/ref"))
     }
 
-    fn reference_sigmas() -> Result<Vec<f32>, String> {
+    fn reference_sigmas() -> Result<PackedRows, String> {
         let path = reference_dir()?.join("sigmas.txt");
         let text = fs::read_to_string(&path)
             .map_err(|why| format!("fixture {}: {why}", path.display()))?;
-        let parse = |word: &str| word.parse::<f32>().map_err(|why| format!("{word}: {why}"));
-        text.split_whitespace().map(parse).collect()
+        let parse = |word: &str| word.parse().map_err(|why: ParseFloatError| format!("{word}: {why}"));
+        let values = text.split_whitespace().map(parse).collect::<Result<Vec<_>, String>>()?;
+        Ok(host_rows!(&values))
     }
 
     #[test]
     fn sigmas_for_4096_tokens_and_4_steps_match_the_reference_log() -> Outcome {
-        let reference = reference_sigmas()?;
+        let reference = decoded!(reference_sigmas()?);
         let schedule = FlowMatchSchedule::new(STEPS, IMAGE_TOKENS);
         let ours = schedule.sigmas().map_err(|why| why.to_string())?;
         assert_eq!(reference.len(), 5);
@@ -123,15 +326,16 @@ mod scheduler {
 
     #[test]
     fn the_euler_step_adds_the_sigma_difference_times_velocity_element_for_element() {
-        let start = [0.5_f32, -1.25, 3.0, 0.0, 7.5];
-        let velocity = [1.0_f32, -2.0, 0.25, 4.0, -0.5];
-        let (sigma, sigma_next) = (0.967_384_04_f32, 0.908_143_94_f32);
+        let start = [0.5, -1.25, 3.0, 0.0, 7.5];
+        let velocity = [1.0, -2.0, 0.25, 4.0, -0.5];
+        let (sigma, sigma_next) = (0.967_384_04, 0.908_143_94);
+        let layout = super::oracle::host_layout().expect("the host element has a layout");
         let mut latent = start;
-        euler_step(&mut latent, &velocity, sigma, sigma_next, FloatLayout::BF32).expect("binary32");
+        euler_step(&mut latent, &velocity, sigma, sigma_next, layout)
+            .expect("the host element steps");
         let mut through_rule = start;
-        let layout = FloatLayout::BF32;
         step(StepRule::Euler, &mut through_rule, &velocity, sigma, sigma_next, layout)
-            .expect("binary32");
+            .expect("the host element steps");
         assert_eq!(latent, through_rule);
         for index in 0..start.len() {
             let expected = start[index] + (sigma_next - sigma) * velocity[index];
@@ -143,17 +347,18 @@ mod scheduler {
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod dit {
     use std::env;
-    use std::fs;
     use std::path::PathBuf;
+    #[cfg(feature = "instrument")]
+    use std::time::Duration;
     use std::time::Instant;
 
     use conflaguration::Settings;
     use proxima_model_interop::ServingSettings;
     use proxima_model_interop::diffusion::{
         Checkpoint, Denoiser, DiffusionSettings, DitConfig, DitInputs, Graph, attention_scale,
-        build_dit, head_norm_count, timestep_sinusoid,
+        build_dit, head_norm_count,
     };
-    use proxima_numeric::{DType, FloatLayout, FlowMatchSchedule, euler_step};
+    use proxima_numeric::{FlowMatchSchedule, PackedRows, euler_step};
     use proxima_tensor::op::NodeId;
     use proxima_tensor::spec::multi_axis_rope_tables;
 
@@ -163,7 +368,7 @@ mod dit {
     const JOINT: usize = 4608;
     const STEPS: u32 = 4;
     const ROPE_DAXES: [u32; 4] = [32, 32, 32, 32];
-    const ROPE_THETA: f32 = 2000.0;
+    const ROPE_THETA: u16 = 2000;
 
     type Outcome = Result<(), String>;
 
@@ -189,60 +394,17 @@ mod dit {
         Ok(Fixtures { model, reference })
     }
 
-    fn read_dump(path: &PathBuf) -> Result<Vec<f32>, String> {
-        let bytes = fs::read(path).map_err(|why| format!("{}: {why}", path.display()))?;
-        Ok(bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|word| f32::from_le_bytes(*word))
-            .collect())
-    }
-
     /// The reference latent is channel-major (`index = token + tokens * channel`);
     /// the graph reads it token-major.
-    fn token_major(channel_major: &[f32]) -> Vec<f32> {
-        token_major_and(channel_major, IMAGE_TOKENS, HIDDEN)
-    }
-
-    fn token_major_and(channel_major: &[f32], tokens: usize, channels: usize) -> Vec<f32> {
-        let mut values = vec![0.0f32; channel_major.len()];
-        for channel in 0..channels {
-            for token in 0..tokens {
-                values[token * channels + channel] = channel_major[token + tokens * channel];
-            }
-        }
-        values
+    fn token_major<T: Copy>(channel_major: &[T]) -> Vec<T> {
+        super::token_major_and(channel_major, IMAGE_TOKENS, HIDDEN)
     }
 
     /// A `[channels, tokens]` capture (dim0 the channel axis) as token-major.
-    fn from_channel_major(values: &[f32], tokens: usize, channels: usize) -> Vec<f32> {
-        let mut token_major = vec![0.0f32; values.len()];
-        for token in 0..tokens {
-            for channel in 0..channels {
-                token_major[token * channels + channel] = values[channel + channels * token];
-            }
-        }
-        token_major
-    }
-
-    fn stats(actual: &[f32], reference: &[f32]) -> (f64, f64) {
-        let mut squared_diff = 0.0f64;
-        let mut squared_reference = 0.0f64;
-        let mut dot = 0.0f64;
-        let mut squared_actual = 0.0f64;
-        for (&got, &want) in actual.iter().zip(reference) {
-            let (got, want) = (f64::from(got), f64::from(want));
-            squared_diff += (got - want) * (got - want);
-            squared_reference += want * want;
-            squared_actual += got * got;
-            dot += got * want;
-        }
-        let count = actual.len() as f64;
-        (
-            (squared_diff / count).sqrt() / (squared_reference / count).sqrt(),
-            dot / (squared_actual * squared_reference).sqrt(),
-        )
+    fn from_channel_major<T: Copy>(values: &[T], tokens: usize, channels: usize) -> Vec<T> {
+        (0..tokens * channels)
+            .map(|index| values[(index % channels) + channels * (index / channels)])
+            .collect()
     }
 
     fn dit_config() -> DitConfig {
@@ -255,22 +417,24 @@ mod dit {
             double_blocks: 5,
             single_blocks: 20,
             timestep_channels: 256,
-            rope_theta: ROPE_THETA as u32,
+            rope_theta: ROPE_THETA.into(),
         }
     }
 
-    fn rope_positions() -> Vec<f32> {
+    fn rope_positions<T: Copy + From<u16>>() -> Result<Vec<T>, String> {
         let mut positions = Vec::with_capacity(JOINT * 4);
-        for token in 0..TEXT_TOKENS {
-            positions.extend_from_slice(&[0.0, 0.0, 0.0, token as f32]);
+        let zero = T::from(0);
+        let text_tokens = u16::try_from(TEXT_TOKENS).map_err(|why| why.to_string())?;
+        for token in 0..text_tokens {
+            positions.extend_from_slice(&[zero, zero, zero, token.into()]);
         }
-        let width = 64u32;
-        for token in 0..IMAGE_TOKENS {
-            let row = (token / width as usize) as f32;
-            let column = (token % width as usize) as f32;
-            positions.extend_from_slice(&[0.0, row, column, 0.0]);
+        let width: u16 = 64;
+        let image_tokens = u16::try_from(IMAGE_TOKENS).map_err(|why| why.to_string())?;
+        for token in 0..image_tokens {
+            let (row, column) = (token / width, token % width);
+            positions.extend_from_slice(&[zero, row.into(), column.into(), zero]);
         }
-        positions
+        Ok(positions)
     }
 
     fn serving_settings() -> Result<ServingSettings, String> {
@@ -281,30 +445,26 @@ mod dit {
     fn velocity_and_the_four_euler_steps_match_the_reference() -> Outcome {
         let fixtures = fixtures()?;
         let started = Instant::now();
-        let mut graph = Graph::new(DType::FLOAT32);
-        let latent = graph.host("latent", &[IMAGE_TOKENS as u32, HIDDEN as u32], Vec::new());
-        let text = graph.host("text", &[TEXT_TOKENS as u32, 7680], Vec::new());
-        let timestep = graph.host("timestep", &[256], Vec::new());
+        let activation_dtype = super::activation::dit()?;
+        let mut graph = Graph::new(activation_dtype).expect("diffusion settings validate");
+        let latent = graph.host("latent", &[IMAGE_TOKENS as u32, HIDDEN as u32], graph.unbound());
+        let text = graph.host("text", &[TEXT_TOKENS as u32, 7680], graph.unbound());
+        let timestep = graph.host("timestep", &[256], graph.unbound());
         let (cos_bytes, sin_bytes) = multi_axis_rope_tables(
-            &rope_positions(),
+            &rope_positions()?,
             &ROPE_DAXES,
-            &[ROPE_THETA; 4],
-            DType::FLOAT32,
+            &[ROPE_THETA.into(); 4],
+            activation_dtype,
         )
         .map_err(|why| why.to_string())?;
-        let decode = |bytes: &[u8]| -> Vec<f32> {
-            bytes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|word| f32::from_le_bytes(*word))
-                .collect()
-        };
-        let rope_cos = graph.host("rope_cos", &[JOINT as u32, 64], decode(&cos_bytes));
-        let rope_sin = graph.host("rope_sin", &[JOINT as u32, 64], decode(&sin_bytes));
+        let cos_rows = PackedRows::from_bytes(graph.activation_format(), cos_bytes);
+        let sin_rows = PackedRows::from_bytes(graph.activation_format(), sin_bytes);
+        let rope_cos = graph.host("rope_cos", &[JOINT as u32, 64], cos_rows);
+        let rope_sin = graph.host("rope_sin", &[JOINT as u32, 64], sin_rows);
         let config = dit_config();
         let norm_count = head_norm_count(&mut graph, &config);
-        let scale = attention_scale(&mut graph, &config);
+        let scale = attention_scale(&mut graph, &config)
+            .expect("the attention scale builds in the program");
         let inputs = DitInputs {
             latent,
             text,
@@ -325,11 +485,11 @@ mod dit {
             .collect();
         traced.push(("velocity", velocity));
         eprintln!(
-            "program: {} ops, {} weight leaves, {} host leaves, built in {:.1}s",
+            "program: {} ops, {} weight leaves, {} host leaves, built in {:?}",
             graph.program.len(),
             graph.weights.len(),
             graph.hosts.len(),
-            started.elapsed().as_secs_f64()
+            started.elapsed()
         );
 
         let checkpoint = Checkpoint::open(&fixtures.model.join("flux-2-klein-4b.safetensors"))?;
@@ -345,37 +505,45 @@ mod dit {
             diffusion.dit_weights,
             &serving_settings()?.as_serving_config(&[]),
         )?;
-        eprintln!("weights loaded in {:.1}s", loading.elapsed().as_secs_f64());
+        eprintln!("weights loaded in {:?}", loading.elapsed());
 
-        let mut latent_values =
-            token_major(&read_dump(&fixtures.reference.join("noise.f32"))?);
-        let text_values = read_dump(&fixtures.reference.join("text.f32"))?;
+        let mut latent_values = token_major(&named_values!(fixtures.reference, "noise"));
+        let text_values = named_values!(fixtures.reference, "text");
+        let layout = super::oracle::host_layout()?;
         let sigmas = FlowMatchSchedule::new(STEPS, IMAGE_TOKENS as u32)
             .sigmas()
             .map_err(|why| why.to_string())?;
 
-        let mut call_graph = Graph::new(activation);
-        call_graph.host("latent", &[IMAGE_TOKENS as u32, HIDDEN as u32], Vec::new());
-        call_graph.host("text", &[TEXT_TOKENS as u32, 7680], Vec::new());
-        call_graph.host("timestep", &[256], Vec::new());
+        let mut call_graph = Graph::new(activation).expect("diffusion settings validate");
+        call_graph.host("latent", &[IMAGE_TOKENS as u32, HIDDEN as u32], call_graph.unbound());
+        call_graph.host("text", &[TEXT_TOKENS as u32, 7680], call_graph.unbound());
+        call_graph.host("timestep", &[256], call_graph.unbound());
 
-        let reference_velocity = token_major(&read_dump(&fixtures.reference.join("velocity1.f32"))?);
+        let reference_velocity = token_major(&named_values!(fixtures.reference, "velocity1"));
         let mut verdicts = 0;
         for step in 0..STEPS as usize {
-            let timestep_values = timestep_sinusoid(sigmas[step], 256);
-            let named = call_graph.host_blocks(
-                &[
-                    ("latent", latent_values.as_slice()),
-                    ("text", text_values.as_slice()),
-                    ("timestep", timestep_values.as_slice()),
-                ],
-                &[],
-            );
+            let settings = DiffusionSettings::resolved();
+            let format = settings.dit_activation;
+            let timestep_rows = PackedRows::from_values(&format, &[sigmas[step]])
+                .map_err(|why| why.to_string())
+                .and_then(|sigma| settings.timestep_embedding(&sigma, 256, &format))
+                .expect("the timestep embeds");
+            let latent_rows = PackedRows::from_values(call_graph.activation_format(), &latent_values)
+                .map_err(|why| why.to_string())?;
+            let text_rows = PackedRows::from_values(call_graph.activation_format(), &text_values)
+                .map_err(|why| why.to_string())?;
             let ran = Instant::now();
+            let named = call_graph.host_blocks(&[
+                ("latent", &latent_rows),
+                ("text", &text_rows),
+                ("timestep", &timestep_rows),
+            ])?;
+            let named = named.as_slice();
+            let evaluated = {
             #[cfg(feature = "instrument")]
             let profiled = if env::var_os("PROXIMA_FLUX2_KLEIN_PROFILE").is_some() {
                 let (evaluated, timings) = denoiser
-                    .evaluate_op_timed(&named)
+                    .evaluate_op_timed(named)
                     .map_err(|why| format!("step {}: {why}", step + 1))?;
                 let mut rows: Vec<(&str, u64, Vec<u64>)> = timings
                     .iter()
@@ -383,23 +551,24 @@ mod dit {
                     .collect();
                 rows.sort_by_key(|row| core::cmp::Reverse(row.1));
                 for (kind, nanos, extents) in rows.iter().take(14) {
-                    eprintln!("op {kind} {:?} {:.1}ms", extents, *nanos as f64 / 1e6);
+                    eprintln!("op {kind} {:?} {:?}", extents, Duration::from_nanos(*nanos));
                 }
                 let total: u64 = rows.iter().map(|row| row.1).sum();
-                eprintln!("op gpu total {:.1}s over {} ops", total as f64 / 1e9, rows.len());
+                eprintln!("op gpu total {:?} over {} ops", Duration::from_nanos(total), rows.len());
                 Some(evaluated)
             } else {
                 None
             };
             #[cfg(not(feature = "instrument"))]
             let profiled = None::<_>;
-            let evaluated = match profiled {
+            match profiled {
                 Some(evaluated) => evaluated,
                 None => denoiser
-                    .evaluate(&named, &extra)
+                    .evaluate(named, &extra)
                     .map_err(|why| format!("step {}: {why}", step + 1))?,
+            }
             };
-            let elapsed = ran.elapsed().as_secs_f64();
+            let elapsed = ran.elapsed();
             let velocity_values = evaluated
                 .get(velocity)
                 .ok_or("velocity is not in the evaluated set")?
@@ -415,20 +584,20 @@ mod dit {
                         if *name == "velocity" {
                             continue;
                         }
-                        let path = trace_dir.join(format!("p_{name}.f32"));
+                        let path = trace_dir.join(super::oracle::file("traces", name)?);
                         if !path.exists() {
                             eprintln!("trace {name}: no reference at {}", path.display());
                             continue;
                         }
-                        let reference = read_dump(&path)?;
+                        let reference = dump_values!(&path);
                         let actual = evaluated
                             .get(*node)
                             .ok_or_else(|| format!("trace {name} is not in the evaluated set"))?
                             .0;
                         let (rms, cosine) = if *name == "vec" {
-                            stats(actual, &reference)
+                            stats!(actual, &reference)
                         } else if name.starts_with("b_imgq") || name.starts_with("b_imgk") || name.starts_with("b_imgv") {
-                            let mut token_major = vec![0.0f32; reference.len()];
+                            let mut token_major = vec![0.0; reference.len()];
                             for token in 0..4096 {
                                 for head in 0..24 {
                                     for axis in 0..128 {
@@ -437,17 +606,17 @@ mod dit {
                                     }
                                 }
                             }
-                            stats(actual, &token_major)
+                            stats!(actual, &token_major)
                         } else {
                             let channels = if *name == "final" { 128 } else { 3072 };
                             let tokens = actual.len() / channels;
-                            stats(actual, &from_channel_major(&reference, tokens, channels))
+                            stats!(actual, &from_channel_major(&reference, tokens, channels))
                         };
                         eprintln!("trace {name}: rms_rel={rms:.6} cosine={cosine:.8}");
                     }
                 }
-                let (rms, cosine) = stats(&velocity_values, &reference_velocity);
-                eprintln!("velocity1: rms_rel={rms:.6} cosine={cosine:.8} in {elapsed:.2}s");
+                let (rms, cosine) = stats!(&velocity_values, &reference_velocity);
+                eprintln!("velocity1: rms_rel={rms:.6} cosine={cosine:.8} in {elapsed:?}");
                 assert!(rms <= 0.101, "velocity rms_rel {rms}");
                 assert!(cosine >= 0.999, "velocity cosine {cosine}");
                 verdicts += 1;
@@ -457,14 +626,14 @@ mod dit {
                 &velocity_values,
                 sigmas[step],
                 sigmas[step + 1],
-                FloatLayout::BF32,
+                layout,
             )
             .map_err(|why| why.to_string())?;
             let reference =
-                token_major(&read_dump(&fixtures.reference.join(format!("step{}.f32", step + 1)))?);
-            let (rms, cosine) = stats(&latent_values, &reference);
+                token_major(&named_values!(fixtures.reference, &format!("step{}", step + 1)));
+            let (rms, cosine) = stats!(&latent_values, &reference);
             let bar = [0.003, 0.007, 0.016, 0.078][step];
-            eprintln!("step{}: rms_rel={rms:.6} cosine={cosine:.8} bar={bar} in {elapsed:.2}s", step + 1);
+            eprintln!("step{}: rms_rel={rms:.6} cosine={cosine:.8} bar={bar} in {elapsed:?}", step + 1);
             assert!(rms <= bar, "step {} rms_rel {rms} above {bar}", step + 1);
             assert!(cosine >= 0.999, "step {} cosine {cosine}", step + 1);
             verdicts += 1;
@@ -484,7 +653,6 @@ mod dit_shape {
     use proxima_model_interop::diffusion::{
         DitConfig, DitInputs, Graph, attention_scale, build_dit, head_norm_count,
     };
-    use proxima_numeric::DType;
 
     const IMAGE_TOKENS: usize = 64 * 64;
     const TEXT_TOKENS: usize = 512;
@@ -506,15 +674,17 @@ mod dit_shape {
 
     #[test]
     fn the_whole_backbone_program_shapes_without_any_weights() {
-        let mut graph = Graph::new(DType::FLOAT32);
-        let latent = graph.host("latent", &[IMAGE_TOKENS as u32, 128], vec![0.0; 8]);
-        let text = graph.host("text", &[TEXT_TOKENS as u32, 7680], vec![0.0; 8]);
-        let timestep = graph.host("timestep", &[256], vec![0.0; 8]);
-        let rope_cos = graph.host("rope_cos", &[JOINT as u32, 64], vec![0.0; 8]);
-        let rope_sin = graph.host("rope_sin", &[JOINT as u32, 64], vec![0.0; 8]);
+        let activation = super::activation::dit().expect("the backbone's activation dtype resolves");
+        let mut graph = Graph::new(activation).expect("diffusion settings validate");
+        let latent = graph.host("latent", &[IMAGE_TOKENS as u32, 128], graph.unbound());
+        let text = graph.host("text", &[TEXT_TOKENS as u32, 7680], graph.unbound());
+        let timestep = graph.host("timestep", &[256], graph.unbound());
+        let rope_cos = graph.host("rope_cos", &[JOINT as u32, 64], graph.unbound());
+        let rope_sin = graph.host("rope_sin", &[JOINT as u32, 64], graph.unbound());
         let config = dit_config();
         let norm_count = head_norm_count(&mut graph, &config);
-        let scale = attention_scale(&mut graph, &config);
+        let scale = attention_scale(&mut graph, &config)
+            .expect("the attention scale builds in the program");
         let inputs = DitInputs {
             latent,
             text,
@@ -551,9 +721,12 @@ mod dit_shape {
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod prelude_layout {
     use std::env;
+    use std::iter::Sum;
+    use std::ops::Mul;
     use std::path::PathBuf;
 
-    use proxima_model_interop::diffusion::{Checkpoint, timestep_sinusoid};
+    use proxima_model_interop::diffusion::{Checkpoint, DiffusionSettings};
+    use proxima_numeric::PackedRows;
 
     type Outcome = Result<(), String>;
 
@@ -570,78 +743,63 @@ mod prelude_layout {
             .unwrap_or_else(|| PathBuf::from(&home).join("models/image_gen/flux2-klein-4b")))
     }
 
-    fn read(path: &PathBuf) -> Result<Vec<f32>, String> {
-        let bytes = std::fs::read(path).map_err(|why| format!("{}: {why}", path.display()))?;
-        Ok(bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|word| f32::from_le_bytes(*word))
-            .collect())
-    }
-
-    fn cos(actual: &[f32], reference: &[f32]) -> f64 {
-        let mut dot = 0.0f64;
-        let mut left = 0.0f64;
-        let mut right = 0.0f64;
-        for (&a, &b) in actual.iter().zip(reference) {
-            dot += f64::from(a) * f64::from(b);
-            left += f64::from(a) * f64::from(a);
-            right += f64::from(b) * f64::from(b);
-        }
-        dot / (left * right).sqrt()
-    }
-
     /// `out[t, o] = sum_i x[t, i] * weight[o, i]`.
-    fn matvec(x: &[f32], weight: &[f32], tokens: usize, into: usize, out: usize) -> Vec<f32> {
-        let mut values = vec![0.0f32; tokens * out];
-        for token in 0..tokens {
-            for column in 0..out {
+    fn project_rows<T>(x: &[T], weight: &[T], tokens: usize, into: usize, out: usize) -> Vec<T>
+    where
+        T: Copy + Mul<Output = T> + Sum<T>,
+    {
+        (0..tokens * out)
+            .map(|index| {
+                let (token, column) = (index / out, index % out);
                 let row = &x[token * into..(token + 1) * into];
                 let kernel = &weight[column * into..(column + 1) * into];
-                values[token * out + column] = row
-                    .iter()
+                row.iter()
                     .zip(kernel)
-                    .map(|(left, right)| left * right)
-                    .sum();
-            }
-        }
-        values
+                    .map(|(left, right)| *left * *right)
+                    .sum::<T>()
+            })
+            .collect()
     }
 
     #[test]
     fn the_captured_prelude_identifies_the_latent_mapping_and_time_embedding() -> Outcome {
         let trace = trace_dir()?;
         let checkpoint = Checkpoint::open(&model_dir()?.join("flux-2-klein-4b.safetensors"))?;
-        let (_, image_weight) = checkpoint.values("img_in.weight", None, None, false)?;
-        let (_, in_weight) = checkpoint.values("time_in.in_layer.weight", None, None, false)?;
-        let (_, out_weight) = checkpoint.values("time_in.out_layer.weight", None, None, false)?;
-        let reference_image_in = read(&trace.join("p_img_in.f32"))?;
-        let reference_vec = read(&trace.join("p_vec.f32"))?;
-        let noise = read(&trace.join("noise.f32"))?;
+        let (_, image_rows) = checkpoint.values("img_in.weight", None, None, false)?;
+        let (_, in_rows) = checkpoint.values("time_in.in_layer.weight", None, None, false)?;
+        let (_, out_rows) = checkpoint.values("time_in.out_layer.weight", None, None, false)?;
+        let mut image_weight = Vec::new();
+        image_rows.decode_all(&mut image_weight).map_err(|why| why.to_string())?;
+        let mut in_weight = Vec::new();
+        in_rows.decode_all(&mut in_weight).map_err(|why| why.to_string())?;
+        let mut out_weight = Vec::new();
+        out_rows.decode_all(&mut out_weight).map_err(|why| why.to_string())?;
+        let reference_image_in = dump_values!(&trace.join(super::oracle::file("traces", "img_in")?));
+        let reference_vec = dump_values!(&trace.join(super::oracle::file("traces", "vec")?));
+        let noise = named_values!(trace, "noise");
 
         const TOKENS: usize = 64 * 64;
         const CHANNELS: usize = 128;
         const HIDDEN: usize = 3072;
         let _ = HIDDEN;
-        let token_first: Vec<f32> = (0..TOKENS * CHANNELS)
+        let token_first: Vec<_> = (0..TOKENS * CHANNELS)
             .map(|index| noise[(index / CHANNELS) + TOKENS * (index % CHANNELS)])
             .collect();
-        let channel_first: Vec<f32> = noise.clone();
+        let channel_first = noise.clone();
         for (label, latent) in [("token-major", &token_first), ("row-major", &channel_first)] {
-            let projected = matvec(latent, &image_weight, TOKENS, CHANNELS, HIDDEN);
-            let reference: Vec<f32> = (0..TOKENS * HIDDEN)
+            let projected = project_rows(latent, &image_weight, TOKENS, CHANNELS, HIDDEN);
+            let reference: Vec<_> = (0..TOKENS * HIDDEN)
                 .map(|index| reference_image_in[(index % HIDDEN) + HIDDEN * (index / HIDDEN)])
                 .collect();
             eprintln!(
                 "img_in with the {label} latent: cosine={:.8}",
-                cos(&projected, &reference)
+                cosine_of!(&projected, &reference)
             );
             if label == "token-major" {
                 let mut per_token = Vec::with_capacity(TOKENS);
                 for token in 0..TOKENS {
                     let range = token * HIDDEN..(token + 1) * HIDDEN;
-                    per_token.push(cos(&projected[range.clone()], &reference[range]));
+                    per_token.push(cosine_of!(&projected[range.clone()], &reference[range]));
                 }
                 per_token.sort_by(|left, right| left.partial_cmp(right).expect("finite"));
                 eprintln!(
@@ -653,9 +811,9 @@ mod prelude_layout {
                 );
                 let mut per_channel = Vec::with_capacity(HIDDEN);
                 for column in 0..HIDDEN {
-                    let ours: Vec<f32> = (0..TOKENS).map(|token| projected[token * HIDDEN + column]).collect();
-                    let theirs: Vec<f32> = (0..TOKENS).map(|token| reference[token * HIDDEN + column]).collect();
-                    per_channel.push(cos(&ours, &theirs));
+                    let ours: Vec<_> = (0..TOKENS).map(|token| projected[token * HIDDEN + column]).collect();
+                    let theirs: Vec<_> = (0..TOKENS).map(|token| reference[token * HIDDEN + column]).collect();
+                    per_channel.push(cosine_of!(&ours, &theirs));
                 }
                 per_channel.sort_by(|left, right| left.partial_cmp(right).expect("finite"));
                 eprintln!(
@@ -672,16 +830,21 @@ mod prelude_layout {
                 );
                 let ours = &projected[..HIDDEN];
                 let theirs = &reference[..HIDDEN];
-                let mut delta = vec![(0.0f32, 0usize); CHANNELS];
+                let mut delta = vec![(0.0, 0usize); CHANNELS];
                 for channel in 0..CHANNELS {
                     let kernel = &image_weight[channel * CHANNELS..(channel + 1) * CHANNELS];
-                    let norm: f32 = kernel.iter().map(|value| value * value).sum();
-                    let residual: f32 = (0..HIDDEN)
+                    let norm = kernel
+                        .iter()
+                        .map(|value| value * value)
+                        .reduce(|total, term| total + term)
+                        .unwrap_or_default();
+                    let residual = (0..HIDDEN)
                         .map(|column| {
                             (theirs[column] - ours[column])
                                 * image_weight[column * CHANNELS + channel]
                         })
-                        .sum();
+                        .reduce(|total, term| total + term)
+                        .unwrap_or_default();
                     delta[channel] = (residual / norm, channel);
                 }
                 delta.sort_by(|left, right| {
@@ -696,29 +859,40 @@ mod prelude_layout {
             }
         }
 
+        let settings = DiffusionSettings::resolved();
+        let format = settings.dit_activation;
+        let embed = |timestep| {
+            let mut values = Vec::new();
+            PackedRows::from_values(&format, &[timestep])
+                .map_err(|why| why.to_string())
+                .and_then(|sigma| settings.timestep_embedding(&sigma, 256, &format))
+                .and_then(|rows| rows.decode_all(&mut values).map_err(|why| why.to_string()))
+                .expect("the timestep embeds");
+            values
+        };
         for (label, values) in [
-            ("cos-first", timestep_sinusoid(1.0, 256)),
+            ("cos-first", embed(1.0)),
             ("sin-first", {
-                let mut values = timestep_sinusoid(1.0, 256);
+                let mut values = embed(1.0);
                 values.rotate_left(128);
                 values
             }),
-            ("cos-at-0.001", timestep_sinusoid(0.001, 256)),
+            ("cos-at-0.001", embed(0.001)),
             ("sin-at-0.001", {
-                let mut values = timestep_sinusoid(0.001, 256);
+                let mut values = embed(0.001);
                 values.rotate_left(128);
                 values
             }),
         ] {
-            let inner = matvec(&values, &in_weight, 1, 256, HIDDEN);
-            let inner: Vec<f32> = inner
+            let inner = project_rows(&values, &in_weight, 1, 256, HIDDEN);
+            let inner: Vec<_> = inner
                 .iter()
                 .map(|value| value / (1.0 + (-value).exp()))
                 .collect();
-            let projected = matvec(&inner, &out_weight, 1, HIDDEN, HIDDEN);
+            let projected = project_rows(&inner, &out_weight, 1, HIDDEN, HIDDEN);
             eprintln!(
                 "time_in with the {label} sinusoid: cosine={:.8}",
-                cos(&projected, &reference_vec)
+                cosine_of!(&projected, &reference_vec)
             );
         }
         Ok(())
@@ -728,7 +902,7 @@ mod prelude_layout {
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod vae {
     use std::env;
-    use std::fs;
+    use std::ops::{Add, Mul};
     use std::path::PathBuf;
     use std::time::Instant;
 
@@ -737,7 +911,7 @@ mod vae {
     use proxima_model_interop::diffusion::{
         Checkpoint, Decoder, DiffusionSettings, Graph, VaeConfig, build_vae_decode,
     };
-    use proxima_numeric::DType;
+    use proxima_numeric::PackedRows;
 
     const LATENT: usize = 64;
     const LATENT_CHANNELS: usize = 128;
@@ -762,18 +936,9 @@ mod vae {
             .unwrap_or_else(|| PathBuf::from(&home).join("models/image_gen/flux2-klein-4b")))
     }
 
-    fn read_dump(path: &PathBuf) -> Result<Vec<f32>, String> {
-        let bytes = fs::read(path).map_err(|why| format!("{}: {why}", path.display()))?;
-        Ok(bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|word| f32::from_le_bytes(*word))
-            .collect())
-    }
-
-    fn config() -> VaeConfig {
+    fn config(window: u32) -> VaeConfig {
         VaeConfig {
+            window,
             channels: CHANNELS as u32,
             block_channels: [128, 256, 512, 512],
             layers_per_block: 2,
@@ -790,11 +955,14 @@ mod vae {
     /// `step4` is the 128-channel latent in channel-major order; the decoder
     /// wants `[row, column, channels / patch^2]` after the checkpoint's own
     /// per-channel de-normalisation and the 2x2 pixel shuffle.
-    fn decoder_input(raw: &[f32], mean: &[f32], deviation: &[f32]) -> Result<Vec<f32>, String> {
+    fn decoder_input<T>(raw: &[T], mean: &[T], deviation: &[T]) -> Result<Vec<T>, String>
+    where
+        T: Copy + Default + Mul<Output = T> + Add<Output = T>,
+    {
         if raw.len() != LATENT * LATENT * LATENT_CHANNELS {
             return Err(format!("latent has {} values", raw.len()));
         }
-        let mut values = vec![0.0f32; TOKENS * CHANNELS];
+        let mut values = vec![T::default(); TOKENS * CHANNELS];
         for row in 0..LATENT {
             for column in 0..LATENT {
                 for channel in 0..LATENT_CHANNELS {
@@ -812,23 +980,6 @@ mod vae {
         Ok(values)
     }
 
-    fn psnr(actual: &[f32], reference: &[f32]) -> (f64, f64) {
-        let mut error = 0.0f64;
-        let mut dot = 0.0f64;
-        let mut left = 0.0f64;
-        let mut right = 0.0f64;
-        for (&got, &want) in actual.iter().zip(reference) {
-            let (got, want) = (f64::from(got), f64::from(want));
-            error += (got - want) * (got - want);
-            dot += got * want;
-            left += got * got;
-            right += want * want;
-        }
-        let count = actual.len() as f64;
-        let rms = (error / count).sqrt();
-        (20.0 * (1.0 / rms).log10(), dot / (left * right).sqrt())
-    }
-
     fn serving_settings() -> Result<ServingSettings, String> {
         ServingSettings::from_env().map_err(|why| why.to_string())
     }
@@ -838,27 +989,33 @@ mod vae {
         let reference = reference_dir()?;
         let model = model_dir()?;
         let checkpoint = Checkpoint::open(&model.join("comfy/flux2-vae.safetensors"))?;
-        let (_, mean) = checkpoint.values("bn.running_mean", None, None, false)?;
-        let (_, variance) = checkpoint.values("bn.running_var", None, None, false)?;
-        let deviation: Vec<f32> = variance.iter().map(|value| value.sqrt()).collect();
-        let raw = read_dump(&reference.join("step4.f32"))?;
+        let (_, mean_rows) = checkpoint.values("bn.running_mean", None, None, false)?;
+        let (_, variance_rows) = checkpoint.values("bn.running_var", None, None, false)?;
+        let mut mean = Vec::new();
+        mean_rows.decode_all(&mut mean).map_err(|why| why.to_string())?;
+        let mut variance = Vec::new();
+        variance_rows.decode_all(&mut variance).map_err(|why| why.to_string())?;
+        let deviation: Vec<_> = variance.iter().map(|value| value.sqrt()).collect();
+        let raw = named_values!(reference, "step4");
         let latent = decoder_input(&raw, &mean, &deviation)?;
 
-        let mut graph = Graph::new(DType::FLOAT32);
+        let mut graph = Graph::new(super::activation::vae()?).expect("diffusion settings validate");
         let input = graph.host(
             "latent",
             &[TOKENS as u32, CHANNELS as u32, 1],
-            Vec::new(),
+            graph.unbound(),
         );
         let started = Instant::now();
-        let output = build_vae_decode(&mut graph, &config(), input).map_err(|why| why.to_string())?;
+        let window = checkpoint.window_extent("decoder.conv_in.weight")?;
+        let output =
+            build_vae_decode(&mut graph, &config(window), input).map_err(|why| why.to_string())?;
         let image = output.image;
         eprintln!(
-            "decoder: {} ops, {} weights, {} hosts built in {:.1}s",
+            "decoder: {} ops, {} weights, {} hosts built in {:?}",
             graph.program.len(),
             graph.weights.len(),
             graph.hosts.len(),
-            started.elapsed().as_secs_f64()
+            started.elapsed()
         );
         let loading = Instant::now();
         let activation = graph.activation();
@@ -870,52 +1027,38 @@ mod vae {
             DiffusionSettings::resolved().vae_weights,
             &serving_settings()?.as_serving_config(&[]),
         )?;
-        eprintln!("vae weights loaded in {:.1}s", loading.elapsed().as_secs_f64());
+        eprintln!("vae weights loaded in {:?}", loading.elapsed());
 
-        let mut call_graph = Graph::new(activation);
-        call_graph.host("latent", &[TOKENS as u32, CHANNELS as u32, 1], Vec::new());
-        let blocks = call_graph.host_blocks(&[("latent", latent.as_slice())], &[]);
+        let mut call_graph = Graph::new(activation).expect("diffusion settings validate");
+        call_graph.host("latent", &[TOKENS as u32, CHANNELS as u32, 1], call_graph.unbound());
+        let latent_rows = PackedRows::from_values(call_graph.activation_format(), &latent)
+            .map_err(|why| why.to_string())?;
         let ran = Instant::now();
+        let blocks = call_graph.host_blocks(&[("latent", &latent_rows)])?;
         let evaluated = decoder
             .evaluate(&blocks)
             .map_err(|why| format!("decode: {why}"))?;
-        let elapsed = ran.elapsed().as_secs_f64();
+        let elapsed = ran.elapsed();
         let decoded = evaluated.get(image).ok_or("image is not an output")?.0;
-        eprintln!("decoded [{}] in {:.1}s", decoded.len(), elapsed);
+        eprintln!("decoded [{}] in {:?}", decoded.len(), elapsed);
 
-        let scaled: Vec<f32> = decoded
+        let scaled: Vec<_> = decoded
             .iter()
             .map(|value| ((value + 1.0) * 0.5).clamp(0.0, 1.0))
             .collect();
         let decoded = scaled.as_slice();
-        let channel_major = read_dump(&reference.join("vae_out.f32"))?;
+        let channel_major = named_values!(reference, "vae_out");
         let tokens = channel_major.len() / 3;
-        let mut token_major = vec![0.0f32; channel_major.len()];
-        for token in 0..tokens {
-            for channel in 0..3 {
-                token_major[token * 3 + channel] = channel_major[token + tokens * channel];
-            }
-        }
-        let summary = |values: &[f32]| -> (f32, f32, f32) {
-            let mut min = f32::MAX;
-            let mut max = f32::MIN;
-            let mut sum = 0.0f64;
-            for &value in values {
-                min = min.min(value);
-                max = max.max(value);
-                sum += f64::from(value);
-            }
-            (min, max, (sum / values.len() as f64) as f32)
-        };
-        let ours = summary(decoded);
-        let theirs = summary(&token_major);
+        let token_major = super::token_major_and(&channel_major, tokens, 3);
+        let ours = summary!(decoded);
+        let theirs = summary!(&token_major);
         eprintln!(
             "ours min {:.3} max {:.3} mean {:.3}; reference min {:.3} max {:.3} mean {:.3}",
             ours.0, ours.1, ours.2, theirs.0, theirs.1, theirs.2
         );
         for shift_y in [-1i32, 0, 1] {
             for shift_x in [-1i32, 0, 1] {
-                let mut shifted = vec![0.0f32; decoded.len()];
+                let mut shifted = vec![0.0; decoded.len()];
                 for row in 0..1024i32 {
                     for column in 0..1024i32 {
                         let source_row = (row + shift_y).clamp(0, 1023);
@@ -927,17 +1070,17 @@ mod vae {
                         }
                     }
                 }
-                let (moved, moved_cos) = psnr(&shifted, &token_major);
+                let (moved, moved_cos) = fidelity!(&shifted, &token_major);
                 if (shift_y, shift_x) != (0, 0) {
                     eprintln!("shift ({shift_y},{shift_x}): psnr={moved:.2} cos={moved_cos:.6}");
                 }
             }
         }
-        let (signal, cosine) = psnr(decoded, &token_major);
+        let (signal, cosine) = fidelity!(decoded, &token_major);
         for channel in 0..3usize {
-            let ours: Vec<f32> = (0..token_major.len() / 3).map(|token| decoded[token * 3 + channel]).collect();
-            let theirs: Vec<f32> = (0..token_major.len() / 3).map(|token| token_major[token * 3 + channel]).collect();
-            let (value, channel_cos) = psnr(&ours, &theirs);
+            let ours: Vec<_> = (0..token_major.len() / 3).map(|token| decoded[token * 3 + channel]).collect();
+            let theirs: Vec<_> = (0..token_major.len() / 3).map(|token| token_major[token * 3 + channel]).collect();
+            let (value, channel_cos) = fidelity!(&ours, &theirs);
             eprintln!("channel {channel}: psnr={value:.2} cos={channel_cos:.6}");
         }
         eprintln!("vae decode: psnr={signal:.2} dB cosine={cosine:.8}");
@@ -950,7 +1093,6 @@ mod vae {
 #[cfg(feature = "std")]
 mod vae_shape {
     use proxima_model_interop::diffusion::{Graph, VaeConfig, build_vae_decode};
-    use proxima_numeric::DType;
 
     #[test]
     fn the_whole_decoder_program_shapes_without_any_weights() {
@@ -963,9 +1105,11 @@ mod vae_shape {
             height: 128,
             width: 128,
             conv_taps: proxima_model_interop::diffusion::DiffusionSettings::resolved().conv_taps(),
+            window: super::shape_only_window(),
         };
-        let mut graph = Graph::new(DType::FLOAT32);
-        let latent = graph.host("latent", &[16384, 32, 1], vec![0.0; 8]);
+        let activation = super::activation::vae().expect("the decoder's activation dtype resolves");
+        let mut graph = Graph::new(activation).expect("diffusion settings validate");
+        let latent = graph.host("latent", &[16384, 32, 1], graph.unbound());
         let output = build_vae_decode(&mut graph, &config, latent).expect("decoder builds");
         let image = output.image;
         match proxima_tensor::infer(&graph.program, &[16384]) {
@@ -991,7 +1135,7 @@ mod vae_shape {
 #[cfg(feature = "std")]
 mod vae_bind {
     use proxima_model_interop::diffusion::{Graph, VaeConfig, build_vae_decode};
-    use proxima_numeric::{DType, NumericPolicy};
+    use proxima_numeric::NumericPolicy;
 
     #[test]
     fn the_whole_decoder_program_binds() {
@@ -1004,9 +1148,11 @@ mod vae_bind {
             height: 128,
             width: 128,
             conv_taps: proxima_model_interop::diffusion::DiffusionSettings::resolved().conv_taps(),
+            window: super::shape_only_window(),
         };
-        let mut graph = Graph::new(DType::FLOAT32);
-        let latent = graph.host("latent", &[16384, 32, 1], vec![0.0; 8]);
+        let activation = super::activation::vae().expect("the decoder's activation dtype resolves");
+        let mut graph = Graph::new(activation).expect("diffusion settings validate");
+        let latent = graph.host("latent", &[16384, 32, 1], graph.unbound());
         let output = build_vae_decode(&mut graph, &config, latent).expect("decoder builds");
         let image = output.image;
         let shapes = match proxima_tensor::infer(&graph.program, &[16384]) {
@@ -1043,7 +1189,7 @@ mod vae_conv_probe {
     use conflaguration::Settings;
     use proxima_model_interop::ServingSettings;
     use proxima_model_interop::diffusion::{Checkpoint, Decoder, DiffusionSettings, Graph};
-    use proxima_numeric::DType;
+    use proxima_numeric::PackedRows;
     use proxima_tensor::op::ScalarOp;
 
     const SIDE: u32 = 8;
@@ -1058,9 +1204,9 @@ mod vae_conv_probe {
             .unwrap_or_else(|| std::path::PathBuf::from(&home).join("models/image_gen/flux2-klein-4b"))
             .join("comfy/flux2-vae.safetensors");
         let checkpoint = Checkpoint::open(&path)?;
-        let mut graph = Graph::new(DType::FLOAT32);
+        let mut graph = Graph::new(super::activation::vae()?).expect("diffusion settings validate");
         let rows = SIDE * SIDE;
-        let latent = graph.host("latent", &[rows, GROUPS, 1], vec![0.0; 8]);
+        let latent = graph.host("latent", &[rows, GROUPS, 1], graph.unbound());
         let mut taps = [proxima_tensor::op::NodeId(0); 9];
         for tap_row in 0..3u32 {
             for tap_column in 0..3u32 {
@@ -1076,21 +1222,23 @@ mod vae_conv_probe {
         }
         let pad_index = graph.index_leaf(
             "pad.index",
-            proxima_tensor::spec::conv3x3_pad_index(SIDE, SIDE),
+            proxima_tensor::spec::window_pad_index(SIDE, SIDE, 3),
         );
+        let mask: Vec<_> = proxima_tensor::spec::window_pad_mask(SIDE, SIDE, 3)
+            .into_iter()
+            .map(|value| value as _)
+            .collect();
+        let mask_rows = PackedRows::from_values(graph.activation_format(), &mask);
         let pad_mask = graph.host(
             "pad.mask",
-            &[proxima_tensor::spec::conv3x3_pad_rows(SIDE, SIDE)],
-            proxima_tensor::spec::conv3x3_pad_mask(SIDE, SIDE)
-                .into_iter()
-                .map(|value| value as f32)
-                .collect(),
+            &[proxima_tensor::spec::window_pad_rows(SIDE, SIDE, 3)],
+            mask_rows,
         );
         let crop_index = graph.index_leaf(
             "crop.index",
-            proxima_tensor::spec::conv3x3_crop_index(SIDE, SIDE),
+            proxima_tensor::spec::window_crop_index(SIDE, SIDE, 3),
         );
-        let convolved = proxima_tensor::spec::conv3x3_same(
+        let convolved = proxima_tensor::spec::window_same(
             &mut graph.program,
             latent,
             &taps,
@@ -1099,6 +1247,7 @@ mod vae_conv_probe {
             crop_index,
             SIDE,
             SIDE,
+            3,
         )
         .map_err(|why| why.to_string())?;
         let bias = graph.weight(
@@ -1113,10 +1262,11 @@ mod vae_conv_probe {
             &[(convolved, "rgc->rgc"), (bias, "gc->rgc")],
         )
         .map_err(|why| why.to_string())?;
-        let latent_values = vec![0.5f32; (rows * GROUPS) as usize];
-        let mut call_graph = Graph::new(graph.activation());
-        call_graph.host("latent", &[rows, GROUPS, 1], Vec::new());
-        let blocks = call_graph.host_blocks(&[("latent", latent_values.as_slice())], &[]);
+        let latent_values = vec![0.5; (rows * GROUPS) as usize];
+        let mut call_graph = Graph::new(graph.activation()).expect("diffusion settings validate");
+        call_graph.host("latent", &[rows, GROUPS, 1], call_graph.unbound());
+        let latent_rows = PackedRows::from_values(call_graph.activation_format(), &latent_values)
+            .map_err(|why| why.to_string())?;
         let mut decoder = Decoder::new(
             &checkpoint,
             graph,
@@ -1127,13 +1277,12 @@ mod vae_conv_probe {
                 .map_err(|why| why.to_string())?
                 .as_serving_config(&[]),
         )?;
+        let blocks = call_graph.host_blocks(&[("latent", &latent_rows)])?;
         let evaluated = decoder
             .evaluate(&blocks)
             .map_err(|why| format!("run: {why}"))?;
         let values = evaluated.get(image).ok_or("no image")?.0;
-        let rms = (values.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>()
-            / values.len() as f64)
-            .sqrt();
+        let rms = measured!(::proxima_numeric::compare::rms(&host_rows!(values)))[0];
         eprintln!("probe conv output {} values, rms {rms:.4}", values.len());
         Ok(())
     }
@@ -1157,12 +1306,12 @@ mod reduce_split_axis {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    use proxima_model_interop::diffusion::Graph;
-    use proxima_numeric::DType;
+    use proxima_model_interop::diffusion::{DiffusionSettings, Graph};
+    use proxima_numeric::{NumericError, NumericFormat, PackedRows, Philox};
     use proxima_tensor::QuantizedBlock;
     use proxima_tensor::spec::{
-        conv3x3_taps_index, conv3x3_crop_index, conv3x3_pad_index, conv3x3_pad_mask,
-        conv3x3_pad_rows, conv3x3_same_three,
+        window_crop_index, window_pad_index, window_pad_mask, window_pad_rows,
+        window_same_one_reduce, window_taps_index,
     };
 
     // The decoder's own group/width split: 32 GroupNorm groups, 4 channels
@@ -1176,45 +1325,47 @@ mod reduce_split_axis {
     /// The guard: a correct dispatch is milliseconds, the defect is unbounded.
     const GUARD: Duration = Duration::from_secs(120);
 
-    fn values(count: usize, scale: f32, salt: usize) -> Vec<f32> {
-        (0..count)
-            .map(|index| ((index * 37 + salt) % 101) as f32 / 101.0 * scale - scale * 0.5)
-            .collect()
+    fn values(format: &NumericFormat, count: usize, seed: u64) -> Result<PackedRows, NumericError> {
+        PackedRows::from_values(format, &Philox::new(seed).normal(count))
     }
 
     struct Case {
         program: Vec<proxima_tensor::op::Op>,
-        blocks: Vec<(&'static str, Vec<f32>)>,
+        blocks: Vec<(&'static str, PackedRows)>,
         root: proxima_tensor::op::NodeId,
-        want: Vec<f32>,
+        want: PackedRows,
+    }
+
+    /// Host-element rows of an index or mask table, cast to the host element.
+    macro_rules! table_rows {
+        ($table:expr) => {{
+            let cast: Vec<_> = $table.into_iter().map(|value| value as _).collect();
+            host_rows!(&cast)
+        }};
     }
 
     /// The program, its bound values, and the direct-loop answer.
     fn case() -> Result<Case, Box<dyn std::error::Error>> {
         let rows = HEIGHT * WIDTH;
-        let mut graph = Graph::new(DType::FLOAT32);
-        let activation = graph.host(
-            "image",
-            &[rows, IN_G, IN_C],
-            values((rows * IN_G * IN_C) as usize, 2.0, 7),
+        let mut graph = Graph::new(super::activation::vae()?)?;
+        let image_rows = values(graph.activation_format(), (rows * IN_G * IN_C) as usize, 7);
+        let activation = graph.host("image", &[rows, IN_G, IN_C], image_rows);
+        let pad_index = graph.index_leaf("pad.index", window_pad_index(HEIGHT, WIDTH, 3));
+        let mask: Vec<_> = window_pad_mask(HEIGHT, WIDTH, 3)
+            .into_iter()
+            .map(|value| value as _)
+            .collect();
+        let mask_rows = PackedRows::from_values(graph.activation_format(), &mask);
+        let pad_mask = graph.host("pad.mask", &[window_pad_rows(HEIGHT, WIDTH, 3)], mask_rows);
+        let crop_index = graph.index_leaf("crop.index", window_crop_index(HEIGHT, WIDTH, 3));
+        let columns_index = graph.index_leaf("columns.index", window_taps_index(HEIGHT, WIDTH, 3));
+        let kernel_rows = values(
+            graph.activation_format(),
+            (OUT_G * OUT_C * 9 * IN_G * IN_C) as usize,
+            31,
         );
-        let pad_index = graph.index_leaf("pad.index", conv3x3_pad_index(HEIGHT, WIDTH));
-        let pad_mask = graph.host(
-            "pad.mask",
-            &[conv3x3_pad_rows(HEIGHT, WIDTH)],
-            conv3x3_pad_mask(HEIGHT, WIDTH)
-                .into_iter()
-                .map(|value| value as f32)
-                .collect(),
-        );
-        let crop_index = graph.index_leaf("crop.index", conv3x3_crop_index(HEIGHT, WIDTH));
-        let columns_index = graph.index_leaf("columns.index", conv3x3_taps_index(HEIGHT, WIDTH));
-        let kernel = graph.host(
-            "kernel",
-            &[OUT_G, OUT_C, 9, IN_G, IN_C],
-            values((OUT_G * OUT_C * 9 * IN_G * IN_C) as usize, 2.0, 31),
-        );
-        let root = conv3x3_same_three(
+        let kernel = graph.host("kernel", &[OUT_G, OUT_C, 9, IN_G, IN_C], kernel_rows);
+        let root = window_same_one_reduce(
             &mut graph.program,
             activation,
             kernel,
@@ -1222,17 +1373,20 @@ mod reduce_split_axis {
             pad_mask,
             crop_index,
             columns_index,
+            3,
         )?;
 
         // The definition, on the same values.
-        let image = graph_host(&graph, "image")?;
-        let weights = graph_host(&graph, "kernel")?;
-        let mut want = vec![0.0f32; (rows * OUT_G * OUT_C) as usize];
+        let image_host = graph_host(&graph, "image")?;
+        let weights_host = graph_host(&graph, "kernel")?;
+        let image = decoded!(image_host);
+        let weights = decoded!(weights_host);
+        let mut want = vec![0.0; (rows * OUT_G * OUT_C) as usize];
         for row in 0..HEIGHT as usize {
             for column in 0..WIDTH as usize {
                 for og in 0..OUT_G as usize {
                     for oc in 0..OUT_C as usize {
-                        let mut sum = 0.0f32;
+                        let mut sum = 0.0;
                         for y in 0..3usize {
                             for x in 0..3usize {
                                 let (sr, sc) = (row + y, column + x);
@@ -1260,70 +1414,62 @@ mod reduce_split_axis {
             }
         }
 
-        let integers = graph.int_buffers();
-        let _ = graph.host_blocks(&[("image", image.as_slice())], &integers);
-        let blocks: Vec<(&'static str, Vec<f32>)> = vec![
-            ("image", image.clone()),
-            ("kernel", weights.clone()),
-            (
-                "pad.mask",
-                conv3x3_pad_mask(HEIGHT, WIDTH)
-                    .into_iter()
-                    .map(|value| value as f32)
-                    .collect(),
-            ),
-            (
-                "pad.index",
-                conv3x3_pad_index(HEIGHT, WIDTH)
-                    .into_iter()
-                    .map(|value| value as f32)
-                    .collect(),
-            ),
-            (
-                "crop.index",
-                conv3x3_crop_index(HEIGHT, WIDTH)
-                    .into_iter()
-                    .map(|value| value as f32)
-                    .collect(),
-            ),
-            (
-                "columns.index",
-                conv3x3_taps_index(HEIGHT, WIDTH)
-                    .into_iter()
-                    .map(|value| value as f32)
-                    .collect(),
-            ),
+        let image_rows = PackedRows::from_values(graph.activation_format(), &image)?;
+        let held = graph.host_blocks(&[("image", &image_rows)])?;
+        assert!(!held.is_empty());
+        let blocks = vec![
+            ("image", image_host),
+            ("kernel", weights_host),
+            ("pad.mask", table_rows!(window_pad_mask(HEIGHT, WIDTH, 3))),
+            ("pad.index", table_rows!(window_pad_index(HEIGHT, WIDTH, 3))),
+            ("crop.index", table_rows!(window_crop_index(HEIGHT, WIDTH, 3))),
+            ("columns.index", table_rows!(window_taps_index(HEIGHT, WIDTH, 3))),
         ];
         Ok(Case {
             program: graph.program,
             blocks,
             root,
-            want,
+            want: host_rows!(&want),
         })
     }
 
-    fn graph_host(graph: &Graph, name: &str) -> Result<Vec<f32>, String> {
-        graph
+    fn graph_host(graph: &Graph, name: &str) -> Result<PackedRows, String> {
+        let leaf = graph
             .hosts
             .iter()
             .find(|leaf| leaf.name == name)
-            .map(|leaf| leaf.values.clone())
-            .ok_or_else(|| format!("no host leaf named {name}"))
+            .ok_or_else(|| format!("no host leaf named {name}"))?;
+        leaf.values.to_host_element().map_err(|why| why.to_string())
     }
 
-    fn quantized<'a>(
-        blocks: &'a [(&'static str, Vec<f32>)],
-    ) -> Vec<(&'static str, QuantizedBlock<'a>)> {
+    fn quantized<'a, T>(
+        blocks: &'a [(&'static str, Vec<T>)],
+    ) -> Vec<(&'static str, QuantizedBlock<'a>)>
+    where
+        QuantizedBlock<'a>: From<&'a [T]>,
+    {
         blocks
             .iter()
-            .map(|(name, values)| (*name, QuantizedBlock::Float32(values)))
+            .map(|(name, values)| (*name, QuantizedBlock::from(values.as_slice())))
             .collect()
     }
 
+    macro_rules! decoded_blocks {
+        ($blocks:expr) => {{
+            let mut out = Vec::new();
+            for (name, rows) in &$blocks {
+                out.push((*name, decoded!(rows)));
+            }
+            out
+        }};
+    }
+
     #[test]
-    fn a_split_contraction_axis_reduce_agrees_between_cpu_and_metal() {
+    fn a_split_contraction_axis_reduce_agrees_between_cpu_and_metal() -> Result<(), String> {
         let case = case().expect("the three-block convolution case builds");
-        let bound = quantized(&case.blocks);
+        let decoded_case = decoded_blocks!(case.blocks);
+        let bound = quantized(&decoded_case);
+        let want = decoded!(case.want);
 
         let mut pools = proxima_tensor::cpu::BufferPools::default();
         let mut validated = None;
@@ -1339,15 +1485,20 @@ mod reduce_split_axis {
         let cpu_started = std::time::Instant::now();
         let cpu = evaluated.get(case.root).expect("root").0.to_vec();
         let _ = cpu_started.elapsed();
-        // Relative: the contract is a 4608-term f32 dot product here, so an
+        // Relative: the contract is a 4608-term dot product here, so an
         // absolute micro-bound would be measuring the accumulator's rounding
         // rather than the lowering.
-        let scale = case.want.iter().fold(0.0f32, |worst, value| worst.max(value.abs()));
+        let scale = want
+            .iter()
+            .map(|value| value.abs())
+            .reduce(|worst, value| worst.max(value))
+            .unwrap_or_default();
         let worst_cpu = cpu
             .iter()
-            .zip(&case.want)
+            .zip(&want)
             .map(|(cpu, want)| (cpu - want).abs())
-            .fold(0.0f32, f32::max)
+            .reduce(|worst, value| worst.max(value))
+            .unwrap_or_default()
             / scale;
         assert!(
             worst_cpu < 1e-4,
@@ -1358,28 +1509,29 @@ mod reduce_split_axis {
         // defect, so the guard is what turns that into a failure.
         let program = case.program.clone();
         let root = case.root;
-        let blocks: Vec<(&'static str, Vec<f32>)> = case.blocks.clone();
+        let blocks = decoded_case.clone();
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             // The kernel is bound exactly as the decoder binds it: packed
-            // half-precision rows, not f32. The f32 binding passes; the packed
+            // packed weight rows, not host elements. The host binding passes; the packed
             // one is what the served graph actually uses.
-            let packed: Vec<u8> = proxima_model_interop::diffusion::encode(
+            let codec = DiffusionSettings::resolved().vae_weights;
+            let packed = PackedRows::from_values(
+                &codec,
                 &blocks.iter().find(|(name, _)| *name == "kernel").expect("kernel").1,
-                proxima_numeric::codec::Codec::Float16,
             )
-            .expect("the kernel encodes to f16");
+            .expect("the kernel encodes in the bound weight format");
             let mut bound: Vec<(&'static str, QuantizedBlock<'_>)> = Vec::new();
             for (name, values) in &blocks {
                 bound.push((
                     *name,
                     if *name == "kernel" {
                         QuantizedBlock::Packed {
-                            codec: proxima_numeric::codec::Codec::Float16,
-                            bytes: &packed,
+                            codec,
+                            bytes: packed.as_bytes(),
                         }
                     } else {
-                        QuantizedBlock::Float32(values)
+                        QuantizedBlock::from(values.as_slice())
                     },
                 ));
             }
@@ -1420,29 +1572,30 @@ mod reduce_split_axis {
         // Throughput of the split-axis reduce: the op the decoder spends its
         // whole VAE budget in. `macs` is the contraction's true work, so a rate
         // far below the machine's GEMM rate is the finding.
-        let macs = (HEIGHT * WIDTH) as f64
-            * (OUT_G * OUT_C) as f64
-            * 9.0
-            * (IN_G * IN_C) as f64;
+        let nanos = metal_started.elapsed().as_nanos().max(1);
+        let macs = u128::from(HEIGHT * WIDTH)
+            * u128::from(OUT_G * OUT_C)
+            * 9
+            * u128::from(IN_G * IN_C);
         eprintln!(
-            "split_reduce metal {:.2}s for {:.1} GMAC = {:.2} GFLOPS",
-            metal_started.elapsed().as_secs_f64(),
-            macs / 1e9,
-            2.0 * macs / 1e9 / metal_started.elapsed().as_secs_f64()
+            "split_reduce metal {nanos} ns for {macs} MACs = {} MACs per microsecond",
+            macs * 1000 / nanos
         );
         assert_eq!(metal.len(), cpu.len(), "shape");
         let worst = metal
             .iter()
             .zip(&cpu)
             .map(|(metal, cpu)| (metal - cpu).abs())
-            .fold(0.0f32, f32::max);
-        // The kernel is bound as f16, so the agreement bound is that codec's
+            .reduce(|worst, value| worst.max(value))
+            .unwrap_or_default();
+        // The kernel is bound in the weight codec, so the agreement bound is that codec's
         // rounding accumulated over the contraction, not the graph's own.
         assert!(
             worst / scale < 2e-2,
             "Metal differs from the CPU by {} relative",
             worst / scale
         );
+        Ok(())
     }
 }
 
@@ -1456,7 +1609,7 @@ mod vae_prefix {
     use proxima_model_interop::diffusion::{
         Checkpoint, Decoder, DiffusionSettings, Graph, VaeConfig, build_vae_decode,
     };
-    use proxima_numeric::DType;
+    use proxima_numeric::PackedRows;
 
     const SIDE: u32 = 16;
     const TOKENS: usize = (SIDE * SIDE) as usize;
@@ -1476,15 +1629,17 @@ mod vae_prefix {
             out_channels: 3,
             height: SIDE,
             width: SIDE,
+            window: checkpoint.window_extent("decoder.conv_in.weight")?,
             conv_taps: proxima_model_interop::diffusion::DiffusionSettings::resolved().conv_taps(),
         };
-        let mut graph = Graph::new(DType::FLOAT32);
-        let latent = graph.host("latent", &[SIDE * SIDE, 32, 1], vec![0.0; 8]);
+        let mut graph = Graph::new(super::activation::vae()?).expect("diffusion settings validate");
+        let latent = graph.host("latent", &[SIDE * SIDE, 32, 1], graph.unbound());
         let output = build_vae_decode(&mut graph, &config, latent).map_err(|why| why.to_string())?;
-        let latent_values = vec![0.1f32; TOKENS * 32];
-        let mut call_graph = Graph::new(graph.activation());
-        call_graph.host("latent", &[SIDE * SIDE, 32, 1], Vec::new());
-        let blocks = call_graph.host_blocks(&[("latent", latent_values.as_slice())], &[]);
+        let latent_values = vec![0.1; TOKENS * 32];
+        let mut call_graph = Graph::new(graph.activation()).expect("diffusion settings validate");
+        call_graph.host("latent", &[SIDE * SIDE, 32, 1], call_graph.unbound());
+        let latent_rows = PackedRows::from_values(call_graph.activation_format(), &latent_values)
+            .map_err(|why| why.to_string())?;
         let mut decoder = Decoder::new(
             &checkpoint,
             graph,
@@ -1495,16 +1650,19 @@ mod vae_prefix {
                 .map_err(|why| why.to_string())?
                 .as_serving_config(&[]),
         )?;
+        let blocks = call_graph.host_blocks(&[("latent", &latent_rows)])?;
+        let mut faulted = false;
         for (name, node) in &output.trace {
-            match decoder.evaluate_nodes(&blocks, &[*node]) {
-                Ok(_) => eprintln!("stage {name} ok"),
-                Err(why) => {
-                    eprintln!("stage {name} FAULTS: {why}");
-                    return Ok(());
-                }
+            if let Err(why) = decoder.evaluate_nodes(&blocks, &[*node]) {
+                eprintln!("stage {name} FAULTS: {why}");
+                faulted = true;
+                break;
             }
+            eprintln!("stage {name} ok");
         }
-        eprintln!("every decoder stage ran");
+        if !faulted {
+            eprintln!("every decoder stage ran");
+        }
         Ok(())
     }
 }
@@ -1512,7 +1670,6 @@ mod vae_prefix {
 #[cfg(feature = "std")]
 mod vae_gathers {
     use proxima_model_interop::diffusion::{Graph, VaeConfig, build_vae_decode};
-    use proxima_numeric::DType;
     use proxima_tensor::map::IndexMap;
     use proxima_tensor::op::Op;
 
@@ -1527,9 +1684,11 @@ mod vae_gathers {
             height: 16,
             width: 16,
             conv_taps: proxima_model_interop::diffusion::DiffusionSettings::resolved().conv_taps(),
+            window: super::shape_only_window(),
         };
-        let mut graph = Graph::new(DType::FLOAT32);
-        let latent = graph.host("latent", &[256, 32, 1], vec![0.0; 8]);
+        let activation = super::activation::vae().expect("the decoder's activation dtype resolves");
+        let mut graph = Graph::new(activation).expect("diffusion settings validate");
+        let latent = graph.host("latent", &[256, 32, 1], graph.unbound());
         build_vae_decode(&mut graph, &config, latent).expect("decoder builds");
         let shapes = proxima_tensor::infer(&graph.program, &[256]).expect("shapes");
         let name_of = |node: proxima_tensor::op::NodeId| -> String {
@@ -1569,7 +1728,15 @@ mod vae_gathers {
                     eprintln!("node {index}: gather with a computed (non-leaf) index");
                     continue;
                 };
-                let maximum = host.values.iter().fold(f32::MIN, |acc, value| acc.max(*value));
+                let mut decoded = Vec::new();
+                host.values
+                    .decode_all(&mut decoded)
+                    .expect("a gather's leaf decodes");
+                let maximum = decoded
+                    .iter()
+                    .copied()
+                    .reduce(|acc, value| acc.max(value))
+                    .unwrap_or_default();
                 let extent = shapes.of(*source)[*gathered_dim as usize];
                 if maximum as u64 >= extent {
                     eprintln!(
@@ -1589,7 +1756,6 @@ mod vae_gathers {
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod vae_stages {
     use std::env;
-    use std::fs;
     use std::path::PathBuf;
 
     use conflaguration::Settings;
@@ -1597,22 +1763,15 @@ mod vae_stages {
     use proxima_model_interop::diffusion::{
         Checkpoint, Decoder, DiffusionSettings, Graph, VaeConfig, build_vae_decode,
     };
-    use proxima_numeric::DType;
+    use proxima_numeric::PackedRows;
 
 type Outcome = Result<(), String>;
 
     /// The reference's captures are `[width, height, channels]` with the width
     /// axis innermost; the graph's activations are `[row, groups, width]` with
     /// the channel innermost. This reads a capture into the graph's order.
-    fn channel_fastest(values: &[f32], channels: usize) -> Vec<f32> {
-        let rows = values.len() / channels;
-        let mut token_major = vec![0.0f32; values.len()];
-        for row in 0..rows {
-            for channel in 0..channels {
-                token_major[row * channels + channel] = values[row + rows * channel];
-            }
-        }
-        token_major
+    fn channel_fastest<T: Copy>(values: &[T], channels: usize) -> Vec<T> {
+        super::token_major_and(values, values.len() / channels, channels)
     }
 
     #[test]
@@ -1630,21 +1789,15 @@ type Outcome = Result<(), String>;
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(&home).join("models/image_gen/flux2-klein-4b"));
         let checkpoint = Checkpoint::open(&model.join("comfy/flux2-vae.safetensors"))?;
-        let (_, mean) = checkpoint.values("bn.running_mean", None, None, false)?;
-        let (_, variance) = checkpoint.values("bn.running_var", None, None, false)?;
-        let deviation: Vec<f32> = variance.iter().map(|value| value.sqrt()).collect();
-        let read = |name: &str| -> Result<Vec<f32>, String> {
-            let path = trace.join(name);
-            let bytes = fs::read(&path).map_err(|why| format!("{}: {why}", path.display()))?;
-            Ok(bytes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|word| f32::from_le_bytes(*word))
-                .collect())
-        };
-        let raw = read("step4.f32")?;
-        let mut latent = vec![0.0f32; (side * side) as usize * 32];
+        let (_, mean_rows) = checkpoint.values("bn.running_mean", None, None, false)?;
+        let (_, variance_rows) = checkpoint.values("bn.running_var", None, None, false)?;
+        let mut mean = Vec::new();
+        mean_rows.decode_all(&mut mean).map_err(|why| why.to_string())?;
+        let mut variance = Vec::new();
+        variance_rows.decode_all(&mut variance).map_err(|why| why.to_string())?;
+        let deviation: Vec<_> = variance.iter().map(|value| value.sqrt()).collect();
+        let raw = named_values!(trace, "step4");
+        let mut latent = vec![0.0; (side * side) as usize * 32];
         for row in 0..latent_side {
             for column in 0..latent_side {
                 for channel in 0..128usize {
@@ -1668,14 +1821,16 @@ type Outcome = Result<(), String>;
             out_channels: 3,
             height: side,
             width: side,
+            window: checkpoint.window_extent("decoder.conv_in.weight")?,
             conv_taps: proxima_model_interop::diffusion::DiffusionSettings::resolved().conv_taps(),
         };
-        let mut graph = Graph::new(DType::FLOAT32);
-        let input = graph.host("latent", &[side * side, 32, 1], Vec::new());
+        let mut graph = Graph::new(super::activation::vae()?).expect("diffusion settings validate");
+        let input = graph.host("latent", &[side * side, 32, 1], graph.unbound());
         let output = build_vae_decode(&mut graph, &config, input).map_err(|why| why.to_string())?;
-        let mut call_graph = Graph::new(graph.activation());
-        call_graph.host("latent", &[side * side, 32, 1], Vec::new());
-        let blocks = call_graph.host_blocks(&[("latent", latent.as_slice())], &[]);
+        let mut call_graph = Graph::new(graph.activation()).expect("diffusion settings validate");
+        call_graph.host("latent", &[side * side, 32, 1], call_graph.unbound());
+        let latent_rows = PackedRows::from_values(call_graph.activation_format(), &latent)
+            .map_err(|why| why.to_string())?;
         let mut decoder = Decoder::new(
             &checkpoint,
             graph,
@@ -1687,29 +1842,31 @@ type Outcome = Result<(), String>;
                 .as_serving_config(&[]),
         )?;
         for (name, node) in &output.trace {
-            let (capture, width, channels) = match *name {
-                "conv_in" => ("p_dconv_in.f32", side as usize, 512usize),
-                "up3" => ("p_dup3_0.f32", side as usize, 512),
-                "up3.up" => ("p_dup3_up.f32", (side * 2) as usize, 512),
-                "up2.up" => ("p_dup2_up.f32", (side * 4) as usize, 512),
-                "up1.up" => ("p_dup1_up.f32", (side * 8) as usize, 256),
-                "image" => ("vae_out.f32", (side * 8) as usize, 3),
+            let (width, channels) = match *name {
+                "conv_in" => (side as usize, 512usize),
+                "up3" => (side as usize, 512),
+                "up3.up" => ((side * 2) as usize, 512),
+                "up2.up" => ((side * 4) as usize, 512),
+                "up1.up" => ((side * 8) as usize, 256),
+                "image" => ((side * 8) as usize, 3),
                 other => {
                     eprintln!("stage {other}: no reference capture");
                     continue;
                 }
             };
-            if !trace.join(capture).exists() {
+            let capture = super::oracle::file("vae_captures", name)?;
+            if !trace.join(&capture).exists() {
                 eprintln!("stage {name}: no capture at {capture}");
                 continue;
             }
             let _ = width;
-            let reference = channel_fastest(&read(capture)?, channels);
+            let reference = channel_fastest(&dump_values!(&trace.join(&capture)), channels);
+            let blocks = call_graph.host_blocks(&[("latent", &latent_rows)])?;
             let evaluated = decoder
                 .evaluate_nodes(&blocks, &[*node])
                 .map_err(|why| format!("run {name}: {why}"))?;
             let actual = evaluated.get(*node).ok_or("stage missing")?.0;
-            let scaled: Vec<f32> = if *name == "image" {
+            let scaled: Vec<_> = if *name == "image" {
                 actual
                     .iter()
                     .map(|value| ((value + 1.0) * 0.5).clamp(0.0, 1.0))
@@ -1717,20 +1874,8 @@ type Outcome = Result<(), String>;
             } else {
                 actual.to_vec()
             };
-            let mut error = 0.0f64;
-            let mut squared = 0.0f64;
-            let mut dot = 0.0f64;
-            let mut left = 0.0f64;
-            for (&got, &want) in scaled.iter().zip(&reference) {
-                let (got, want) = (f64::from(got), f64::from(want));
-                error += (got - want) * (got - want);
-                squared += want * want;
-                dot += got * want;
-                left += got * got;
-            }
-            let count = reference.len() as f64;
-            let rms_rel = (error / count).sqrt() / (squared / count).sqrt();
-            let cosine = dot / (left * squared).sqrt();
+            let shared = scaled.len().min(reference.len());
+            let (rms_rel, cosine) = stats!(&scaled[..shared], &reference[..shared]);
             eprintln!("stage {name}: rms_rel={rms_rel:.6} cos={cosine:.6}");
         }
         Ok(())

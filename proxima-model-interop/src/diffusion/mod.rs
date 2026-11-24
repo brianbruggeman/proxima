@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
-use proxima_numeric::DType;
+use proxima_numeric::{DType, NumericError, NumericFormat, PackedRows};
 use proxima_tensor::QuantizedBlock;
 use proxima_tensor::op::{Extent, NodeId, Op};
 use proxima_tensor::spec::input_leaf;
@@ -25,13 +25,10 @@ pub use dit::{
     build_single_block, head_norm_count,
 };
 pub use host::{Decoder, Denoiser};
-pub use load::{Checkpoint, WeightData, Weights, encode, load_weights};
-pub use png::{PngImage, read_png, write_png};
+pub use load::{Checkpoint, WeightData, Weights, load_weights};
+pub use png::{PngImage, full_scale, read_png, write_png};
 pub use settings::DiffusionSettings;
-pub use vae::{
-    ConvTaps, VaeConfig, VaeOutput, build_conv3x3, build_vae_decode, latent_grouped,
-    latent_statistics, latent_unnormalise,
-};
+pub use vae::{ConvTaps, VaeConfig, VaeOutput, build_vae_decode, build_window_same};
 
 /// One weight leaf's source: the checkpoint tensor it reads and, when the leaf
 /// is a row slice of that tensor, the half-open row range.
@@ -42,19 +39,22 @@ pub struct WeightBinding {
     pub rows: Option<(u32, u32)>,
     pub columns: Option<(u32, u32)>,
     pub tap: Option<(u32, u32)>,
-    /// The whole 3x3 kernel as one `[out_g, out_c, 3, 3, in_g, in_c]` leaf
+    /// The whole window x window kernel as one `[out_g, out_c, window, window, in_g, in_c]` leaf
     /// ([`Self::weight_taps`]) rather than one leaf per kernel position.
     pub taps: bool,
 }
 
 /// One host-built activation leaf: a rope table, a gather index, a time
-/// sinusoid. `values` is already in the leaf's declared dtype.
+/// sinusoid. `values` is packed in the leaf's declared format.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HostLeaf {
     pub name: String,
     pub dtype: DType,
     pub extent: u32,
-    pub values: Vec<f32>,
+    pub values: PackedRows,
+    /// `values` re-encoded in the host element when it is in another format, so a bind reads
+    /// decoded values; `None` when `values` already is.
+    pub(crate) widened: Option<PackedRows>,
 }
 
 /// The graph under construction: the program, the weight leaves it needs from
@@ -66,20 +66,82 @@ pub struct Graph {
     pub hosts: Vec<HostLeaf>,
     host_nodes: BTreeMap<String, NodeId>,
     activation: DType,
+    activation_format: NumericFormat,
+    index: DType,
+    settings: DiffusionSettings,
     steps: Vec<(String, Range<usize>)>,
+    faults: Vec<String>,
 }
 
 impl Graph {
-    #[must_use]
-    pub fn new(activation: DType) -> Self {
-        Self {
+    /// A graph over the environment-resolved settings.
+    ///
+    /// # Errors
+    ///
+    /// The settings' load failure rendered as text.
+    pub fn new(activation: DType) -> Result<Self, String> {
+        let settings = DiffusionSettings::try_resolved().map_err(|why| why.to_string())?;
+        Self::with_settings(activation, settings)
+    }
+
+    /// A graph over explicit settings.
+    ///
+    /// # Errors
+    ///
+    /// A message when `activation` has no format or `gather_index` is not a scalar format.
+    pub fn with_settings(activation: DType, settings: DiffusionSettings) -> Result<Self, String> {
+        let activation_format = activation
+            .format()
+            .ok_or_else(|| String::from("the graph's activation dtype has no numeric format"))?;
+        Ok(Self {
             program: Vec::new(),
             weights: Vec::new(),
             hosts: Vec::new(),
             host_nodes: BTreeMap::new(),
             activation,
+            activation_format,
+            index: settings.gather_index_dtype()?,
+            settings,
             steps: Vec::new(),
+            faults: Vec::new(),
+        })
+    }
+
+    /// The format an activation leaf's values are packed in.
+    #[must_use]
+    pub const fn activation_format(&self) -> &NumericFormat {
+        &self.activation_format
+    }
+
+    /// The format a gather index leaf's values are packed in.
+    #[must_use]
+    pub const fn index_format(&self) -> &NumericFormat {
+        &self.settings.gather_index
+    }
+
+    /// An empty activation run, the placeholder for a leaf the caller binds per call.
+    pub fn unbound(&self) -> Result<PackedRows, NumericError> {
+        PackedRows::new(&self.activation_format)
+    }
+
+    /// Packing failures recorded by [`Self::host`] and [`Self::host_index`];
+    /// [`Self::host_blocks`] and the stages' constructors report them.
+    #[must_use]
+    pub fn faults(&self) -> &[String] {
+        &self.faults
+    }
+
+    fn check_faults(&self) -> Result<(), String> {
+        match self.faults.first() {
+            Some(first) => Err(first.clone()),
+            None => Ok(()),
         }
+    }
+
+    /// The settings this graph's builders read their epsilons and formats from.
+    #[must_use]
+    pub const fn settings(&self) -> &DiffusionSettings {
+        &self.settings
     }
 
     /// Each builder call in order, with the `program` index range it appended
@@ -100,36 +162,66 @@ impl Graph {
     }
 
     /// One activation leaf the caller binds per call.
-    pub fn host(&mut self, name: &str, shape: &[u32], values: Vec<f32>) -> NodeId {
+    ///
+    /// `values` is the caller's `PackedRows::from_values(graph.activation_format(), ..)`; a
+    /// failure is recorded in [`Self::faults`] rather than returned per call.
+    pub fn host(
+        &mut self,
+        name: &str,
+        shape: &[u32],
+        values: Result<PackedRows, NumericError>,
+    ) -> NodeId {
         self.leaf(name, self.activation, shape, values)
     }
 
-    /// One gather index leaf: integer values the backend carries as floats.
-    pub fn host_index(&mut self, name: &str, extent: u32, values: Vec<f32>) -> NodeId {
-        self.leaf(name, DType::INT32, &[extent], values)
+    /// One gather index leaf: integer values the backend carries as floats, packed by the caller
+    /// in [`Self::index_format`].
+    pub fn host_index(
+        &mut self,
+        name: &str,
+        extent: u32,
+        values: Result<PackedRows, NumericError>,
+    ) -> NodeId {
+        self.leaf(name, self.index, &[extent], values)
     }
 
-    fn leaf(&mut self, name: &str, dtype: DType, shape: &[u32], values: Vec<f32>) -> NodeId {
+    fn leaf(
+        &mut self,
+        name: &str,
+        dtype: DType,
+        shape: &[u32],
+        values: Result<PackedRows, NumericError>,
+    ) -> NodeId {
         if let Some(node) = self.host_nodes.get(name) {
             return *node;
         }
         let extents = shape.iter().map(|&size| Extent::Static(size)).collect();
         let node = input_leaf(&mut self.program, dtype, extents, name);
         self.host_nodes.insert(name.to_string(), node);
-        self.hosts.push(HostLeaf {
-            name: name.to_string(),
-            dtype,
-            extent: shape.iter().product(),
-            values,
-        });
+        let packed = values
+            .map_err(|why| format!("host leaf {name}: {why}"))
+            .and_then(|values| {
+                host::widened(&format!("host leaf {name}"), &values).map(|wide| (values, wide))
+            });
+        match packed {
+            Ok((values, widened)) => self.hosts.push(HostLeaf {
+                name: name.to_string(),
+                dtype,
+                extent: shape.iter().product(),
+                values,
+                widened,
+            }),
+            Err(why) => self.faults.push(why),
+        }
         node
     }
 
     /// One gather index leaf, deduplicated by name: an `i32` value list.
     pub fn index_leaf(&mut self, name: &str, values: Vec<i32>) -> NodeId {
         let extent = values.len() as u32;
-        let values = values.into_iter().map(|value| value as f32).collect();
-        self.host_index(name, extent, values)
+        let wide: Vec<_> = values.into_iter().map(|value| value as _).collect();
+        let packed = PackedRows::from_values(self.index_format(), &wide);
+        self.host_index(name, extent, packed)
     }
 
     /// One weight leaf: `tensor` is the checkpoint name, `shape` the leaf's
@@ -152,16 +244,17 @@ impl Graph {
         self.weight_window(tensor, shape, rows, columns, None, false)
     }
 
-    /// The whole 3x3 kernel as ONE `[out_g, out_c, 3, 3, in_g, in_c]` leaf, the
-    /// weight [`super::vae::conv`]'s three-block form contracts. The bytes are
-    /// the checkpoint's `[out, in, 3, 3]` reordered to `[out, 3, 3, in]` by the
-    /// loader's own kernel permutation, which is that shape's element order
-    /// exactly -- a reshape, not a repack.
+    /// The whole window x window kernel as ONE
+    /// `[out_g, out_c, window, window, in_g, in_c]` leaf, the weight
+    /// [`super::vae::conv`]'s three-block form contracts. The bytes are the
+    /// checkpoint's `[out, in, window, window]` reordered to
+    /// `[out, window, window, in]` by the loader's own kernel permutation,
+    /// which is that shape's element order exactly -- a reshape, not a repack.
     pub fn weight_taps(&mut self, tensor: &str, shape: &[u32]) -> NodeId {
         self.weight_window(tensor, shape, None, None, None, true)
     }
 
-    /// One tap of a 3x3 kernel as its own `[out, in]` leaf: the loader
+    /// One tap of a window x window kernel as its own `[out, in]` leaf: the loader
     /// extracts that kernel position, so the reduce addresses the weight
     /// through single-term axes only.
     pub fn weight_tap(
@@ -196,7 +289,7 @@ impl Graph {
             leaf = format!("{leaf}@tap{row}.{column}");
         }
         if taps {
-            leaf = format!("{leaf}@taps3");
+            leaf = format!("{leaf}@taps");
         }
         if let Some(existing) = self.weights.iter().find(|binding| binding.leaf == leaf) {
             let dtype = self.activation;
@@ -231,79 +324,55 @@ impl Graph {
         let mut mask = Vec::with_capacity(total as usize);
         for row in 0..total {
             if row < head_rows {
-                head.push(row as f32);
+                head.push(row as _);
                 tail.push(0.0);
                 mask.push(1.0);
             } else {
                 head.push(0.0);
-                tail.push((row - head_rows) as f32);
+                tail.push((row - head_rows) as _);
                 mask.push(0.0);
             }
         }
-        let head_index = self.host_index(&format!("{name}.head_index"), total, head);
-        let tail_index = self.host_index(&format!("{name}.tail_index"), total, tail);
-        let head_mask = self.host(&format!("{name}.head_mask"), &[total], mask);
+        let head_packed = PackedRows::from_values(self.index_format(), &head);
+        let tail_packed = PackedRows::from_values(self.index_format(), &tail);
+        let mask_packed = PackedRows::from_values(&self.activation_format, &mask);
+        let head_index = self.host_index(&format!("{name}.head_index"), total, head_packed);
+        let tail_index = self.host_index(&format!("{name}.tail_index"), total, tail_packed);
+        let head_mask = self.host(&format!("{name}.head_mask"), &[total], mask_packed);
         [head_index, tail_index, head_mask]
     }
 }
 
-/// `t * 1000`'s cosine/sine embedding: `channels / 2` frequencies from
-/// `10000^(-i / (channels / 2))`, cosine in the first half and sine in the
-/// second (ggml's `ggml_timestep_embedding` order).
-#[must_use]
-pub fn timestep_sinusoid(timestep: f32, channels: u32) -> Vec<f32> {
-    let half = channels / 2;
-    let mut values = Vec::with_capacity(channels as usize);
-    for index in 0..half {
-        let exponent = -(index as f32) / half as f32;
-        let angle = timestep * 1000.0 * 10_000.0f32.powf(exponent);
-        values.push(angle.cos());
-    }
-    for index in 0..half {
-        let exponent = -(index as f32) / half as f32;
-        let angle = timestep * 1000.0 * 10_000.0f32.powf(exponent);
-        values.push(angle.sin());
-    }
-    values
-}
-
 impl Graph {
-    /// The integer buffers the gather leaves bind, positionally matching
-    /// [`Self::hosts`].
-    #[must_use]
-    pub fn int_buffers(&self) -> Vec<Vec<i32>> {
+    /// Every host leaf's named block, bound as a stage binds it: a leaf in another format is
+    /// bound through its host-element form, widened once when the leaf was built. `overrides`
+    /// replace a leaf's placeholder values (the activations a caller feeds per call) and bind
+    /// as given, as a stage's per-call inputs do.
+    ///
+    /// # Errors
+    ///
+    /// A recorded packing or widening fault, or a host-element leaf or override whose bytes
+    /// cannot be viewed in place, as text.
+    pub fn host_blocks<'a>(
+        &'a self,
+        overrides: &[(&str, &'a PackedRows)],
+    ) -> Result<Vec<(&'a str, QuantizedBlock<'a>)>, String> {
+        self.check_faults()?;
         self.hosts
             .iter()
             .map(|host| {
-                if host.dtype == DType::INT32 {
-                    host.values.iter().map(|value| *value as i32).collect()
-                } else {
-                    Vec::new()
-                }
-            })
-            .collect()
-    }
-
-    /// Every host leaf's named block, with `overrides` replacing a leaf's
-    /// placeholder values (the activations a caller feeds per call).
-    #[must_use]
-    pub fn host_blocks<'a>(
-        &'a self,
-        overrides: &[(&str, &'a [f32])],
-        integers: &'a [Vec<i32>],
-    ) -> Vec<(&'a str, QuantizedBlock<'a>)> {
-        self.hosts
-            .iter()
-            .enumerate()
-            .map(|(index, host)| {
-                let supplied = overrides
-                    .iter()
-                    .find(|(name, _)| *name == host.name)
-                    .map(|(_, values)| *values);
-                let _ = integers;
-                let _ = index;
-                let block = QuantizedBlock::Float32(supplied.unwrap_or(&host.values));
-                (host.name.as_str(), block)
+                let supplied = overrides.iter().find(|(name, _)| *name == host.name);
+                let block = match supplied {
+                    Some((_, values)) => host::host_checked(
+                        &host.name,
+                        QuantizedBlock::Packed {
+                            codec: *values.format(),
+                            bytes: values.as_bytes(),
+                        },
+                    )?,
+                    None => host::leaf_block(&host.name, &host.values, host.widened.as_ref())?,
+                };
+                Ok::<_, String>((host.name.as_str(), block))
             })
             .collect()
     }

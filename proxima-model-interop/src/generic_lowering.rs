@@ -3,7 +3,8 @@
 
 use alloc::vec::Vec;
 
-use proxima_numeric::DType;
+use proxima_numeric::float_layout::NAMED_LAYOUTS;
+use proxima_numeric::{DType, Philox};
 use proxima_tensor::cpu::evaluate_named;
 use proxima_tensor::op::{Extent, NodeId, Op};
 use proxima_tensor::spec::{
@@ -236,42 +237,49 @@ fn tap_layers_stacks_the_chosen_layer_outputs_in_tap_order() {
     assert_close(&actual, &expected);
 }
 
+fn index_dtype() -> DType {
+    NAMED_LAYOUTS
+        .iter()
+        .map(|(layout, _)| DType::Layout(*layout))
+        .find(|dtype| {
+            dtype.is_signed_integer() && dtype.size_bytes() == core::mem::size_of::<i32>()
+        })
+        .expect("a signed integer layout holds an index")
+}
+
 fn integer_leaf(program: &mut Vec<Op>, name: &str, extent: u32) -> NodeId {
     input_leaf(
         program,
-        DType::INT32,
+        index_dtype(),
         alloc::vec![Extent::Static(extent)],
         name,
     )
 }
 
 #[test]
-fn linear_matches_the_row_major_outer_product_on_a_non_model_shape() {
+fn project_rows_matches_the_row_major_outer_product_on_a_non_model_shape() {
     let (tokens, into, out) = (3usize, 5usize, 4usize);
-    let x: Vec<f32> = (0..tokens * into)
-        .map(|index| (index as f32 * 0.31).sin())
-        .collect();
-    let weight: Vec<f32> = (0..out * into)
-        .map(|index| (index as f32 * 0.17).cos())
-        .collect();
-    let bias: Vec<f32> = (0..out).map(|index| index as f32 * 0.1 - 0.2).collect();
+    let input = Philox::new(31).normal(tokens * into);
+    let weight = Philox::new(17).normal(out * into);
+    let bias = Philox::new(10).normal(out);
     let mut program = Vec::new();
-    let x_node = leaf(&mut program, "x", &[tokens as u32, into as u32]);
+    let input_node = leaf(&mut program, "x", &[tokens as u32, into as u32]);
     let weight_node = leaf(&mut program, "weight", &[out as u32, into as u32]);
     let bias_node = leaf(&mut program, "bias", &[out as u32]);
-    let out_node = proxima_tensor::spec::linear(&mut program, x_node, weight_node, Some(bias_node))
-        .expect("linear builds");
+    let out_node =
+        proxima_tensor::spec::project_rows(&mut program, input_node, weight_node, Some(bias_node))
+            .expect("linear builds");
     let actual = run(
         &program,
-        &[("x", &x), ("weight", &weight), ("bias", &bias)],
+        &[("x", &input), ("weight", &weight), ("bias", &bias)],
         out_node,
     );
     let mut expected = Vec::new();
     for token in 0..tokens {
         for column in 0..out {
-            let dot: f32 = (0..into)
-                .map(|inner| x[token * into + inner] * weight[column * into + inner])
-                .sum();
+            let dot = (0..into).fold(0.0, |total, inner| {
+                total + input[token * into + inner] * weight[column * into + inner]
+            });
             expected.push(dot + bias[column]);
         }
     }
@@ -280,15 +288,18 @@ fn linear_matches_the_row_major_outer_product_on_a_non_model_shape() {
 
 #[test]
 fn gelu_tanh_matches_its_closed_form() {
-    let values = [-2.5f32, -0.5, 0.0, 0.25, 1.0, 3.75];
+    let values = Philox::new(5).normal(6);
     let mut program = Vec::new();
-    let x = leaf(&mut program, "x", &[values.len() as u32]);
-    let out = proxima_tensor::spec::gelu_tanh(&mut program, x, "s->s").expect("gelu builds");
+    let input_node = leaf(&mut program, "x", &[values.len() as u32]);
+    let out =
+        proxima_tensor::spec::gelu_tanh(&mut program, input_node, "s->s").expect("gelu builds");
     let actual = run(&program, &[("x", &values)], out);
-    let expected: Vec<f32> = values
+    let unit = values[0].signum().abs();
+    let scale = (2.0 / (-unit).acos()).sqrt();
+    let expected: Vec<_> = values
         .iter()
         .map(|value| {
-            let inner = (2.0f32 / core::f32::consts::PI).sqrt() * (value + 0.044_715 * value.powi(3));
+            let inner = scale * (value + 0.044_715 * value.powi(3));
             0.5 * value * (1.0 + inner.tanh())
         })
         .collect();
@@ -299,30 +310,30 @@ fn gelu_tanh_matches_its_closed_form() {
 fn group_norm_matches_the_naive_per_group_mean_and_variance() {
     let (rows, groups, group_width) = (4u32, 2u32, 2u32);
     let channels = groups * group_width;
-    let source: Vec<f32> = (0..(rows * channels))
-        .map(|index| (index as f32 * 0.23).sin() * 2.0)
-        .collect();
-    let weight: Vec<f32> = (0..channels as usize)
-        .map(|index| 0.5 + index as f32 * 0.25)
-        .collect();
-    let bias: Vec<f32> = (0..channels as usize)
-        .map(|index| index as f32 * -0.125)
-        .collect();
+    let source = Philox::new(23).normal((rows * channels) as usize);
+    let weight = Philox::new(25).normal(channels as usize);
+    let bias = Philox::new(12).normal(channels as usize);
     let mut program = Vec::new();
-    let x = leaf(&mut program, "x", &[rows, groups, group_width]);
-    let w = leaf(&mut program, "weight", &[groups, group_width]);
-    let b = leaf(&mut program, "bias", &[groups, group_width]);
+    let input_node = leaf(&mut program, "x", &[rows, groups, group_width]);
+    let weight_node = leaf(&mut program, "weight", &[groups, group_width]);
+    let bias_node = leaf(&mut program, "bias", &[groups, group_width]);
+    let eps = proxima_tensor::spec::scalar_constant_like(&mut program, 1e-6, input_node)
+        .expect("eps builds");
     let out = proxima_tensor::spec::group_norm(
         &mut program,
-        x,
-        w,
-        b,
+        input_node,
+        weight_node,
+        bias_node,
         rows * group_width,
-        1e-6,
+        eps,
     )
     .expect("group norm builds");
-    let actual = run(&program, &[("x", &source), ("weight", &weight), ("bias", &bias)], out);
-    let mut expected = vec![0.0f32; source.len()];
+    let actual = run(
+        &program,
+        &[("x", &source), ("weight", &weight), ("bias", &bias)],
+        out,
+    );
+    let mut expected = vec![0.0; source.len()];
     for group in 0..groups as usize {
         let mut values = Vec::new();
         for row in 0..rows as usize {
@@ -330,9 +341,12 @@ fn group_norm_matches_the_naive_per_group_mean_and_variance() {
                 values.push(source[row * channels as usize + group * group_width as usize + within]);
             }
         }
-        let count = values.len() as f32;
-        let mean = values.iter().sum::<f32>() / count;
-        let variance = values.iter().map(|value| (value - mean).powi(2)).sum::<f32>() / count;
+        let count = values.iter().fold(0.0, |total, _| total + 1.0);
+        let mean = values.iter().fold(0.0, |total, &value| total + value) / count;
+        let variance = values
+            .iter()
+            .fold(0.0, |total, &value| total + (value - mean).powi(2))
+            / count;
         let deviation = (variance + 1e-6).sqrt();
         for (index, value) in values.iter().enumerate() {
             let row = index / group_width as usize;
@@ -348,19 +362,25 @@ fn group_norm_matches_the_naive_per_group_mean_and_variance() {
 #[test]
 fn nearest_upsample_x2_repeats_each_source_cell_into_a_two_by_two_block() {
     let (rows, columns, group_width) = (2u32, 3u32, 2u32);
-    let source: Vec<f32> = (0..(rows * columns * group_width) as usize)
-        .map(|index| index as f32 + 0.5)
-        .collect();
+    let source = Philox::new(7).normal((rows * columns * group_width) as usize);
     let mut program = Vec::new();
-    let x = leaf(&mut program, "x", &[rows * columns, 1, group_width]);
+    let input_node = leaf(&mut program, "x", &[rows * columns, 1, group_width]);
     let index = integer_leaf(&mut program, "index", 4 * rows * columns);
-    let out = proxima_tensor::spec::nearest_upsample_x2(&mut program, x, index)
+    let out = proxima_tensor::spec::nearest_upsample_x2(&mut program, input_node, index)
         .expect("upsample builds");
-    let encoded: Vec<f32> = proxima_tensor::spec::upsample_x2_index(rows, columns)
+    let encoded: Vec<_> = proxima_tensor::spec::upsample_x2_index(rows, columns)
         .iter()
-        .map(|value| *value as f32)
+        .map(|value| {
+            i16::try_from(*value)
+                .expect("an upsample index is small")
+                .into()
+        })
         .collect();
-    let actual = run(&program, &[("x", &source), ("index", &encoded)], out);
+    let actual = run(
+        &program,
+        &[("x", &source), ("index", encoded.as_slice())],
+        out,
+    );
     let mut expected = Vec::new();
     for row in 0..2 * rows {
         for column in 0..2 * columns {
@@ -374,16 +394,12 @@ fn nearest_upsample_x2_repeats_each_source_cell_into_a_two_by_two_block() {
 }
 
 #[test]
-fn conv3x3_same_matches_a_direct_loop_on_a_two_by_two_image() {
+fn window_same_matches_a_direct_loop_on_a_two_by_two_image() {
     let (rows, columns, groups, in_width, out_width) = (2u32, 2u32, 2u32, 2u32, 3u32);
-    let source: Vec<f32> = (0..(rows * columns * groups * in_width) as usize)
-        .map(|index| (index as f32 * 0.41).sin())
-        .collect();
-    let weight: Vec<f32> = (0..(groups * out_width * 9 * groups * in_width) as usize)
-        .map(|index| (index as f32 * 0.19).cos())
-        .collect();
+    let source = Philox::new(41).normal((rows * columns * groups * in_width) as usize);
+    let weight = Philox::new(19).normal((groups * out_width * 9 * groups * in_width) as usize);
     let mut program = Vec::new();
-    let x = leaf(&mut program, "x", &[rows * columns, groups, in_width]);
+    let input_node = leaf(&mut program, "x", &[rows * columns, groups, in_width]);
     let mut taps = [proxima_tensor::op::NodeId(0); 9];
     for tap_row in 0..3u32 {
         for tap_column in 0..3u32 {
@@ -394,44 +410,53 @@ fn conv3x3_same_matches_a_direct_loop_on_a_two_by_two_image() {
             );
         }
     }
-    let pad_rows = proxima_tensor::spec::conv3x3_pad_rows(rows, columns);
+    let pad_rows = proxima_tensor::spec::window_pad_rows(rows, columns, 3);
     let pad_index = integer_leaf(&mut program, "pad_index", pad_rows);
     let pad_mask = leaf(&mut program, "pad_mask", &[pad_rows]);
     let crop_index = integer_leaf(&mut program, "crop_index", rows * columns);
-    let out = proxima_tensor::spec::conv3x3_same(
+    let out = proxima_tensor::spec::window_same(
         &mut program,
-        x,
+        input_node,
         &taps,
         pad_index,
         pad_mask,
         crop_index,
         rows,
         columns,
+        3,
     )
     .expect("conv builds");
-    let pad: Vec<f32> = proxima_tensor::spec::conv3x3_pad_index(rows, columns)
+    let pad: Vec<_> = proxima_tensor::spec::window_pad_index(rows, columns, 3)
         .iter()
-        .map(|value| *value as f32)
+        .map(|value| {
+            i16::try_from(*value)
+                .expect("a window index is small")
+                .into()
+        })
         .collect();
-    let mask: Vec<f32> = proxima_tensor::spec::conv3x3_pad_mask(rows, columns)
+    let mask: Vec<_> = proxima_tensor::spec::window_pad_mask(rows, columns, 3)
         .iter()
-        .map(|value| *value as f32)
+        .map(|value| i16::try_from(*value).expect("a mask entry is small").into())
         .collect();
-    let crop: Vec<f32> = proxima_tensor::spec::conv3x3_crop_index(rows, columns)
+    let crop: Vec<_> = proxima_tensor::spec::window_crop_index(rows, columns, 3)
         .iter()
-        .map(|value| *value as f32)
+        .map(|value| {
+            i16::try_from(*value)
+                .expect("a window index is small")
+                .into()
+        })
         .collect();
-    let mut named: Vec<(&str, &[f32])> = vec![
-        ("x", &source),
-        ("pad_index", &pad),
-        ("pad_mask", &mask),
-        ("crop_index", &crop),
+    let mut named = vec![
+        ("x", source.as_slice()),
+        ("pad_index", pad.as_slice()),
+        ("pad_mask", mask.as_slice()),
+        ("crop_index", crop.as_slice()),
     ];
     let names: Vec<String> = (0..9).map(|tap| format!("tap{}{}", tap / 3, tap % 3)).collect();
     for (tap, name) in names.iter().enumerate() {
         let row = tap / 3;
         let column = tap % 3;
-        let tap_values: Vec<f32> = (0..(groups * out_width * groups * in_width) as usize)
+        let tap_values: Vec<_> = (0..(groups * out_width * groups * in_width) as usize)
             .map(|index| {
                 let out_group = index / (out_width * groups * in_width) as usize;
                 let rest = index % (out_width * groups * in_width) as usize;
@@ -458,7 +483,7 @@ fn conv3x3_same_matches_a_direct_loop_on_a_two_by_two_image() {
         for column in 0..columns {
             for out_group in 0..groups {
                 for out_within in 0..out_width {
-                    let mut total = 0.0f32;
+                    let mut total = 0.0;
                     for tap_row in 0..3i32 {
                         for tap_column in 0..3i32 {
                             let source_row = row as i32 + tap_row - 1;

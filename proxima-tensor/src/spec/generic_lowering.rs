@@ -18,11 +18,12 @@ use alloc::vec::Vec;
 use crate::error::TensorError;
 use crate::map::{self, AxisIndex, AxisTerm, IndexPattern};
 use crate::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
-use proxima_numeric::{DType, FormatCodec};
+use proxima_numeric::{DType, FormatCodec, NumericFormat, PackedRows};
 
 use super::attention_forward::append_masked_softmax_mix;
 use super::{
-    elementwise_like, input_leaf, produced_dtype_or_binary32, reduce_like, scalar_constant_like,
+    elementwise_like, input_leaf, produced_dtype_or_binary32, reduce_like,
+    scalar_constant_like,
 };
 
 fn row_mean(program: &mut Vec<Op>, x: NodeId, inv_width: NodeId) -> Result<NodeId, TensorError> {
@@ -164,7 +165,7 @@ pub fn modulate(
 /// # Errors
 ///
 /// [`TensorError`] when a node is not part of `program`.
-pub fn linear(
+pub fn project_rows(
     program: &mut Vec<Op>,
     x: NodeId,
     weight: NodeId,
@@ -266,6 +267,26 @@ fn broadcast(full: &str) -> alloc::string::String {
     }
 }
 
+/// `1 / count` as a rank-0 constant in `like`'s dtype, computed on the host in one rounding:
+/// `count` read back through the host element's own codec, then divided into one.
+fn inverse_count_constant(
+    program: &mut Vec<Op>,
+    like: NodeId,
+    count: u32,
+) -> Result<NodeId, TensorError> {
+    let unreadable = |reason| TensorError::NotLowerable { node: like, reason };
+    let packed = PackedRows::from_values(&NumericFormat::host_element(), &[count as _])
+        .map_err(|_| unreadable("group norm count has no codec"))?;
+    let mut decoded = Vec::new();
+    packed
+        .decode_all(&mut decoded)
+        .map_err(|_| unreadable("group norm count does not decode"))?;
+    let [width] = decoded.as_slice() else {
+        return Err(unreadable("group norm count is not one element"));
+    };
+    scalar_constant_like(program, 1.0 / width, like)
+}
+
 /// Channel-group normalisation over `[rows, g, cg]` with `g * cg == channels`: per
 /// group, the mean and variance of `rows * cg` values (the spatial axes are
 /// already flattened into `rows`), then
@@ -281,7 +302,7 @@ pub fn group_norm(
     weight: NodeId,
     bias: NodeId,
     count: u32,
-    eps: f32,
+    eps: NodeId,
 ) -> Result<NodeId, TensorError> {
     let sum = reduce_like(
         program,
@@ -291,7 +312,7 @@ pub fn group_norm(
         "rgc->rgc",
         "g->rgc",
     )?;
-    let inverse_count = scalar_constant_like(program, 1.0 / count as f32, x)?;
+    let inverse_count = inverse_count_constant(program, x, count)?;
     let mean = elementwise_like(
         program,
         x,
@@ -324,12 +345,11 @@ pub fn group_norm(
         ScalarOp::Multiply,
         &[(variance_sum, "g->g"), (inverse_count, "->g")],
     )?;
-    let eps_node = scalar_constant_like(program, eps, x)?;
     let spread = elementwise_like(
         program,
         x,
         ScalarOp::Add,
-        &[(variance, "g->g"), (eps_node, "->g")],
+        &[(variance, "g->g"), (eps, "->g")],
     )?;
     let deviation = elementwise_like(program, x, ScalarOp::SquareRoot, &[(spread, "g->g")])?;
     let inverse = elementwise_like(program, x, ScalarOp::Reciprocal, &[(deviation, "g->g")])?;
@@ -403,7 +423,7 @@ pub fn gather_leading_axis(
 /// Nearest-neighbour 2x upsample of `[rows, g, cg]` to `[4 * rows, g, cg]`,
 /// through one leading-axis gather: `index[4 * h * width + 2 * w + y]` names source
 /// row `h * width + w` ([`upsample_x2_index`]), so the flat token axis stays a
-/// single axis a later [`conv3x3_same`] can offset.
+/// single axis a later [`window_same`] can offset.
 ///
 /// # Errors
 ///
@@ -417,18 +437,18 @@ pub fn nearest_upsample_x2(
     Ok(gather_leading_axis(program, x, index, 2, dtype))
 }
 
-/// [`conv3x3_same`] with the nine taps contracted in ONE reduce, reading one
-/// `[go, cgo, 3, 3, gi, cgi]` weight and writing ONE output tensor.
+/// [`window_same`] with every tap contracted in ONE reduce, reading one
+/// `[go, cgo, window, window, gi, cgi]` weight and writing ONE output tensor.
 ///
-/// The nine-tap form is nine reduces plus eight adds, which the planner fuses
+/// The per-tap form is one reduce per tap plus the adds, which the planner fuses
 /// into a single kernel whose epilogue carries the eight sibling products --
 /// measured at ~3.4 GB/s while re-reading eight ~1 GB operands per output
 /// element. This form gives the planner nothing to fuse: one reduce, no
 /// epilogue.
 ///
 /// The whole stencil becomes the leading axis of one gathered operand
-/// ([`conv3x3_columns_index`]: nine blocks, block `3 * y + x` the padded grid
-/// shifted to that stencil position, `conv3x3_block_rows` rows each). The reduce
+/// ([`window_taps_index`]: `window * window` blocks, block `window * y + x` the
+/// padded grid shifted to that stencil position, [`window_block_rows`] rows each). The reduce
 /// then keeps `(r, g, c)` and contracts `(t, i, j)` -- the stencil block and the
 /// input channel pair -- addressing that operand as
 /// `block_rows * t + r @ block_rows`. That two-term address is the split
@@ -443,7 +463,7 @@ pub fn nearest_upsample_x2(
 ///
 /// [`TensorError`] when a node is not part of `program`.
 #[allow(clippy::too_many_arguments)]
-pub fn conv3x3_same_three(
+pub fn window_same_one_reduce(
     program: &mut Vec<Op>,
     x: NodeId,
     weight: NodeId,
@@ -451,6 +471,7 @@ pub fn conv3x3_same_three(
     pad_mask: NodeId,
     crop_index: NodeId,
     taps_index: NodeId,
+    window: u32,
 ) -> Result<NodeId, TensorError> {
     let dtype = produced_dtype_or_binary32(program, x);
     let gathered = gather_leading_axis(program, x, pad_index, 2, dtype);
@@ -465,20 +486,18 @@ pub fn conv3x3_same_three(
             (zero, "->rij"),
         ],
     )?;
-    // The stencil staged tap-inner: `[9 * rows, in_g, in_c]` with row `r`'s
-    // nine taps adjacent, so the contraction `(t, i, j)` is contiguous.
+    // The stencil staged tap-inner: `[taps * rows, in_g, in_c]` with row `r`'s
+    // taps adjacent, so the contraction `(t, i, j)` is contiguous.
     let staged = gather_leading_axis(program, padded, taps_index, 2, dtype);
-    // `9 * r + t @ 9`: the outer coefficient equals `t`'s declared length, the
-    // split rule's own reshape form, so `r` and `t` separate again here.
-    let image_map = "9*r+t@9,i,j->rgctij";
+    // `taps * r + t @ taps`: the outer coefficient equals `t`'s declared length,
+    // the split rule's own reshape form, so `r` and `t` separate again here.
+    let taps = window * window;
+    let image_map = format!("{taps}*r+t@{taps},i,j->rgctij");
     let product = elementwise_like(
         program,
         staged,
         ScalarOp::Multiply,
-        &[
-            (staged, image_map),
-            (weight, "g,c,t,i,j->rgctij"),
-        ],
+        &[(staged, image_map.as_str()), (weight, "g,c,t,i,j->rgctij")],
     )?;
     let sum = reduce_like(
         program,
@@ -491,32 +510,48 @@ pub fn conv3x3_same_three(
     Ok(gather_leading_axis(program, sum, crop_index, 2, dtype))
 }
 
-/// One 3x3 stride-1 "same" convolution of `[rows, g, cg]` through nine
-/// `linear`-shaped reduces sharing one `[go, cgo, gi, cgi]` weight, plus the
-/// gather that crops the padding ring back to `height * width` rows.
+/// One stride-1 "same" convolution of `[rows, g, cg]` with an odd square
+/// `window` extent, through `window * window` `linear`-shaped reduces (one per
+/// entry of `weights`, tap-row major) sharing one `[go, cgo, gi, cgi]` weight
+/// each, plus the gather that crops the padding ring back to `height * width`
+/// rows.
 ///
-/// The activation is first gathered onto the `(height + 2) * (width + 2)`-row
-/// grid whose interior holds the image ([`conv3x3_pad_index`]); each tap is
-/// then one reduce whose image operand is a flat `tap_row * (width + 2) +
-/// tap_column` ahead of the output row. The token axis stays a single axis, so
-/// the nine taps keep the contiguous token/feature split the tiled matmul path
-/// admits. The `ones` operand only pins the padded row count and is removed
-/// when the reduce's body is composed.
+/// The activation is first gathered onto the `(height + window - 1) * (width +
+/// window - 1)`-row grid whose interior holds the image ([`window_pad_index`]);
+/// each tap is then one reduce whose image operand is a flat
+/// `tap_row * (width + window - 1) + tap_column` ahead of the output row. The token axis stays a
+/// single axis, so the taps keep the contiguous token/feature split the tiled
+/// matmul path admits. The `ones` operand only pins the padded row count and is
+/// removed when the reduce's body is composed.
 ///
 /// # Errors
 ///
-/// [`TensorError`] when a node is not part of `program`.
+/// [`TensorError`] when a node is not part of `program`, or `weights` does not
+/// hold `window * window` nodes.
 #[allow(clippy::too_many_arguments)]
-pub fn conv3x3_same(
+pub fn window_same(
     program: &mut Vec<Op>,
     x: NodeId,
-    weights: &[NodeId; 9],
+    weights: &[NodeId],
     pad_index: NodeId,
     pad_mask: NodeId,
     crop_index: NodeId,
     height: u32,
     width: u32,
+    window: u32,
 ) -> Result<NodeId, TensorError> {
+    if window == 0 || window.is_multiple_of(2) {
+        return Err(TensorError::NotLowerable {
+            node: x,
+            reason: "window_same needs an odd, nonzero window",
+        });
+    }
+    if weights.len() != (window * window) as usize {
+        return Err(TensorError::NotLowerable {
+            node: x,
+            reason: "window_same needs window * window tap weights",
+        });
+    }
     let dtype = produced_dtype_or_binary32(program, x);
     let gathered = gather_leading_axis(program, x, pad_index, 2, dtype);
     let zero = scalar_constant_like(program, 0.0, x)?;
@@ -530,13 +565,13 @@ pub fn conv3x3_same(
             (zero, "->rij"),
         ],
     )?;
-    let padded_width = width + 2;
-    let out_rows = (height + 2) * padded_width;
+    let padded_width = width + window - 1;
+    let out_rows = (height + window - 1) * padded_width;
     let one = scalar_constant_like(program, 1.0, x)?;
     let mut accumulator: Option<NodeId> = None;
-    for tap_row in 0..3usize {
-        for tap_column in 0..3usize {
-            let offset = tap_row as u32 * padded_width + tap_column as u32;
+    for tap_row in 0..window {
+        for tap_column in 0..window {
+            let offset = tap_row * padded_width + tap_column;
             let image_map = format!("r+{offset}@{out_rows},i,j->rij");
             let shifted = elementwise_like(
                 program,
@@ -550,7 +585,10 @@ pub fn conv3x3_same(
                 ScalarOp::Multiply,
                 &[
                     (shifted, "r,i,j->rgcij"),
-                    (weights[tap_row * 3 + tap_column], "g,c,i,j->rgcij"),
+                    (
+                        weights[(tap_row * window + tap_column) as usize],
+                        "g,c,i,j->rgcij",
+                    ),
                 ],
             )?;
             let tap = reduce_like(
@@ -574,18 +612,18 @@ pub fn conv3x3_same(
     }
     let sum = accumulator.ok_or(TensorError::NotLowerable {
         node: x,
-        reason: "conv3x3_same needs at least one tap",
+        reason: "window_same needs at least one tap",
     })?;
     Ok(gather_leading_axis(program, sum, crop_index, 2, dtype))
 }
 
-/// `y[o] = sum_i x[i] * weight[o, i] + bias[o]`: [`linear`]'s rank-1 form, for
+/// `y[o] = sum_i x[i] * weight[o, i] + bias[o]`: [`project_rows`]'s rank-1 form, for
 /// a checkpoint's modulation/timestep linears whose activation is one vector.
 ///
 /// # Errors
 ///
 /// [`TensorError`] when a node is not part of `program`.
-pub fn matvec(
+pub fn project_vector(
     program: &mut Vec<Op>,
     x: NodeId,
     weight: NodeId,
@@ -616,7 +654,7 @@ pub fn matvec(
     }
 }
 
-/// [`linear`] over an input-column window of `weight`: `x`'s feature axis is
+/// [`project_rows`] over an input-column window of `weight`: `x`'s feature axis is
 /// `input_width` wide and reads the weight's columns `[input_offset,
 /// input_offset + input_width)`. A fused projection whose consumers take
 /// different columns (a residual concatenation) splits here rather than
@@ -625,7 +663,7 @@ pub fn matvec(
 /// # Errors
 ///
 /// [`TensorError`] when a node is not part of `program`.
-pub fn linear_window(
+pub fn project_window(
     program: &mut Vec<Op>,
     x: NodeId,
     weight: NodeId,
@@ -673,20 +711,6 @@ pub fn slice_range(
     )
 }
 
-/// A rank-1 constant leaf of extent 1, the shape a per-row scalar operand
-/// (`eps`) is declared at by the norm builders.
-#[must_use]
-pub fn unit_constant(program: &mut Vec<Op>, value: f32, dtype: DType) -> NodeId {
-    op::append(
-        program,
-        Op::Constant {
-            dtype,
-            shape: alloc::vec![Extent::Static(1)],
-            value,
-        },
-    )
-}
-
 /// Columns `[start, start + width)` of a `[t, c]` node as a `[t, width]` one.
 ///
 /// # Errors
@@ -725,92 +749,97 @@ pub fn slice_rows(
     )
 }
 
-/// [`conv3x3_same`]'s gather index: the `(height + 2) * (width + 2)`-row grid
-/// plus the tail the last tap offset reads past it, entry `r` naming image row
-/// `(row - 1) * width + column - 1` for the interior and the image's last row
-/// everywhere else (the ring's outputs are cropped, so their values are not
-/// part of the result and only the address has to stay in bounds).
+/// [`window_same`]'s gather index: the grid of `(height + window - 1) * (width +
+/// window - 1)` rows plus the tail the last tap offset reads past it, entry `r`
+/// naming the image row under the grid cell for the interior and the image's
+/// last row everywhere else (the ring's outputs are cropped, so their values
+/// are not part of the result and only the address has to stay in bounds).
 #[must_use]
-pub fn conv3x3_pad_rows(height: u32, width: u32) -> u32 {
-    let padded_width = width + 2;
-    (height + 2) * padded_width + 2 * padded_width + 2
+pub fn window_pad_rows(height: u32, width: u32, window: u32) -> u32 {
+    let ring = window - 1;
+    let padded_width = width + ring;
+    (height + ring) * padded_width + ring * padded_width + ring
 }
 
 #[must_use]
-pub fn conv3x3_pad_index(height: u32, width: u32) -> Vec<i32> {
-    let padded_width = width + 2;
-    (0..conv3x3_pad_rows(height, width))
+pub fn window_pad_index(height: u32, width: u32, window: u32) -> Vec<i32> {
+    let lead = (window - 1) / 2;
+    let padded_width = width + window - 1;
+    (0..window_pad_rows(height, width, window))
         .map(|row| {
             let along = row / padded_width;
             let across = row % padded_width;
-            if along == 0 || across == 0 || along > height || across > width {
+            if along < lead || across < lead || along >= height + lead || across >= width + lead {
                 return 0;
             }
-            ((along - 1) * width + across - 1) as i32
+            ((along - lead) * width + across - lead) as i32
         })
         .collect()
 }
 
-/// [`conv3x3_same`]'s zero mask: 1 on the padded grid's interior rows (the
+/// [`window_same`]'s zero mask: 1 on the padded grid's interior rows (the
 /// image) and 0 on the ring, which is what makes the gather a zero pad.
 #[must_use]
-pub fn conv3x3_pad_mask(height: u32, width: u32) -> Vec<i32> {
-    let padded_width = width + 2;
-    (0..conv3x3_pad_rows(height, width))
+pub fn window_pad_mask(height: u32, width: u32, window: u32) -> Vec<i32> {
+    let lead = (window - 1) / 2;
+    let padded_width = width + window - 1;
+    (0..window_pad_rows(height, width, window))
         .map(|row| {
             let along = row / padded_width;
             let across = row % padded_width;
-            let interior = along >= 1 && along <= height && across >= 1 && across <= width;
+            let interior =
+                along >= lead && along < height + lead && across >= lead && across < width + lead;
             i32::from(interior)
         })
         .collect()
 }
 
-/// [`conv3x3_same`]'s crop index: the `height * width` output rows that hold
+/// [`window_same`]'s crop index: the `height * width` output rows that hold
 /// the image's own window of the padded grid.
 #[must_use]
-pub fn conv3x3_crop_index(height: u32, width: u32) -> Vec<i32> {
-    let padded_width = width + 2;
+pub fn window_crop_index(height: u32, width: u32, window: u32) -> Vec<i32> {
+    let padded_width = width + window - 1;
     (0..height * width)
         .map(|row| ((row / width) * padded_width + row % width) as i32)
         .collect()
 }
 
-/// [`conv3x3_same_three`]'s tap index: the padded grid staged with the tap axis
-/// **inside** the row axis, `(row, tap)` flattened row-major, so each output
-/// row's nine stencil positions are adjacent in memory and the reduce's
+/// [`window_same_one_reduce`]'s tap index: the padded grid staged with the tap
+/// axis **inside** the row axis, `(row, tap)` flattened row-major, so each
+/// output row's stencil positions are adjacent in memory and the reduce's
 /// contraction `(t, i, j)` is one contiguous run.
 ///
-/// Entry `row * 9 + t` names source row `row + y * (width + 2) + x` for
-/// `t = 3 * y + x`. The gather itself produces a rank-1-axis view
-/// (`[9 * rows, in_g, in_c]`); the reduce un-flattens it with
-/// `9 * r + t @ 9`, which the split rule
+/// With `taps = window * window`, entry `row * taps + t` names source row `row
+/// + y * (width + window - 1) + x` for `t = window * y + x`. The gather itself
+/// produces a rank-1-axis view (`[taps * rows, in_g, in_c]`); the reduce
+/// un-flattens it with `taps * r + t @ taps`, which the split rule
 /// (`AxisIndex::split_outer_axis`: the outer term's coefficient equals the
 /// inner axis's declared `len`) recognises, so `r` comes back as the row axis
-/// and `t` as the nine-wide tap axis without a second op.
+/// and `t` as the tap axis without a second op.
 ///
 /// The *order* is the whole point: staging the taps row-inner rather than
 /// block-major is what makes the contraction contiguous in the activation, and
 /// a strided contraction is what keeps a reduce off the K-tiled GEMM and on the
 /// per-element kernel (measured at ~3.4 GB/s in this decoder's profile).
 #[must_use]
-pub fn conv3x3_taps_index(height: u32, width: u32) -> Vec<i32> {
-    let padded_width = width + 2;
-    let rows = conv3x3_block_rows(height, width);
-    (0..9 * rows)
+pub fn window_taps_index(height: u32, width: u32, window: u32) -> Vec<i32> {
+    let padded_width = width + window - 1;
+    let taps = window * window;
+    let rows = window_block_rows(height, width, window);
+    (0..taps * rows)
         .map(|index| {
-            let row = index / 9;
-            let tap = index % 9;
-            (row + (tap / 3) * padded_width + tap % 3) as i32
+            let row = index / taps;
+            let tap = index % taps;
+            (row + (tap / window) * padded_width + tap % window) as i32
         })
         .collect()
 }
 
-/// Rows one [`conv3x3_taps_index`] output row's tap run spans: the padded
+/// Rows one [`window_taps_index`] output row's tap run spans: the padded
 /// output rows, one per stencil position (the shift lives in the gather).
 #[must_use]
-pub fn conv3x3_block_rows(height: u32, width: u32) -> u32 {
-    (height + 2) * (width + 2)
+pub fn window_block_rows(height: u32, width: u32, window: u32) -> u32 {
+    (height + window - 1) * (width + window - 1)
 }
 
 /// [`nearest_upsample_x2`]'s gather index for a `height` x `width` image:
@@ -1904,4 +1933,65 @@ pub fn non_causal_attention_heads(
         ScalarOp::Identity,
         &[(attended, attended_order.as_str())],
     )
+}
+
+#[cfg(test)]
+mod window_and_group_norm_tests {
+    use super::*;
+
+    fn host_dtype() -> DType {
+        NumericFormat::host_element()
+            .to_dtype()
+            .expect("the host element is a scalar dtype")
+    }
+
+    fn leaf(program: &mut Vec<Op>, name: &str) -> NodeId {
+        input_leaf(program, host_dtype(), alloc::vec![Extent::Static(4)], name)
+    }
+
+    #[test]
+    fn window_same_rejects_a_zero_and_an_even_window() {
+        for window in [0_u32, 2] {
+            let mut program = Vec::new();
+            let x = leaf(&mut program, "x");
+            let weights = alloc::vec![x; (window * window) as usize];
+
+            let built = window_same(&mut program, x, &weights, x, x, x, 2, 2, window);
+
+            assert!(
+                matches!(built, Err(TensorError::NotLowerable { .. })),
+                "window {window} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn group_norm_inverse_count_is_the_host_reciprocal_bit_for_bit() {
+        let count = 8_u32;
+        let mut program = Vec::new();
+        let x = leaf(&mut program, "x");
+        let weight = leaf(&mut program, "weight");
+        let bias = leaf(&mut program, "bias");
+        let eps = scalar_constant_like(&mut program, 1e-6, x).expect("eps builds");
+        let before = program.len();
+        let probe = PackedRows::from_values(&NumericFormat::host_element(), &[count as _])
+            .expect("host element encodes the count");
+        let mut decoded = Vec::new();
+        probe.decode_all(&mut decoded).expect("count decodes");
+        let expected = (1.0 / decoded[0]).to_bits();
+
+        group_norm(&mut program, x, weight, bias, count, eps).expect("group norm builds");
+
+        let constants: Vec<_> = program[before..]
+            .iter()
+            .filter_map(|op| match op {
+                Op::Constant { shape, value, .. } if shape.is_empty() => Some(value.to_bits()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(constants, [expected]);
+        assert!(program[before..].iter().all(
+            |op| !matches!(op, Op::Constant { dtype, .. } if *dtype != host_dtype())
+        ));
+    }
 }

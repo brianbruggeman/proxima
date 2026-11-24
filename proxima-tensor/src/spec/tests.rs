@@ -25025,9 +25025,8 @@ mod per_layer_rope {
 }
 
 #[cfg(test)]
-#[cfg(test)]
 mod conv_direct_loop {
-    //! [`conv3x3_same`] against a direct Rust loop on the same weights.
+    //! [`window_same`] against a direct Rust loop on the same weights.
     //!
     //! The direct loop is the specification, written from the definition and not
     //! from the lowering: zero-pad by one pixel, then for each output pixel and
@@ -25039,7 +25038,8 @@ mod conv_direct_loop {
 
     use alloc::vec::Vec;
 
-    use proxima_numeric::DType;
+    use proxima_numeric::float_layout::NAMED_LAYOUTS;
+    use proxima_numeric::{DType, NumericFormat, PackedRows, Philox};
 
     use super::*;
     use crate::QuantizedBlock;
@@ -25051,28 +25051,56 @@ mod conv_direct_loop {
     const IN_C: usize = 3;
     const OUT_G: usize = 2;
     const OUT_C: usize = 2;
+    const IMAGE_SEED: u64 = 17;
+    const KERNEL_SEED: u64 = 53;
 
-    fn image() -> Vec<f32> {
-        (0..HEIGHT * WIDTH * IN_G * IN_C)
-            .map(|index| ((index * 37 % 101) as f32 - 50.0) / 17.0)
-            .collect()
+    /// The dtype of the activations: the element the slice decoders emit.
+    fn activation_dtype() -> DType {
+        NumericFormat::host_element()
+            .to_dtype()
+            .expect("the host element is a scalar")
+    }
+
+    /// The dtype of the index vectors, which hold `i32`s: the signed integer
+    /// layout of the same width.
+    fn index_dtype() -> DType {
+        NAMED_LAYOUTS
+            .iter()
+            .map(|(layout, _)| DType::Layout(*layout))
+            .find(|dtype| {
+                dtype.is_signed_integer() && dtype.size_bytes() == core::mem::size_of::<i32>()
+            })
+            .expect("a signed integer layout holds an index")
+    }
+
+    fn image() -> PackedRows {
+        let values = Philox::new(IMAGE_SEED).normal(HEIGHT * WIDTH * IN_G * IN_C);
+        PackedRows::from_values(&NumericFormat::host_element(), &values).expect("the image encodes")
     }
 
     /// `[og, oc, y, x, ig, ic]`.
-    fn kernel() -> Vec<f32> {
-        (0..OUT_G * OUT_C * 9 * IN_G * IN_C)
-            .map(|index| ((index * 53 % 97) as f32 - 48.0) / 23.0)
-            .collect()
+    fn kernel() -> PackedRows {
+        let values = Philox::new(KERNEL_SEED).normal(OUT_G * OUT_C * 9 * IN_G * IN_C);
+        PackedRows::from_values(&NumericFormat::host_element(), &values)
+            .expect("the kernel encodes")
     }
 
     /// The definition, on `[row, g, c]` activations.
-    fn direct(image: &[f32], kernel: &[f32]) -> Vec<f32> {
-        let mut out = alloc::vec![0.0f32; HEIGHT * WIDTH * OUT_G * OUT_C];
+    fn direct(image: &PackedRows, kernel: &PackedRows) -> PackedRows {
+        let (mut image_values, mut kernel_values) = (Vec::new(), Vec::new());
+        image
+            .decode_all(&mut image_values)
+            .expect("the image decodes");
+        kernel
+            .decode_all(&mut kernel_values)
+            .expect("the kernel decodes");
+        let (image, kernel) = (image_values, kernel_values);
+        let mut out = alloc::vec![0.0; HEIGHT * WIDTH * OUT_G * OUT_C];
         for row in 0..HEIGHT {
             for column in 0..WIDTH {
                 for og in 0..OUT_G {
                     for oc in 0..OUT_C {
-                        let mut sum = 0.0f32;
+                        let mut sum = 0.0;
                         for y in 0..3usize {
                             for x in 0..3usize {
                                 let (source_row, source_column) = (row + y, column + x);
@@ -25102,49 +25130,50 @@ mod conv_direct_loop {
                 }
             }
         }
-        out
+        PackedRows::from_values(&NumericFormat::host_element(), &out)
+            .expect("the reference encodes")
     }
 
     fn index_leaf(program: &mut Vec<Op>, name: &str, values: &[i32]) -> NodeId {
         input_leaf(
             program,
-            DType::INT32,
+            index_dtype(),
             alloc::vec![Extent::Static(values.len() as u32)],
             name,
         )
     }
 
-    fn f32_leaf(program: &mut Vec<Op>, name: &str, shape: &[u32]) -> NodeId {
+    fn activation_leaf(program: &mut Vec<Op>, name: &str, shape: &[u32]) -> NodeId {
         input_leaf(
             program,
-            DType::FLOAT32,
+            activation_dtype(),
             shape.iter().map(|&size| Extent::Static(size)).collect(),
             name,
         )
     }
 
     /// Runs one of the two lowerings and returns its `[rows, og, oc]` output.
-    fn run(three: bool) -> Vec<f32> {
+    fn run(three: bool) -> PackedRows {
         let rows = (HEIGHT * WIDTH) as u32;
         let mut program = Vec::new();
-        let activation = f32_leaf(&mut program, "image", &[rows, IN_G as u32, IN_C as u32]);
+        let activation = activation_leaf(&mut program, "image", &[rows, IN_G as u32, IN_C as u32]);
         let pad_index = index_leaf(
             &mut program,
             "pad.index",
-            &conv3x3_pad_index(HEIGHT as u32, WIDTH as u32),
+            &window_pad_index(HEIGHT as u32, WIDTH as u32, 3),
         );
-        let pad_mask = f32_leaf(
+        let pad_mask = activation_leaf(
             &mut program,
             "pad.mask",
-            &[conv3x3_pad_rows(HEIGHT as u32, WIDTH as u32)],
+            &[window_pad_rows(HEIGHT as u32, WIDTH as u32, 3)],
         );
         let crop_index = index_leaf(
             &mut program,
             "crop.index",
-            &conv3x3_crop_index(HEIGHT as u32, WIDTH as u32),
+            &window_crop_index(HEIGHT as u32, WIDTH as u32, 3),
         );
         let root = if three {
-            let weight = f32_leaf(
+            let weight = activation_leaf(
                 &mut program,
                 "kernel",
                 &[OUT_G as u32, OUT_C as u32, 9, IN_G as u32, IN_C as u32],
@@ -25152,9 +25181,9 @@ mod conv_direct_loop {
             let columns_index = index_leaf(
                 &mut program,
                 "columns.index",
-                &conv3x3_taps_index(HEIGHT as u32, WIDTH as u32),
+                &window_taps_index(HEIGHT as u32, WIDTH as u32, 3),
             );
-            conv3x3_same_three(
+            window_same_one_reduce(
                 &mut program,
                 activation,
                 weight,
@@ -25162,20 +25191,21 @@ mod conv_direct_loop {
                 pad_mask,
                 crop_index,
                 columns_index,
+                3,
             )
             .expect("the three-block convolution builds")
         } else {
             let mut taps = [NodeId(0); 9];
             for tap_row in 0..3u32 {
                 for tap_column in 0..3u32 {
-                    taps[(tap_row * 3 + tap_column) as usize] = f32_leaf(
+                    taps[(tap_row * 3 + tap_column) as usize] = activation_leaf(
                         &mut program,
                         &alloc::format!("kernel.tap{tap_row}.{tap_column}"),
                         &[OUT_G as u32, OUT_C as u32, IN_G as u32, IN_C as u32],
                     );
                 }
             }
-            conv3x3_same(
+            window_same(
                 &mut program,
                 activation,
                 &taps,
@@ -25184,14 +25214,20 @@ mod conv_direct_loop {
                 crop_index,
                 HEIGHT as u32,
                 WIDTH as u32,
+                3,
             )
             .expect("the nine-tap convolution builds")
         };
 
-        let image = image();
-        let kernel = kernel();
+        let (mut image, mut kernel) = (Vec::new(), Vec::new());
+        self::image()
+            .decode_all(&mut image)
+            .expect("the image decodes");
+        self::kernel()
+            .decode_all(&mut kernel)
+            .expect("the kernel decodes");
         // Each tap leaf holds one `[og, oc, ig, ic]` kernel position.
-        let tap_values: Vec<Vec<f32>> = (0..9)
+        let tap_values: Vec<Vec<_>> = (0..9)
             .map(|tap| {
                 let (y, x) = (tap / 3, tap % 3);
                 let mut values = Vec::with_capacity(OUT_G * OUT_C * IN_G * IN_C);
@@ -25209,37 +25245,28 @@ mod conv_direct_loop {
                 values
             })
             .collect();
-        let mask: Vec<f32> = conv3x3_pad_mask(HEIGHT as u32, WIDTH as u32)
+        let mask: Vec<_> = window_pad_mask(HEIGHT as u32, WIDTH as u32, 3)
             .into_iter()
-            .map(|value| value as f32)
+            .map(|value| i16::try_from(value).expect("a mask entry is small").into())
             .collect();
-        let pad_index_values: Vec<f32> = conv3x3_pad_index(HEIGHT as u32, WIDTH as u32)
-            .into_iter()
-            .map(|value| value as f32)
-            .collect();
-        let crop_index_values: Vec<f32> = conv3x3_crop_index(HEIGHT as u32, WIDTH as u32)
-            .into_iter()
-            .map(|value| value as f32)
-            .collect();
+        let pad_index_values = window_pad_index(HEIGHT as u32, WIDTH as u32, 3);
+        let crop_index_values = window_crop_index(HEIGHT as u32, WIDTH as u32, 3);
         let tap_names: Vec<alloc::string::String> = (0..9)
             .map(|tap| alloc::format!("kernel.tap{}.{}", tap / 3, tap % 3))
             .collect();
         let mut blocks: Vec<(&str, QuantizedBlock)> = alloc::vec![
-            ("image", QuantizedBlock::Float32(&image)),
-            ("pad.index", QuantizedBlock::Float32(&pad_index_values)),
-            ("pad.mask", QuantizedBlock::Float32(&mask)),
-            ("crop.index", QuantizedBlock::Float32(&crop_index_values)),
+            ("image", QuantizedBlock::from(image.as_slice())),
+            ("pad.index", QuantizedBlock::Int32(&pad_index_values)),
+            ("pad.mask", QuantizedBlock::from(mask.as_slice())),
+            ("crop.index", QuantizedBlock::Int32(&crop_index_values)),
         ];
-        let columns: Vec<f32> = conv3x3_taps_index(HEIGHT as u32, WIDTH as u32)
-            .into_iter()
-            .map(|value| value as f32)
-            .collect();
+        let columns = window_taps_index(HEIGHT as u32, WIDTH as u32, 3);
         if three {
-            blocks.push(("kernel", QuantizedBlock::Float32(&kernel)));
-            blocks.push(("columns.index", QuantizedBlock::Float32(&columns)));
+            blocks.push(("kernel", QuantizedBlock::from(kernel.as_slice())));
+            blocks.push(("columns.index", QuantizedBlock::Int32(&columns)));
         } else {
             for (name, values) in tap_names.iter().zip(&tap_values) {
-                blocks.push((name.as_str(), QuantizedBlock::Float32(values)));
+                blocks.push((name.as_str(), QuantizedBlock::from(values.as_slice())));
             }
         }
 
@@ -25254,41 +25281,53 @@ mod conv_direct_loop {
             &mut validated,
         )
         .expect("the convolution evaluates on the CPU");
-        evaluated.get(root).expect("the root is returned").0.to_vec()
+        let values = evaluated
+            .get(root)
+            .expect("the root is returned")
+            .0
+            .to_vec();
+        PackedRows::from_values(&NumericFormat::host_element(), &values)
+            .expect("the output encodes")
     }
 
-    fn worst_difference(left: &[f32], right: &[f32]) -> f32 {
-        left.iter()
-            .zip(right)
+    /// Asserts the worst element-wise gap between two runs stays inside the
+    /// summation-order rounding of a 54-term dot product.
+    fn assert_agree(left: &PackedRows, right: &PackedRows, what: &str) {
+        let (mut left_values, mut right_values) = (Vec::new(), Vec::new());
+        left.decode_all(&mut left_values)
+            .expect("the left run decodes");
+        right
+            .decode_all(&mut right_values)
+            .expect("the right run decodes");
+        assert_eq!(left_values.len(), right_values.len(), "shape");
+        let worst = left_values
+            .iter()
+            .zip(&right_values)
             .map(|(left, right)| (left - right).abs())
-            .fold(0.0f32, f32::max)
+            .fold(0.0, |worst, gap| if gap > worst { gap } else { worst });
+        assert!(worst < 1e-5, "{what} differs by {worst}");
     }
 
     #[test]
     fn the_nine_tap_convolution_reproduces_the_direct_loop() {
         let want = direct(&image(), &kernel());
         let got = run(false);
-        assert_eq!(got.len(), want.len(), "shape");
+        let mut wanted = Vec::new();
+        want.decode_all(&mut wanted).expect("the reference decodes");
         assert!(
-            want.iter().any(|value| value.abs() > 1.0),
+            wanted.iter().any(|value| value.abs() > 1.0),
             "a vacuous reference proves nothing"
         );
-        let worst = worst_difference(&got, &want);
-        assert!(
-            worst < 1e-5,
-            "the nine-tap lowering differs from the definition by {worst}"
-        );
+        assert_agree(&got, &want, "the nine-tap lowering against the definition");
     }
 
     #[test]
     fn the_three_block_convolution_reproduces_the_direct_loop() {
         let want = direct(&image(), &kernel());
-        let got = run(true);
-        assert_eq!(got.len(), want.len(), "shape");
-        let worst = worst_difference(&got, &want);
-        assert!(
-            worst < 1e-5,
-            "the three-block lowering differs from the definition by {worst}"
+        assert_agree(
+            &run(true),
+            &want,
+            "the three-block lowering against the definition",
         );
     }
 
@@ -25300,23 +25339,23 @@ mod conv_direct_loop {
     fn the_three_block_reduce_iterates_its_contraction_not_its_operand() {
         let rows = (HEIGHT * WIDTH) as u32;
         let mut program = Vec::new();
-        let activation = f32_leaf(&mut program, "image", &[rows, IN_G as u32, IN_C as u32]);
+        let activation = activation_leaf(&mut program, "image", &[rows, IN_G as u32, IN_C as u32]);
         let pad_index = index_leaf(
             &mut program,
             "pad.index",
-            &conv3x3_pad_index(HEIGHT as u32, WIDTH as u32),
+            &window_pad_index(HEIGHT as u32, WIDTH as u32, 3),
         );
-        let pad_mask = f32_leaf(
+        let pad_mask = activation_leaf(
             &mut program,
             "pad.mask",
-            &[conv3x3_pad_rows(HEIGHT as u32, WIDTH as u32)],
+            &[window_pad_rows(HEIGHT as u32, WIDTH as u32, 3)],
         );
         let crop_index = index_leaf(
             &mut program,
             "crop.index",
-            &conv3x3_crop_index(HEIGHT as u32, WIDTH as u32),
+            &window_crop_index(HEIGHT as u32, WIDTH as u32, 3),
         );
-        let weight = f32_leaf(
+        let weight = activation_leaf(
             &mut program,
             "kernel",
             &[OUT_G as u32, OUT_C as u32, 9, IN_G as u32, IN_C as u32],
@@ -25324,10 +25363,10 @@ mod conv_direct_loop {
         let columns_index = index_leaf(
             &mut program,
             "columns.index",
-            &conv3x3_taps_index(HEIGHT as u32, WIDTH as u32),
+            &window_taps_index(HEIGHT as u32, WIDTH as u32, 3),
         );
         let start = program.len();
-        let _root = conv3x3_same_three(
+        let _root = window_same_one_reduce(
             &mut program,
             activation,
             weight,
@@ -25335,6 +25374,7 @@ mod conv_direct_loop {
             pad_mask,
             crop_index,
             columns_index,
+            3,
         )
         .expect("the three-block convolution builds");
         let shapes = crate::shape::infer(&program, &[]).expect("the program infers");
@@ -25353,7 +25393,6 @@ mod conv_direct_loop {
 
     #[test]
     fn the_two_forms_agree_with_each_other() {
-        let worst = worst_difference(&run(true), &run(false));
-        assert!(worst < 1e-5, "the two forms differ by {worst}");
+        assert_agree(&run(true), &run(false), "the two forms");
     }
 }

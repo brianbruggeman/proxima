@@ -5,55 +5,107 @@
 
 use std::path::Path;
 
-/// A decoded image: interleaved channels in `[0, 1]`, row-major from the top.
+use proxima_numeric::{NumericFormat, PackedRows};
+
+/// A decoded image: interleaved channels as codes of the sample format,
+/// row-major from the top.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PngImage {
     pub width: u32,
     pub height: u32,
     pub channels: u8,
-    pub pixels: Vec<f32>,
+    pub pixels: PackedRows,
 }
 
-/// Encodes `pixels` (interleaved `channels` per pixel, `[0, 1]`) as a PNG.
+const BITS_PER_BYTE: usize = 8;
+
+/// Whether `sample` is a one-byte unsigned integer, the only sample this codec's all-ones full
+/// scale, scanline filters and byte-wide IHDR bit depth are correct for.
+#[must_use]
+pub fn is_supported_sample(sample: &NumericFormat) -> bool {
+    sample.is_integer()
+        && !sample.is_signed_integer()
+        && sample.size_bytes() == 1
+        && sample.bits() == BITS_PER_BYTE
+}
+
+fn require_sample(sample: &NumericFormat) -> Result<u8, String> {
+    if !is_supported_sample(sample) {
+        return Err(String::from("png samples must be a one-byte unsigned integer format"));
+    }
+    u8::try_from(sample.size_bytes() * BITS_PER_BYTE).map_err(|why| why.to_string())
+}
+
+/// One sample at its format's largest code, decoded: the divisor that maps a
+/// stored code onto `[0, 1]` and the multiplier that maps `[0, 1]` onto codes.
+///
+/// # Errors
+///
+/// A message when the format has no codec.
+pub fn full_scale(sample: &NumericFormat) -> Result<PackedRows, String> {
+    PackedRows::from_bytes(sample, vec![0xff; sample.size_bytes()]).map_err(|why| why.to_string())
+}
+
+/// Encodes `pixels` (interleaved `channels` per pixel, `[0, 1]`) as a PNG whose
+/// samples are stored in `sample`.
 ///
 /// # Errors
 ///
 /// A message naming the path and the failure when the file cannot be written
 /// or the dimensions do not match the buffer.
-pub fn write_png(path: &Path, width: u32, height: u32, channels: u8, pixels: &[f32]) -> Result<(), String> {
+pub fn write_png(
+    path: &Path,
+    width: u32,
+    height: u32,
+    channels: u8,
+    pixels: &PackedRows,
+    sample: &NumericFormat,
+) -> Result<(), String> {
+    let bit_depth = require_sample(sample)?;
     if !matches!(channels, 3 | 4) {
         return Err(format!("{channels} channels is not RGB or RGBA"));
     }
-    if pixels.len() != (width as usize) * (height as usize) * channels as usize {
+    if pixels.elements() != (width as usize) * (height as usize) * channels as usize {
         return Err(String::from("pixel buffer does not match the dimensions"));
     }
-    let stride = width as usize * channels as usize;
+    let mut scale = Vec::new();
+    full_scale(sample)?
+        .decode_all(&mut scale)
+        .map_err(|why| why.to_string())?;
+    let mut wide = Vec::new();
+    pixels
+        .decode_all(&mut wide)
+        .map_err(|why| why.to_string())?;
+    for value in &mut wide {
+        *value = (value.clamp(0.0, 1.0) * scale[0]).round();
+    }
+    let codes = PackedRows::from_values(sample, &wide).map_err(|why| why.to_string())?;
+    let stride = width as usize * channels as usize * sample.size_bytes();
     let mut raw = Vec::with_capacity((stride + 1) * height as usize);
-    for row in pixels.chunks(stride) {
+    for row in codes.as_bytes().chunks(stride) {
         raw.push(0);
-        for &value in row {
-            raw.push((value.clamp(0.0, 1.0) * 255.0).round() as u8);
-        }
+        raw.extend_from_slice(row);
     }
     let mut encoded = Vec::new();
     encoded.extend_from_slice(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
     let mut header = Vec::with_capacity(13);
     header.extend_from_slice(&width.to_be_bytes());
     header.extend_from_slice(&height.to_be_bytes());
-    header.extend_from_slice(&[8, if channels == 3 { 2 } else { 6 }, 0, 0, 0]);
+    header.extend_from_slice(&[bit_depth, if channels == 3 { 2 } else { 6 }, 0, 0, 0]);
     push_chunk(&mut encoded, b"IHDR", &header);
     push_chunk(&mut encoded, b"IDAT", &zlib_stored(&raw));
     push_chunk(&mut encoded, b"IEND", &[]);
     std::fs::write(path, encoded).map_err(|why| format!("{}: {why}", path.display()))
 }
 
-/// Reads an 8-bit RGB/RGBA PNG into `[0, 1]` samples.
+/// Reads a PNG whose bit depth is `sample`'s width, RGB/RGBA, into `sample` codes.
 ///
 /// # Errors
 ///
 /// A message naming the path when it is unreadable, and the unsupported
 /// feature when the file uses one this reader does not cover.
-pub fn read_png(path: &Path) -> Result<PngImage, String> {
+pub fn read_png(path: &Path, sample: &NumericFormat) -> Result<PngImage, String> {
+    let expected_depth = require_sample(sample)?;
     let bytes = std::fs::read(path).map_err(|why| format!("{}: {why}", path.display()))?;
     if bytes.len() < 8 || bytes[..8] != [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a] {
         return Err(format!("{}: not a PNG", path.display()));
@@ -72,9 +124,9 @@ pub fn read_png(path: &Path) -> Result<PngImage, String> {
                 let bit_depth = body[8];
                 let colour = body[9];
                 let interlace = body[12];
-                if bit_depth != 8 || interlace != 0 || !matches!(colour, 2 | 6) {
+                if bit_depth != expected_depth || interlace != 0 || !matches!(colour, 2 | 6) {
                     return Err(format!(
-                        "{}: only 8-bit non-interlaced RGB/RGBA is read (depth {bit_depth}, colour {colour}, interlace {interlace})",
+                        "{}: only {expected_depth}-bit non-interlaced RGB/RGBA is read (depth {bit_depth}, colour {colour}, interlace {interlace})",
                         path.display()
                     ));
                 }
@@ -89,24 +141,24 @@ pub fn read_png(path: &Path) -> Result<PngImage, String> {
         offset += 12 + length;
     }
     let raw = inflate(&compressed).ok_or_else(|| format!("{}: corrupt deflate stream", path.display()))?;
-    let stride = width as usize * channels as usize;
+    let pixel_bytes = channels as usize * sample.size_bytes();
+    let stride = width as usize * pixel_bytes;
     if raw.len() != (stride + 1) * height as usize {
         return Err(format!("{}: unexpected data length {}", path.display(), raw.len()));
     }
-    let mut pixels = vec![0.0f32; stride * height as usize];
+    let mut codes = Vec::with_capacity(stride * height as usize);
     let mut previous = vec![0u8; stride];
     let mut current = vec![0u8; stride];
     for row in 0..height as usize {
         let start = row * (stride + 1);
         let filter = raw[start];
         current.copy_from_slice(&raw[start + 1..start + 1 + stride]);
-        unfilter(filter, channels as usize, &mut current, &previous)
+        unfilter(filter, pixel_bytes, &mut current, &previous)
             .ok_or_else(|| format!("{}: filter {filter} is not supported", path.display()))?;
-        for (index, value) in current.iter().enumerate() {
-            pixels[row * stride + index] = f32::from(*value) / 255.0;
-        }
+        codes.extend_from_slice(&current);
         previous.copy_from_slice(&current);
     }
+    let pixels = PackedRows::from_bytes(sample, codes).map_err(|why| why.to_string())?;
     Ok(PngImage {
         width,
         height,

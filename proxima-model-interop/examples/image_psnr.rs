@@ -6,7 +6,8 @@
 //! the full `1.0` scale the spec's gates are stated on, and exits non-zero below
 //! the 22.0 dB gate.
 
-use proxima_model_interop::diffusion::{PngImage, read_png};
+use proxima_model_interop::diffusion::{DiffusionSettings, PngImage, full_scale, read_png};
+use proxima_numeric::NumericFormat;
 
 fn main() {
     let mut arguments = std::env::args().skip(1);
@@ -14,14 +15,15 @@ fn main() {
         eprintln!("usage: image_psnr <reference.png> <actual.png>");
         std::process::exit(64);
     };
-    let reference = match read_png(reference.as_ref()) {
+    let sample = DiffusionSettings::resolved().png_sample;
+    let reference = match read_png(reference.as_ref(), &sample) {
         Ok(image) => image,
         Err(why) => {
             eprintln!("{why}");
             std::process::exit(1);
         }
     };
-    let actual = match read_png(actual.as_ref()) {
+    let actual = match read_png(actual.as_ref(), &sample) {
         Ok(image) => image,
         Err(why) => {
             eprintln!("{why}");
@@ -33,13 +35,11 @@ fn main() {
         reference.width, reference.height, reference.channels,
         actual.width, actual.height, actual.channels
     );
-    match psnr(&actual, &reference) {
-        Ok((signal, rms)) => {
-            eprintln!("rms={rms:.6} psnr={signal:.2} dB");
-            if signal < 22.0 {
-                eprintln!("below the 22.0 dB gate");
-                std::process::exit(2);
-            }
+    match psnr(&actual, &reference, &sample) {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!("below the 22.0 dB gate");
+            std::process::exit(2);
         }
         Err(why) => {
             eprintln!("{why}");
@@ -48,20 +48,39 @@ fn main() {
     }
 }
 
-fn psnr(actual: &PngImage, reference: &PngImage) -> Result<(f64, f64), String> {
+fn psnr(actual: &PngImage, reference: &PngImage, sample: &NumericFormat) -> Result<bool, String> {
     if (actual.width, actual.height, actual.channels)
         != (reference.width, reference.height, reference.channels)
     {
         return Err(String::from("images differ in size or channel count"));
     }
-    let mut error = 0.0f64;
-    for (&got, &want) in actual.pixels.iter().zip(&reference.pixels) {
-        let difference = f64::from(got) - f64::from(want);
+    let mut scale = Vec::new();
+    full_scale(sample)?
+        .decode_all(&mut scale)
+        .map_err(|why| why.to_string())?;
+    let mut got = Vec::new();
+    actual
+        .pixels
+        .decode_all(&mut got)
+        .map_err(|why| why.to_string())?;
+    let mut want = Vec::new();
+    reference
+        .pixels
+        .decode_all(&mut want)
+        .map_err(|why| why.to_string())?;
+    let mut error = scale[0] * 0.0;
+    let mut count = error;
+    for (&left, &right) in got.iter().zip(&want) {
+        let difference = left / scale[0] - right / scale[0];
         error += difference * difference;
+        count += 1.0;
     }
-    let rms = (error / actual.pixels.len() as f64).sqrt();
+    let rms = (error / count).sqrt();
     if rms == 0.0 {
-        return Ok((f64::INFINITY, 0.0));
+        eprintln!("rms=0.000000 psnr=inf dB");
+        return Ok(true);
     }
-    Ok((20.0 * (1.0 / rms).log10(), rms))
+    let signal = 20.0 * rms.recip().log10();
+    eprintln!("rms={rms:.6} psnr={signal:.2} dB");
+    Ok(signal >= 22.0)
 }

@@ -329,7 +329,10 @@ fn a_half_width_checkpoint_forwards_the_logits_of_the_reference_width_one() {
         .filter_map(NumericFormat::to_dtype)
         .filter(|dtype| dtype.is_float() && dtype.size_bytes() == 2)
         .collect();
-    assert!(!half_width.is_empty(), "the numeric registry names half-width floats");
+    assert!(
+        !half_width.is_empty(),
+        "the numeric registry names narrow activation formats"
+    );
     for dtype in half_width {
         let bytes = dense_safetensors_as(dtype);
         let manifest = proxima_safetensors::parse_complete(&bytes).expect("parse the fixture");
@@ -341,7 +344,7 @@ fn a_half_width_checkpoint_forwards_the_logits_of_the_reference_width_one() {
             dense_architecture(),
             byte_vocab(),
         )
-        .expect("load the half-width model");
+        .expect("load the narrow-format model");
         assert_eq!(logits_of(&model), reference, "{dtype:?} logits");
     }
 }

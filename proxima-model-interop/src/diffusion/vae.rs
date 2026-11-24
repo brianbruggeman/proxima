@@ -2,15 +2,17 @@
 //! convolutions, 32-group normalisation, nearest-x2 upsampling and one
 //! single-head non-causal attention at the latent resolution.
 
+use proxima_numeric::PackedRows;
 use proxima_tensor::TensorError;
 use proxima_tensor::op::NodeId;
 use proxima_tensor::spec::{
-    conv3x3_crop_index, conv3x3_pad_index, conv3x3_pad_mask, conv3x3_pad_rows, conv3x3_same,
-    conv3x3_same_three, conv3x3_taps_index, group_norm, nearest_upsample_x2,
-    non_causal_attention_heads, scalar_constant_like, silu, unit_constant, upsample_x2_index,
+    group_norm, nearest_upsample_x2, non_causal_attention_heads, scalar_constant_like, silu,
+    upsample_x2_index, window_crop_index, window_pad_index, window_pad_mask, window_pad_rows,
+    window_same, window_same_one_reduce, window_taps_index,
 };
 
 use super::Graph;
+use super::dit::inverse_root_constant;
 
 /// How a 3x3 convolution's nine kernel positions reach the reduce.
 ///
@@ -71,9 +73,10 @@ pub struct VaeConfig {
     pub width: u32,
     /// Which 3x3 lowering to emit ([`ConvTaps`]).
     pub conv_taps: ConvTaps,
+    /// The convolution kernel's square extent, read from a conv weight's
+    /// `[out, in, kh, kw]` shape ([`super::Checkpoint::window_extent`]).
+    pub window: u32,
 }
-
-const GROUP_EPS: f32 = 1e-6;
 
 fn norm(
     graph: &mut Graph,
@@ -87,14 +90,15 @@ fn norm(
     let group_width = channels / groups;
     let weight = graph.weight(&format!("{tensor}.weight"), &[groups, group_width], None);
     let bias = graph.weight(&format!("{tensor}.bias"), &[groups, group_width], None);
-    let normed = group_norm(
-        &mut graph.program,
-        x,
-        weight,
-        bias,
-        rows * group_width,
-        GROUP_EPS,
-    )?;
+    let eps_value = graph
+        .settings()
+        .group_eps()
+        .map_err(|_| TensorError::NotLowerable {
+            node: x,
+            reason: "group_eps is not a number",
+        })?;
+    let eps = scalar_constant_like(&mut graph.program, eps_value, x)?;
+    let normed = group_norm(&mut graph.program, x, weight, bias, rows * group_width, eps)?;
     graph.record_step(format!("group_norm:{tensor}"), start);
     Ok(normed)
 }
@@ -117,8 +121,9 @@ fn conv(
     grid: (u32, u32),
     channels: (u32, u32),
     groups: (u32, u32),
-    tap_form: ConvTaps,
+    config: &VaeConfig,
 ) -> Result<NodeId, TensorError> {
+    let window = config.window;
     let (height, width) = grid;
     let (in_channels, out_channels) = channels;
     let (in_groups, out_groups) = groups;
@@ -136,36 +141,37 @@ fn conv(
     );
     let pad_index = graph.index_leaf(
         &format!("pad.{height}x{width}.index"),
-        conv3x3_pad_index(height, width),
+        window_pad_index(height, width, window),
     );
+    let mask: Vec<_> = window_pad_mask(height, width, window)
+        .into_iter()
+        .map(|value| value as _)
+        .collect();
+    let packed_mask = PackedRows::from_values(graph.activation_format(), &mask);
     let pad_mask = graph.host(
         &format!("pad.{height}x{width}.mask"),
-        &[conv3x3_pad_rows(height, width)],
-        conv3x3_pad_mask(height, width)
-            .into_iter()
-            .map(|value| value as f32)
-            .collect(),
+        &[window_pad_rows(height, width, window)],
+        packed_mask,
     );
     let crop_index = graph.index_leaf(
         &format!("crop.{height}x{width}.index"),
-        conv3x3_crop_index(height, width),
+        window_crop_index(height, width, window),
     );
-    let convolved = match tap_form {
+    let convolved = match config.conv_taps {
         ConvTaps::Nine => {
-            let mut weights = [NodeId(0); 9];
-            for tap_row in 0..3u32 {
-                for tap_column in 0..3u32 {
-                    let tap = (tap_row * 3 + tap_column) as usize;
-                    weights[tap] = graph.weight_tap(
+            let mut weights = Vec::with_capacity((window * window) as usize);
+            for tap_row in 0..window {
+                for tap_column in 0..window {
+                    weights.push(graph.weight_tap(
                         &format!("{tensor}.weight"),
                         &weight_shape,
                         (tap_row, tap_column),
                         in_groups,
                         in_channels / in_groups,
-                    );
+                    ));
                 }
             }
-            conv3x3_same(
+            window_same(
                 &mut graph.program,
                 x,
                 &weights,
@@ -174,25 +180,26 @@ fn conv(
                 crop_index,
                 height,
                 width,
+                window,
             )?
         }
         ConvTaps::Three => {
-            // The checkpoint's `[out, 3, 3, in]` viewed as
-            // `[out_g, out_c, 9, in_g, in_c]`: the tap pair flattened to one
+            // The checkpoint's `[out, window, window, in]` viewed as
+            // `[out_g, out_c, taps, in_g, in_c]`: the tap pair flattened to one
             // block axis, which is the same element order (a reshape).
             let taps_shape = [
                 out_groups,
                 out_channels / out_groups,
-                9,
+                window * window,
                 in_groups,
                 in_channels / in_groups,
             ];
             let weight = graph.weight_taps(&format!("{tensor}.weight"), &taps_shape);
             let taps_index = graph.index_leaf(
                 &format!("taps.{height}x{width}.index"),
-                conv3x3_taps_index(height, width),
+                window_taps_index(height, width, window),
             );
-            conv3x3_same_three(
+            window_same_one_reduce(
                 &mut graph.program,
                 x,
                 weight,
@@ -200,6 +207,7 @@ fn conv(
                 pad_mask,
                 crop_index,
                 taps_index,
+                window,
             )?
         }
     };
@@ -265,28 +273,28 @@ fn pointwise(
     Ok(biased)
 }
 
-/// One 3x3 "same" convolution as a program fragment, for a caller that composes
-/// a decoder by hand (the per-shape bench) rather than through
-/// [`build_vae_decode`].
+/// One "same" windowed convolution as a program fragment, for a caller that
+/// composes a decoder by hand (the per-shape bench) rather than through
+/// [`build_vae_decode`]; the window extent and tap form come from `config`.
 ///
 /// `grid` is `(height, width)`, `channels` is `(in, out)`, and `groups` is
 /// `(in, out)` channel-group counts: the decoder's checkpoint was trained with
 /// `groups` on the input side, and the output side is `1` for the final
-/// `3`-channel carve and `groups` otherwise.
+/// carve and `groups` otherwise.
 ///
 /// # Errors
 ///
 /// [`TensorError`] when a notation or extent fails to build.
-pub fn build_conv3x3(
+pub fn build_window_same(
     graph: &mut Graph,
     x: NodeId,
     tensor: &str,
     grid: (u32, u32),
     channels: (u32, u32),
     groups: (u32, u32),
-    tap_form: ConvTaps,
+    config: &VaeConfig,
 ) -> Result<NodeId, TensorError> {
-    conv(graph, x, tensor, grid, channels, groups, tap_form)
+    conv(graph, x, tensor, grid, channels, groups, config)
 }
 
 fn resnet(
@@ -315,7 +323,7 @@ fn resnet(
         grid,
         (in_channels, out_channels),
         (config.groups, config.groups),
-        config.conv_taps,
+        config,
     )?;
     let second = norm(
         graph,
@@ -333,7 +341,7 @@ fn resnet(
         grid,
         (out_channels, out_channels),
         (config.groups, config.groups),
-        config.conv_taps,
+        config,
     )?;
     let residual = if in_channels == out_channels {
         x
@@ -385,7 +393,7 @@ fn upsample(
         (height * 2, width * 2),
         (channels, channels),
         (config.groups, config.groups),
-        config.conv_taps,
+        config,
     )
 }
 
@@ -431,12 +439,7 @@ fn attention(
         config.groups,
     )?;
     let start = graph.program.len();
-    let activation = graph.activation();
-    let inv_sqrt = unit_constant(
-        &mut graph.program,
-        1.0 / (channels as f32).sqrt(),
-        activation,
-    );
+    let inv_sqrt = inverse_root_constant(graph, channels)?;
     let half = config.groups / 2;
     let q_even = group_range(graph, q, 0, half)?;
     let q_odd = group_range(graph, q, half, half)?;
@@ -517,7 +520,7 @@ pub fn build_vae_decode(
         (height, width),
         (in_channels, first),
         (config.groups, config.groups),
-        config.conv_taps,
+        config,
     )?;
     trace.push(("conv_in", hidden));
     let rows = height * width;
@@ -608,73 +611,10 @@ pub fn build_vae_decode(
         (height, width),
         (channels, config.out_channels),
         (config.groups, 1),
-        config.conv_taps,
+        config,
     )?;
     trace.push(("image", image));
     Ok(VaeOutput { image, trace })
-}
-
-/// The checkpoint's latent statistics: `mean` and the standard deviation
-/// `sqrt(running_var + eps)` of each latent channel, both from the VAE's own
-/// batch-norm buffers.
-#[must_use]
-pub fn latent_statistics(
-    running_mean: &[f32],
-    running_var: &[f32],
-    eps: f32,
-) -> (Vec<f32>, Vec<f32>) {
-    let deviation = running_var
-        .iter()
-        .map(|variance| (variance + eps).sqrt())
-        .collect();
-    (running_mean.to_vec(), deviation)
-}
-
-/// `latent * deviation + mean`: the de-normalisation the decoder's input
-/// expects, per channel and broadcast over tokens.
-///
-/// # Errors
-///
-/// [`TensorError`] when a node is not part of `program`.
-pub fn latent_unnormalise(
-    graph: &mut Graph,
-    latent: NodeId,
-    mean: NodeId,
-    deviation: NodeId,
-) -> Result<NodeId, TensorError> {
-    let program = &mut graph.program;
-    let scaled = proxima_tensor::spec::elementwise_like(
-        program,
-        latent,
-        proxima_tensor::ScalarOp::Multiply,
-        &[(latent, "rgc->rgc"), (deviation, "gc->rgc")],
-    )?;
-    proxima_tensor::spec::elementwise_like(
-        program,
-        scaled,
-        proxima_tensor::ScalarOp::Add,
-        &[(scaled, "rgc->rgc"), (mean, "gc->rgc")],
-    )
-}
-
-/// The latent viewed as the decoder's `[rows, groups, channels / groups]`:
-/// the model's `[rows, channels]` with the channel axis split at `groups`.
-///
-/// # Errors
-///
-/// [`TensorError`] when a node is not part of `program`.
-pub fn latent_grouped(
-    graph: &mut Graph,
-    latent: NodeId,
-    _groups: u32,
-    group_width: u32,
-) -> Result<NodeId, TensorError> {
-    proxima_tensor::spec::elementwise_like(
-        &mut graph.program,
-        latent,
-        proxima_tensor::ScalarOp::Identity,
-        &[(latent, format!("{group_width}*g+c->rgc").as_str())],
-    )
 }
 
 /// Group axis `[start, start + count)` of a `[rows, groups, width]` node.

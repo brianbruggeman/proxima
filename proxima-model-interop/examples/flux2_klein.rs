@@ -6,24 +6,25 @@ mod metal_path {
 //!   cargo run --release -p proxima-model-interop --features std,metal \
 //!     --example flux2_klein -- --seed 42 --out image.png
 //!
-//! `--stage text` keeps the S4 diagnostic (it writes the three taps as raw f32);
-//! `--text-reference <text.f32>` replaces our text encoder's output with the
-//! sd.cpp dump, which isolates the DiT and the VAE from the text gap.
+//! `--stage text` keeps the S4 diagnostic (it writes the three taps as raw host
+//! elements); `--text-reference <dump>` replaces our text encoder's output with the
+//! sd.cpp dump (raw host elements), which isolates the DiT and the VAE from the
+//! text gap.
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use conflaguration::Settings;
 use proxima_model_interop::ServingConfig;
 use proxima_model_interop::diffusion::{
     Checkpoint, Decoder, Denoiser, DiffusionSettings, DitConfig, DitInputs, Graph as ModelGraph,
-    VaeConfig, attention_scale, build_dit, build_vae_decode, head_norm_count, timestep_sinusoid,
-    write_png,
+    VaeConfig, attention_scale, build_dit, build_vae_decode, head_norm_count, write_png,
 };
 use proxima_model_interop::{
     LoadedModel, ServingSettings, architecture_from_hf_config, parse_hf_config,
 };
-use proxima_numeric::{FloatLayout, FlowMatchSchedule, Philox, euler_step};
+use proxima_numeric::{FlowMatchSchedule, NumericFormat, PackedRows, Philox, euler_step};
+use proxima_tensor::QuantizedBlock;
 use proxima_tensor::op::NodeId;
 use proxima_tensor::spec::multi_axis_rope_tables;
 use proxima_tokenizer::Vocab;
@@ -110,7 +111,7 @@ fn encode_text(
     ids: &[u32],
     key_pad: Option<u32>,
     serving: &ServingConfig,
-) -> Result<Vec<f32>, String> {
+) -> Result<PackedRows, String> {
     let config_bytes = std::fs::read(dir.join("text_encoder/config.json")).map_err(|why| why.to_string())?;
     let hf_config = parse_hf_config(&config_bytes).map_err(|why| why.to_string())?;
     let architecture = architecture_from_hf_config(&hf_config).map_err(|why| why.to_string())?;
@@ -171,12 +172,12 @@ fn encode_text(
         omega::metal::BLOCK_COPIED_BYTES.get(),
         omega::metal::BLOCK_NOCOPY_BOUND_BYTES.get(),
     );
-    Ok(joined)
+    PackedRows::from_values(&NumericFormat::host_element(), &joined).map_err(|why| why.to_string())
 }
 
 /// The reference dump is channel-major (`index = token + tokens * channel`).
-fn token_major(channel_major: &[f32]) -> Vec<f32> {
-    let mut values = vec![0.0f32; channel_major.len()];
+fn token_major<T: Copy + Default>(channel_major: &[T]) -> Vec<T> {
+    let mut values = vec![T::default(); channel_major.len()];
     for channel in 0..LATENT_CHANNELS {
         for token in 0..IMAGE_TOKENS {
             values[token * LATENT_CHANNELS + channel] =
@@ -186,16 +187,26 @@ fn token_major(channel_major: &[f32]) -> Vec<f32> {
     values
 }
 
-fn read_dump(path: &Path) -> Option<Vec<f32>> {
+/// A reference dump holds raw elements in the format the external tool writes.
+fn read_dump(path: &Path, format: &NumericFormat) -> Option<PackedRows> {
     let bytes = std::fs::read(path).ok()?;
-    Some(
-        bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|word| f32::from_le_bytes(*word))
-            .collect(),
-    )
+    PackedRows::from_bytes(format, bytes).ok()
+}
+
+fn fixed(value: u128, per_unit: u128, places: u32) -> String {
+    let scale = 10u128.pow(places);
+    let divisor = per_unit.max(1);
+    let scaled = (value * scale * 2 + divisor) / (divisor * 2);
+    format!("{}.{:0width$}", scaled / scale, scaled % scale, width = places as usize)
+}
+
+fn seconds(duration: Duration, places: u32) -> String {
+    fixed(duration.as_nanos(), Duration::from_secs(1).as_nanos(), places)
+}
+
+#[cfg(feature = "instrument")]
+fn millis(nanos: u64, places: u32) -> String {
+    fixed(u128::from(nanos), Duration::from_millis(1).as_nanos(), places)
 }
 
 /// The serving settings the whole pipeline runs under: the environment's
@@ -218,9 +229,9 @@ fn report_op_profile(timings: &[omega::metal::OpGpuTiming], program: &[proxima_t
     let total_ns: u64 = timings.iter().map(|timing| timing.gpu_ns).sum();
     let total_bytes: u64 = timings.iter().map(|timing| timing.operand_bytes).sum();
     eprintln!(
-        "op_profile ops={} total_gpu_ms={:.1} operand_bytes={total_bytes}",
+        "op_profile ops={} total_gpu_ms={} operand_bytes={total_bytes}",
         timings.len(),
-        total_ns as f64 / 1e6,
+        millis(total_ns, 1),
     );
     let mut by_kind: std::collections::BTreeMap<&'static str, (u64, u64, u64)> = Default::default();
     for timing in timings {
@@ -231,9 +242,9 @@ fn report_op_profile(timings: &[omega::metal::OpGpuTiming], program: &[proxima_t
     }
     for (kind, (count, ns, bytes)) in &by_kind {
         eprintln!(
-            "op_profile_kind kind={kind} ops={count} gpu_ms={:.1} share={:.1}% operand_bytes={bytes}",
-            *ns as f64 / 1e6,
-            100.0 * *ns as f64 / total_ns as f64,
+            "op_profile_kind kind={kind} ops={count} gpu_ms={} share={}% operand_bytes={bytes}",
+            millis(*ns, 1),
+            fixed(100 * u128::from(*ns), u128::from(total_ns), 1),
         );
     }
     let mut ranked: Vec<&omega::metal::OpGpuTiming> = timings.iter().collect();
@@ -248,26 +259,26 @@ fn report_op_profile(timings: &[omega::metal::OpGpuTiming], program: &[proxima_t
             None => String::from("?"),
         };
         let bytes_per_ns = if timing.gpu_ns == 0 {
-            f64::NAN
+            String::from("NaN")
         } else {
-            timing.operand_bytes as f64 / timing.gpu_ns as f64
+            fixed(u128::from(timing.operand_bytes), u128::from(timing.gpu_ns), 2)
         };
         eprintln!(
-            "op_profile_top rank={} node={} kind={} extents={:?} out_axes={:?} gpu_ms={:.1} operand_bytes={} bytes_per_ns={bytes_per_ns:.2} weight={:?} detail={detail}",
+            "op_profile_top rank={} node={} kind={} extents={:?} out_axes={:?} gpu_ms={} operand_bytes={} bytes_per_ns={bytes_per_ns} weight={:?} detail={detail}",
             rank + 1,
             timing.node.0,
             timing.kind,
             timing.extents,
             timing.output_axes,
-            timing.gpu_ns as f64 / 1e6,
+            millis(timing.gpu_ns, 1),
             timing.operand_bytes,
             timing.weight_name.as_deref().unwrap_or("-"),
         );
     }
     let accounted: u64 = ranked.iter().take(top).map(|timing| timing.gpu_ns).sum();
     eprintln!(
-        "op_profile_top{top}_share={:.1}%",
-        100.0 * accounted as f64 / total_ns as f64
+        "op_profile_top{top}_share={}%",
+        fixed(100 * u128::from(accounted), u128::from(total_ns), 1)
     );
 }
 
@@ -391,20 +402,22 @@ fn dit_config() -> DitConfig {
     }
 }
 
-fn rope_positions() -> Vec<f32> {
+fn rope_positions<T: Copy + From<u16>>() -> Vec<T> {
     let mut positions = Vec::with_capacity((MIN_LENGTH + IMAGE_TOKENS) * 4);
-    for token in 0..MIN_LENGTH {
-        positions.extend_from_slice(&[0.0, 0.0, 0.0, token as f32]);
+    let none = T::from(0);
+    for token in 0..MIN_LENGTH as u16 {
+        positions.extend([none, none, none, T::from(token)]);
     }
-    let width = LATENT_SIDE as usize;
-    for token in 0..IMAGE_TOKENS {
-        positions.extend_from_slice(&[0.0, (token / width) as f32, (token % width) as f32, 0.0]);
+    let width = LATENT_SIDE as u16;
+    for token in 0..IMAGE_TOKENS as u16 {
+        positions.extend([none, T::from(token / width), T::from(token % width), none]);
     }
     positions
 }
 
-fn vae_config() -> VaeConfig {
+fn vae_config(window: u32) -> VaeConfig {
     VaeConfig {
+        window,
         channels: (LATENT_CHANNELS / 4) as u32,
         block_channels: [128, 256, 512, 512],
         layers_per_block: 2,
@@ -445,22 +458,22 @@ fn vae_config() -> VaeConfig {
 /// update. Returns the latent after step 4, the per-step seconds and the weight
 /// load time.
 fn step_leaves(graph: &mut ModelGraph) -> [NodeId; 3] {
-    let latent = graph.host("latent", &[IMAGE_TOKENS as u32, LATENT_CHANNELS as u32], Vec::new());
-    let text = graph.host("text", &[MIN_LENGTH as u32, JOINT_ATTENTION as u32], Vec::new());
-    let timestep = graph.host("timestep", &[256], Vec::new());
+    let latent = graph.host("latent", &[IMAGE_TOKENS as u32, LATENT_CHANNELS as u32], graph.unbound());
+    let text = graph.host("text", &[MIN_LENGTH as u32, JOINT_ATTENTION as u32], graph.unbound());
+    let timestep = graph.host("timestep", &[256], graph.unbound());
     [latent, text, timestep]
 }
 
 fn diffuse(
     dir: &Path,
-    text: &[f32],
+    text: &PackedRows,
     seed: u64,
     serving: &ServingConfig,
     diffusion: &DiffusionSettings,
-) -> Result<(Vec<f32>, Vec<f64>, f64), String> {
+) -> Result<(PackedRows, Vec<Duration>, Duration), String> {
     let checkpoint = Checkpoint::open(&dir.join("flux-2-klein-4b.safetensors"))?;
     let activation = diffusion.dit_activation_dtype()?;
-    let mut graph = ModelGraph::new(activation);
+    let mut graph = ModelGraph::new(activation).map_err(|why| why.to_string())?;
     let [latent_leaf, text_leaf, timestep_leaf] = step_leaves(&mut graph);
     let (cos_bytes, sin_bytes) = multi_axis_rope_tables(
         &rope_positions(),
@@ -469,19 +482,13 @@ fn diffuse(
         activation,
     )
     .map_err(|why| why.to_string())?;
-    let decode = |bytes: &[u8]| -> Vec<f32> {
-        bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|word| f32::from_le_bytes(*word))
-            .collect()
-    };
-    let rope_cos = graph.host("rope_cos", &[(MIN_LENGTH + IMAGE_TOKENS) as u32, 64], decode(&cos_bytes));
-    let rope_sin = graph.host("rope_sin", &[(MIN_LENGTH + IMAGE_TOKENS) as u32, 64], decode(&sin_bytes));
+    let cos_rows = PackedRows::from_bytes(graph.activation_format(), cos_bytes);
+    let sin_rows = PackedRows::from_bytes(graph.activation_format(), sin_bytes);
+    let rope_cos = graph.host("rope_cos", &[(MIN_LENGTH + IMAGE_TOKENS) as u32, 64], cos_rows);
+    let rope_sin = graph.host("rope_sin", &[(MIN_LENGTH + IMAGE_TOKENS) as u32, 64], sin_rows);
     let config = dit_config();
     let norm_count = head_norm_count(&mut graph, &config);
-    let scale = attention_scale(&mut graph, &config);
+    let scale = attention_scale(&mut graph, &config).map_err(|why| why.to_string())?;
     let output = build_dit(
         &mut graph,
         &config,
@@ -508,52 +515,64 @@ fn diffuse(
         diffusion.dit_weights,
         serving,
     )?;
-    let dit_seconds_load = dit_load.elapsed().as_secs_f64();
+    let dit_seconds_load = dit_load.elapsed();
     drop(checkpoint);
     let mut latent_values = token_major(&Philox::new(seed).normal(IMAGE_TOKENS * LATENT_CHANNELS));
     let sigmas = FlowMatchSchedule::new(STEPS, IMAGE_TOKENS as u32)
         .sigmas()
         .map_err(|why| why.to_string())?;
     eprintln!(
-        "dit: {} ops, {} weights, load {dit_seconds_load:.1}s (step 1 plans)",
+        "dit: {} ops, {} weights, load {}s (step 1 plans)",
         denoiser.graph().program.len(),
         denoiser.graph().weights.len(),
+        seconds(dit_seconds_load, 1),
     );
-    let mut call_graph = ModelGraph::new(activation);
+    let mut call_graph = ModelGraph::new(activation).map_err(|why| why.to_string())?;
     step_leaves(&mut call_graph);
     let mut dit_seconds = Vec::with_capacity(STEPS as usize);
+    let mut text_values = Vec::new();
+    text.decode_all(&mut text_values).map_err(|why| why.to_string())?;
+    let text_rows = PackedRows::from_values(call_graph.activation_format(), &text_values)
+        .map_err(|why| why.to_string())?;
+    let layout = NumericFormat::host_element()
+        .element_layout()
+        .ok_or("the host element has no scalar layout")?;
     for step in 0..STEPS as usize {
-        let timestep = timestep_sinusoid(sigmas[step], 256);
-        let inputs = call_graph.host_blocks(
-            &[
-                ("latent", latent_values.as_slice()),
-                ("text", text),
-                ("timestep", timestep.as_slice()),
-            ],
-            &[],
-        );
+        let settings = DiffusionSettings::resolved();
+        let format = settings.dit_activation;
+        let sigma = PackedRows::from_values(&format, &[sigmas[step]]).map_err(|why| why.to_string())?;
+        let timestep = settings.timestep_embedding(&sigma, 256, &format)?;
+        let latent_rows = PackedRows::from_values(call_graph.activation_format(), &latent_values)
+            .map_err(|why| why.to_string())?;
+        let inputs = call_graph.host_blocks(&[
+            ("latent", &latent_rows),
+            ("text", &text_rows),
+            ("timestep", &timestep),
+        ])?;
         let ran = Instant::now();
         let evaluated = denoiser
             .evaluate(&inputs, &[])
             .map_err(|why| format!("dit step {}: {why}", step + 1))?;
-        let elapsed = ran.elapsed().as_secs_f64();
+        let elapsed = ran.elapsed();
         dit_seconds.push(elapsed);
         let velocity = evaluated
             .get(denoiser.velocity())
             .ok_or("velocity is not an output")?
             .0
             .to_vec();
-        eprintln!("dit step {}: {elapsed:.2}s", step + 1);
+        eprintln!("dit step {}: {}s", step + 1, seconds(elapsed, 2));
         euler_step(
             &mut latent_values,
             &velocity,
             sigmas[step],
             sigmas[step + 1],
-            FloatLayout::BF32,
+            layout,
         )
         .map_err(|why| why.to_string())?;
     }
-    Ok((latent_values, dit_seconds, dit_seconds_load))
+    let latent = PackedRows::from_values(&NumericFormat::host_element(), &latent_values)
+        .map_err(|why| why.to_string())?;
+    Ok((latent, dit_seconds, dit_seconds_load))
 }
 
 fn run() -> Result<(), String> {
@@ -610,28 +629,35 @@ fn run() -> Result<(), String> {
     } else {
         None
     };
+    let host = NumericFormat::host_element();
     let text_started = Instant::now();
     let text = match &text_reference {
-        Some(path) => read_dump(path).ok_or_else(|| format!("no text dump at {}", path.display()))?,
-        None if latent_reference.is_some() => Vec::new(),
+        Some(path) => {
+            read_dump(path, &diffusion.reference_format)
+                .ok_or_else(|| format!("no text dump at {}", path.display()))?
+        }
+        None if latent_reference.is_some() => {
+            PackedRows::new(&host).map_err(|why| why.to_string())?
+        }
         None => encode_text(&dir, &vocab, &ids, key_pad, &serving)?,
     };
-    if latent_reference.is_none() && text.len() != MIN_LENGTH * JOINT_ATTENTION {
-        return Err(format!("text block has {} values", text.len()));
+    if latent_reference.is_none() && text.elements() != MIN_LENGTH * JOINT_ATTENTION {
+        return Err(format!("text block has {} values", text.elements()));
     }
-    let text_seconds = text_started.elapsed().as_secs_f64();
+    let text_seconds = text_started.elapsed();
     eprintln!(
-        "text: {} tokens, {} values in {text_seconds:.2}s ({}), pad key mask {}",
+        "text: {} tokens, {} values in {}s ({}), pad key mask {}",
         ids.len(),
-        text.len(),
+        text.elements(),
+        seconds(text_seconds, 2),
         if text_reference.is_some() { "reference dump" } else { "our encoder" },
         key_pad.map_or_else(|| String::from("off"), |pad| pad.to_string())
     );
     if stage == "text" {
         if let Some(path) = out {
-            let bytes: Vec<u8> = text.iter().flat_map(|value| value.to_le_bytes()).collect();
-            std::fs::write(&path, bytes).map_err(|why| format!("{}: {why}", path.display()))?;
-            eprintln!("wrote {} ({} f32)", path.display(), text.len());
+            std::fs::write(&path, text.as_bytes())
+                .map_err(|why| format!("{}: {why}", path.display()))?;
+            eprintln!("wrote {} ({} values)", path.display(), text.elements());
         }
         return Ok(());
     }
@@ -642,26 +668,34 @@ fn run() -> Result<(), String> {
     // under measurement.
     let (latent_values, dit_seconds) = match &latent_reference {
         Some(path) => {
-            let dump =
-                read_dump(path).ok_or_else(|| format!("no latent dump at {}", path.display()))?;
-            if dump.len() != IMAGE_TOKENS * LATENT_CHANNELS {
-                return Err(format!("latent dump has {} values", dump.len()));
+            let dump = read_dump(path, &diffusion.reference_format)
+                .ok_or_else(|| format!("no latent dump at {}", path.display()))?;
+            if dump.elements() != IMAGE_TOKENS * LATENT_CHANNELS {
+                return Err(format!("latent dump has {} values", dump.elements()));
             }
             eprintln!("dit: skipped, latent from {}", path.display());
-            (token_major(&dump), Vec::new())
+            let mut values = Vec::new();
+            dump.decode_all(&mut values).map_err(|why| why.to_string())?;
+            (token_major(&values), Vec::new())
         }
         None => {
-            let (latent, seconds, _) = diffuse(&dir, &text, seed, &serving, &diffusion)?;
-            (latent, seconds)
+            let (latent, timings, _) = diffuse(&dir, &text, seed, &serving, &diffusion)?;
+            let mut values = Vec::new();
+            latent.decode_all(&mut values).map_err(|why| why.to_string())?;
+            (values, timings)
         }
     };
 
     // --- VAE: de-normalise, unpatchify, decode ---------------------------
     let vae = Checkpoint::open(&dir.join("comfy/flux2-vae.safetensors"))?;
-    let (_, mean) = vae.values("bn.running_mean", None, None, false)?;
-    let (_, variance) = vae.values("bn.running_var", None, None, false)?;
-    let deviation: Vec<f32> = variance.iter().map(|value| value.sqrt()).collect();
-    let mut decoder_input = vec![0.0f32; IMAGE_TOKENS * 4 * (LATENT_CHANNELS / 4)];
+    let (_, mean_rows) = vae.values("bn.running_mean", None, None, false)?;
+    let (_, variance_rows) = vae.values("bn.running_var", None, None, false)?;
+    let mut mean = Vec::new();
+    mean_rows.decode_all(&mut mean).map_err(|why| why.to_string())?;
+    let mut variance = Vec::new();
+    variance_rows.decode_all(&mut variance).map_err(|why| why.to_string())?;
+    let deviation: Vec<_> = variance.iter().map(|value| value.sqrt()).collect();
+    let mut decoder_input = vec![Default::default(); IMAGE_TOKENS * 4 * (LATENT_CHANNELS / 4)];
     for row in 0..LATENT_SIDE as usize {
         for column in 0..LATENT_SIDE as usize {
             for channel in 0..LATENT_CHANNELS {
@@ -682,9 +716,10 @@ fn run() -> Result<(), String> {
     }
     let latent_shape = [LATENT_SIDE * LATENT_SIDE * 4, (LATENT_CHANNELS / 4) as u32, 1];
     let vae_activation = diffusion.vae_activation_dtype()?;
-    let mut vae_graph = ModelGraph::new(vae_activation);
-    let vae_latent = vae_graph.host("latent", &latent_shape, Vec::new());
-    let vae_output = build_vae_decode(&mut vae_graph, &vae_config(), vae_latent)
+    let mut vae_graph = ModelGraph::new(vae_activation).map_err(|why| why.to_string())?;
+    let vae_latent = vae_graph.host("latent", &latent_shape, vae_graph.unbound());
+    let window = vae.window_extent("decoder.conv_in.weight")?;
+    let vae_output = build_vae_decode(&mut vae_graph, &vae_config(window), vae_latent)
         .map_err(|why| why.to_string())?;
     let vae_load = Instant::now();
     let mut decoder = Decoder::new(
@@ -696,14 +731,17 @@ fn run() -> Result<(), String> {
         &serving,
     )?;
     eprintln!(
-        "vae: {} ops, {} weights, load {:.1}s",
+        "vae: {} ops, {} weights, load {}s",
         decoder.graph().program.len(),
         decoder.graph().weights.len(),
-        vae_load.elapsed().as_secs_f64()
+        seconds(vae_load.elapsed(), 1)
     );
-    let mut call_graph = ModelGraph::new(vae_activation);
-    call_graph.host("latent", &latent_shape, Vec::new());
-    let vae_inputs = call_graph.host_blocks(&[("latent", decoder_input.as_slice())], &[]);
+    let mut call_graph = ModelGraph::new(vae_activation).map_err(|why| why.to_string())?;
+    call_graph.host("latent", &latent_shape, call_graph.unbound());
+    let decoder_rows = PackedRows::from_values(call_graph.activation_format(), &decoder_input)
+        .map_err(|why| why.to_string())?;
+    let vae_blocks = call_graph.host_blocks(&[("latent", &decoder_rows)])?;
+    let run_vae = |vae_inputs: &[(&str, QuantizedBlock<'_>)]| -> Result<_, String> {
     // A profiled decode runs on the decoder's profile-local runtime, so its
     // one-command-buffer-per-op plan never enters the cache a plain decode reads.
     #[cfg(feature = "instrument")]
@@ -711,20 +749,20 @@ fn run() -> Result<(), String> {
         if op_profile_path.is_some() {
             let warm_started = Instant::now();
             decoder
-                .evaluate_op_timed(&vae_inputs)
+                .evaluate_op_timed(vae_inputs)
                 .map_err(|why| format!("vae warm profile: {why}"))?;
             eprintln!("vae warm decode: {:.2?} (discarded)", warm_started.elapsed());
         }
         let decode_started = Instant::now();
         let (evaluated, timings) = decoder
-            .evaluate_op_timed(&vae_inputs)
+            .evaluate_op_timed(vae_inputs)
             .map_err(|why| format!("vae profile: {why}"))?;
         if let Some(path) = &op_profile_path {
             write_op_profile(path, &timings, decoder.graph())?;
         }
         eprintln!(
-            "vae profile decode: {:.2}s (one command buffer per op)",
-            decode_started.elapsed().as_secs_f64()
+            "vae profile decode: {}s (one command buffer per op)",
+            seconds(decode_started.elapsed(), 2)
         );
         report_op_profile(&timings, &decoder.graph().program, diffusion.profile_top as usize);
         // `PROXIMA_DIFFUSION_CAPTURE_NODES=<node,..>` re-runs the same plan with omega's
@@ -772,7 +810,7 @@ fn run() -> Result<(), String> {
             }
             let _ = omega::take_captured_dispatches();
             decoder
-                .evaluate_fresh(&vae_inputs)
+                .evaluate_fresh(vae_inputs)
                 .map_err(|why| format!("vae capture: {why}"))?;
             for record in omega::take_captured_dispatches() {
                 eprintln!(
@@ -786,38 +824,53 @@ fn run() -> Result<(), String> {
             .ok_or("image is not an output")?
             .0
             .to_vec();
-        return finish_image(image, out);
+        let image_rows =
+            PackedRows::from_values(&host, &image).map_err(|why| why.to_string())?;
+        finish_image(&image_rows, out)?;
+        return Ok(None);
     }
     let decode_started = Instant::now();
     let evaluated = decoder
-        .evaluate(&vae_inputs)
+        .evaluate(vae_inputs)
         .map_err(|why| format!("vae decode: {why}"))?;
-    let vae_seconds = decode_started.elapsed().as_secs_f64();
+    let vae_seconds = decode_started.elapsed();
     let image = evaluated.get(decoder.image()).ok_or("image is not an output")?.0;
-    eprintln!("vae decode: {vae_seconds:.2}s (includes the plan)");
+    eprintln!("vae decode: {}s (includes the plan)", seconds(vae_seconds, 2));
 
-    finish_image(image.to_vec(), out)?;
-    let dit_total: f64 = dit_seconds.iter().sum();
+    let image_rows = PackedRows::from_values(&host, image).map_err(|why| why.to_string())?;
+    finish_image(&image_rows, out)?;
+    Ok(Some(vae_seconds))
+    };
+    let vae_run = run_vae(&vae_blocks)?;
+    let Some(vae_seconds) = vae_run else {
+        return Ok(());
+    };
+    let dit_total: Duration = dit_seconds.iter().sum();
     let dit_steps = if dit_seconds.is_empty() {
         String::from("skipped")
     } else {
         dit_seconds
             .iter()
-            .map(|seconds| format!("{seconds:.1}"))
+            .map(|step| seconds(*step, 1))
             .collect::<Vec<_>>()
             .join("/")
     };
     eprintln!(
-        "stages: text {text_seconds:.2}s, dit {dit_total:.2}s ({dit_steps}), vae {vae_seconds:.2}s, total {:.2}s",
-        started.elapsed().as_secs_f64()
+        "stages: text {}s, dit {}s ({dit_steps}), vae {}s, total {}s",
+        seconds(text_seconds, 2),
+        seconds(dit_total, 2),
+        seconds(vae_seconds, 2),
+        seconds(started.elapsed(), 2)
     );
     let _ = reference_dir();
     Ok(())
 }
 
-/// Scales the raw decoder output to `[0, 1]`, writes the PNG and its f32 dump.
-fn finish_image(image: Vec<f32>, out: Option<PathBuf>) -> Result<(), String> {
-    let pixels: Vec<f32> = image
+/// Scales the raw decoder output to `[0, 1]`, writes the PNG and its raw host-element dump.
+fn finish_image(image: &PackedRows, out: Option<PathBuf>) -> Result<(), String> {
+    let mut values = Vec::new();
+    image.decode_all(&mut values).map_err(|why| why.to_string())?;
+    let pixels: Vec<_> = values
         .iter()
         .map(|value| ((value + 1.0) * 0.5).clamp(0.0, 1.0))
         .collect();
@@ -829,11 +882,15 @@ fn finish_image(image: Vec<f32>, out: Option<PathBuf>) -> Result<(), String> {
         }
     }
     if let Some(path) = out {
-        write_png(&path, side as u32, side as u32, 3, &rgb)?;
+        let settings = DiffusionSettings::resolved();
+        let unit = PackedRows::from_values(&settings.vae_activation, &rgb).map_err(|why| why.to_string())?;
+        write_png(&path, side as u32, side as u32, 3, &unit, &settings.png_sample)?;
         eprintln!("wrote {} ({side}x{side})", path.display());
-        let dump = path.with_extension("f32");
-        let bytes: Vec<u8> = pixels.iter().flat_map(|value| value.to_le_bytes()).collect();
-        std::fs::write(&dump, bytes).map_err(|why| format!("{}: {why}", dump.display()))?;
+        let dump = path.with_extension("raw");
+        let packed = PackedRows::from_values(&NumericFormat::host_element(), &pixels)
+            .map_err(|why| why.to_string())?;
+        std::fs::write(&dump, packed.as_bytes())
+            .map_err(|why| format!("{}: {why}", dump.display()))?;
         eprintln!("wrote {}", dump.display());
     }
     Ok(())

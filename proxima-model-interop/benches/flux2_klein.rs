@@ -36,18 +36,17 @@ mod bench {
     use criterion::{BenchmarkGroup, Criterion, measurement::WallTime};
     use proxima_model_interop::diffusion::{
         Checkpoint, ConvTaps, Decoder, Denoiser, DiffusionSettings, DitConfig, DitInputs,
-        Graph as ModelGraph, VaeConfig, Weights, attention_scale, build_conv3x3, build_dit,
-        build_double_block, build_single_block, build_vae_decode, head_norm_count,
-        timestep_sinusoid,
+        Graph as ModelGraph, VaeConfig, Weights, attention_scale, build_dit, build_double_block,
+        build_single_block, build_vae_decode, build_window_same, head_norm_count,
     };
     use proxima_model_interop::{
         LoadedModel, ServingConfig, ServingSettings, architecture_from_hf_config, parse_hf_config,
     };
-    use proxima_numeric::DType;
+    use proxima_numeric::{NumericError, NumericFormat, PackedRows, Philox};
     use proxima_telemetry::error;
     use proxima_tensor::op::{NodeId, Op};
     use proxima_tensor::spec::{
-        group_norm, nearest_upsample_x2, non_causal_attention_heads, unit_constant,
+        group_norm, nearest_upsample_x2, non_causal_attention_heads, scalar_constant_like,
         upsample_x2_index,
     };
     use proxima_tokenizer::Vocab;
@@ -125,32 +124,84 @@ mod bench {
         }
     }
 
-    /// Deterministic non-zero activation values: denormals and an all-zero
-    /// operand are not what the real pipeline feeds these kernels.
-    fn pseudo_random(count: usize, seed: u32) -> Vec<f32> {
-        let mut state = seed | 1;
-        (0..count)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 17;
-                state ^= state << 5;
-                (state as f32 / u32::MAX as f32) * 2.0 - 1.0
-            })
-            .collect()
+    /// Deterministic normal noise packed in `format`: denormals and an
+    /// all-zero operand are not what the real pipeline feeds these kernels.
+    fn noise_rows(
+        format: &NumericFormat,
+        count: usize,
+        seed: u32,
+    ) -> Result<PackedRows, NumericError> {
+        PackedRows::from_values(format, &Philox::new(u64::from(seed)).normal(count))
+    }
+
+    /// [`noise_rows`] in the graph's activation format.
+    fn seeded(graph: &ModelGraph, count: usize, seed: u32) -> Result<PackedRows, NumericError> {
+        noise_rows(graph.activation_format(), count, seed)
+    }
+
+    fn diffusion_settings() -> Outcome<DiffusionSettings> {
+        DiffusionSettings::try_resolved().map_err(context("diffusion settings"))
+    }
+
+    /// A graph in the backbone's configured activation element type.
+    fn dit_graph() -> Outcome<ModelGraph> {
+        let settings = diffusion_settings()?;
+        ModelGraph::with_settings(settings.dit_activation_dtype()?, settings)
+    }
+
+    /// A graph in the decoder's configured activation element type.
+    fn vae_graph() -> Outcome<ModelGraph> {
+        let settings = diffusion_settings()?;
+        ModelGraph::with_settings(settings.vae_activation_dtype()?, settings)
+    }
+
+    fn element_bytes(format: &NumericFormat) -> u64 {
+        format.size_bytes() as u64
+    }
+
+    const SCALE: u128 = 1_000;
+
+    fn nanos(elapsed: Duration) -> u64 {
+        u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    fn thousandths(value: u128) -> String {
+        format!("{}.{:03}", value / SCALE, value % SCALE)
+    }
+
+    fn milliseconds(elapsed_nanos: u64) -> String {
+        thousandths(u128::from(elapsed_nanos) / SCALE)
+    }
+
+    /// `count` units per nanosecond is giga-units per second; printed in thousandths.
+    fn giga_per_second(count: u64, elapsed: Duration) -> String {
+        let scaled = u128::from(count) * SCALE;
+        thousandths(scaled.checked_div(elapsed.as_nanos()).unwrap_or(0))
     }
 
     #[derive(Default)]
     struct Stats {
         iterations: u64,
-        samples: Vec<f64>,
+        samples: Vec<Duration>,
     }
 
     struct Row {
         label: String,
-        millis: f64,
-        macs: f64,
-        bytes: f64,
+        median: Duration,
+        macs: u64,
+        bytes: u64,
         iterations: u64,
+    }
+
+    impl Row {
+        fn rates(&self) -> String {
+            format!(
+                "mean_ms={} gmac_s={} gb_s={}",
+                milliseconds(nanos(self.median)),
+                giga_per_second(self.macs, self.median),
+                giga_per_second(self.bytes, self.median),
+            )
+        }
     }
 
     /// Criterion's positional filters, so a filtered run does not fail the
@@ -177,8 +228,8 @@ mod bench {
         group: &mut BenchmarkGroup<'_, WallTime>,
         group_label: &str,
         label: &str,
-        macs: f64,
-        bytes: f64,
+        macs: u64,
+        bytes: u64,
         mut body: impl FnMut() -> Outcome<()>,
     ) -> Outcome<Row> {
         let filters = filters();
@@ -195,7 +246,7 @@ mod bench {
                 let elapsed = started.elapsed();
                 let mut slot = meter.borrow_mut();
                 slot.iterations += 1;
-                slot.samples.push(elapsed.as_secs_f64());
+                slot.samples.push(elapsed);
                 outcome
             });
         });
@@ -208,58 +259,42 @@ mod bench {
         // Median, not mean: the first iteration can include the pipeline's
         // one-time shader compile, and criterion's own warmup may not run a
         // whole slow iteration. The median is criterion's midpoint.
-        let seconds = if stats.samples.is_empty() {
-            0.0
+        let median = if stats.samples.is_empty() {
+            Duration::ZERO
         } else {
             let mut samples = stats.samples.clone();
-            samples.sort_by(f64::total_cmp);
+            samples.sort_unstable();
             let middle = samples.len() / 2;
-            if samples.len() % 2 == 0 {
-                (samples[middle - 1] + samples[middle]) / 2.0
+            if samples.len().is_multiple_of(2) {
+                (samples[middle - 1] + samples[middle]) / 2
             } else {
                 samples[middle]
             }
         };
         let row = Row {
             label: label.to_string(),
-            millis: seconds * 1e3,
+            median,
             macs,
             bytes,
             iterations: stats.iterations,
         };
         if stats.iterations > 0 {
             eprintln!(
-                "flux2_klein_bench case={group_label}/{} iters={} mean_ms={:.3} gmac_s={:.2} gb_s={:.2}",
+                "flux2_klein_bench case={group_label}/{} iters={} {}",
                 row.label,
                 row.iterations,
-                row.millis,
-                gmac_per_second(row.macs, seconds),
-                gb_per_second(row.bytes, seconds),
+                row.rates(),
             );
         }
         Ok(row)
     }
 
-    fn gmac_per_second(macs: f64, seconds: f64) -> f64 {
-        macs / seconds / 1e9
-    }
-
-    fn gb_per_second(bytes: f64, seconds: f64) -> f64 {
-        bytes / seconds / 1e9
-    }
-
-    fn macs_of(program: &[Op], symbols: &[u64]) -> Outcome<f64> {
+    fn macs_of(program: &[Op], symbols: &[u64]) -> Outcome<u64> {
         let shapes = proxima_tensor::infer(program, symbols).map_err(context("program shapes"))?;
         Ok(program
             .iter()
             .filter_map(|op| match op {
-                Op::Reduce(reduce) => Some(
-                    shapes
-                        .of(reduce.operand)
-                        .iter()
-                        .map(|&extent| extent as f64)
-                        .product::<f64>(),
-                ),
+                Op::Reduce(reduce) => Some(shapes.of(reduce.operand).iter().product::<u64>()),
                 _ => None,
             })
             .sum())
@@ -353,7 +388,8 @@ mod bench {
             .map(|&layer| text.roots[layer])
             .collect();
         let one_layer = [text.roots[0]];
-        let tokens = TEXT_TOKENS as f64;
+        let tokens = u64::from(TEXT_TOKENS);
+        let element = element_bytes(&NumericFormat::host_element());
 
         let mut group = c.benchmark_group("text");
         group.sample_size(10);
@@ -363,10 +399,10 @@ mod bench {
         // heads of width 128 (SwiGLU MLP counted as three projections). The
         // 3-tap output stops after layer 27 (1-based), so the forward runs 27
         // of the model's 36 layers.
-        let attention = 2560.0 * 4096.0 + 2.0 * 2560.0 * 1024.0 + 4096.0 * 2560.0;
-        let mlp = 3.0 * 2560.0 * 9728.0;
-        let full_macs = 27.0 * (attention + mlp) * tokens;
-        let full_bytes = (3.0 * tokens * f64::from(JOINT_ATTENTION) + tokens * 2560.0 * 3.0) * 4.0;
+        let attention: u64 = 2560 * 4096 + 2 * 2560 * 1024 + 4096 * 2560;
+        let mlp: u64 = 3 * 2560 * 9728;
+        let full_macs = 27 * (attention + mlp) * tokens;
+        let full_bytes = (3 * tokens * u64::from(JOINT_ATTENTION) + tokens * 2560 * 3) * element;
         rows.push(case(
             &mut group,
             "text",
@@ -388,7 +424,7 @@ mod bench {
             "text",
             "one_qwen3_layer",
             one_macs,
-            (tokens * 2560.0 * 2.0) * 4.0,
+            (tokens * 2560 * 2) * element,
             || {
                 let values = text
                     .model
@@ -420,8 +456,8 @@ mod bench {
 
     fn rope_hosts(graph: &mut ModelGraph) -> (NodeId, NodeId) {
         let positions = (MIN_LENGTH + IMAGE_TOKENS as usize) * 64;
-        let cos = pseudo_random(positions, 7);
-        let sin = pseudo_random(positions, 11);
+        let cos = seeded(graph, positions, 7);
+        let sin = seeded(graph, positions, 11);
         let cos = graph.host(
             "rope_cos",
             &[(MIN_LENGTH + IMAGE_TOKENS as usize) as u32, 64],
@@ -435,23 +471,29 @@ mod bench {
         (cos, sin)
     }
 
-    fn base_inputs(graph: &mut ModelGraph) -> (DitInputs, NodeId, NodeId) {
+    fn base_inputs(graph: &mut ModelGraph) -> Outcome<(DitInputs, NodeId, NodeId)> {
         let latent = graph.host(
             "latent",
             &[IMAGE_TOKENS, LATENT_CHANNELS],
-            pseudo_random((IMAGE_TOKENS * LATENT_CHANNELS) as usize, 3),
+            seeded(graph, (IMAGE_TOKENS * LATENT_CHANNELS) as usize, 3),
         );
         let text = graph.host(
             "text",
             &[TEXT_TOKENS, JOINT_ATTENTION],
-            pseudo_random((TEXT_TOKENS * JOINT_ATTENTION) as usize, 5),
+            seeded(graph, (TEXT_TOKENS * JOINT_ATTENTION) as usize, 5),
         );
-        let timestep = graph.host("timestep", &[256], timestep_sinusoid(0.5, 256));
+        let settings = DiffusionSettings::resolved();
+        let format = settings.dit_activation;
+        let embedding = PackedRows::from_values(&format, &[0.5])
+            .map_err(|why| why.to_string())
+            .and_then(|sigma| settings.timestep_embedding(&sigma, 256, &format))?;
+        let timestep = graph.host("timestep", &[256], Ok(embedding));
         let (cos, sin) = rope_hosts(graph);
         let config = dit_config(0, 0);
         let norm_count = head_norm_count(graph, &config);
-        let attention_scale = attention_scale(graph, &config);
-        (
+        let attention_scale =
+            attention_scale(graph, &config).map_err(context("attention scale"))?;
+        Ok((
             DitInputs {
                 latent,
                 text,
@@ -465,7 +507,7 @@ mod bench {
             },
             latent,
             text,
-        )
+        ))
     }
 
     fn bench_dit_block(
@@ -475,19 +517,21 @@ mod bench {
     ) -> Outcome<()> {
         let settings = serving_settings()?;
         let config = settings.as_serving_config(&[]);
+        let weight = element_bytes(&diffusion_settings()?.dit_weights);
         // --- one double block ---
         {
-            let mut graph = ModelGraph::new(DType::FLOAT32);
-            let (inputs, _, _) = base_inputs(&mut graph);
+            let mut graph = dit_graph()?;
+            let element = element_bytes(graph.activation_format());
+            let (inputs, _, _) = base_inputs(&mut graph)?;
             let image = graph.host(
                 "block_image",
                 &[IMAGE_TOKENS, HIDDEN],
-                pseudo_random((IMAGE_TOKENS * HIDDEN) as usize, 61),
+                seeded(&graph, (IMAGE_TOKENS * HIDDEN) as usize, 61),
             );
             let text = graph.host(
                 "block_text",
                 &[TEXT_TOKENS, HIDDEN],
-                pseudo_random((TEXT_TOKENS * HIDDEN) as usize, 67),
+                seeded(&graph, (TEXT_TOKENS * HIDDEN) as usize, 67),
             );
             let mut image_mod = [NodeId(0); 6];
             let mut text_mod = [NodeId(0); 6];
@@ -495,14 +539,14 @@ mod bench {
                 *slot = graph.host(
                     &format!("image_mod{index}"),
                     &[HIDDEN],
-                    pseudo_random(HIDDEN as usize, 13 + index as u32),
+                    seeded(&graph, HIDDEN as usize, 13 + index as u32),
                 );
             }
             for (index, slot) in text_mod.iter_mut().enumerate() {
                 *slot = graph.host(
                     &format!("text_mod{index}"),
                     &[HIDDEN],
-                    pseudo_random(HIDDEN as usize, 29 + index as u32),
+                    seeded(&graph, HIDDEN as usize, 29 + index as u32),
                 );
             }
             let (image, text_out) = build_double_block(
@@ -513,10 +557,10 @@ mod bench {
                 [image, text],
                 [image_mod, text_mod],
             )
-            .map_err(context("double block"))?;
+            .map_err(context("joint block"))?;
             let symbols = [(MIN_LENGTH + IMAGE_TOKENS as usize) as u64];
             let macs = macs_of(&graph.program, &symbols)?;
-            let bytes = dit_bytes(&graph.program, &symbols)?;
+            let bytes = dit_bytes(&graph.program, &symbols, weight, element)?;
             let mut stage = denoiser(checkpoint, graph, image, &symbols, &config)?;
             let mut group = c.benchmark_group("dit");
             group.sample_size(10);
@@ -538,19 +582,24 @@ mod bench {
         }
         // --- one single block ---
         {
-            let mut graph = ModelGraph::new(DType::FLOAT32);
-            let (inputs, _, _) = base_inputs(&mut graph);
+            let mut graph = dit_graph()?;
+            let element = element_bytes(graph.activation_format());
+            let (inputs, _, _) = base_inputs(&mut graph)?;
             let stream = graph.host(
                 "stream",
                 &[(MIN_LENGTH + IMAGE_TOKENS as usize) as u32, HIDDEN],
-                pseudo_random((MIN_LENGTH + IMAGE_TOKENS as usize) * HIDDEN as usize, 17),
+                seeded(
+                    &graph,
+                    (MIN_LENGTH + IMAGE_TOKENS as usize) * HIDDEN as usize,
+                    17,
+                ),
             );
             let mut modulation = [NodeId(0); 3];
             for (index, slot) in modulation.iter_mut().enumerate() {
                 *slot = graph.host(
                     &format!("single_mod{index}"),
                     &[HIDDEN],
-                    pseudo_random(HIDDEN as usize, 41 + index as u32),
+                    seeded(&graph, HIDDEN as usize, 41 + index as u32),
                 );
             }
             let output = build_single_block(
@@ -564,7 +613,7 @@ mod bench {
             .map_err(context("single block"))?;
             let symbols = [(MIN_LENGTH + IMAGE_TOKENS as usize) as u64];
             let macs = macs_of(&graph.program, &symbols)?;
-            let bytes = dit_bytes(&graph.program, &symbols)?;
+            let bytes = dit_bytes(&graph.program, &symbols, weight, element)?;
             let mut stage = denoiser(checkpoint, graph, output, &symbols, &config)?;
             let mut group = c.benchmark_group("dit");
             group.sample_size(10);
@@ -586,28 +635,27 @@ mod bench {
         Ok(())
     }
 
-    fn dit_bytes(program: &[Op], symbols: &[u64]) -> Outcome<f64> {
+    fn dit_bytes(
+        program: &[Op],
+        symbols: &[u64],
+        weight_bytes: u64,
+        activation_bytes: u64,
+    ) -> Outcome<u64> {
         let shapes = proxima_tensor::infer(program, symbols).map_err(context("program shapes"))?;
-        let count = |node: NodeId| -> f64 {
-            shapes
-                .of(node)
-                .iter()
-                .map(|&extent| extent as f64)
-                .product::<f64>()
-        };
-        let mut bytes = 0.0;
+        let count = |node: NodeId| -> u64 { shapes.of(node).iter().product::<u64>() };
+        let mut bytes = 0;
         for (index, op) in program.iter().enumerate() {
             if let Op::Input { name, .. } = op {
                 let element = if name.as_deref().is_some_and(|name| name.contains(".weight")) {
-                    2.0
+                    weight_bytes
                 } else {
-                    4.0
+                    activation_bytes
                 };
                 bytes += count(NodeId(index as u32)) * element;
             }
         }
         if let Some(last) = program.len().checked_sub(1) {
-            bytes += count(NodeId(last as u32)) * 4.0;
+            bytes += count(NodeId(last as u32)) * activation_bytes;
         }
         Ok(bytes)
     }
@@ -617,15 +665,17 @@ mod bench {
         rows: &mut Vec<Row>,
         checkpoint: &Checkpoint,
     ) -> Outcome<()> {
-        let mut graph = ModelGraph::new(DType::FLOAT32);
-        let (inputs, _, _) = base_inputs(&mut graph);
+        let mut graph = dit_graph()?;
+        let element = element_bytes(graph.activation_format());
+        let weight = element_bytes(&diffusion_settings()?.dit_weights);
+        let (inputs, _, _) = base_inputs(&mut graph)?;
         let output =
             build_dit(&mut graph, &dit_config(5, 20), &inputs).map_err(context("full dit"))?;
         let settings = serving_settings()?;
         let config = settings.as_serving_config(&[]);
         let symbols = [(MIN_LENGTH + IMAGE_TOKENS as usize) as u64];
         let macs = macs_of(&graph.program, &symbols)?;
-        let bytes = dit_bytes(&graph.program, &symbols)?;
+        let bytes = dit_bytes(&graph.program, &symbols, weight, element)?;
         let mut stage = denoiser(checkpoint, graph, output.velocity, &symbols, &config)?;
         let mut group = c.benchmark_group("dit");
         group.sample_size(10);
@@ -656,19 +706,19 @@ mod bench {
         let half = head_dim / 2;
         let mut host = |name: &str, shape: &[u32], salt: u32| {
             let count: u32 = shape.iter().product();
-            graph.host(name, shape, pseudo_random(count as usize, seed + salt))
+            let values = seeded(graph, count as usize, seed + salt);
+            graph.host(name, shape, values)
         };
         let q_even = host("q_even", &[tokens, heads, half], 1);
         let q_odd = host("q_odd", &[tokens, heads, half], 2);
         let k_even = host("k_even", &[tokens, heads, half], 3);
         let k_odd = host("k_odd", &[tokens, heads, half], 4);
         let v = host("v", &[tokens, heads, head_dim], 5);
-        let activation = graph.activation();
-        let scale = unit_constant(
-            &mut graph.program,
-            1.0 / (head_dim as f32).sqrt(),
-            activation,
-        );
+        let config = DitConfig {
+            head_dim,
+            ..dit_config(0, 0)
+        };
+        let scale = attention_scale(graph, &config).map_err(context("attention scale"))?;
         non_causal_attention_heads(
             &mut graph.program,
             q_even,
@@ -686,13 +736,14 @@ mod bench {
 
     fn bench_dit_attention(c: &mut Criterion, rows: &mut Vec<Row>) -> Outcome<()> {
         let tokens = MIN_LENGTH as u32 + IMAGE_TOKENS;
-        let mut graph = ModelGraph::new(DType::FLOAT32);
+        let mut graph = dit_graph()?;
+        let element = element_bytes(graph.activation_format());
         let output = attention_program(&mut graph, tokens, HEADS, HEAD_DIM, 53)?;
-        let symbols = [tokens as u64];
+        let symbols = [u64::from(tokens)];
         let macs = macs_of(&graph.program, &symbols)?;
-        let bytes = (tokens as f64 * HEADS as f64 * HEAD_DIM as f64 * 2.0
-            + tokens as f64 * HEADS as f64 * (HEAD_DIM as f64 / 2.0) * 4.0)
-            * 4.0;
+        let row_count = u64::from(tokens) * u64::from(HEADS);
+        let bytes = (row_count * u64::from(HEAD_DIM) * 2 + row_count * u64::from(HEAD_DIM / 2) * 4)
+            * element;
         let settings = serving_settings()?;
         let config = settings.as_serving_config(&[]);
         let mut stage = Denoiser::with_weights(graph, output, &symbols, bare_weights(), &config)
@@ -721,8 +772,9 @@ mod bench {
     }
 
     // ----------------------------------------------------------------- vae --
-    fn vae_config() -> VaeConfig {
+    fn vae_config(window: u32) -> VaeConfig {
         VaeConfig {
+            window,
             channels: LATENT_CHANNELS / 4,
             block_channels: [128, 256, 512, 512],
             layers_per_block: 2,
@@ -745,7 +797,7 @@ mod bench {
 
     const CONV_CASES: [ConvCase; 4] = [
         ConvCase {
-            label: "conv3x3_128sq_32to512",
+            label: "window_same_128sq_32to512",
             tensor: "decoder.conv_in",
             side: 128,
             in_channels: 32,
@@ -753,7 +805,7 @@ mod bench {
             groups: 32,
         },
         ConvCase {
-            label: "conv3x3_256sq_512to512",
+            label: "window_same_256sq_512to512",
             tensor: "decoder.up.2.block.0.conv2",
             side: 256,
             in_channels: 512,
@@ -761,7 +813,7 @@ mod bench {
             groups: 32,
         },
         ConvCase {
-            label: "conv3x3_512sq_256to256",
+            label: "window_same_512sq_256to256",
             tensor: "decoder.up.1.block.0.conv2",
             side: 512,
             in_channels: 256,
@@ -769,7 +821,7 @@ mod bench {
             groups: 32,
         },
         ConvCase {
-            label: "conv3x3_1024sq_128to128",
+            label: "window_same_1024sq_128to128",
             tensor: "decoder.up.0.block.1.conv2",
             side: 1024,
             in_channels: 128,
@@ -778,33 +830,44 @@ mod bench {
         },
     ];
 
-    fn case_metrics(case: &ConvCase) -> (f64, f64) {
-        let rows = f64::from(case.side) * f64::from(case.side);
-        let macs = f64::from(case.out_channels) * rows * 9.0 * f64::from(case.in_channels);
-        let bytes = f64::from(case.out_channels) * f64::from(case.in_channels) * 9.0 * 2.0
-            + rows * f64::from(case.in_channels) * 4.0
-            + rows * f64::from(case.out_channels) * 4.0;
+    fn case_metrics(case: &ConvCase, weight_bytes: u64, activation_bytes: u64) -> (u64, u64) {
+        let rows = u64::from(case.side) * u64::from(case.side);
+        let macs = u64::from(case.out_channels) * rows * 9 * u64::from(case.in_channels);
+        let bytes = u64::from(case.out_channels) * u64::from(case.in_channels) * 9 * weight_bytes
+            + rows * u64::from(case.in_channels) * activation_bytes
+            + rows * u64::from(case.out_channels) * activation_bytes;
         (macs, bytes)
     }
 
     /// The VAE's own factored 3x3 conv for `case`, exactly as the decoder
     /// builds it, over a pseudo-random activation leaf.
-    fn conv_graph(case: &ConvCase) -> Outcome<(ModelGraph, NodeId)> {
+    fn conv_graph(case: &ConvCase, checkpoint: &Checkpoint) -> Outcome<(ModelGraph, NodeId)> {
+        let window = checkpoint
+            .window_extent(&format!("{}.weight", case.tensor))
+            .map_err(context("conv window"))?;
+        let config = VaeConfig {
+            conv_taps: ConvTaps::Three,
+            ..vae_config(window)
+        };
         let rows_n = case.side * case.side;
-        let mut graph = ModelGraph::new(DType::FLOAT32);
+        let mut graph = vae_graph()?;
         let input = graph.host(
             "activation",
             &[rows_n, case.groups, case.in_channels / case.groups],
-            pseudo_random((rows_n * case.in_channels) as usize, 101 + case.side),
+            seeded(
+                &graph,
+                (rows_n * case.in_channels) as usize,
+                101 + case.side,
+            ),
         );
-        let output = build_conv3x3(
+        let output = build_window_same(
             &mut graph,
             input,
             case.tensor,
             (case.side, case.side),
             (case.in_channels, case.out_channels),
             (case.groups, case.groups),
-            ConvTaps::Three,
+            &config,
         )
         .map_err(context("conv"))?;
         Ok((graph, output))
@@ -817,11 +880,13 @@ mod bench {
     ) -> Outcome<()> {
         let settings = serving_settings()?;
         let config = settings.as_serving_config(&[]);
+        let weight = element_bytes(&diffusion_settings()?.vae_weights);
         for case_spec in &CONV_CASES {
             let rows_n = case_spec.side * case_spec.side;
-            let (graph, output) = conv_graph(case_spec)?;
+            let (graph, output) = conv_graph(case_spec, checkpoint)?;
             let symbols = [u64::from(rows_n)];
-            let (macs, bytes) = case_metrics(case_spec);
+            let (macs, bytes) =
+                case_metrics(case_spec, weight, element_bytes(graph.activation_format()));
             let mut stage = decoder(checkpoint, graph, output, &symbols, &config)?;
             let mut group = c.benchmark_group("vae_conv");
             group.sample_size(10);
@@ -852,14 +917,15 @@ mod bench {
         let config = settings.as_serving_config(&[]);
         // group_norm: the mid block's 512 channels at 128x128, 32 groups.
         {
-            let mut graph = ModelGraph::new(DType::FLOAT32);
+            let mut graph = vae_graph()?;
+            let element = element_bytes(graph.activation_format());
             let rows_n = 128u32 * 128u32;
             let channels = 512u32;
             let groups = 32u32;
             let x = graph.host(
                 "activation",
                 &[rows_n, groups, channels / groups],
-                pseudo_random((rows_n * channels) as usize, 201),
+                seeded(&graph, (rows_n * channels) as usize, 201),
             );
             let weight = graph.weight(
                 "decoder.mid.block_1.norm1.weight",
@@ -871,17 +937,19 @@ mod bench {
                 &[groups, channels / groups],
                 None,
             );
+            let eps = scalar_constant_like(&mut graph.program, 1e-6, x)
+                .map_err(context("group norm eps"))?;
             let output = group_norm(
                 &mut graph.program,
                 x,
                 weight,
                 bias,
                 rows_n * (channels / groups),
-                1e-6,
+                eps,
             )
             .map_err(context("group norm"))?;
             let symbols = [u64::from(rows_n)];
-            let bytes = (rows_n * channels * 2) as f64 * 4.0;
+            let bytes = u64::from(rows_n) * u64::from(channels) * 2 * element;
             let mut stage = decoder(checkpoint, graph, output, &symbols, &config)?;
             let mut group = c.benchmark_group("vae");
             group.sample_size(10);
@@ -891,7 +959,7 @@ mod bench {
                 &mut group,
                 "vae",
                 "group_norm_128sq",
-                0.0,
+                0,
                 bytes,
                 || {
                     black_box(stage.evaluate(&[]).map_err(context("norm evaluate"))?);
@@ -902,7 +970,8 @@ mod bench {
         }
         // nearest_x2: the 128x128 -> 256x256 upsample that precedes a conv.
         {
-            let mut graph = ModelGraph::new(DType::FLOAT32);
+            let mut graph = vae_graph()?;
+            let element = element_bytes(graph.activation_format());
             let height = 128u32;
             let width = 128u32;
             let channels = 512u32;
@@ -910,13 +979,13 @@ mod bench {
             let x = graph.host(
                 "activation",
                 &[height * width, groups, channels / groups],
-                pseudo_random((height * width * channels) as usize, 211),
+                seeded(&graph, (height * width * channels) as usize, 211),
             );
             let index = graph.index_leaf("upsample.index", upsample_x2_index(height, width));
             let output =
                 nearest_upsample_x2(&mut graph.program, x, index).map_err(context("upsample"))?;
             let symbols = [u64::from(height * width)];
-            let bytes = (height * width * channels) as f64 * 4.0 * 2.0;
+            let bytes = u64::from(height * width * channels) * element * 2;
             let mut stage = Decoder::with_weights(graph, output, &symbols, bare_weights(), &config)
                 .map_err(context("upsample stage"))?;
             let mut group = c.benchmark_group("vae");
@@ -927,7 +996,7 @@ mod bench {
                 &mut group,
                 "vae",
                 "nearest_x2_128sq",
-                0.0,
+                0,
                 bytes,
                 || {
                     black_box(stage.evaluate(&[]).map_err(context("upsample evaluate"))?);
@@ -941,13 +1010,14 @@ mod bench {
 
     fn bench_vae_attention(c: &mut Criterion, rows: &mut Vec<Row>) -> Outcome<()> {
         let tokens = 128u32 * 128u32;
-        let mut graph = ModelGraph::new(DType::FLOAT32);
+        let mut graph = vae_graph()?;
+        let element = element_bytes(graph.activation_format());
         // One head of width 512 split as 32 channel groups of 16; the same
         // shape the decoder's mid attention builds from its 1x1 projections.
         let output = attention_program(&mut graph, tokens, 32, 32, 71)?;
         let symbols = [u64::from(tokens)];
         let macs = macs_of(&graph.program, &symbols)?;
-        let bytes = (tokens as f64 * 512.0 * 2.0) * 4.0;
+        let bytes = u64::from(tokens) * 512 * 2 * element;
         let settings = serving_settings()?;
         let config = settings.as_serving_config(&[]);
         let mut stage = Decoder::with_weights(graph, output, &symbols, bare_weights(), &config)
@@ -976,20 +1046,23 @@ mod bench {
         rows: &mut Vec<Row>,
         checkpoint: &Checkpoint,
     ) -> Outcome<()> {
-        let config = vae_config();
-        let mut graph = ModelGraph::new(DType::FLOAT32);
+        let window = checkpoint
+            .window_extent("decoder.conv_in.weight")
+            .map_err(context("vae window"))?;
+        let config = vae_config(window);
+        let mut graph = vae_graph()?;
         let tokens = LATENT_SIDE * 2 * LATENT_SIDE * 2;
         let input = graph.host(
             "latent",
             &[tokens, LATENT_CHANNELS / 4, 1],
-            pseudo_random((tokens * LATENT_CHANNELS / 4) as usize, 301),
+            seeded(&graph, (tokens * LATENT_CHANNELS / 4) as usize, 301),
         );
         let output = build_vae_decode(&mut graph, &config, input).map_err(context("vae decode"))?;
         let settings = serving_settings()?;
         let config = settings.as_serving_config(&[]);
         let symbols = [u64::from(tokens)];
         let macs = macs_of(&graph.program, &symbols)?;
-        let bytes = 0.0;
+        let bytes = 0;
         let mut stage = decoder(checkpoint, graph, output.image, &symbols, &config)?;
         let mut group = c.benchmark_group("vae");
         group.sample_size(10);
@@ -1023,14 +1096,14 @@ mod bench {
         use proxima_model_interop::ServingConfig;
         use proxima_model_interop::diffusion::{
             Checkpoint, Decoder, DiffusionSettings, Graph as ModelGraph, WeightData, Weights,
-            encode,
         };
         use proxima_numeric::DType;
         use proxima_numeric::codec::Codec;
-        use proxima_tensor::spec::linear;
+        use proxima_tensor::spec::project_rows;
 
         use super::{
-            CONV_CASES, ConvCase, Outcome, context, conv_graph, pseudo_random, serving_settings,
+            CONV_CASES, ConvCase, Outcome, context, conv_graph, milliseconds, noise_rows, seeded,
+            serving_settings,
         };
 
         const TAPS: u32 = 9;
@@ -1076,10 +1149,6 @@ mod bench {
             u64::from(padded_rows(case))
                 * u64::from(TAPS * case.in_channels)
                 * u64::from(case.out_channels)
-        }
-
-        fn milliseconds(nanos: u64) -> String {
-            format!("{}.{:03}", nanos / 1_000_000, (nanos / 1_000) % 1_000)
         }
 
         fn median(sorted: &[u64]) -> u64 {
@@ -1194,7 +1263,7 @@ mod bench {
             case: &ConvCase,
             tiles: DenseMmaInputLayout,
         ) -> Outcome<(DType, Codec)> {
-            let (graph, output) = conv_graph(case)?;
+            let (graph, output) = conv_graph(case, checkpoint)?;
             let activation = graph.activation();
             let codec = DiffusionSettings::resolved().vae_weights;
             with_tiles(tiles, |config| {
@@ -1227,18 +1296,18 @@ mod bench {
         ) -> Outcome<()> {
             let width = TAPS * case.in_channels;
             let rows = padded_rows(case);
-            let mut graph = ModelGraph::new(activation);
+            let mut graph = ModelGraph::new(activation)?;
             let staged = graph.host(
                 "staged",
                 &[rows, width],
-                pseudo_random((rows * width) as usize, 103),
+                seeded(&graph, (rows * width) as usize, 103),
             );
             let weight = graph.weight_taps(
                 &format!("{}.weight", case.tensor),
                 &[case.out_channels, width],
             );
-            let output =
-                linear(&mut graph.program, staged, weight, None).map_err(context("linear"))?;
+            let output = project_rows(&mut graph.program, staged, weight, None)
+                .map_err(context("linear"))?;
             let codec = DiffusionSettings::resolved().vae_weights;
             with_tiles(tiles, |config| {
                 let mut stage =
@@ -1256,20 +1325,19 @@ mod bench {
         }
 
         fn form_d(activation: DType, codec: Codec, tiles: DenseMmaInputLayout) -> Outcome<()> {
-            let mut graph = ModelGraph::new(activation);
+            let mut graph = ModelGraph::new(activation)?;
             let input = graph.host(
                 "control_activation",
                 &[CONTROL_ROWS, CONTROL_DEPTH],
-                pseudo_random((CONTROL_ROWS * CONTROL_DEPTH) as usize, 107),
+                seeded(&graph, (CONTROL_ROWS * CONTROL_DEPTH) as usize, 107),
             );
             let weight = graph.weight("control.weight", &[CONTROL_COLUMNS, CONTROL_DEPTH], None);
             let output =
-                linear(&mut graph.program, input, weight, None).map_err(context("linear"))?;
-            let bytes = encode(
-                &pseudo_random((CONTROL_COLUMNS * CONTROL_DEPTH) as usize, 109),
-                codec,
-            )
-            .map_err(context("control weight"))?;
+                project_rows(&mut graph.program, input, weight, None).map_err(context("linear"))?;
+            let bytes = noise_rows(&codec, (CONTROL_COLUMNS * CONTROL_DEPTH) as usize, 109)
+                .map_err(context("control weight"))?
+                .as_bytes()
+                .to_vec();
             let weights = Weights {
                 codec,
                 entries: vec![(String::from("control.weight"), WeightData::Packed(bytes))],
@@ -1312,13 +1380,10 @@ mod bench {
     fn print_table(rows: &[Row]) {
         eprintln!("flux2_klein_bench_table label,mean_ms,gmac_s,gb_s,iters");
         for row in rows {
-            let seconds = row.millis / 1e3;
             eprintln!(
-                "flux2_klein_bench_row label={} mean_ms={:.3} gmac_s={:.2} gb_s={:.2} iters={}",
+                "flux2_klein_bench_row label={} {} iters={}",
                 row.label,
-                row.millis,
-                gmac_per_second(row.macs, seconds),
-                gb_per_second(row.bytes, seconds),
+                row.rates(),
                 row.iterations,
             );
         }
@@ -1335,10 +1400,10 @@ mod bench {
     }
 
     const VAE_CONV_CASES: [&str; 4] = [
-        "conv3x3_128sq_32to512",
-        "conv3x3_256sq_512to512",
-        "conv3x3_512sq_256to256",
-        "conv3x3_1024sq_128to128",
+        "window_same_128sq_32to512",
+        "window_same_256sq_512to512",
+        "window_same_512sq_256to256",
+        "window_same_1024sq_128to128",
     ];
     const VAE_CASES: [&str; 4] = [
         "group_norm_128sq",

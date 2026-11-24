@@ -2,10 +2,13 @@
 //! graphs' lowering choices, the same split the serving settings use -- the
 //! value lives where the graph builder reads it, this module owns the loader.
 
-use conflaguration::Settings;
-use proxima_numeric::{DType, NumericFormat};
+use std::str::FromStr;
+
+use conflaguration::{Error, Settings, Validate, ValidationMessage};
+use proxima_numeric::{DType, NumericFormat, PackedRows};
 use serde::{Deserialize, Serialize};
 
+use super::png::is_supported_sample;
 use super::vae::ConvTaps;
 
 const FORMAT_DEFAULTS: &str = include_str!("defaults.toml");
@@ -52,6 +55,21 @@ pub struct DiffusionSettings {
     pub vae_activation: NumericFormat,
     /// How the decoder's checkpoint weights are packed for the backend.
     pub vae_weights: NumericFormat,
+    /// The decoder's group-norm epsilon as decimal text; read through [`Self::group_eps`].
+    pub group_eps: String,
+    /// The backbone's norm epsilon as decimal text; read through [`Self::norm_eps`].
+    pub norm_eps: String,
+    /// The factor the timestep is scaled by before it is embedded, as decimal text; read through
+    /// [`Self::time_factor`].
+    pub time_factor: String,
+    /// The embedding's longest period, as decimal text; read through [`Self::max_period`].
+    pub max_period: String,
+    /// The format one PNG channel sample is stored in.
+    pub png_sample: NumericFormat,
+    /// The format a gather index leaf is stored in.
+    pub gather_index: NumericFormat,
+    /// The element format of the external reference tool's dumps, raw little-endian.
+    pub reference_format: NumericFormat,
 }
 
 /// The format data `defaults.toml` carries, parsed once per default.
@@ -62,6 +80,13 @@ struct FormatDefaults {
     dit_weights: NumericFormat,
     vae_activation: NumericFormat,
     vae_weights: NumericFormat,
+    group_eps: String,
+    norm_eps: String,
+    time_factor: String,
+    max_period: String,
+    png_sample: NumericFormat,
+    gather_index: NumericFormat,
+    reference_format: NumericFormat,
 }
 
 impl FormatDefaults {
@@ -83,6 +108,13 @@ impl Default for DiffusionSettings {
             dit_weights: formats.dit_weights,
             vae_activation: formats.vae_activation,
             vae_weights: formats.vae_weights,
+            group_eps: formats.group_eps,
+            norm_eps: formats.norm_eps,
+            time_factor: formats.time_factor,
+            max_period: formats.max_period,
+            png_sample: formats.png_sample,
+            gather_index: formats.gather_index,
+            reference_format: formats.reference_format,
         }
     }
 }
@@ -101,6 +133,20 @@ impl DiffusionSettings {
             Ok(()) => settings,
             Err(_) => Self::default(),
         }
+    }
+
+    /// The shipped formats with every set `PROXIMA_DIFFUSION_<FIELD>` over
+    /// them, validated: a format a graph's element type cannot express fails
+    /// here, at load, instead of being papered over where a graph is built.
+    ///
+    /// # Errors
+    ///
+    /// The environment layer's error, or the validation failure.
+    pub fn try_resolved() -> conflaguration::Result<Self> {
+        let mut settings = Self::default();
+        settings.override_from_env()?;
+        settings.validate()?;
+        Ok(settings)
     }
 
     /// The backbone's activation format as the element type its graph is built in.
@@ -126,6 +172,133 @@ impl DiffusionSettings {
             .ok_or_else(|| String::from("vae_activation must be a scalar format"))
     }
 
+    /// The gather index format as the element type an index leaf is declared in.
+    ///
+    /// # Errors
+    ///
+    /// A message when the configured format is not a scalar format.
+    pub fn gather_index_dtype(&self) -> Result<DType, String> {
+        self.gather_index
+            .to_dtype()
+            .ok_or_else(|| String::from("gather_index must be a scalar format"))
+    }
+
+    /// The reference dump format as the element type its rows are read in.
+    ///
+    /// # Errors
+    ///
+    /// A message when the configured format is not a scalar format.
+    pub fn reference_format_dtype(&self) -> Result<DType, String> {
+        self.reference_format
+            .to_dtype()
+            .ok_or_else(|| String::from("reference_format must be a scalar format"))
+    }
+
+    /// The group-norm epsilon, parsed into whatever element type the caller needs.
+    ///
+    /// # Errors
+    ///
+    /// A message when the configured text is not a number.
+    pub fn group_eps<T: FromStr>(&self) -> Result<T, String> {
+        self.group_eps
+            .parse()
+            .map_err(|_| format!("group_eps {:?} is not a number", self.group_eps))
+    }
+
+    /// The backbone's norm epsilon, parsed as [`Self::group_eps`] is.
+    ///
+    /// # Errors
+    ///
+    /// A message when the configured text is not a number.
+    pub fn norm_eps<T: FromStr>(&self) -> Result<T, String> {
+        self.norm_eps
+            .parse()
+            .map_err(|_| format!("norm_eps {:?} is not a number", self.norm_eps))
+    }
+
+    /// The timestep scale, parsed as [`Self::group_eps`] is.
+    ///
+    /// # Errors
+    ///
+    /// A message when the configured text is not a number.
+    pub fn time_factor<T: FromStr>(&self) -> Result<T, String> {
+        self.time_factor
+            .parse()
+            .map_err(|_| format!("time_factor {:?} is not a number", self.time_factor))
+    }
+
+    /// The embedding's longest period, parsed as [`Self::group_eps`] is.
+    ///
+    /// # Errors
+    ///
+    /// A message when the configured text is not a number.
+    pub fn max_period<T: FromStr>(&self) -> Result<T, String> {
+        self.max_period
+            .parse()
+            .map_err(|_| format!("max_period {:?} is not a number", self.max_period))
+    }
+
+    /// The cosine/sine embedding of `timestep * time_factor`: `channels / 2` frequencies from
+    /// `max_period^(-i / (channels / 2))`, cosine first and sine second (ggml's order), computed
+    /// with the standard library's methods.
+    ///
+    /// # Errors
+    ///
+    /// A message when either setting is not a number, `timestep` is not one element, or a
+    /// value has no codec in `format`.
+    pub fn timestep_embedding(
+        &self,
+        timestep: &PackedRows,
+        channels: u32,
+        format: &NumericFormat,
+    ) -> Result<PackedRows, String> {
+        let host = NumericFormat::host_element();
+        let encode = |target: &NumericFormat, values: &[_]| {
+            PackedRows::from_values(target, values).map_err(|why| why.to_string())
+        };
+        let decode = |rows: &PackedRows| {
+            let mut out = Vec::new();
+            rows.decode_all(&mut out).map_err(|why| why.to_string())?;
+            Ok::<_, String>(out)
+        };
+        let single = |value| decode(&encode(&host, &[value])?);
+        let half = channels / 2;
+        let positions: Vec<_> = (0..half).map(|index| index as _).collect();
+        let indices = decode(&encode(&host, &positions)?)?;
+        let stamps = decode(timestep)?;
+        let factors = single(self.time_factor()?)?;
+        let periods = single(self.max_period()?)?;
+        let counts = single(half as _)?;
+        let ([stamp], [factor], [period], [count]) = (
+            stamps.as_slice(),
+            factors.as_slice(),
+            periods.as_slice(),
+            counts.as_slice(),
+        ) else {
+            return Err(String::from(
+                "timestep, time_factor and max_period must each be one element",
+            ));
+        };
+        let angles: Vec<_> = indices
+            .iter()
+            .map(|index| stamp * factor * period.powf(-index / count))
+            .collect();
+        let mut values = Vec::with_capacity(channels as usize);
+        values.extend(angles.iter().map(|angle| angle.cos()));
+        values.extend(angles.iter().map(|angle| angle.sin()));
+        encode(format, &values)
+    }
+
+    fn png_sample_supported(&self) -> Result<(), String> {
+        if is_supported_sample(&self.png_sample) {
+            Ok(())
+        } else {
+            Err(String::from(
+                "png_sample must be a one-byte unsigned integer format",
+            ))
+        }
+    }
+
     /// The `conv_taps` field as the enum the graph builder takes.
     #[must_use]
     pub fn conv_taps(&self) -> ConvTaps {
@@ -133,9 +306,52 @@ impl DiffusionSettings {
     }
 }
 
+fn host_number<T: FromStr>(parsed: Result<T, String>, probe: &mut Vec<T>) -> Result<(), String> {
+    probe.push(parsed?);
+    Ok(())
+}
+
+impl Validate for DiffusionSettings {
+    fn validate(&self) -> conflaguration::Result<()> {
+        let mut probe = Vec::new();
+        let host = PackedRows::from_values(&NumericFormat::host_element(), &[Default::default()])
+            .and_then(|rows| rows.decode_all(&mut probe))
+            .map_err(|why| why.to_string());
+        let errors: Vec<ValidationMessage> = [
+            ("dit_activation", self.dit_activation_dtype().map(drop)),
+            ("vae_activation", self.vae_activation_dtype().map(drop)),
+            ("gather_index", self.gather_index_dtype().map(drop)),
+            ("reference_format", self.reference_format_dtype().map(drop)),
+            ("png_sample", self.png_sample_supported()),
+            ("host_element", host),
+            ("group_eps", host_number(self.group_eps(), &mut probe)),
+            ("norm_eps", host_number(self.norm_eps(), &mut probe)),
+            ("time_factor", host_number(self.time_factor(), &mut probe)),
+            ("max_period", host_number(self.max_period(), &mut probe)),
+        ]
+        .into_iter()
+        .filter_map(|(field, found)| {
+            found
+                .err()
+                .map(|message| ValidationMessage::new(field, message))
+        })
+        .collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Validation { errors })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shipped_formats_validate() {
+        assert!(DiffusionSettings::default().validate().is_ok());
+    }
 
     /// The struct's `#[setting(default = ...)]` string and `ConvTaps::default`
     /// are two spellings of one default; this stops them drifting when the
@@ -174,6 +390,87 @@ mod tests {
         assert_eq!(settings.dit_weights, formats.dit_weights);
         assert_eq!(settings.vae_activation, formats.vae_activation);
         assert!(settings.dit_activation_dtype().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_png_samples_that_are_wide_or_signed() {
+        let signed = NumericFormat::from_name("int8").expect("int8 is a layout name");
+        let unfit: Vec<NumericFormat> = NumericFormat::ALL
+            .into_iter()
+            .chain([signed])
+            .filter(|format| {
+                format.size_bytes() == 2 || format.is_signed_integer() || format.is_float()
+            })
+            .collect();
+        assert!(unfit.iter().any(|format| format.size_bytes() == 2));
+        assert!(unfit.iter().any(NumericFormat::is_signed_integer));
+
+        for format in unfit {
+            let settings = DiffusionSettings {
+                png_sample: format,
+                ..DiffusionSettings::default()
+            };
+            assert!(
+                settings.validate().is_err(),
+                "png_sample {format:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_a_malformed_norm_eps() {
+        let settings = DiffusionSettings {
+            norm_eps: String::from("one millionth"),
+            ..DiffusionSettings::default()
+        };
+
+        assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn the_timestep_angles_at_the_defaults_match_the_direct_formula() {
+        let settings = DiffusionSettings::default();
+        let host = NumericFormat::host_element();
+        let timestep =
+            PackedRows::from_values(&host, &[0.37]).expect("one host element encodes");
+        let channels = 8u32;
+        let half = (channels / 2) as usize;
+
+        let embedding = settings
+            .timestep_embedding(&timestep, channels, &host)
+            .expect("the default settings embed a timestep");
+        let mut decoded = Vec::new();
+        embedding
+            .decode_all(&mut decoded)
+            .expect("the embedding decodes at the host element");
+
+        let mut inputs = Vec::new();
+        timestep
+            .decode_all(&mut inputs)
+            .expect("the timestep decodes at the host element");
+        inputs.push(settings.time_factor().expect("default time_factor parses"));
+        inputs.push(settings.max_period().expect("default max_period parses"));
+        inputs.push(half as _);
+        for index in 0..half {
+            inputs.push(index as _);
+        }
+        let (head, indices) = inputs.split_at(4);
+        let [stamp, factor, period, count] = head else {
+            panic!("four scalar inputs were pushed");
+        };
+        let angles: Vec<_> = indices
+            .iter()
+            .map(|index| stamp * factor * period.powf(-index / count))
+            .collect();
+        let expected: Vec<_> = angles
+            .iter()
+            .map(|angle| angle.cos())
+            .chain(angles.iter().map(|angle| angle.sin()))
+            .collect();
+        assert_eq!(decoded.len(), expected.len());
+        for (found, wanted) in decoded.iter().zip(&expected) {
+            assert_eq!(found.to_bits(), wanted.to_bits());
+        }
     }
 
     #[test]

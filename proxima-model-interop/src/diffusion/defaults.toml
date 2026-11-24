@@ -8,3 +8,20 @@ vae_activation = "float32"
 # how each stage's checkpoint weights are packed for the backend
 dit_weights = "float16"
 vae_weights = "float16"
+
+# the norm epsilons, as decimal text parsed into the element type that consumes them
+group_eps = "1e-6"
+norm_eps = "1e-6"
+
+# the sample format a PNG channel is stored in
+png_sample = "uint8"
+
+# the format a gather index leaf is stored in
+gather_index = "int32"
+
+# the element format of the external reference tool's dumps, raw little-endian
+reference_format = "float32"
+
+# the timestep embedding's scale and frequency base, as decimal text parsed into the element type that consumes them
+time_factor = "1000.0"
+max_period = "10000.0"

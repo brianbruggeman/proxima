@@ -4,12 +4,16 @@
 //! is the checkpoint's own (the diffusers layout its safetensors header
 //! declares).
 
+use std::str::FromStr;
+
+use proxima_numeric::{NumericFormat, PackedRows};
 use proxima_tensor::TensorError;
 use proxima_tensor::op::{NodeId, ReduceInit, ScalarOp};
 use proxima_tensor::spec::{
     RopePairing, concat_rows, count_constant, elementwise_like, fused_rope_pair,
-    layer_norm_no_affine, linear, matvec, modulate, non_causal_attention_heads, reduce_like,
-    rmsnorm_per_head, scalar_constant_like, silu, slice_columns, slice_range, unit_constant,
+    layer_norm_no_affine, modulate, non_causal_attention_heads, project_rows, project_vector,
+    reduce_like, rmsnorm_per_head, scalar_constant_as, scalar_constant_like, silu, slice_columns,
+    slice_range,
 };
 
 use super::Graph;
@@ -37,7 +41,7 @@ impl DitConfig {
 
     /// `3 * hidden + 2 * mlp_hidden`, a single block's fused q/k/v/mlp width.
     #[must_use]
-    pub const fn single_linear1_width(&self) -> u32 {
+    pub const fn single_stage1_width(&self) -> u32 {
         self.hidden * 3 + self.mlp_hidden() * 2
     }
 
@@ -66,19 +70,27 @@ pub struct DitInputs {
     pub text_tokens: u32,
 }
 
-const NORM_EPS: f32 = 1e-6;
+fn norm_eps<T: FromStr>(graph: &Graph, like: NodeId) -> Result<T, TensorError> {
+    graph
+        .settings()
+        .norm_eps()
+        .map_err(|_| TensorError::NotLowerable {
+            node: like,
+            reason: "norm_eps is not a number",
+        })
+}
 
-fn linear_of(
+fn project_leaf(
     graph: &mut Graph,
     x: NodeId,
     tensor: &str,
     shape: &[u32],
 ) -> Result<NodeId, TensorError> {
     let weight = graph.weight(tensor, shape, None);
-    linear(&mut graph.program, x, weight, None)
+    project_rows(&mut graph.program, x, weight, None)
 }
 
-fn linear_rows(
+fn project_row_slice(
     graph: &mut Graph,
     x: NodeId,
     tensor: &str,
@@ -86,7 +98,7 @@ fn linear_rows(
     rows: (u32, u32),
 ) -> Result<NodeId, TensorError> {
     let weight = graph.weight(tensor, &[rows.1 - rows.0, in_width], Some(rows));
-    linear(&mut graph.program, x, weight, None)
+    project_rows(&mut graph.program, x, weight, None)
 }
 
 fn dense(
@@ -144,7 +156,8 @@ fn multiply_gate(graph: &mut Graph, value: NodeId, gate: NodeId) -> Result<NodeI
 }
 
 fn norm(graph: &mut Graph, x: NodeId, hidden: u32) -> Result<NodeId, TensorError> {
-    layer_norm_no_affine(&mut graph.program, x, hidden, NORM_EPS)
+    let eps = norm_eps(graph, x)?;
+    layer_norm_no_affine(&mut graph.program, x, hidden, eps)
 }
 
 fn activated(graph: &mut Graph, x: NodeId, map: &str) -> Result<NodeId, TensorError> {
@@ -266,7 +279,7 @@ fn swiglu(
     config: &DitConfig,
 ) -> Result<NodeId, TensorError> {
     let mlp = config.mlp_hidden();
-    let gate = linear_rows(
+    let gate = project_row_slice(
         graph,
         x,
         &format!("{prefix}.0.weight"),
@@ -274,7 +287,7 @@ fn swiglu(
         (0, mlp),
     )?;
     let gate = activated(graph, gate, "td->td")?;
-    let up = linear_rows(
+    let up = project_row_slice(
         graph,
         x,
         &format!("{prefix}.0.weight"),
@@ -282,7 +295,7 @@ fn swiglu(
         (mlp, 2 * mlp),
     )?;
     let gained = scaled_mul(graph, gate, up, "td->td")?;
-    linear_of(
+    project_leaf(
         graph,
         gained,
         &format!("{prefix}.2.weight"),
@@ -300,11 +313,10 @@ fn head_norm(
     rows: u32,
 ) -> Result<NodeId, TensorError> {
     let gamma = graph.weight(tensor, &[config.head_dim], None);
-    let eps = graph.host(
-        &format!("norm_eps.{rows}"),
-        &[rows],
-        vec![NORM_EPS; rows as usize],
-    );
+    let eps_value = norm_eps(graph, x)?;
+    let packed =
+        PackedRows::from_values(graph.activation_format(), &vec![eps_value; rows as usize]);
+    let eps = graph.host(&format!("norm_eps.{rows}"), &[rows], packed);
     rmsnorm_per_head(&mut graph.program, x, gamma, count, eps, "h")
 }
 
@@ -333,23 +345,24 @@ fn double_block(
     let [image_mod, text_mod] = modulation;
     let count = inputs.norm_count;
     let inv_sqrt = inputs.attention_scale;
+    let eps = norm_eps(graph, image)?;
     let program = &mut graph.program;
-    let image_normed = layer_norm_no_affine(program, image, config.hidden, NORM_EPS)?;
+    let image_normed = layer_norm_no_affine(program, image, config.hidden, eps)?;
     let image_normed = modulate(program, image_normed, image_mod[0], image_mod[1])?;
-    let text_normed = layer_norm_no_affine(program, text, config.hidden, NORM_EPS)?;
+    let text_normed = layer_norm_no_affine(program, text, config.hidden, eps)?;
     let text_normed = modulate(program, text_normed, text_mod[0], text_mod[1])?;
     if let Some(trace) = trace.as_mut() {
         trace.push(("b_imgmod", image_normed));
     }
 
     let attention_in = config.attention_width();
-    let image_qkv = linear_of(
+    let image_qkv = project_leaf(
         graph,
         image_normed,
         &format!("{prefix}.img_attn.qkv.weight"),
         &[attention_in * 3, config.hidden],
     )?;
-    let text_qkv = linear_of(
+    let text_qkv = project_leaf(
         graph,
         text_normed,
         &format!("{prefix}.txt_attn.qkv.weight"),
@@ -469,14 +482,15 @@ fn single_block(
 ) -> Result<NodeId, TensorError> {
     let count = inputs.norm_count;
     let inv_sqrt = inputs.attention_scale;
+    let eps = norm_eps(graph, x)?;
     let program = &mut graph.program;
-    let normed = layer_norm_no_affine(program, x, config.hidden, NORM_EPS)?;
+    let normed = layer_norm_no_affine(program, x, config.hidden, eps)?;
     let normed = modulate(program, normed, modulation[0], modulation[1])?;
-    let fused = linear_of(
+    let fused = project_leaf(
         graph,
         normed,
         &format!("{prefix}.linear1.weight"),
-        &[config.single_linear1_width(), config.hidden],
+        &[config.single_stage1_width(), config.hidden],
     )?;
     let attention_in = config.attention_width();
     let rows = inputs.text_tokens + inputs.image_tokens;
@@ -520,7 +534,7 @@ fn single_block(
             None,
             Some((attention_in, attention_in + config.mlp_hidden())),
         );
-        linear(&mut graph.program, gained, weight, None)?
+        project_rows(&mut graph.program, gained, weight, None)?
     };
     let (q_even, q_odd) = rope(graph, q, inputs)?;
     let (k_even, k_odd) = rope(graph, k, inputs)?;
@@ -564,13 +578,31 @@ pub fn head_norm_count(graph: &mut Graph, config: &DitConfig) -> NodeId {
 }
 
 /// The constant attention scores are scaled by, built once per program.
-pub fn attention_scale(graph: &mut Graph, config: &DitConfig) -> NodeId {
+///
+/// # Errors
+///
+/// [`TensorError`] when a node fails to build.
+pub fn attention_scale(graph: &mut Graph, config: &DitConfig) -> Result<NodeId, TensorError> {
+    inverse_root_constant(graph, config.head_dim)
+}
+
+/// `1 / sqrt(count)` as a rank-0 constant in the graph's activation dtype,
+/// with `count` read back at the host element, which holds an integer exactly,
+/// so the constant is rounded once, into the activation dtype.
+///
+/// # Errors
+///
+/// [`TensorError`] when the count does not round-trip through the host element.
+pub(crate) fn inverse_root_constant(graph: &mut Graph, count: u32) -> Result<NodeId, TensorError> {
     let activation = graph.activation();
-    unit_constant(
-        &mut graph.program,
-        1.0 / (config.head_dim as f32).sqrt(),
-        activation,
-    )
+    let packed = PackedRows::from_values(&NumericFormat::host_element(), &[count as _])?;
+    let mut decoded = Vec::new();
+    packed.decode_all(&mut decoded)?;
+    let [width] = decoded.as_slice() else {
+        return Err(TensorError::Empty);
+    };
+    let scale = 1.0 / width.sqrt();
+    Ok(scalar_constant_as(&mut graph.program, scale, activation))
 }
 
 /// One single-stream block as its own program fragment.
@@ -597,7 +629,7 @@ fn modulation_chunks(
     chunks: u32,
 ) -> Result<Vec<NodeId>, TensorError> {
     let weight = graph.weight(tensor, &[width * chunks, width], None);
-    let projected = matvec(&mut graph.program, vector, weight, None)?;
+    let projected = project_vector(&mut graph.program, vector, weight, None)?;
     (0..chunks)
         .map(|chunk| slice_range(&mut graph.program, projected, chunk * width, width))
         .collect()
@@ -630,13 +662,13 @@ pub fn build_dit(
     inputs: &DitInputs,
 ) -> Result<DitOutput, TensorError> {
     let mut trace = Vec::new();
-    let image_in = linear_of(
+    let image_in = project_leaf(
         graph,
         inputs.latent,
         "img_in.weight",
         &[config.hidden, config.in_channels],
     )?;
-    let text_in = linear_of(
+    let text_in = project_leaf(
         graph,
         inputs.text,
         "txt_in.weight",
@@ -647,14 +679,14 @@ pub fn build_dit(
         &[config.hidden, config.timestep_channels],
         None,
     );
-    let time = matvec(&mut graph.program, inputs.timestep, weight, None)?;
+    let time = project_vector(&mut graph.program, inputs.timestep, weight, None)?;
     let time = activated(graph, time, "d->d")?;
     let weight = graph.weight(
         "time_in.out_layer.weight",
         &[config.hidden, config.hidden],
         None,
     );
-    let vector = matvec(&mut graph.program, time, weight, None)?;
+    let vector = project_vector(&mut graph.program, time, weight, None)?;
     trace.push(("img_in", image_in));
     trace.push(("txt_in", text_in));
     trace.push(("vec", vector));
@@ -724,8 +756,9 @@ pub fn build_dit(
         }
     }
 
+    let eps = norm_eps(graph, stream)?;
     let program = &mut graph.program;
-    let normed = layer_norm_no_affine(program, stream, config.hidden, NORM_EPS)?;
+    let normed = layer_norm_no_affine(program, stream, config.hidden, eps)?;
     let normed = modulate(program, normed, final_mod[0], final_mod[1])?;
     let image_tokens = proxima_tensor::spec::slice_rows(
         &mut graph.program,
@@ -733,7 +766,7 @@ pub fn build_dit(
         inputs.text_tokens,
         inputs.image_tokens,
     )?;
-    let velocity = linear_of(
+    let velocity = project_leaf(
         graph,
         image_tokens,
         "final_layer.linear.weight",

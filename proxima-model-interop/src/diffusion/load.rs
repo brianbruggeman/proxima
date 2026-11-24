@@ -6,8 +6,7 @@
 use std::path::Path;
 
 use proxima_numeric::codec::Codec;
-use proxima_numeric::{DType, FormatCodec};
-use proxima_tensor::QuantizedBlock;
+use proxima_numeric::{DType, FormatCodec, PackedRows};
 
 use crate::CheckpointMapping;
 
@@ -21,7 +20,7 @@ use super::WeightBinding;
 #[derive(Debug)]
 pub enum WeightData {
     Packed(Vec<u8>),
-    Plain(Vec<f32>),
+    Plain(PackedRows),
 }
 
 /// The bound leaves, each holding the exact bytes the plan reads.
@@ -29,27 +28,6 @@ pub enum WeightData {
 pub struct Weights {
     pub codec: Codec,
     pub entries: Vec<(String, WeightData)>,
-}
-
-impl Weights {
-    /// The `(leaf name, block)` pairs a `plan_named`/`execute_plan_named` call
-    /// binds.
-    #[must_use]
-    pub fn blocks(&self) -> Vec<(&str, QuantizedBlock<'_>)> {
-        self.entries
-            .iter()
-            .map(|(name, data)| {
-                let block = match data {
-                    WeightData::Packed(bytes) => QuantizedBlock::Packed {
-                        codec: self.codec,
-                        bytes: bytes.as_slice(),
-                    },
-                    WeightData::Plain(values) => QuantizedBlock::Float32(values),
-                };
-                (name.as_str(), block)
-            })
-            .collect()
-    }
 }
 
 /// One safetensors file's tensor directory over its mapped bytes: the file is
@@ -124,8 +102,28 @@ impl Checkpoint {
         ))
     }
 
-    /// Decodes one tensor to `f32`, optionally slicing rows and permuting a
-    /// convolution kernel's `[out, in, k, k]` axes to `[out, k, k, in]`.
+    /// The square window extent of a convolution weight stored `[out, in, kh, kw]`.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the tensor when it is not rank 4 or `kh != kw`.
+    pub fn window_extent(&self, name: &str) -> Result<u32, String> {
+        let (_, shape, _) = self.tensor(name)?;
+        match shape.as_slice() {
+            [_, _, rows, columns] if rows == columns => {
+                let window = u32::try_from(*rows).map_err(|why| format!("{name}: {why}"))?;
+                if window == 0 || window % 2 == 0 {
+                    return Err(format!("{name}: window {window} is not odd and nonzero"));
+                }
+                Ok(window)
+            }
+            _ => Err(format!("{name}: not a square [out, in, kh, kw] kernel")),
+        }
+    }
+
+    /// Decodes one tensor, optionally slicing rows and permuting a convolution
+    /// kernel's `[out, in, k, k]` axes to `[out, k, k, in]`, and returns it
+    /// packed in the tensor's own format.
     ///
     /// # Errors
     ///
@@ -136,13 +134,11 @@ impl Checkpoint {
         rows: Option<(u32, u32)>,
         columns: Option<(u32, u32)>,
         permute_kernel: bool,
-    ) -> Result<(Vec<u64>, Vec<f32>), String> {
+    ) -> Result<(Vec<u64>, PackedRows), String> {
         let (dtype, shape, bytes) = self.tensor(name)?;
         let format = dtype
             .format()
             .ok_or_else(|| format!("{name}: no numeric format"))?;
-        let codec = FormatCodec::for_format(&format)
-            .ok_or_else(|| format!("{name}: no codec for its format"))?;
         let per_row: u64 = shape.iter().skip(1).product();
         let row_bytes = bytes.len() / (shape[0].max(1) as usize);
         let (first, last) = rows.unwrap_or((0, shape[0] as u32));
@@ -151,18 +147,25 @@ impl Checkpoint {
         let first = (first as usize).min(last);
         let start = first * row_bytes;
         let end = last * row_bytes;
+        let mut shape = shape;
+        shape[0] = (last - first) as u64;
+        if columns.is_none() && !(permute_kernel && shape.len() == 4) {
+            let packed = PackedRows::from_bytes(&format, bytes[start..end].to_vec())
+                .map_err(|why| format!("{name}: {why}"))?;
+            return Ok((shape, packed));
+        }
+        let codec = FormatCodec::for_format(&format)
+            .ok_or_else(|| format!("{name}: no codec for its format"))?;
         let count = (last - first) * per_row as usize;
-        let mut values = vec![0.0f32; count];
-        let mut slots: Vec<core::mem::MaybeUninit<f32>> =
-            vec![core::mem::MaybeUninit::uninit(); count];
+        let mut slots = vec![core::mem::MaybeUninit::uninit(); count];
         codec
             .decode(&bytes[start..end], &mut slots)
             .map_err(|why| format!("{name}: {why}"))?;
-        for (slot, value) in slots.into_iter().enumerate() {
-            values[slot] = unsafe { value.assume_init() };
-        }
-        let mut shape = shape;
-        shape[0] = (last - first) as u64;
+        let mut values: Vec<_> = slots
+            .into_iter()
+            // SAFETY: decode returned Ok, which writes every one of the `count` slots it was given
+            .map(|value| unsafe { value.assume_init() })
+            .collect();
         if let Some((from, to)) = columns {
             let width = shape[1] as usize;
             let selected = (to - from) as usize;
@@ -177,19 +180,21 @@ impl Checkpoint {
             values = permute_kernel_axes(&values, &shape);
             shape = vec![shape[0], shape[2], shape[3], shape[1]];
         }
-        Ok((shape, values))
+        let packed =
+            PackedRows::from_values(&format, &values).map_err(|why| format!("{name}: {why}"))?;
+        Ok((shape, packed))
     }
 }
 
 /// `[out, in, k, k]` row-major to `[out, k, k, in]`.
-fn permute_kernel_axes(values: &[f32], shape: &[u64]) -> Vec<f32> {
+fn permute_kernel_axes<T: Copy>(values: &[T], shape: &[u64]) -> Vec<T> {
     let (out, into, kernel, columns) = (
         shape[0] as usize,
         shape[1] as usize,
         shape[2] as usize,
         shape[3] as usize,
     );
-    let mut permuted = vec![0.0f32; values.len()];
+    let mut permuted = values.to_vec();
     for channel_out in 0..out {
         for channel_in in 0..into {
             for row in 0..kernel {
@@ -202,26 +207,6 @@ fn permute_kernel_axes(values: &[f32], shape: &[u64]) -> Vec<f32> {
         }
     }
     permuted
-}
-
-/// Encodes `values` into `codec`'s packed bytes.
-///
-/// # Errors
-///
-/// A message naming the format when it has no codec.
-pub fn encode(values: &[f32], codec: Codec) -> Result<Vec<u8>, String> {
-    let encoder = FormatCodec::for_format(&codec)
-        .ok_or_else(|| format!("{codec:?}: no encoder"))?;
-    let mut bytes = vec![
-        0u8;
-        encoder
-            .packed_len(values.len())
-            .ok_or_else(|| format!("{codec:?}: no packed length"))?
-    ];
-    encoder
-        .encode(values, &mut bytes)
-        .map_err(|why| why.to_string())?;
-    Ok(bytes)
 }
 
 /// Binds every declared weight leaf, `codec`-encoded, with each convolution
@@ -238,34 +223,38 @@ pub fn load_weights(
 ) -> Result<Weights, String> {
     let mut entries = Vec::with_capacity(bindings.len());
     for binding in bindings {
-#[allow(unused_mut)]
-        let (mut shape, mut values) = checkpoint.values(
+        let (shape, values) = checkpoint.values(
             &binding.tensor,
             binding.rows,
             binding.columns,
             permute_kernels
                 && (binding.tap.is_some() || binding.taps || binding.tensor.ends_with("conv.weight")),
         )?;
-        let (shape, values) = match binding.tap {
-            Some((row, column)) => (
-                alloc::vec![shape[0], shape[3]],
-                kernel_tap(&values, &shape, row, column),
-            ),
-            None => (shape, values),
+        if shape.len() == 1 {
+            entries.push((binding.leaf.clone(), WeightData::Plain(values)));
+            continue;
+        }
+        let mut wide = Vec::new();
+        values
+            .decode_all(&mut wide)
+            .map_err(|why| format!("{}: {why}", binding.leaf))?;
+        let wide = match binding.tap {
+            Some((row, column)) => kernel_tap(&wide, &shape, row, column),
+            None => wide,
         };
-        let data = if shape.len() == 1 {
-            WeightData::Plain(values)
-        } else {
-            WeightData::Packed(encode(&values, codec)?)
-        };
-        entries.push((binding.leaf.clone(), data));
+        let packed = PackedRows::from_values(&codec, &wide)
+            .map_err(|why| format!("{}: {codec:?}: {why}", binding.leaf))?;
+        entries.push((
+            binding.leaf.clone(),
+            WeightData::Packed(packed.as_bytes().to_vec()),
+        ));
     }
     Ok(Weights { codec, entries })
 }
 
 /// `[out, k, k, in]`'s kernel position `(row, column)` as a contiguous
 /// `[out, in]` matrix.
-fn kernel_tap(values: &[f32], shape: &[u64], row: u32, column: u32) -> Vec<f32> {
+fn kernel_tap<T: Copy>(values: &[T], shape: &[u64], row: u32, column: u32) -> Vec<T> {
     let out = shape[0] as usize;
     let kernel = shape[1] as usize;
     let columns = shape[2] as usize;

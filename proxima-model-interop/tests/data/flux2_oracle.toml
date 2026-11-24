@@ -1,0 +1,28 @@
+# the reference dumps the patched sd-cli writes; the names are that tool's contract, so
+# they live here and the tests look them up by key. an entry named "*" is the pattern for
+# every key a section does not list, with {name} replaced by the key.
+
+[dumps]
+noise = "noise.f32"
+text = "text.f32"
+velocity1 = "velocity1.f32"
+step1 = "step1.f32"
+step2 = "step2.f32"
+step3 = "step3.f32"
+step4 = "step4.f32"
+vae_out = "vae_out.f32"
+
+[traces]
+"*" = "p_{name}.f32"
+
+[vae_captures]
+conv_in = "p_dconv_in.f32"
+up3 = "p_dup3_0.f32"
+"up3.up" = "p_dup3_up.f32"
+"up2.up" = "p_dup2_up.f32"
+"up1.up" = "p_dup1_up.f32"
+image = "vae_out.f32"
+
+# parity tolerances, read in the measured value's own type
+[tolerances]
+philox = "1e-5"
