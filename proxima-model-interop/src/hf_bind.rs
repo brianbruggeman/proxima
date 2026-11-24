@@ -1801,7 +1801,7 @@ mod tests {
         let llama_family_bytes = dense_checkpoint_with_extra_tensors(&architecture, &[]);
         let qwen3_family_bytes = dense_checkpoint_with_extra_tensors(
             &architecture,
-            &[("model.layers.0.self_attn.q_norm.weight".into(), 4)],
+            &[(names::q_norm(0), 4), (names::k_norm(0), 4)],
         );
 
         let llama_manifest = proxima_safetensors::parse_complete(&llama_family_bytes)
