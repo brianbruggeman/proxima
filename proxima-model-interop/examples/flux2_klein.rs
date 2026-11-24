@@ -13,13 +13,14 @@ mod metal_path {
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use conflaguration::Settings;
 use proxima_model_interop::ServingConfig;
 use proxima_model_interop::diffusion::{
-    Checkpoint, DitConfig, DitInputs, Graph as ModelGraph, VaeConfig, build_dit,
-    build_vae_decode, load_weights, timestep_sinusoid, write_png,
+    Checkpoint, DiffusionSettings, DitConfig, DitInputs, Graph as ModelGraph, VaeConfig,
+    build_dit, build_vae_decode, load_weights, timestep_sinusoid, write_png,
 };
 use proxima_model_interop::{
-    ContextLength, GPU_LAYERS_ALL, LoadedModel, architecture_from_hf_config, parse_hf_config,
+    LoadedModel, ServingSettings, architecture_from_hf_config, parse_hf_config,
 };
 use proxima_numeric::codec::Codec;
 use proxima_numeric::{DType, FloatLayout, FlowMatchSchedule, Philox, euler_step};
@@ -103,7 +104,13 @@ fn padded_ids(vocab: &Vocab) -> Result<Vec<u32>, String> {
 
 /// The three Qwen3 taps as one `[512, 7680]` block, tap order and row order as
 /// the reference dump orders them.
-fn encode_text(dir: &Path, vocab: &Vocab, ids: &[u32]) -> Result<Vec<f32>, String> {
+fn encode_text(
+    dir: &Path,
+    vocab: &Vocab,
+    ids: &[u32],
+    key_pad: Option<u32>,
+    serving: &ServingConfig,
+) -> Result<Vec<f32>, String> {
     let config_bytes = std::fs::read(dir.join("text_encoder/config.json")).map_err(|why| why.to_string())?;
     let hf_config = parse_hf_config(&config_bytes).map_err(|why| why.to_string())?;
     let architecture = architecture_from_hf_config(&hf_config).map_err(|why| why.to_string())?;
@@ -112,13 +119,6 @@ fn encode_text(dir: &Path, vocab: &Vocab, ids: &[u32]) -> Result<Vec<f32>, Strin
     // 7.6 GB mapping must be gone before the DiT becomes resident, or the two
     // checkpoints' resident sets overlap for the whole image run.
     let checkpoint = Checkpoint::open(&path)?;
-    // `PROXIMA_FLUX2_KLEIN_NO_KEY_PAD` forces the mask off, so one binary can
-    // A/B it (a mask that changes nothing is either a no-op or not in the graph).
-    let key_pad = if std::env::var_os("PROXIMA_FLUX2_KLEIN_NO_KEY_PAD").is_some() {
-        None
-    } else {
-        key_pad_id(&dir, &vocab)?
-    };
     let model = match key_pad {
         Some(pad) => LoadedModel::load_from_safetensors_with_key_pad(
             checkpoint.manifest(),
@@ -139,12 +139,8 @@ fn encode_text(dir: &Path, vocab: &Vocab, ids: &[u32]) -> Result<Vec<f32>, Strin
     .map_err(|why| why.to_string())?;
     let roots = model.layer_residual_roots().to_vec();
     let outputs: Vec<_> = TAP_LAYERS.iter().map(|&layer| roots[layer]).collect();
-    let mut serving = ServingConfig::default();
-    serving.gpu_layers = GPU_LAYERS_ALL;
-    serving.context_length = ContextLength::Within(MIN_LENGTH as u32);
-    serving.model_path = dir.to_str().unwrap_or_default();
     let values = model
-        .forward_node_values_from_ids(ids, &outputs, &serving)
+        .forward_node_values_from_ids(ids, &outputs, serving)
         .map_err(|why| why.to_string())?;
     if values.len() != TAP_LAYERS.len() {
         return Err(String::from("the tap count does not match the layer list"));
@@ -186,8 +182,17 @@ fn read_dump(path: &Path) -> Option<Vec<f32>> {
     )
 }
 
-fn runtime() -> omega::config::RuntimeConfig {
-    let serving = ServingConfig::default();
+/// The serving settings the whole pipeline runs under: the environment's
+/// `PROXIMA_SERVING_*` values, with the model directory and the token count
+/// the only values this run derives.
+fn serving_settings(dir: &Path, tokens: usize) -> Result<ServingSettings, String> {
+    let mut settings = ServingSettings::from_env().map_err(|why| why.to_string())?;
+    settings.model_path = dir.to_string_lossy().into_owned();
+    settings.context_length = u32::try_from(tokens).map_err(|why| why.to_string())?;
+    Ok(settings)
+}
+
+fn runtime(serving: &ServingConfig) -> omega::config::RuntimeConfig {
     omega::config::RuntimeConfig::builder()
         .with_engine("gpu")
         .with_gpu_driver("metal")
@@ -416,7 +421,12 @@ fn vae_config() -> VaeConfig {
 /// The four Euler steps: Philox noise, the DiT velocity and the flow-match
 /// update. Returns the latent after step 4, the per-step seconds and the weight
 /// load time.
-fn diffuse(dir: &Path, text: &[f32], seed: u64) -> Result<(Vec<f32>, Vec<f64>, f64), String> {
+fn diffuse(
+    dir: &Path,
+    text: &[f32],
+    seed: u64,
+    serving: &ServingConfig,
+) -> Result<(Vec<f32>, Vec<f64>, f64), String> {
     let checkpoint = Checkpoint::open(&dir.join("flux-2-klein-4b.safetensors"))?;
     let mut graph = ModelGraph::new(DType::FLOAT32);
     let latent_leaf = graph.host("latent", &[IMAGE_TOKENS as u32, LATENT_CHANNELS as u32], Vec::new());
@@ -478,7 +488,7 @@ fn diffuse(dir: &Path, text: &[f32], seed: u64) -> Result<(Vec<f32>, Vec<f64>, f
     ));
     let plan_started = Instant::now();
     let (mut plan, _) = omega::backend::plan_named_with_config(
-        &runtime(),
+        &runtime(serving),
         &graph.program,
         &[(MIN_LENGTH + IMAGE_TOKENS) as u64],
         &named,
@@ -572,13 +582,21 @@ fn run() -> Result<(), String> {
         ));
     }
     let started = Instant::now();
+    let diffusion = DiffusionSettings::resolved();
     let vocab = read_vocab(&dir)?;
     let ids = padded_ids(&vocab)?;
+    let settings = serving_settings(&dir, ids.len())?;
+    let serving = settings.as_serving_config(&[]);
+    let key_pad = if diffusion.key_pad_mask {
+        key_pad_id(&dir, &vocab)?
+    } else {
+        None
+    };
     let text_started = Instant::now();
     let text = match &text_reference {
         Some(path) => read_dump(path).ok_or_else(|| format!("no text dump at {}", path.display()))?,
         None if latent_reference.is_some() => Vec::new(),
-        None => encode_text(&dir, &vocab, &ids)?,
+        None => encode_text(&dir, &vocab, &ids, key_pad, &serving)?,
     };
     if latent_reference.is_none() && text.len() != MIN_LENGTH * JOINT_ATTENTION {
         return Err(format!("text block has {} values", text.len()));
@@ -589,11 +607,7 @@ fn run() -> Result<(), String> {
         ids.len(),
         text.len(),
         if text_reference.is_some() { "reference dump" } else { "our encoder" },
-        if std::env::var_os("PROXIMA_FLUX2_KLEIN_NO_KEY_PAD").is_some() {
-            String::from("forced off")
-        } else {
-            key_pad_id(&dir, &vocab)?.map_or_else(|| String::from("off"), |pad| pad.to_string())
-        }
+        key_pad.map_or_else(|| String::from("off"), |pad| pad.to_string())
     );
     if stage == "text" {
         if let Some(path) = out {
@@ -619,7 +633,7 @@ fn run() -> Result<(), String> {
             (token_major(&dump), Vec::new())
         }
         None => {
-            let (latent, seconds, _) = diffuse(&dir, &text, seed)?;
+            let (latent, seconds, _) = diffuse(&dir, &text, seed, &serving)?;
             (latent, seconds)
         }
     };
@@ -675,7 +689,7 @@ fn run() -> Result<(), String> {
     // The op-timed submission takes `omega`'s own Metal plan, so a profiling run
     // plans through the Metal entry point directly; every other run goes through
     // `omega::backend`, the surface a serving caller uses.
-    let vae_runtime = runtime();
+    let vae_runtime = runtime(&serving);
     #[cfg(feature = "instrument")]
     let profiled_plan = if profile_stage.as_deref() == Some("vae") || op_profile_path.is_some() {
         Some(
@@ -711,12 +725,8 @@ fn run() -> Result<(), String> {
             "vae profile decode: {:.2}s (one command buffer per op)",
             decode_started.elapsed().as_secs_f64()
         );
-        let top = std::env::var("PROXIMA_PROFILE_TOP")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(10);
-        report_op_profile(&timings, &vae_graph.program, top);
-        // `PROXIMA_VAE_CAPTURE=<node,..>` re-runs the same plan with omega's
+        report_op_profile(&timings, &vae_graph.program, diffusion.profile_top as usize);
+        // `PROXIMA_DIFFUSION_CAPTURE_NODES=<node,..>` re-runs the same plan with omega's
         // live capture on, so the record for each named op carries the launch
         // grid, the emitted entry and each operand's codec -- the facts the
         // timing table alone cannot report.
@@ -724,10 +734,13 @@ fn run() -> Result<(), String> {
         // whose reduce has the identical rank-5 shape) captured together: the
         // pair is what names the difference between the two kernels.
         let mut wanted_ids: Vec<u32> = Vec::new();
-        if let Ok(list) = std::env::var("PROXIMA_VAE_CAPTURE") {
-            wanted_ids.extend(list.split(',').filter_map(|token| token.trim().parse::<u32>().ok()));
-        }
-        if std::env::var_os("PROXIMA_VAE_CAPTURE_AUTO").is_some() {
+        wanted_ids.extend(
+            diffusion
+                .capture_nodes
+                .split(',')
+                .filter_map(|token| token.trim().parse::<u32>().ok()),
+        );
+        if diffusion.capture_auto {
             let mut ranked: Vec<&omega::metal::OpGpuTiming> = timings.iter().collect();
             ranked.sort_by_key(|timing| core::cmp::Reverse(timing.gpu_ns));
             wanted_ids.extend(ranked.iter().take(1).map(|timing| timing.node.0));
@@ -743,9 +756,7 @@ fn run() -> Result<(), String> {
                     .map(|timing| timing.node.0),
             );
         }
-        if let Ok(_) = std::env::var("PROXIMA_VAE_CAPTURE")
-            .or_else(|_| std::env::var("PROXIMA_VAE_CAPTURE_AUTO"))
-        {
+        if !diffusion.capture_nodes.is_empty() || diffusion.capture_auto {
             let wanted = wanted_ids
                 .iter()
                 .map(ToString::to_string)
@@ -760,7 +771,7 @@ fn run() -> Result<(), String> {
             }
             let _ = omega::take_captured_dispatches();
             let (mut capture_plan, _) = omega::backend::plan_named_with_config(
-                &runtime(),
+                &runtime(&serving),
                 &vae_graph.program,
                 &[(LATENT_SIDE * LATENT_SIDE * 4) as u64],
                 &vae_named,

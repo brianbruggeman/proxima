@@ -7,10 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use super::vae::ConvTaps;
 
-/// The diffusion lowering's switches.
+/// The diffusion lowering's and pipeline's switches.
 ///
-/// One field today: how a 3x3 convolution's nine kernel positions reach the
-/// reduce. `three` is the default: one `[out_g, out_c, 9, in_g, in_c]` leaf,
+/// `conv_taps` is how a 3x3 convolution's nine kernel positions reach the
+/// reduce; the other fields are the text mask and the op-profile knobs, each
+/// `PROXIMA_DIFFUSION_<FIELD>`. `three` is the default: one `[out_g, out_c, 9, in_g, in_c]` leaf,
 /// one reduce over a tap-inner staged activation, parity with the nine-tap
 /// incumbent proven on the reference decode (`vae::the_decoder_reproduces_the_
 /// reference_image`) and on the end-to-end image.
@@ -25,12 +26,30 @@ pub struct DiffusionSettings {
     /// default, matching conflaguration's lenient rule for every switch here.
     #[setting(default = "three")]
     pub conv_taps: String,
+    /// Whether the text encoder masks the tokenizer's declared pad token's keys,
+    /// as the reference does; `false` A/Bs the mask off in one binary.
+    #[setting(default = true)]
+    pub key_pad_mask: bool,
+    /// How many of the slowest ops an op profile ranks.
+    #[setting(default = 10)]
+    pub profile_top: u32,
+    /// Comma-separated graph node ids whose dispatches a profiled decode
+    /// captures (grid, entry, operand codecs); empty captures none.
+    #[setting(default = "")]
+    pub capture_nodes: String,
+    /// Capture the slowest op and the first projection op of a profiled decode.
+    #[setting(default = false)]
+    pub capture_auto: bool,
 }
 
 impl Default for DiffusionSettings {
     fn default() -> Self {
         Self {
             conv_taps: String::from("three"),
+            key_pad_mask: true,
+            profile_top: 10,
+            capture_nodes: String::new(),
+            capture_auto: false,
         }
     }
 }
@@ -64,6 +83,16 @@ mod tests {
             DiffusionSettings::default().conv_taps(),
             ConvTaps::default()
         );
+    }
+
+    #[test]
+    fn the_pipeline_switches_default_to_the_reference_behaviour() {
+        let settings = DiffusionSettings::default();
+
+        assert!(settings.key_pad_mask);
+        assert_eq!(settings.profile_top, 10);
+        assert!(settings.capture_nodes.is_empty());
+        assert!(!settings.capture_auto);
     }
 
     #[test]
