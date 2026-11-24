@@ -2568,8 +2568,12 @@ mod tests {
     }
 
     fn three_projection_fixture() -> (Vec<u8>, Vec<u8>) {
+        projection_fixture(1)
+    }
+
+    fn projection_fixture(experts: usize) -> (Vec<u8>, Vec<u8>) {
         let values: [f32; 256] = core::array::from_fn(|index| index as f32 * 0.01 - 1.0);
-        let mut checkpoint = vec![0_u8; 144 * 3];
+        let mut checkpoint = vec![0_u8; 144 * 3 * experts];
         for projection in checkpoint.as_chunks_mut::<144>().0 {
             proxima_gguf::quant::q4_k::quantize(&values, projection)
                 .expect("the synthetic checkpoint projection encodes");
@@ -2579,9 +2583,11 @@ mod tests {
             .enumerate()
             .map(|(index, projection)| TensorInfo {
                 name: format!("blk.0.{projection}_exps.weight"),
-                dims: [256_u64, 1_u64].into_iter().collect::<ArrayVec<_, 4>>(),
+                dims: [256_u64, 1_u64, experts as u64]
+                    .into_iter()
+                    .collect::<ArrayVec<_, 4>>(),
                 ggml_type: GgmlType::Q4_K,
-                offset: (index * 144) as u64,
+                offset: (index * 144 * experts) as u64,
             })
             .collect::<Vec<_>>();
         let parsed = ParsedGguf {
@@ -2598,7 +2604,7 @@ mod tests {
                 layer: 0,
                 projection: "ffn_gate",
                 tensor_name: "blk.0.ffn_gate_exps.weight",
-                expert_count: 1,
+                expert_count: experts as u32,
                 out_dim: 1,
                 in_dim: 256,
                 target_codec: Codec::Q2K,
@@ -2607,7 +2613,7 @@ mod tests {
                 layer: 0,
                 projection: "ffn_up",
                 tensor_name: "blk.0.ffn_up_exps.weight",
-                expert_count: 1,
+                expert_count: experts as u32,
                 out_dim: 1,
                 in_dim: 256,
                 target_codec: Codec::Q2K,
@@ -2616,7 +2622,7 @@ mod tests {
                 layer: 0,
                 projection: "ffn_down",
                 tensor_name: "blk.0.ffn_down_exps.weight",
-                expert_count: 1,
+                expert_count: experts as u32,
                 out_dim: 1,
                 in_dim: 256,
                 target_codec: Codec::Q2K,
@@ -2648,24 +2654,30 @@ mod tests {
         (file, mapping)
     }
 
-    fn bound_slab<'checkpoint>(
-        sidecar: &MappedExpertSidecar,
-        checkpoint: &'checkpoint [u8],
-    ) -> ExpertSlab<'checkpoint> {
+    fn bound_checkpoint_slab(checkpoint: &[u8], experts: usize) -> ExpertSlab<'_> {
+        let stride = 144 * experts;
         let mut slab = ExpertSlab::new();
         for (site, projection) in ExpertProjection::ALL.into_iter().enumerate() {
             slab.bind_layer_stack(
                 site,
                 proxima_tensor::NodeId(site as u32),
                 Codec::Q4K,
-                &checkpoint[site * 144..(site + 1) * 144],
-                1,
+                &checkpoint[site * stride..(site + 1) * stride],
+                experts,
                 1,
                 256,
             )
             .expect("the checkpoint projection binds");
             slab.register_model_layer_site(0, projection, site);
         }
+        slab
+    }
+
+    fn bound_slab<'checkpoint>(
+        sidecar: &MappedExpertSidecar,
+        checkpoint: &'checkpoint [u8],
+    ) -> ExpertSlab<'checkpoint> {
+        let mut slab = bound_checkpoint_slab(checkpoint, 1);
         sidecar
             .install_low_copies(&mut slab, 1, 1)
             .expect("attachment installs every low projection");
@@ -2775,89 +2787,16 @@ mod tests {
         assert_eq!(slab.memory().owned_bytes, 0);
         assert_eq!(slab.memory().mapped_bytes, 84 * 3);
     }
+
     /// The universal plan installs only its own experts into the slab's low
     /// view; the rest keep the checkpoint copy. This is the per-expert table
     /// every MoE family reads, with no pre-gather plan.
     #[test]
     fn hobbit_universal_plan_installs_only_its_low_experts() {
-        let names = [
-            "blk.0.ffn_gate_exps.weight",
-            "blk.0.ffn_up_exps.weight",
-            "blk.0.ffn_down_exps.weight",
-        ];
-        let mut source = vec![0u8; 3 * 2 * 144];
-        for block in 0..6 {
-            let values: Vec<f32> = (0..256).map(|index| (index as f32 * 0.01) - 1.0).collect();
-            proxima_gguf::quant::q4_k::quantize(&values, &mut source[block * 144..(block + 1) * 144])
-                .expect("one Q4_K expert encodes");
-        }
-        let tensors = names
-            .iter()
-            .enumerate()
-            .map(|(index, name)| TensorInfo {
-                name: (*name).into(),
-                dims: [256_u64, 1_u64, 2_u64]
-                    .into_iter()
-                    .collect::<ArrayVec<_, 4>>(),
-                ggml_type: GgmlType::Q4_K,
-                offset: (index * 288) as u64,
-            })
-            .collect();
-        let parsed = ParsedGguf {
-            version: 3,
-            tensor_count: 3,
-            kv_count: 0,
-            metadata: Vec::new(),
-            tensors,
-            data_offset: 0,
-            alignment: 32,
-        };
-        let specs = names
-            .iter()
-            .map(|name| ExpertStackSpec {
-                layer: 0,
-                projection: name.trim_start_matches("blk.0.").trim_end_matches("_exps.weight"),
-                tensor_name: name,
-                expert_count: 2,
-                out_dim: 1,
-                in_dim: 256,
-                target_codec: Codec::Q2K,
-            })
-            .collect::<Vec<_>>();
-        let mut decode_scratch = [0.0_f32; 256];
-        let mut encoded_expert = [0_u8; 84];
-        let mut sidecar_bytes = Cursor::new(Vec::new());
-        write_expert_sidecar(
-            &parsed,
-            &source,
-            &specs,
-            Codec::Q2K,
-            &mut decode_scratch,
-            &mut encoded_expert,
-            &mut sidecar_bytes,
-        )
-        .expect("the two-expert sidecar writes");
-        let mut sidecar_file = tempfile().expect("creates sidecar file");
-        sidecar_file
-            .write_all(sidecar_bytes.get_ref())
-            .expect("writes sidecar bytes");
-        sidecar_file.flush().expect("flushes sidecar bytes");
-        let sidecar = MappedExpertSidecar::from_file(sidecar_file).expect("maps the sidecar");
-
-        let mut slab = ExpertSlab::new();
-        for (site, projection) in ExpertProjection::ALL.into_iter().enumerate() {
-            slab.bind_layer_stack(
-                site,
-                NodeId(site as u32 + 1),
-                Codec::Q4K,
-                &source[site * 288..(site + 1) * 288],
-                2,
-                1,
-                256,
-            )
-            .expect("binds a two-expert stack");
-            slab.register_model_layer_site(0, projection, site);
-        }
+        let (checkpoint, sidecar_bytes) = projection_fixture(2);
+        let (file, _) = mapped_sidecar_file(&sidecar_bytes);
+        let sidecar = MappedExpertSidecar::from_file(file).expect("the sidecar opens from file");
+        let mut slab = bound_checkpoint_slab(&checkpoint, 2);
 
         let empty = BTreeSet::new();
         sidecar
@@ -2880,5 +2819,4 @@ mod tests {
         assert!(slab.uses_mapped_low(0, 0, ExpertProjection::Gate).expect("expert 0"));
         assert!(slab.uses_mapped_low(0, 1, ExpertProjection::Gate).expect("expert 1"));
     }
-
 }
