@@ -12,6 +12,7 @@
 //! [`non_causal_attention`] leaves off.
 
 use alloc::format;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use crate::error::TensorError;
