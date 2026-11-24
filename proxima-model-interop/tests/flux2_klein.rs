@@ -1190,7 +1190,7 @@ mod reduce_split_axis {
     }
 
     /// The program, its bound values, and the direct-loop answer.
-    fn case() -> Case {
+    fn case() -> Result<Case, Box<dyn std::error::Error>> {
         let rows = HEIGHT * WIDTH;
         let mut graph = Graph::new(DType::FLOAT32);
         let activation = graph.host(
@@ -1222,12 +1222,11 @@ mod reduce_split_axis {
             pad_mask,
             crop_index,
             columns_index,
-        )
-        .expect("the three-block convolution builds");
+        )?;
 
         // The definition, on the same values.
-        let image = graph_host(&graph, "image");
-        let weights = graph_host(&graph, "kernel");
+        let image = graph_host(&graph, "image")?;
+        let weights = graph_host(&graph, "kernel")?;
         let mut want = vec![0.0f32; (rows * OUT_G * OUT_C) as usize];
         for row in 0..HEIGHT as usize {
             for column in 0..WIDTH as usize {
@@ -1263,48 +1262,53 @@ mod reduce_split_axis {
 
         let integers = graph.int_buffers();
         let _ = graph.host_blocks(&[("image", image.as_slice())], &integers);
-        let mut blocks: Vec<(&'static str, Vec<f32>)> = Vec::new();
-        blocks.push(("image", image.clone()));
-        blocks.push(("kernel", weights.clone()));
-        blocks.push((
-            "pad.mask",
-            conv3x3_pad_mask(HEIGHT, WIDTH)
-                .into_iter()
-                .map(|value| value as f32)
-                .collect(),
-        ));
-        blocks.push((
-            "pad.index",
-            conv3x3_pad_index(HEIGHT, WIDTH)
-                .into_iter()
-                .map(|value| value as f32)
-                .collect(),
-        ));
-        blocks.push((
-            "crop.index",
-            conv3x3_crop_index(HEIGHT, WIDTH)
-                .into_iter()
-                .map(|value| value as f32)
-                .collect(),
-        ));
-        blocks.push((
-            "columns.index",
-            conv3x3_taps_index(HEIGHT, WIDTH)
-                .into_iter()
-                .map(|value| value as f32)
-                .collect(),
-        ));
-        Case {
+        let blocks: Vec<(&'static str, Vec<f32>)> = vec![
+            ("image", image.clone()),
+            ("kernel", weights.clone()),
+            (
+                "pad.mask",
+                conv3x3_pad_mask(HEIGHT, WIDTH)
+                    .into_iter()
+                    .map(|value| value as f32)
+                    .collect(),
+            ),
+            (
+                "pad.index",
+                conv3x3_pad_index(HEIGHT, WIDTH)
+                    .into_iter()
+                    .map(|value| value as f32)
+                    .collect(),
+            ),
+            (
+                "crop.index",
+                conv3x3_crop_index(HEIGHT, WIDTH)
+                    .into_iter()
+                    .map(|value| value as f32)
+                    .collect(),
+            ),
+            (
+                "columns.index",
+                conv3x3_taps_index(HEIGHT, WIDTH)
+                    .into_iter()
+                    .map(|value| value as f32)
+                    .collect(),
+            ),
+        ];
+        Ok(Case {
             program: graph.program,
             blocks,
             root,
             want,
-        }
+        })
     }
 
-    fn graph_host(graph: &Graph, name: &str) -> Vec<f32> {
-        let leaf = graph.hosts.iter().find(|leaf| leaf.name == name).expect("leaf");
-        leaf.values.clone()
+    fn graph_host(graph: &Graph, name: &str) -> Result<Vec<f32>, String> {
+        graph
+            .hosts
+            .iter()
+            .find(|leaf| leaf.name == name)
+            .map(|leaf| leaf.values.clone())
+            .ok_or_else(|| format!("no host leaf named {name}"))
     }
 
     fn quantized<'a>(
@@ -1318,7 +1322,7 @@ mod reduce_split_axis {
 
     #[test]
     fn a_split_contraction_axis_reduce_agrees_between_cpu_and_metal() {
-        let case = case();
+        let case = case().expect("the three-block convolution case builds");
         let bound = quantized(&case.blocks);
 
         let mut pools = proxima_tensor::cpu::BufferPools::default();
