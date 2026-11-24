@@ -775,3 +775,236 @@ pub fn build_dit(
     trace.push(("final", velocity));
     Ok(DitOutput { velocity, trace })
 }
+
+#[cfg(test)]
+mod linear2_binding {
+    //! The single block's fused `linear2` consumed as today's two column-window
+    //! leaves (`windowed`) and as one whole leaf read twice (`whole`): the attention
+    //! half through [`project_heads`], the mlp half through
+    //! [`proxima_tensor::spec::project_window`]. Both forms share the surrounding
+    //! `attended`/`gained` leaves and the closing [`scaled_sum`], so only the binding differs.
+
+    use proxima_numeric::{NumericError, PackedRows, Philox, compare};
+    use proxima_tensor::QuantizedBlock;
+    use proxima_tensor::spec::project_window;
+
+    use super::super::DiffusionSettings;
+    use super::*;
+
+    type Outcome = Result<(), String>;
+    #[cfg(all(
+        feature = "metal",
+        feature = "instrument",
+        feature = "metal-tiled-gemm",
+        target_os = "macos"
+    ))]
+    type Verdict = Result<(), omega::msl::TiledGemmRejection>;
+
+    const LINEAR2: &str = "single_blocks.0.linear2.weight";
+
+    fn config(hidden: u32, heads: u32, head_dim: u32) -> DitConfig {
+        DitConfig {
+            in_channels: 128,
+            hidden,
+            heads,
+            head_dim,
+            joint_attention_dim: 7680,
+            double_blocks: 0,
+            single_blocks: 1,
+            timestep_channels: 256,
+            rope_theta: 2000,
+        }
+    }
+
+    fn rows(graph: &Graph, count: usize, seed: u64) -> Result<PackedRows, NumericError> {
+        PackedRows::from_values(graph.activation_format(), &Philox::new(seed).normal(count))
+    }
+
+    /// `linear2`'s closing sum for `tokens` rows; `filled` binds deterministic
+    /// activations, otherwise the leaves are shape-only.
+    fn fragment(
+        config: &DitConfig,
+        tokens: u32,
+        whole: bool,
+        filled: bool,
+    ) -> Result<(Graph, NodeId), String> {
+        let settings = DiffusionSettings::try_resolved().map_err(|why| why.to_string())?;
+        let mut graph = Graph::with_settings(
+            settings.dit_activation_dtype()?,
+            settings,
+        )?;
+        let attention_in = config.attention_width();
+        let mlp = config.mlp_hidden();
+        let heads = attention_in / config.head_dim;
+        let attended_count = (tokens * attention_in) as usize;
+        let gained_count = (tokens * mlp) as usize;
+        let (attended_values, gained_values) = if filled {
+            (rows(&graph, attended_count, 1), rows(&graph, gained_count, 2))
+        } else {
+            (graph.unbound(), graph.unbound())
+        };
+        let attended = graph.host("attended", &[tokens, heads, config.head_dim], attended_values);
+        let gained = graph.host("gained", &[tokens, mlp], gained_values);
+        let (attention_out, mlp_out) = if whole {
+            let total = attention_in + mlp;
+            let attention_out =
+                project_heads(&mut graph, attended, LINEAR2, config, total, attention_in, None)
+                    .map_err(|why| why.to_string())?;
+            let weight = graph.weight_slice(LINEAR2, &[config.hidden, total], None, None);
+            let mlp_out = project_window(&mut graph.program, gained, weight, attention_in, mlp)
+                .map_err(|why| why.to_string())?;
+            (attention_out, mlp_out)
+        } else {
+            let attention_out = project_heads(
+                &mut graph,
+                attended,
+                LINEAR2,
+                config,
+                attention_in,
+                attention_in,
+                Some((0, attention_in)),
+            )
+            .map_err(|why| why.to_string())?;
+            let weight = graph.weight_slice(
+                LINEAR2,
+                &[config.hidden, mlp],
+                None,
+                Some((attention_in, attention_in + mlp)),
+            );
+            let mlp_out = project_rows(&mut graph.program, gained, weight, None)
+                .map_err(|why| why.to_string())?;
+            (attention_out, mlp_out)
+        };
+        let root = scaled_sum(&mut graph, attention_out, mlp_out, "td->td")
+            .map_err(|why| why.to_string())?;
+        Ok((graph, root))
+    }
+
+    /// The checkpoint tensor `whole` (`[hidden, columns]`, row-major) cut to a leaf's column window.
+    fn leaf_values<T: Copy>(whole: &[T], columns: usize, window: Option<(u32, u32)>) -> Vec<T> {
+        let (start, end) = window.map_or((0, columns), |(start, end)| (start as usize, end as usize));
+        whole
+            .chunks(columns)
+            .flat_map(|row| row[start..end].iter().copied())
+            .collect()
+    }
+
+    fn evaluated(config: &DitConfig, tokens: u32, whole: bool) -> Result<PackedRows, String> {
+        let (graph, root) = fragment(config, tokens, whole, true)?;
+        let columns = (config.attention_width() + config.mlp_hidden()) as usize;
+        let tensor = Philox::new(3).normal(config.hidden as usize * columns);
+        let leaves: Vec<Vec<_>> = graph
+            .weights
+            .iter()
+            .map(|binding| leaf_values(&tensor, columns, binding.columns))
+            .collect();
+        let mut bound = graph.host_blocks(&[])?;
+        for (binding, values) in graph.weights.iter().zip(&leaves) {
+            bound.push((binding.leaf.as_str(), QuantizedBlock::from(values.as_slice())));
+        }
+        let mut pools = proxima_tensor::cpu::BufferPools::default();
+        let mut validated = None;
+        let result = proxima_tensor::cpu::evaluate_quantized_named_with_scratch(
+            &graph.program,
+            &[],
+            &bound,
+            &[root],
+            &mut pools,
+            &mut validated,
+        )
+        .map_err(|why| why.to_string())?;
+        let value = result.get(root).ok_or("the root has no value")?;
+        PackedRows::from_values(graph.activation_format(), value.0).map_err(|why| why.to_string())
+    }
+
+    #[test]
+    fn fused_projection_bound_whole_equals_two_column_windows_on_small_shapes() -> Outcome {
+        let small = config(64, 4, 16);
+        let windowed = evaluated(&small, 8, false)?;
+        let whole = evaluated(&small, 8, true)?;
+        let rms = compare::rms_rel(&whole, &windowed).map_err(|why| why.to_string())?;
+        let mut measured = Vec::new();
+        rms.decode_all(&mut measured).map_err(|why| why.to_string())?;
+        assert!(measured[0] < 1e-4, "relative rms difference {}", measured[0]);
+        Ok(())
+    }
+
+    /// Every reduce that reads `linear2`, with the tiled gemm's verdict, at FLUX shapes
+    /// and the checkpoint weight format.
+    #[cfg(all(
+        feature = "metal",
+        feature = "instrument",
+        feature = "metal-tiled-gemm",
+        target_os = "macos"
+    ))]
+    fn classified(whole: bool) -> Result<Vec<(String, Verdict)>, String> {
+        use std::collections::BTreeSet;
+
+        use proxima_tensor::{BoundOpKind, Keep};
+
+        let flux = config(3072, 24, 128);
+        let (graph, root) = fragment(&flux, 4608, whole, false)?;
+        let codec = DiffusionSettings::try_resolved()
+            .map_err(|why| why.to_string())?
+            .dit_compute;
+        let shapes = proxima_tensor::infer(&graph.program, &[]).map_err(|why| why.to_string())?;
+        let packed: BTreeSet<NodeId> = graph
+            .program
+            .iter()
+            .enumerate()
+            .filter(|(_, op)| op.name().is_some_and(|name| name.starts_with(LINEAR2)))
+            .map(|(position, _)| NodeId(position as u32))
+            .collect();
+        let mut bound = proxima_tensor::bind(
+            &graph.program,
+            &shapes,
+            &[root],
+            proxima_numeric::NumericPolicy::default(),
+        )
+        .map_err(|why| why.to_string())?;
+        proxima_tensor::correct_packed_matmul_layouts(&mut bound, &packed);
+        let mut verdicts = Vec::new();
+        for op in &bound {
+            let BoundOpKind::Reduce {
+                reduce_op,
+                init,
+                keep: Keep::Reduce,
+                output_axes,
+                ..
+            } = &op.kind
+            else {
+                continue;
+            };
+            let operands = op.operands();
+            let Some((weight, _, _)) = operands.iter().find(|(node, _, _)| packed.contains(node)) else {
+                continue;
+            };
+            let quantized: Vec<Option<_>> = operands
+                .iter()
+                .map(|(node, _, _)| packed.contains(node).then_some(codec))
+                .collect();
+            let name = graph.program[weight.0 as usize].name().unwrap_or_default().to_string();
+            let verdict = omega::msl::diagnose_tiled_gemm_block(op, &quantized, *reduce_op, *init, output_axes);
+            verdicts.push((name, verdict));
+        }
+        Ok(verdicts)
+    }
+
+    #[cfg(all(
+        feature = "metal",
+        feature = "instrument",
+        feature = "metal-tiled-gemm",
+        target_os = "macos"
+    ))]
+    #[test]
+    fn fused_leaf_bound_whole_is_tiled_for_both_windows() -> Outcome {
+        for whole in [false, true] {
+            let verdicts = classified(whole)?;
+            assert_eq!(verdicts.len(), 2, "whole={whole}: one reduce per window, got {verdicts:?}");
+            for (name, verdict) in &verdicts {
+                assert_eq!(verdict, &Ok(()), "whole={whole} {name} is refused by the tiled kernel");
+            }
+        }
+        Ok(())
+    }
+}
