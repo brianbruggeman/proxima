@@ -2230,6 +2230,7 @@ pub(super) mod checkpoint_mapping_release_tests {
         let read_start = unsafe { base.add(offset) };
         // SAFETY: the page-aligned range around the read lies inside the mapping.
         let cold_in_read = non_resident_pages(unsafe { base.add(64 * page) }, 17 * page);
+        eprintln!("cold probe: non-resident pages before the read: {cold_in_read} of 17");
         assert!(
             cold_in_read > 0,
             "the read range must hold non-resident pages or this test proves nothing \
@@ -2288,6 +2289,10 @@ pub(super) mod checkpoint_mapping_release_tests {
         };
         let invalidate_errno = std::io::Error::last_os_error();
         let cold_after = non_resident_pages(range_start, 17 * page);
+        eprintln!(
+            "invalidate probe: msync returned {invalidate}, errno text: {invalidate_errno}, \
+             non-resident pages after invalidation: {cold_after} of 17"
+        );
         let read = gpu_read_through_mapping(&device, &queue, read_start, length);
 
         unregister_checkpoint_mapping(mapped);
