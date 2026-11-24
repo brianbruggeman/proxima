@@ -11,7 +11,7 @@
 //! top of it for callers that already hold the whole buffer.
 
 use crate::error::SafetensorsError;
-use crate::parser::{Manifest, SafetensorsParser};
+use crate::parser::{Manifest, SafetensorsParser, declared_total_len};
 
 /// Parses one complete, already-assembled byte slice in a single call.
 /// Stateless -- a fresh [`SafetensorsParser`] is built and driven internally
@@ -21,7 +21,23 @@ use crate::parser::{Manifest, SafetensorsParser};
 ///
 /// Any [`SafetensorsError`] `SafetensorsParser::push`/`into_manifest` surfaces.
 pub fn parse_complete(input: &[u8]) -> Result<Manifest, SafetensorsError> {
-    SafetensorsParser::new().push(input)?.into_manifest()
+    let (header, tensor_data) = split_header(input);
+    SafetensorsParser::new()
+        .push(header)?
+        .push(tensor_data)?
+        .into_manifest()
+}
+
+/// Splits `input` at the end of its declared header. The parser buffers every
+/// byte it is fed until the header completes, so feeding a mapped multi-GB
+/// checkpoint whole would copy it onto the heap; the tensor data is fed
+/// after the header so it is only counted. An input whose header is not fully
+/// present is fed whole and reports the truncation itself.
+fn split_header(input: &[u8]) -> (&[u8], &[u8]) {
+    declared_total_len(input)
+        .and_then(|end| usize::try_from(end).ok())
+        .filter(|end| *end <= input.len())
+        .map_or((input, &[]), |end| input.split_at(end))
 }
 
 #[cfg(test)]
@@ -38,6 +54,41 @@ mod tests {
         wire.extend_from_slice(json);
         wire.extend_from_slice(&[0_u8; 4]);
         wire
+    }
+
+    #[test]
+    fn split_header_leaves_the_tensor_data_out_of_the_header_slice() {
+        let wire = build_minimal_buffer();
+
+        let (header, tensor_data) = split_header(&wire);
+
+        assert_eq!(header.len(), wire.len() - 4);
+        assert_eq!(tensor_data, &[0_u8; 4]);
+    }
+
+    #[test]
+    fn split_header_keeps_a_truncated_header_whole() {
+        let wire = build_minimal_buffer();
+        let truncated = &wire[..10];
+
+        let (header, tensor_data) = split_header(truncated);
+
+        assert_eq!(header, truncated);
+        assert!(tensor_data.is_empty());
+        assert!(parse_complete(truncated).is_err());
+    }
+
+    #[test]
+    fn parse_complete_rejects_a_tensor_whose_data_is_shorter_than_declared() {
+        let wire = build_minimal_buffer();
+        let short = &wire[..wire.len() - 1];
+
+        let outcome = parse_complete(short);
+
+        assert!(matches!(
+            outcome,
+            Err(SafetensorsError::OffsetOutOfBounds { .. })
+        ));
     }
 
     #[test]

@@ -254,7 +254,7 @@ impl ByteStreamParser for SafetensorsParser {
 
 /// If `buf` already holds the 8-byte length prefix, the total byte count
 /// (`8 + declared header length`) the parser is still waiting on.
-fn declared_total_len(buf: &[u8]) -> Option<u64> {
+pub(crate) fn declared_total_len(buf: &[u8]) -> Option<u64> {
     if buf.len() < HEADER_LEN_BYTES {
         return None;
     }
