@@ -1203,7 +1203,7 @@ mod bench {
             .expect("control weight");
             let weights = Weights {
                 codec,
-                entries: vec![(String::from("control.weight"), WeightData::Packed(codec, bytes))],
+                entries: vec![(String::from("control.weight"), WeightData::Packed(bytes))],
             };
             with_tiles(tiles, |config| {
                 // the arena cap scales with symbols[0], the plan's row count
