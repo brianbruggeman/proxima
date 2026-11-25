@@ -20,7 +20,7 @@ use std::time::Instant;
 use conflaguration::Settings;
 use cudarc::driver::sys as cuda_sys;
 use cudarc::driver::{
-    CudaContext, CudaEvent, CudaFunction, CudaModule, CudaSlice, CudaView, CudaViewMut, DriverError,
+    CudaContext, CudaFunction, CudaModule, DriverError,
 };
 use crate::gpu_runtime::{CudarcRuntime, DeviceElement, GpuRuntime, LaunchArguments, LaunchShape};
 use crate::encode_render::{EncodeRows, RenderedEncode, row_bytes};
@@ -161,10 +161,10 @@ impl From<DriverError> for CudaDriverError {
 // the shared name-keyed identity rule (`crate::resident_identity`) so a fresh plan or arena finds the weight another plan uploaded and a recycled host address is refused.
 type ResidentBuffers<R = CudarcRuntime> = ResidentLedger<CudaGraphBuffer<R>>;
 
-fn buffer_elements(buffer: &CudaGraphBuffer) -> u64 {
+fn buffer_elements<R: GpuRuntime>(buffer: &CudaGraphBuffer<R>) -> u64 {
     match buffer {
-        CudaGraphBuffer::F32(values) => values.len() as u64,
-        CudaGraphBuffer::Bytes(values) => values.len() as u64,
+        CudaGraphBuffer::F32(values) => R::len(values) as u64,
+        CudaGraphBuffer::Bytes(values) => R::len(values.as_ref()) as u64,
     }
 }
 
@@ -198,7 +198,7 @@ fn cuda_input_contract(
 }
 
 #[derive(Debug)]
-pub(crate) struct CompileCounters {
+pub struct CompileCounters {
     compilations: AtomicU64,
     nvrtc_micros: AtomicU64,
     load_micros: AtomicU64,
@@ -248,9 +248,9 @@ impl CompileCounters {
 
 /// How a launch completes: waited on here, or left on the stream with an optional window of a
 /// fault array the caller reads after its own synchronization.
-enum Completion<'fault> {
+enum Completion<'fault, R: GpuRuntime> {
     Synchronize,
-    Defer(Option<(&'fault CudaSlice<u32>, usize, usize)>),
+    Defer(Option<(&'fault R::Buffer<u32>, usize, usize)>),
 }
 
 /// Carried state parked by an evicted plan, shared by every plan of the driver.
@@ -442,7 +442,9 @@ fn kernel_read_nodes(kernel: &CudaKernel) -> impl Iterator<Item = NodeId> + '_ {
         })
 }
 
-impl CudaF32Arena {
+impl<R: GpuRuntime> CudaF32Arena<R>
+where CudaDriverError: From<R::Error> + From<R::BuildError>
+{
     fn seat_pooled(&mut self, node: NodeId, length: usize) {
         if self.buffers.contains_key(&node) {
             return;
@@ -455,7 +457,7 @@ impl CudaF32Arena {
     fn release_to_pool(&mut self, nodes: &[NodeId]) {
         for node in nodes {
             if let Some(CudaGraphBuffer::F32(buffer)) = self.buffers.remove(node) {
-                self.pool.entry(buffer.len()).or_default().push(buffer);
+                self.pool.entry(R::len(&buffer)).or_default().push(buffer);
             }
         }
     }
@@ -551,10 +553,10 @@ enum CudaGraphBuffer<R: GpuRuntime = CudarcRuntime> {
 /// The event pair bracketing one launch of a timed execute, with the operand bytes read at launch.
 // the fields are read only by the `instrument`-gated `op_timing`; the serving path never builds one
 #[cfg_attr(not(feature = "instrument"), allow(dead_code))]
-struct LaunchEvents {
+struct LaunchEvents<R: GpuRuntime> {
     position: usize,
-    start: CudaEvent,
-    end: CudaEvent,
+    start: R::Event,
+    end: R::Event,
     operand_bytes: u64,
 }
 
@@ -648,7 +650,9 @@ struct PlanPolicy<'config> {
     config: Option<&'config RuntimeConfig>,
 }
 
-impl CudaF32Arena {
+impl<R: GpuRuntime> CudaF32Arena<R>
+where CudaDriverError: From<R::Error> + From<R::BuildError>
+{
     /// Number of device allocations performed by this arena.
     #[must_use]
     pub const fn allocations(&self) -> u64 {
@@ -656,17 +660,7 @@ impl CudaF32Arena {
     }
 }
 
-impl CudaDriver {
-    /// Removes device copies for resident input nodes after their host source changes.
-    pub fn invalidate_resident_buffers(&self, nodes: &[NodeId]) -> Result<(), CudaDriverError> {
-        let mut buffers = self.resident_buffers.lock();
-        if !nodes.is_empty() {
-            // graph-local node ids cannot identify entries keyed by host source identity.
-            buffers.clear();
-        }
-        Ok(())
-    }
-
+impl CudaDriver<CudarcRuntime> {
     /// Initializes the CUDA primary context for `ordinal`.
     ///
     /// This is the first real device boundary: on a machine without a
@@ -729,18 +723,53 @@ impl CudaDriver {
         })
     }
 
-    /// Creates an empty persistent buffer arena owned by this driver.
-    #[must_use]
-    pub fn new_arena(&self) -> CudaF32Arena {
-        CudaF32Arena::default()
+    /// Loads a precompiled PTX module and returns one of its entry points; see [`CudarcRuntime::precompiled_function`].
+    ///
+    /// # Errors
+    /// The module failed to load or the entry is missing.
+    pub fn precompiled_function(&self, module_key: &str, entry: &str, ptx_source: &str) -> Result<CudaFunction, CudaDriverError> {
+        self.runtime.precompiled_function(module_key, entry, ptx_source)
     }
 
+    /// Runs the same numerical smoke through a hand-authored PTX module.
+    ///
+    /// The test intentionally uses the existing launch ABI (input pointer,
+    /// output pointer, uniform pointer), proving that the driver path works
+    /// independently of runtime CUDA-C/NVRTC availability.
+    pub fn smoke_add_one_precompiled(&self, input: &[f32]) -> Result<Vec<f32>, CudaDriverError> {
+        let n =
+            u32::try_from(input.len()).map_err(|_| CudaDriverError::InputTooLarge(input.len()))?;
+        let function =
+            self.precompiled_function("smoke_add_one", "proxima_add_one", PRECOMPILED_ADD_ONE_PTX)?;
+        let device_input = self.runtime.upload(input)?;
+        let mut device_output = self.runtime.alloc_zeros::<f32>(input.len())?;
+        let device_uniforms = self.runtime.upload::<u8>(&n.to_ne_bytes())?;
+        let mut args = self.runtime.launch_arguments(&function);
+        args.push(&device_input);
+        args.push_mut(&mut device_output);
+        args.push(&device_uniforms);
+        unsafe {
+            self.runtime.launch(args, LaunchShape {
+                grid_dim: ((input.len() as u32).div_ceil(256), 1, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            })
+        }?;
+        self.runtime.synchronize()?;
+        Ok(self.runtime.download(&device_output)?)
+    }
+
+}
+
+impl<R: GpuRuntime> CudaDriver<R>
+where CudaDriverError: From<R::Error> + From<R::BuildError>
+{
     /// Number of NVRTC/module compilations performed by this driver. A
     /// steady-state plan should stop increasing this after its first dispatch
     /// of each distinct kernel identity.
     #[must_use]
     pub fn kernel_compilations(&self) -> u64 {
-        self.runtime.compile_counters.compilations.load(Ordering::Relaxed)
+        self.runtime.compile_counters().compilations.load(Ordering::Relaxed)
     }
 
     /// Kernels whose PTX was loaded from the on-disk cache instead of NVRTC.
@@ -748,7 +777,7 @@ impl CudaDriver {
     /// and grows this instead.
     #[must_use]
     pub fn disk_cache_hits(&self) -> u64 {
-        self.runtime.compile_counters
+        self.runtime.compile_counters()
             .disk_cache_hits
             .load(Ordering::Relaxed)
     }
@@ -757,7 +786,7 @@ impl CudaDriver {
     /// compilation across this driver's `kernel_compilations`.
     #[must_use]
     pub fn nvrtc_micros(&self) -> u64 {
-        self.runtime.compile_counters.nvrtc_micros.load(Ordering::Relaxed)
+        self.runtime.compile_counters().nvrtc_micros.load(Ordering::Relaxed)
     }
 
     /// Cumulative wall-clock microseconds spent in `cuModuleLoadData` (PTX to
@@ -765,7 +794,37 @@ impl CudaDriver {
     /// `kernel_compilations`.
     #[must_use]
     pub fn load_micros(&self) -> u64 {
-        self.runtime.compile_counters.load_micros.load(Ordering::Relaxed)
+        self.runtime.compile_counters().load_micros.load(Ordering::Relaxed)
+    }
+
+    /// Returns the CUDA driver's current `(free_bytes, total_bytes)` view.
+    /// This is the authoritative device-memory measurement used by a tier
+    /// fit check; host RSS and checkpoint file size are only proxies.
+    pub fn memory_info(&self) -> Result<(usize, usize), CudaDriverError> {
+        Ok(self.runtime.memory_info()?)
+    }
+
+    /// Device bytes in use now beyond what was in use when this driver was created, `None` when the driver cannot report.
+    #[must_use]
+    pub fn allocated_bytes(&self) -> Option<u64> {
+        let (free, total) = self.memory_info().ok()?;
+        Some((total.saturating_sub(free) as u64).saturating_sub(self.baseline_used_bytes))
+    }
+
+    /// Removes device copies for resident input nodes after their host source changes.
+    pub fn invalidate_resident_buffers(&self, nodes: &[NodeId]) -> Result<(), CudaDriverError> {
+        let mut buffers = self.resident_buffers.lock();
+        if !nodes.is_empty() {
+            // graph-local node ids cannot identify entries keyed by host source identity.
+            buffers.clear();
+        }
+        Ok(())
+    }
+
+    /// Creates an empty persistent buffer arena owned by this driver.
+    #[must_use]
+    pub fn new_arena(&self) -> CudaF32Arena<R> {
+        CudaF32Arena::default()
     }
 
     /// Host-to-device bytes of packed weights uploaded by this driver. A
@@ -798,20 +857,6 @@ impl CudaDriver {
         self.resident_buffers.lock().len()
     }
 
-    /// Returns the CUDA driver's current `(free_bytes, total_bytes)` view.
-    /// This is the authoritative device-memory measurement used by a tier
-    /// fit check; host RSS and checkpoint file size are only proxies.
-    pub fn memory_info(&self) -> Result<(usize, usize), CudaDriverError> {
-        Ok(self.runtime.context.mem_get_info()?)
-    }
-
-    /// Device bytes in use now beyond what was in use when this driver was created, `None` when the driver cannot report.
-    #[must_use]
-    pub fn allocated_bytes(&self) -> Option<u64> {
-        let (free, total) = self.memory_info().ok()?;
-        Some((total.saturating_sub(free) as u64).saturating_sub(self.baseline_used_bytes))
-    }
-
     /// Encodes `rows` of the device binary32 `source` into `destination` at `rows.byte_offset`
     /// with the kernel `rendered` was rendered as for `format`: Metal's encode dispatch contract.
     /// Bytes outside the packed range are untouched. The caller owns synchronizing the stream.
@@ -823,11 +868,12 @@ impl CudaDriver {
         &self,
         rendered: &RenderedEncode,
         format: &NumericFormat,
-        source: &CudaSlice<Row>,
-        destination: &mut CudaSlice<u8>,
+        source: &R::Buffer<Row>,
+        destination: &mut R::Buffer<u8>,
         rows: EncodeRows,
     ) -> Result<(), CudaDriverError> {
-        let mut window = destination.slice_mut(..);
+        let length = R::len(destination);
+        let mut window = R::view_mut(destination, 0..length);
         self.encode_rows_into(rendered, format, source, &mut window, rows)
     }
 
@@ -839,8 +885,8 @@ impl CudaDriver {
         &self,
         rendered: &RenderedEncode,
         format: &NumericFormat,
-        source: &CudaSlice<Row>,
-        destination: &mut CudaViewMut<'_, u8>,
+        source: &R::Buffer<Row>,
+        destination: &mut R::ViewMut<'_, u8>,
         rows: EncodeRows,
     ) -> Result<(), CudaDriverError> {
         if row_bytes() != Some(core::mem::size_of::<Row>()) {
@@ -848,13 +894,13 @@ impl CudaDriver {
         }
         let range = rows.byte_range(format).ok_or(CudaDriverError::BindingContract)?;
         let threads = rows.threads(rendered.elements_per_thread);
-        if threads * rendered.elements_per_thread != rows.element_count || rows.element_count > source.len() || range.end > destination.len() {
+        if threads * rendered.elements_per_thread != rows.element_count || rows.element_count > R::len(source) || range.end > R::view_mut_len(destination) {
             return Err(CudaDriverError::BindingContract);
         }
         let count = u32::try_from(threads).map_err(|_| CudaDriverError::InputTooLarge(threads))?;
         let kernel = encode_kernel(rendered, threads)?;
         let function = self.runtime.build_function(&kernel)?;
-        let mut window = destination.slice_mut(range);
+        let mut window = R::view_mut_range(destination, range);
         let mut args = self.runtime.launch_arguments(&function);
         args.push(source);
         args.push_view_mut(&mut window);
@@ -872,15 +918,13 @@ impl CudaDriver {
     fn encode_into_cache<Row: DeviceElement>(
         &self,
         encode: &KvEncode,
-        source: &CudaSlice<Row>,
-        cache: &mut CudaSlice<Row>,
+        source: &R::Buffer<Row>,
+        cache: &mut R::Buffer<Row>,
         offset: usize,
         count: usize,
     ) -> Result<(), CudaDriverError> {
         let byte_offset = encode.format.packed_len(offset).ok_or(CudaDriverError::BindingContract)?;
-        let bytes = cache.len() * core::mem::size_of::<Row>();
-        // the cache's own allocation read as bytes: every byte pattern is a valid u8
-        let mut window = unsafe { cache.transmute_mut::<u8>(bytes) }.ok_or(CudaDriverError::BindingContract)?;
+        let mut window = R::bytes_mut(cache).ok_or(CudaDriverError::BindingContract)?;
         self.encode_rows_into(&encode.rendered, &encode.format, source, &mut window, EncodeRows { element_count: count, byte_offset })
     }
 
@@ -1143,15 +1187,9 @@ impl CudarcRuntime {
 
 }
 
-impl CudaDriver {
-    /// Loads a precompiled PTX module and returns one of its entry points; see [`CudarcRuntime::precompiled_function`].
-    ///
-    /// # Errors
-    /// The module failed to load or the entry is missing.
-    pub fn precompiled_function(&self, module_key: &str, entry: &str, ptx_source: &str) -> Result<CudaFunction, CudaDriverError> {
-        self.runtime.precompiled_function(module_key, entry, ptx_source)
-    }
-
+impl<R: GpuRuntime> CudaDriver<R>
+where CudaDriverError: From<R::Error> + From<R::BuildError>
+{
     /// Resolves a dense/reduction graph into a persistent CUDA plan.
     pub fn plan(
         &self,
@@ -1160,7 +1198,7 @@ impl CudaDriver {
         outputs: &[NodeId],
         numeric_policy: NumericPolicy,
         named: &[(&str, QuantizedBlock<'_>)],
-    ) -> Result<CudaPlan, CudaDriverError> {
+    ) -> Result<DevicePlan<R>, CudaDriverError> {
         let policy = PlanPolicy {
             activation_storage: None,
             numeric_policy,
@@ -1184,7 +1222,7 @@ impl CudaDriver {
         numeric_policy: NumericPolicy,
         activation_storage: Option<NumericFormat>,
         named: &[(&str, QuantizedBlock<'_>)],
-    ) -> Result<CudaPlan, CudaDriverError> {
+    ) -> Result<DevicePlan<R>, CudaDriverError> {
         let policy = PlanPolicy {
             activation_storage,
             numeric_policy,
@@ -1203,7 +1241,7 @@ impl CudaDriver {
         numeric_policy: NumericPolicy,
         exact_activations: bool,
         named: &[(&str, QuantizedBlock<'_>)],
-    ) -> Result<CudaPlan, CudaDriverError> {
+    ) -> Result<DevicePlan<R>, CudaDriverError> {
         let policy = PlanPolicy {
             activation_storage: None,
             numeric_policy,
@@ -1220,7 +1258,7 @@ impl CudaDriver {
         outputs: &[NodeId],
         named: &[(&str, QuantizedBlock<'_>)],
         config: &RuntimeConfig,
-    ) -> Result<CudaPlan, CudaDriverError> {
+    ) -> Result<DevicePlan<R>, CudaDriverError> {
         let policy = PlanPolicy {
             activation_storage: None,
             numeric_policy: config.numeric,
@@ -1237,7 +1275,7 @@ impl CudaDriver {
         outputs: &[NodeId],
         named: &[(&str, QuantizedBlock<'_>)],
         policy: PlanPolicy<'_>,
-    ) -> Result<CudaPlan, CudaDriverError> {
+    ) -> Result<DevicePlan<R>, CudaDriverError> {
         let PlanPolicy {
             activation_storage,
             numeric_policy,
@@ -1387,13 +1425,13 @@ impl CudaDriver {
     /// later dispatches when the element count is unchanged.
     pub fn upload_f32(
         &self,
-        arena: &mut CudaF32Arena,
+        arena: &mut CudaF32Arena<R>,
         node: NodeId,
         values: &[f32],
     ) -> Result<(), CudaDriverError> {
         crate::backend::record_block_copied(core::mem::size_of_val(values) as u64);
         if let Some(CudaGraphBuffer::F32(buffer)) = arena.buffers.get_mut(&node)
-            && buffer.len() == values.len()
+            && R::len(buffer) == values.len()
         {
             self.runtime.upload_into(values, buffer)?;
             self.graph_uploads.fetch_add(1, Ordering::Relaxed);
@@ -1408,7 +1446,7 @@ impl CudaDriver {
 
     fn upload_bytes(
         &self,
-        arena: &mut CudaF32Arena,
+        arena: &mut CudaF32Arena<R>,
         node: NodeId,
         values: &[u8],
     ) -> Result<(), CudaDriverError> {
@@ -1417,7 +1455,7 @@ impl CudaDriver {
         crate::backend::record_block_copied(values.len() as u64);
         // a buffer shared with the resident cache is never overwritten in place
         if let Some(CudaGraphBuffer::Bytes(shared)) = arena.buffers.get_mut(&node)
-            && shared.len() == values.len()
+            && R::len(shared.as_ref()) == values.len()
             && let Some(buffer) = Arc::get_mut(shared)
         {
             self.runtime.upload_into(values, buffer)?;
@@ -1438,7 +1476,7 @@ impl CudaDriver {
     /// slot of a fresh device allocation, so no host-side gather buffer exists.
     fn upload_runs(
         &self,
-        arena: &mut CudaF32Arena,
+        arena: &mut CudaF32Arena<R>,
         node: NodeId,
         block: &QuantizedBlock<'_>,
     ) -> Result<(), CudaDriverError> {
@@ -1471,12 +1509,12 @@ impl CudaDriver {
     /// graph into an allocation-heavy path and prevents safe graph capture.
     fn upload_uniform(
         &self,
-        arena: &mut CudaF32Arena,
+        arena: &mut CudaF32Arena<R>,
         node: NodeId,
         values: &[u8],
     ) -> Result<(), CudaDriverError> {
         if let Some(buffer) = arena.uniforms.get_mut(&node)
-            && buffer.len() == values.len()
+            && R::len(buffer) == values.len()
         {
             if arena.uniform_host.get(&node).is_some_and(|held| held == values) {
                 return Ok(());
@@ -1499,7 +1537,7 @@ impl CudaDriver {
     /// integer dtype to `float` -- so both input kinds share this upload.
     fn upload_float_input(
         &self,
-        arena: &mut CudaF32Arena,
+        arena: &mut CudaF32Arena<R>,
         node: NodeId,
         values: &[f32],
     ) -> Result<(), CudaDriverError> {
@@ -1520,14 +1558,14 @@ impl CudaDriver {
     /// re-upload it.
     fn materialize_constant(
         &self,
-        arena: &mut CudaF32Arena,
+        arena: &mut CudaF32Arena<R>,
         node: NodeId,
         value: f32,
         output_len: usize,
     ) -> Result<(), CudaDriverError> {
         if matches!(
             arena.buffers.get(&node),
-            Some(CudaGraphBuffer::F32(buffer)) if buffer.len() == output_len
+            Some(CudaGraphBuffer::F32(buffer)) if R::len(buffer) == output_len
         ) {
             return Ok(());
         }
@@ -1552,34 +1590,6 @@ impl CudaDriver {
             i32::try_from(input.len()).map_err(|_| CudaDriverError::InputTooLarge(input.len()))?;
         let kernel = add_one_kernel(NodeId(0), NodeId(1), input.len())?;
         self.launch_f32(&kernel, &[input], &n.to_ne_bytes())
-    }
-
-    /// Runs the same numerical smoke through a hand-authored PTX module.
-    ///
-    /// The test intentionally uses the existing launch ABI (input pointer,
-    /// output pointer, uniform pointer), proving that the driver path works
-    /// independently of runtime CUDA-C/NVRTC availability.
-    pub fn smoke_add_one_precompiled(&self, input: &[f32]) -> Result<Vec<f32>, CudaDriverError> {
-        let n =
-            u32::try_from(input.len()).map_err(|_| CudaDriverError::InputTooLarge(input.len()))?;
-        let function =
-            self.precompiled_function("smoke_add_one", "proxima_add_one", PRECOMPILED_ADD_ONE_PTX)?;
-        let device_input = self.runtime.upload(input)?;
-        let mut device_output = self.runtime.alloc_zeros::<f32>(input.len())?;
-        let device_uniforms = self.runtime.upload::<u8>(&n.to_ne_bytes())?;
-        let mut args = self.runtime.launch_arguments(&function);
-        args.push(&device_input);
-        args.push_mut(&mut device_output);
-        args.push(&device_uniforms);
-        unsafe {
-            self.runtime.launch(args, LaunchShape {
-                grid_dim: ((input.len() as u32).div_ceil(256), 1, 1),
-                block_dim: (256, 1, 1),
-                shared_mem_bytes: 0,
-            })
-        }?;
-        self.runtime.synchronize()?;
-        Ok(self.runtime.download(&device_output)?)
     }
 
     /// Runs two add-one dispatches through one persistent arena. The returned
@@ -1663,7 +1673,7 @@ impl CudaDriver {
     /// occurs for an intermediate node already resident in the arena.
     pub fn launch_f32_persistent(
         &self,
-        arena: &mut CudaF32Arena,
+        arena: &mut CudaF32Arena<R>,
         kernel: &CudaKernel,
         uniforms: &[u8],
     ) -> Result<(), CudaDriverError> {
@@ -1678,7 +1688,7 @@ impl CudaDriver {
     /// elements but materialize only the output shape).
     pub fn launch_f32_persistent_sized(
         &self,
-        arena: &mut CudaF32Arena,
+        arena: &mut CudaF32Arena<R>,
         kernel: &CudaKernel,
         uniforms: &[u8],
         output_len: usize,
@@ -1699,12 +1709,12 @@ impl CudaDriver {
     /// diagnostic would never be observed, so the launch is rejected.
     pub fn launch_f32_persistent_sized_async(
         &self,
-        arena: &mut CudaF32Arena,
+        arena: &mut CudaF32Arena<R>,
         kernel: &CudaKernel,
         uniforms: &[u8],
         output_len: usize,
-        deferred_fault: Option<(&CudaSlice<u32>, usize, usize)>,
-        function: Option<&CudaFunction>,
+        deferred_fault: Option<(&R::Buffer<u32>, usize, usize)>,
+        function: Option<&R::Function>,
     ) -> Result<(), CudaDriverError> {
         let faults = kernel
             .bindings
@@ -1728,7 +1738,7 @@ impl CudaDriver {
     /// kernel's extra output of that node, so it is allocated once and read by the launch after.
     fn launch_prologue(
         &self,
-        arena: &mut CudaF32Arena,
+        arena: &mut CudaF32Arena<R>,
         kernel: &CudaKernel,
         uniforms: &[u8],
     ) -> Result<(), CudaDriverError> {
@@ -1762,12 +1772,12 @@ impl CudaDriver {
 
     fn launch_f32_persistent_sized_with_sync(
         &self,
-        arena: &mut CudaF32Arena,
+        arena: &mut CudaF32Arena<R>,
         kernel: &CudaKernel,
         uniforms: &[u8],
         output_len: usize,
-        completion: Completion<'_>,
-        function: Option<&CudaFunction>,
+        completion: Completion<'_, R>,
+        function: Option<&R::Function>,
     ) -> Result<(), CudaDriverError> {
         let (synchronize, deferred_fault) = match completion {
             Completion::Synchronize => (true, None),
@@ -1851,7 +1861,7 @@ impl CudaDriver {
                 self.runtime.alloc_zeros::<f32>(output_len)?
             }
         };
-        if device_output.len() != output_len {
+        if R::len(&device_output) != output_len {
             let replacement = match self.runtime.alloc_zeros::<f32>(output_len) {
                 Ok(buffer) => buffer,
                 Err(error) => {
@@ -1886,14 +1896,18 @@ impl CudaDriver {
             .then(|| self.runtime.alloc_zeros::<u32>(gather_slots))
             .transpose()?;
         let fault_window =
-            deferred_fault.map(|(array, offset, slots)| array.slice(offset..offset + slots));
+            deferred_fault.map(|(array, offset, slots)| R::view(array, offset..offset + slots));
         arena.launch_profile.mark(3, &mut lap);
         let mut route_buffer = self.take_route_compaction(&mut arena.route_compaction, output_node, kernel.route_compaction_words)?;
         let prepass_result = match route_buffer.as_mut() {
             Some(compaction) => {
-                let owned_view = fault_buffer.as_ref().map(|buffer| buffer.slice(..));
-                let fault_view = fault_window.as_ref().or(owned_view.as_ref());
-                self.launch_route_prepass(&arena.buffers, kernel, compaction, device_uniforms, fault_view)
+                let owned_view = fault_buffer.as_ref().map(|buffer| R::view(buffer, 0..R::len(buffer)));
+                // the view type is invariant in its borrow, so each source is passed on its own instead of joined through Option::or
+                match (fault_window.as_ref(), owned_view.as_ref()) {
+                    (Some(window), _) => self.launch_route_prepass(&arena.buffers, kernel, compaction, device_uniforms, Some(window)),
+                    (None, Some(window)) => self.launch_route_prepass(&arena.buffers, kernel, compaction, device_uniforms, Some(window)),
+                    (None, None) => self.launch_route_prepass(&arena.buffers, kernel, compaction, device_uniforms, None),
+                }
             }
             None => Ok(()),
         };
@@ -1901,8 +1915,9 @@ impl CudaDriver {
         for binding in &kernel.bindings[..output_index] {
             match binding {
                 Binding::Input(node) | Binding::Indices(node) => match arena.buffers.get(node) {
-                    Some(buffer) => push_buffer::<CudarcRuntime>(&mut args, buffer),
+                    Some(buffer) => push_buffer::<R>(&mut args, buffer),
                     None => {
+                        drop(args);
                         arena
                             .buffers
                             .insert(output_node, CudaGraphBuffer::F32(device_output));
@@ -1931,7 +1946,13 @@ impl CudaDriver {
             args.push_mut(buffer);
         }
         arena.launch_profile.mark(4, &mut lap);
-        let launch_result = prepass_result.and_then(|()| unsafe { self.runtime.launch(args, config) }.map_err(CudaDriverError::from));
+        let launch_result = match prepass_result {
+            Ok(()) => unsafe { self.runtime.launch(args, config) }.map_err(CudaDriverError::from),
+            Err(error) => {
+                drop(args);
+                Err(error)
+            }
+        };
         if let Some(buffer) = route_buffer.take() {
             arena.route_compaction.insert(output_node, buffer);
         }
@@ -1974,15 +1995,15 @@ impl CudaDriver {
 
     fn take_route_compaction(
         &self,
-        held: &mut BTreeMap<NodeId, CudaSlice<u32>>,
+        held: &mut BTreeMap<NodeId, R::Buffer<u32>>,
         node: NodeId,
         words: usize,
-    ) -> Result<Option<CudaSlice<u32>>, CudaDriverError> {
+    ) -> Result<Option<R::Buffer<u32>>, CudaDriverError> {
         if words == 0 {
             return Ok(None);
         }
         match held.remove(&node) {
-            Some(buffer) if buffer.len() == words => Ok(Some(buffer)),
+            Some(buffer) if R::len(&buffer) == words => Ok(Some(buffer)),
             Some(_) | None => Ok(Some(self.runtime.alloc_zeros::<u32>(words)?)),
         }
     }
@@ -1992,11 +2013,11 @@ impl CudaDriver {
     /// the compaction buffer the grouped kernel reads next.
     fn launch_route_prepass(
         &self,
-        buffers: &BTreeMap<NodeId, CudaGraphBuffer>,
+        buffers: &BTreeMap<NodeId, CudaGraphBuffer<R>>,
         kernel: &CudaKernel,
-        compaction: &mut CudaSlice<u32>,
-        uniforms: &CudaSlice<u8>,
-        fault: Option<&CudaView<'_, u32>>,
+        compaction: &mut R::Buffer<u32>,
+        uniforms: &R::Buffer<u8>,
+        fault: Option<&R::View<'_, u32>>,
     ) -> Result<(), CudaDriverError> {
         let [prepass] = kernel.prologue.as_slice() else {
             return Err(CudaDriverError::BindingContract);
@@ -2011,7 +2032,7 @@ impl CudaDriver {
         for binding in &prepass.bindings {
             match binding {
                 Binding::Indices(node) => match buffers.get(node) {
-                    Some(buffer) => push_buffer::<CudarcRuntime>(&mut args, buffer),
+                    Some(buffer) => push_buffer::<R>(&mut args, buffer),
                     None => return Err(CudaDriverError::MissingBuffer(*node)),
                 },
                 Binding::Uniforms => args.push(uniforms),
@@ -2027,12 +2048,12 @@ impl CudaDriver {
 
     fn take_extra_output(
         &self,
-        arena: &mut CudaF32Arena,
+        arena: &mut CudaF32Arena<R>,
         node: NodeId,
         length: usize,
-    ) -> Result<CudaSlice<f32>, CudaDriverError> {
+    ) -> Result<R::Buffer<f32>, CudaDriverError> {
         match arena.buffers.remove(&node) {
-            Some(CudaGraphBuffer::F32(buffer)) if buffer.len() == length => Ok(buffer),
+            Some(CudaGraphBuffer::F32(buffer)) if R::len(&buffer) == length => Ok(buffer),
             Some(CudaGraphBuffer::Bytes(_)) => Err(CudaDriverError::BindingContract),
             Some(CudaGraphBuffer::F32(_)) | None => {
                 arena.allocations += 1;
@@ -2042,7 +2063,7 @@ impl CudaDriver {
         }
     }
 
-    fn restore_extra_outputs(arena: &mut CudaF32Arena, buffers: Vec<(NodeId, CudaSlice<f32>)>) {
+    fn restore_extra_outputs(arena: &mut CudaF32Arena<R>, buffers: Vec<(NodeId, R::Buffer<f32>)>) {
         for (node, buffer) in buffers {
             arena.buffers.insert(node, CudaGraphBuffer::F32(buffer));
         }
@@ -2052,7 +2073,7 @@ impl CudaDriver {
     /// final-result readback.
     pub fn read_f32(
         &self,
-        arena: &CudaF32Arena,
+        arena: &CudaF32Arena<R>,
         node: NodeId,
     ) -> Result<Vec<f32>, CudaDriverError> {
         let buffer = arena
@@ -2196,15 +2217,18 @@ fn emit_and_pack(
     Ok((kernels, uniforms))
 }
 
-fn report_event_timing(
-    origin: &CudaEvent,
-    rows: &[(NodeId, String, usize, CudaEvent)],
-) -> Result<(), CudaDriverError> {
+fn report_event_timing<R: GpuRuntime>(
+    origin: &R::Event,
+    rows: &[(NodeId, String, usize, R::Event)],
+) -> Result<(), CudaDriverError>
+where
+    CudaDriverError: From<R::Error>,
+{
     let mut previous = origin;
     let mut by_kernel: BTreeMap<&str, (f64, usize, usize)> = BTreeMap::new();
     let mut total_ms = 0.0f64;
     for (_, label, output_len, event) in rows {
-        let millis = f64::from(CudarcRuntime::elapsed_ms(previous, event)?);
+        let millis = f64::from(R::elapsed_ms(previous, event)?);
         let entry = by_kernel
             .entry(label.as_str())
             .or_insert((0.0, 0, *output_len));
@@ -2507,7 +2531,9 @@ fn store_ptx(store: &PtxStore, key: &CacheKey, ptx: &Ptx) {
     }
 }
 
-impl DevicePlan {
+impl<R: GpuRuntime> DevicePlan<R>
+where CudaDriverError: From<R::Error> + From<R::BuildError>
+{
     #[must_use]
     pub const fn exact_activations(&self) -> bool {
         self.exact_activations
@@ -3121,7 +3147,7 @@ impl DevicePlan {
             let bytes = cuda_float_bytes(self.shapes.of(*node))?;
             match self.arena.buffers.get(node) {
                 Some(CudaGraphBuffer::F32(buffer)) => {
-                    let current = (buffer.len() as u64)
+                    let current = (R::len(buffer) as u64)
                         .checked_mul(4)
                         .ok_or(CudaDriverError::ResourceOverflow)?;
                     add(current)?;
@@ -3130,7 +3156,7 @@ impl DevicePlan {
                     }
                 }
                 Some(CudaGraphBuffer::Bytes(buffer)) => {
-                    add(buffer.len() as u64)?;
+                    add(R::len(buffer.as_ref()) as u64)?;
                     add(bytes)?;
                 }
                 None => add(bytes)?,
@@ -3152,7 +3178,7 @@ impl DevicePlan {
             match self.arena.buffers.get(&bound.node) {
                 _ if pooled => {}
                 Some(CudaGraphBuffer::F32(buffer)) => {
-                    let current = (buffer.len() as u64)
+                    let current = (R::len(buffer) as u64)
                         .checked_mul(4)
                         .ok_or(CudaDriverError::ResourceOverflow)?;
                     add(current)?;
@@ -3161,15 +3187,15 @@ impl DevicePlan {
                     }
                 }
                 Some(CudaGraphBuffer::Bytes(buffer)) => {
-                    add(buffer.len() as u64)?;
+                    add(R::len(buffer.as_ref()) as u64)?;
                     add(bytes)?;
                 }
                 None => add(bytes)?,
             }
             if !matches!(bound.kind, BoundOpKind::Constant { .. }) {
                 if let Some(existing) = self.arena.uniforms.get(&bound.node) {
-                    add(existing.len() as u64)?;
-                    if existing.len() != uniform.len() {
+                    add(R::len(existing) as u64)?;
+                    if R::len(existing) != uniform.len() {
                         add(uniform.len() as u64)?;
                     }
                 } else {
@@ -3286,10 +3312,10 @@ impl DevicePlan {
         }
         let retained_graph = self.arena.buffers.values().try_fold(0_u64, |sum, buffer| {
             let bytes = match buffer {
-                CudaGraphBuffer::F32(values) => (values.len() as u64)
+                CudaGraphBuffer::F32(values) => (R::len(values) as u64)
                     .checked_mul(4)
                     .ok_or(CudaDriverError::ResourceOverflow)?,
-                CudaGraphBuffer::Bytes(values) => values.len() as u64,
+                CudaGraphBuffer::Bytes(values) => R::len(values.as_ref()) as u64,
             };
             sum.checked_add(bytes)
                 .ok_or(CudaDriverError::ResourceOverflow)
@@ -3299,7 +3325,7 @@ impl DevicePlan {
             .uniforms
             .values()
             .try_fold(0_u64, |sum, buffer| {
-                sum.checked_add(buffer.len() as u64)
+                sum.checked_add(R::len(buffer) as u64)
                     .ok_or(CudaDriverError::ResourceOverflow)
             })?;
         let retained = retained_graph
@@ -3364,13 +3390,8 @@ impl DevicePlan {
         self.resolved.len()
     }
     pub fn device_identity(&self) -> Result<String, CudaDriverError> {
-        Ok(format!(
-            "cuda:{}:{}",
-            self.driver.runtime.context.ordinal(),
-            self.driver.runtime.context.name()?
-        ))
+        Ok(self.driver.runtime.device_identity()?)
     }
-
     /// Marks the inputs named in `resident_names` as immutable for the life of
     /// their source bytes, so any plan on this driver reuses the device buffer
     /// another plan uploaded for the same (address, length). Same contract as
@@ -3452,7 +3473,7 @@ impl DevicePlan {
         self.read_state(output, buffer).map(Some)
     }
 
-    fn read_state(&mut self, output: NodeId, buffer: CudaGraphBuffer) -> Result<(NodeId, Vec<f32>), CudaDriverError> {
+    fn read_state(&mut self, output: NodeId, buffer: CudaGraphBuffer<R>) -> Result<(NodeId, Vec<f32>), CudaDriverError> {
         let CudaGraphBuffer::F32(slice) = buffer else {
             return Err(CudaDriverError::BindingContract);
         };
@@ -3611,7 +3632,7 @@ impl DevicePlan {
         input: NodeId,
         valid_rows: u64,
         row_width: u64,
-        buffer: CudaGraphBuffer,
+        buffer: CudaGraphBuffer<R>,
     ) -> Result<(NodeId, Vec<f32>), CudaDriverError> {
         let CudaGraphBuffer::F32(slice) = buffer else {
             return Err(CudaDriverError::BindingContract);
@@ -3676,7 +3697,7 @@ impl DevicePlan {
             return Err(CudaDriverError::MissingBuffer(input));
         };
         let mut grown = self.driver.runtime.alloc_zeros::<f32>(to_elements)?;
-        let preserved = keep_elements.min(current.len());
+        let preserved = keep_elements.min(R::len(current));
         if preserved > 0 {
             self.driver.runtime.copy_range(current, 0..preserved, &mut grown, 0)?;
         }
@@ -3764,7 +3785,7 @@ impl DevicePlan {
         named: &[(&str, QuantizedBlock<'_>)],
         resident_names: Option<&BTreeSet<&str>>,
     ) -> Result<(Evaluated, Vec<crate::OpGpuTiming>), CudaDriverError> {
-        let mut launches: Vec<LaunchEvents> = Vec::with_capacity(self.resolved.len());
+        let mut launches: Vec<LaunchEvents<R>> = Vec::with_capacity(self.resolved.len());
         let evaluated = self.execute_named_launch_events(named, resident_names, Some(&mut launches))?;
         let timings = launches
             .iter()
@@ -3774,9 +3795,9 @@ impl DevicePlan {
     }
 
     #[cfg(feature = "instrument")]
-    fn op_timing(&self, launch: &LaunchEvents) -> Result<crate::OpGpuTiming, CudaDriverError> {
+    fn op_timing(&self, launch: &LaunchEvents<R>) -> Result<crate::OpGpuTiming, CudaDriverError> {
         let bound = &self.resolved[launch.position];
-        let millis = launch.start.elapsed_ms(&launch.end)?;
+        let millis = R::elapsed_ms(&launch.start, &launch.end)?;
         Ok(crate::OpGpuTiming {
             node: bound.node,
             kind: bound.kind.name(),
@@ -3810,7 +3831,7 @@ impl DevicePlan {
             .iter()
             .filter_map(|(source, _, _)| self.arena.buffers.get(source))
             .map(|buffer| match buffer {
-                CudaGraphBuffer::Bytes(values) => values.num_bytes() as u64,
+                CudaGraphBuffer::Bytes(values) => R::len(values.as_ref()) as u64,
                 plain => cuda_float_bytes(&[buffer_elements(plain)]).unwrap_or(0),
             })
             .sum()
@@ -3820,7 +3841,7 @@ impl DevicePlan {
         &mut self,
         named: &[(&str, QuantizedBlock<'_>)],
         resident_names: Option<&BTreeSet<&str>>,
-        mut op_events: Option<&mut Vec<LaunchEvents>>,
+        mut op_events: Option<&mut Vec<LaunchEvents<R>>>,
     ) -> Result<Evaluated, CudaDriverError> {
         let host_timing = std::env::var_os("PROXIMA_CUDA_HOST_TIMING").is_some();
         let upload_started = host_timing.then(std::time::Instant::now);
@@ -3829,7 +3850,7 @@ impl DevicePlan {
         let compilations_before = self.driver.kernel_compilations();
         let nvrtc_before = self.driver.nvrtc_micros();
         let load_before = self.driver.load_micros();
-        let lookup_before = self.driver.runtime.compile_counters.lookup_micros();
+        let lookup_before = self.driver.runtime.compile_counters().lookup_micros();
         let mut upload_call_us = 0u64;
         let mut resident_hits = 0usize;
         let mut resident_misses = 0usize;
@@ -4009,7 +4030,7 @@ impl DevicePlan {
             .then(|| self.driver.runtime.alloc_zeros::<u32>(fault_total))
             .transpose()?;
         let event_timing = std::env::var_os("PROXIMA_CUDA_EVENT_TIMING").is_some();
-        let mut event_rows: Vec<(NodeId, String, usize, CudaEvent)> = Vec::new();
+        let mut event_rows: Vec<(NodeId, String, usize, R::Event)> = Vec::new();
         let event_origin = event_timing
             .then(|| self.driver.runtime.record_event())
             .transpose()?;
@@ -4069,7 +4090,7 @@ impl DevicePlan {
             if kernel.grid.is_idle() {
                 let needs_zero_buffer = !matches!(
                     self.arena.buffers.get(&bound.node),
-                    Some(CudaGraphBuffer::F32(buffer)) if buffer.is_empty()
+                    Some(CudaGraphBuffer::F32(buffer)) if R::len(buffer) == 0
                 );
                 if needs_zero_buffer {
                     self.arena.allocations += 1;
@@ -4186,7 +4207,7 @@ impl DevicePlan {
                 (self.driver.nvrtc_micros() - nvrtc_before) as f64 / 1_000.0,
                 (self.driver.load_micros() - load_before) as f64 / 1_000.0
             );
-            let lookup_after = self.driver.runtime.compile_counters.lookup_micros();
+            let lookup_after = self.driver.runtime.compile_counters().lookup_micros();
             eprintln!(
                 "cuda_host_timing: phase=lookup_split build_ms={:.3} key_ms={:.3} disk_read_ms={:.3} module_load_ms={:.3} function_load_ms={:.3}",
                 (lookup_after[0] - lookup_before[0]) as f64 / 1_000.0,
@@ -4219,7 +4240,7 @@ impl DevicePlan {
             }
         }
         if let Some(origin) = event_origin {
-            report_event_timing(&origin, &event_rows)?;
+            report_event_timing::<R>(&origin, &event_rows)?;
         }
         if let Some(started) = sync_started {
             eprintln!(
@@ -4263,8 +4284,8 @@ impl DevicePlan {
             }
             if trace_outputs {
                 let length = self.arena.buffers.get(node).map(|buffer| match buffer {
-                    CudaGraphBuffer::F32(values) => values.len(),
-                    CudaGraphBuffer::Bytes(values) => values.len(),
+                    CudaGraphBuffer::F32(values) => R::len(values),
+                    CudaGraphBuffer::Bytes(values) => R::len(values.as_ref()),
                 });
                 eprintln!("cuda_trace_output node={node:?} arena_len={length:?}");
             }
@@ -4329,8 +4350,8 @@ impl DevicePlan {
         let mut total = 0_u64;
         for (node, buffer) in &self.arena.buffers {
             let bytes = match buffer {
-                CudaGraphBuffer::F32(values) => values.len() as u64 * 4,
-                CudaGraphBuffer::Bytes(values) => values.len() as u64,
+                CudaGraphBuffer::F32(values) => R::len(values) as u64 * 4,
+                CudaGraphBuffer::Bytes(values) => R::len(values.as_ref()) as u64,
             };
             let kind = kinds.get(node).copied().unwrap_or("input");
             let row = by_kind.entry(kind).or_default();

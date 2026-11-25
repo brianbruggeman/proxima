@@ -45,7 +45,7 @@ pub struct LaunchShape {
 ///
 /// Teaching pointer: the cudarc impl wraps its typed `LaunchArgs::arg`; a runtime without typed
 /// arguments builds a [`crate::kernel_params::KernelParams`] instead.
-pub trait LaunchArguments<'a, Runtime: GpuRuntime + ?Sized> {
+pub trait LaunchArguments<'a, Runtime: GpuRuntime> {
     /// Pushes a buffer the kernel reads.
     fn push<Element: DeviceElement>(&mut self, buffer: &'a Runtime::Buffer<Element>) -> &mut Self;
     /// Pushes a buffer the kernel writes.
@@ -59,7 +59,7 @@ pub trait LaunchArguments<'a, Runtime: GpuRuntime + ?Sized> {
 }
 
 /// The device operations one executor runs on.
-pub trait GpuRuntime: core::fmt::Debug {
+pub trait GpuRuntime: core::fmt::Debug + Clone {
     /// What a failed device call reports.
     type Error;
     /// What a failed kernel build reports: compile and cache failures as well as driver ones.
@@ -186,6 +186,15 @@ pub trait GpuRuntime: core::fmt::Debug {
     /// A writable window onto `range` of `buffer`.
     fn view_mut<Element: DeviceElement>(buffer: &mut Self::Buffer<Element>, range: Range<usize>) -> Self::ViewMut<'_, Element>;
 
+    /// Elements in a writable window.
+    fn view_mut_len<Element: DeviceElement>(view: &Self::ViewMut<'_, Element>) -> usize;
+
+    /// A writable window onto `range` of another writable window.
+    fn view_mut_range<'view, Element: DeviceElement>(view: &'view mut Self::ViewMut<'_, Element>, range: Range<usize>) -> Self::ViewMut<'view, Element>;
+
+    /// All of `buffer` read as bytes, or `None` when the runtime cannot reinterpret it.
+    fn bytes_mut<Element: DeviceElement>(buffer: &mut Self::Buffer<Element>) -> Option<Self::ViewMut<'_, u8>>;
+
     /// Records an event at the current end of the device queue.
     ///
     /// # Errors
@@ -203,6 +212,21 @@ pub trait GpuRuntime: core::fmt::Debug {
     /// # Errors
     /// A queued operation failed.
     fn synchronize(&self) -> Result<(), Self::Error>;
+
+    /// The device's `(free_bytes, total_bytes)` right now.
+    ///
+    /// # Errors
+    /// The device could not report.
+    fn memory_info(&self) -> Result<(usize, usize), Self::Error>;
+
+    /// A stable one-line name of the selected device, prefixed by the runtime.
+    ///
+    /// # Errors
+    /// The device could not report.
+    fn device_identity(&self) -> Result<String, Self::Error>;
+
+    /// The kernel compile and cache counters this runtime keeps.
+    fn compile_counters(&self) -> &CompileCounters;
 }
 
 /// The cudarc stream the CUDA executor always ran on, behind [`GpuRuntime`].
@@ -338,6 +362,20 @@ impl GpuRuntime for CudarcRuntime {
         buffer.slice_mut(range)
     }
 
+    fn view_mut_len<Element: DeviceElement>(view: &CudaViewMut<'_, Element>) -> usize {
+        view.len()
+    }
+
+    fn view_mut_range<'view, Element: DeviceElement>(view: &'view mut CudaViewMut<'_, Element>, range: Range<usize>) -> CudaViewMut<'view, Element> {
+        view.slice_mut(range)
+    }
+
+    fn bytes_mut<Element: DeviceElement>(buffer: &mut CudaSlice<Element>) -> Option<CudaViewMut<'_, u8>> {
+        let bytes = buffer.len() * core::mem::size_of::<Element>();
+        // the buffer's own allocation read as bytes: every byte pattern is a valid u8
+        unsafe { buffer.transmute_mut::<u8>(bytes) }
+    }
+
     fn record_event(&self) -> Result<CudaEvent, DriverError> {
         let event = self.context.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?;
         event.record(&self.stream)?;
@@ -350,6 +388,18 @@ impl GpuRuntime for CudarcRuntime {
 
     fn synchronize(&self) -> Result<(), DriverError> {
         self.stream.synchronize()
+    }
+
+    fn memory_info(&self) -> Result<(usize, usize), DriverError> {
+        self.context.mem_get_info()
+    }
+
+    fn device_identity(&self) -> Result<String, DriverError> {
+        Ok(format!("cuda:{}:{}", self.context.ordinal(), self.context.name()?))
+    }
+
+    fn compile_counters(&self) -> &CompileCounters {
+        &self.compile_counters
     }
 }
 
