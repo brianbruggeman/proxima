@@ -6314,9 +6314,43 @@ impl BackendRuntime {
         false
     }
 
-    /// The host runtime keeps no device residency, so there is nothing to end.
+    /// The host runtime keeps no device residency and no segment plans, so there is nothing to end.
     #[cfg(all(feature = "std", feature = "proxima-autograd"))]
-    pub(crate) fn release_call_residents(&mut self, _names: &[&str]) {}
+    pub(crate) fn release_call_residents_of(&mut self, _names: &[&str], _program_key: usize) {}
+
+    /// The host runtime caches no segment plans, so there is nothing to drop.
+    #[cfg(all(feature = "std", feature = "proxima-autograd"))]
+    pub(crate) fn drop_segment_plans(&mut self) {}
+
+    /// Plan-cache `(hits, misses)`: always `(0, 0)`, the host segment path keeps no plan cache.
+    #[cfg(all(feature = "std", feature = "proxima-autograd"))]
+    pub(crate) fn plan_counts(&self) -> (usize, usize) {
+        (0, 0)
+    }
+
+    /// The host runtime has no device buffer to hand an output off in.
+    #[cfg(all(feature = "std", feature = "proxima-autograd"))]
+    #[allow(clippy::unused_self)] // same signature on every backend
+    pub(crate) fn retains_handoffs(&self) -> bool {
+        false
+    }
+
+    /// The host form of the gpu runtime's `evaluate_segment_handoff`: every handed-off output comes
+    /// back in the [`Evaluated`] beside `outputs`, and the consumer binds it by name as a host block.
+    #[cfg(all(feature = "std", feature = "proxima-autograd"))]
+    pub(crate) fn evaluate_segment_handoff(
+        &mut self,
+        (_program_key, program): (usize, &[Op]),
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
+        handoff: (&[(NodeId, &str)], &[(NodeId, &str)]),
+    ) -> Result<Evaluated, InteropError> {
+        let mut host_outputs = outputs.to_vec();
+        host_outputs.extend(handoff.0.iter().map(|(node, _)| *node));
+        self.evaluate_segment(program, symbols, named, &host_outputs, resident_names, None)
+    }
 
     /// Bytes the selected device has allocated; always `None` on the host runtime.
     #[cfg(feature = "proxima-autograd")]
