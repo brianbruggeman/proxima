@@ -1468,7 +1468,7 @@ fn render_leaf(
     let mut source = String::new();
     preamble(target, &mut source, element_type);
     source.push_str(&format!("struct Uniforms {{ {WORD_C} total_elements; }};\n\n"));
-    kernel_signature(&mut source, &[], 0, 0, entry, element_type);
+    kernel_signature(target, &mut source, &[], 0, 0, entry, element_type);
     source.push_str("    if (gid >= u.total_elements) { return; }\n");
     match constant {
         Some(value) => source.push_str(&format!(
@@ -1558,6 +1558,7 @@ fn render_moe_topk(target: Target, resolved: &BoundOp, entry: &str) -> Result<St
         );
     }
     source.push_str(") {\n");
+    source.push_str(&target.entry_wave_guard());
     let extra_params: Vec<String> = (0..extra_count)
         .map(|index| format!("extra{index}"))
         .collect();
@@ -2559,6 +2560,7 @@ const Q3K_BLOCK_BYTES: usize = proxima_gguf::quant::q3_k::BLOCK_BYTES;
 const Q3K_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q3_k::QK_K;
 
 fn kernel_signature(
+    target: Target,
     source: &mut String,
     quantized: &[Option<Codec>],
     epilogue_operand_count: usize,
@@ -2567,6 +2569,7 @@ fn kernel_signature(
     element_type: &str,
 ) {
     kernel_signature_with_operand_types(
+        target,
         source,
         quantized,
         epilogue_operand_count,
@@ -2579,7 +2582,9 @@ fn kernel_signature(
 
 /// [`kernel_signature`] declaring each plain input in `operand_types[index]` (the scalar its
 /// producer wrote) where given; an empty slice declares every plain input in `element_type`.
+#[allow(clippy::too_many_arguments)] // one context per argument; a bundle would be a type that only relocates them
 fn kernel_signature_with_operand_types(
+    target: Target,
     source: &mut String,
     quantized: &[Option<Codec>],
     epilogue_operand_count: usize,
@@ -2624,6 +2629,7 @@ fn kernel_signature_with_operand_types(
     }
     source.push_str(") {\n");
     source.push_str("    const Uniforms u = *u_ptr;\n");
+    source.push_str(&target.entry_wave_guard());
     source.push_str("    long long gid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;\n");
 }
 
@@ -2896,6 +2902,7 @@ fn render_elementwise(
     source.push_str("};\n\n");
 
     kernel_signature_with_operand_types(
+        target,
         &mut source,
         quantized,
         0,
@@ -4259,6 +4266,7 @@ fn render_reduce(
     source.push_str("};\n\n");
 
     kernel_signature(
+        target,
         &mut source,
         quantized,
         epilogue_operand_count,
@@ -4393,7 +4401,7 @@ fn render_scan(
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, quantized, 0, gather_count, entry, element_type);
+    kernel_signature(target, &mut source, quantized, 0, gather_count, entry, element_type);
     source.push_str("    if (gid != 0) { return; }\n");
 
     if outer_rank > 0 {
@@ -7918,6 +7926,40 @@ mod rocm_tests {
         assert!(!hip.entry.contains("omega_cuda"));
         assert!(cuda.entry.contains("omega_cuda"));
         assert_ne!(hip.entry, cuda.entry);
+    }
+
+    #[test]
+    fn hip_text_refuses_to_run_at_another_wave_width_than_it_was_built_for() {
+        for wave in [HipWave::Wave32, HipWave::Wave64] {
+            let lanes = wave.lanes();
+            let kernel = emit_hip_at_wave(
+                wave,
+                &matmul_reduce(4, 4096),
+                &no_packed(),
+                NumericPolicy::llama_relaxed(),
+                EmitDevice::default(),
+                &OperandDtypes::new(),
+            )
+            .expect("reduce hip emits");
+
+            let build_guard = format!(
+                "#if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != {lanes}\n#error \"omega HIP text built for {lanes}-lane waves\"\n#endif\n"
+            );
+            assert!(kernel.source.contains(&build_guard), "{lanes}-lane text carries the build-time guard");
+            assert!(
+                kernel.source.contains(&format!("if (warpSize != {lanes}) {{ __builtin_trap(); }}")),
+                "{lanes}-lane text traps at kernel entry on another width"
+            );
+        }
+    }
+
+    #[test]
+    fn cuda_text_carries_no_hip_wave_guard() {
+        let kernel = emit_cuda_with_policy(&matmul_reduce(4, 4096), &no_packed(), NumericPolicy::llama_relaxed())
+            .expect("reduce cuda emits");
+
+        assert!(!kernel.source.contains("__AMDGCN_WAVEFRONT_SIZE"));
+        assert!(!kernel.source.contains("warpSize"));
     }
 
     #[test]

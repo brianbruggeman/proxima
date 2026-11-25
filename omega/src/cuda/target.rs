@@ -167,7 +167,30 @@ impl Target {
     /// renderer that builds its source without [`crate::cuda::preamble`] must
     /// still start from this, or its `_sync` call names an undefined token.
     pub(crate) fn lane_mask_define(&self) -> String {
-        alloc::format!("#define {LANE_MASK_TOKEN} {}\n", self.lane_mask_literal())
+        alloc::format!("{}#define {LANE_MASK_TOKEN} {}\n", self.wave_width_guard(), self.lane_mask_literal())
+    }
+
+    /// For HIP, the preprocessor guard that refuses text built for another wavefront width: hipRTC
+    /// compiles an RDNA part at 32 lanes, and 64-lane text on it drops half of every shuffle tree.
+    /// Empty for CUDA, whose warp is always 32.
+    pub(crate) fn wave_width_guard(&self) -> String {
+        if self.language != KernelLanguage::Hip {
+            return String::new();
+        }
+        alloc::format!(
+                "#if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != {wave}\n#error \"omega HIP text built for {wave}-lane waves\"\n#endif\n",
+                wave = self.wave
+            )
+    }
+
+    /// For HIP, the kernel-entry check that traps when the device runs another width than the text
+    /// was built for; `__AMDGCN_WAVEFRONT_SIZE` is deprecated in ROCm 7, so the runtime `warpSize`
+    /// backs the preprocessor guard. Empty for CUDA.
+    pub(crate) fn entry_wave_guard(&self) -> String {
+        if self.language != KernelLanguage::Hip {
+            return String::new();
+        }
+        alloc::format!("    if (warpSize != {}) {{ __builtin_trap(); }}\n", self.wave)
     }
 
     /// A complete statement that broadcasts `value` from `lane` into `dest`.
