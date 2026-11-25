@@ -954,12 +954,21 @@ impl Model {
     /// leaves the flag clear, so the next call retries, and is reported as a
     /// `weight_store_publish` event with `ok = false`.
     fn publish_store(&self) {
+        if self.store_miss.is_none() || self.store_published.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        // with no recoded tensor the entry would be a full copy of the checkpoint, so nothing is written
+        if !self.weights.has_recoded(&self.manifest) {
+            return;
+        }
+        self.write_store();
+    }
+
+    /// Writes the entry for this load's miss unconditionally; [`Self::publish_store`] decides whether to.
+    fn write_store(&self) {
         let Some((store_dir, key)) = &self.store_miss else {
             return;
         };
-        if self.store_published.swap(true, Ordering::AcqRel) {
-            return;
-        }
         let mut stored = Vec::new();
         let written = self
             .weights
@@ -1722,7 +1731,7 @@ mod tests {
 
         let first = model_with(scratch.path(), stored_settings(&store));
         assert!(first.store_miss.is_some(), "an empty store is a miss");
-        first.publish_store();
+        first.write_store();
         let second = model_with(scratch.path(), stored_settings(&store));
 
         assert!(second.store_miss.is_none(), "the published entry is a hit");
@@ -1752,10 +1761,25 @@ mod tests {
     }
 
     #[test]
+    fn a_load_that_recoded_no_tensor_publishes_no_store_entry() {
+        let scratch = source_directory();
+        let store = scratch.path().join("store");
+        let model = model_with(scratch.path(), stored_settings(&store));
+        assert!(model.store_miss.is_some(), "an empty store is a miss");
+
+        model.publish_store();
+
+        assert!(
+            !store.exists(),
+            "with nothing recoded the entry would copy the whole checkpoint, so nothing is written"
+        );
+    }
+
+    #[test]
     fn a_changed_rule_list_is_a_miss_against_an_existing_store() {
         let scratch = source_directory();
         let store = scratch.path().join("store");
-        model_with(scratch.path(), stored_settings(&store)).publish_store();
+        model_with(scratch.path(), stored_settings(&store)).write_store();
         let mut reruled: ServingSettings = conflaguration::from_toml_str(
             "[[weight_precision]]\npattern_kind = \"suffix\"\npattern = \"fc1.weight\"\ntarget = \"q8_0\"",
         )
@@ -1782,10 +1806,12 @@ mod tests {
     fn runtime_uses_the_gpu_exactly_when_settings_offload_every_layer() {
         let cpu = empty_model().with_settings(ServingSettings {
             gpu_layers: 0,
+            weight_store: Some(String::new()),
             ..ServingSettings::default()
         });
         let offloaded = empty_model().with_settings(ServingSettings {
             gpu_layers: crate::serving::GPU_LAYERS_ALL,
+            weight_store: Some(String::new()),
             ..ServingSettings::default()
         });
 
@@ -1803,6 +1829,7 @@ mod tests {
     fn every_layer_offload_is_refused_without_a_gpu_build() {
         let model = empty_model().with_settings(ServingSettings {
             gpu_layers: crate::serving::GPU_LAYERS_ALL,
+            weight_store: Some(String::new()),
             ..ServingSettings::default()
         });
 
