@@ -4331,10 +4331,10 @@ async fn cuda_cached_attention_matches_f64_oracle_with_causal_mask(
         &planes[0], &planes[1], &dummy, &dummy, &planes[2], &planes[3], &dummy, &planes[4],
     ];
     for (index, values) in order.iter().enumerate() {
-        driver.upload_f32(&mut arena, NodeId(index as u32), values).expect("input uploads");
+        driver.upload_f32(&mut arena, NodeId(index as u32), op.dtype, values).expect("input uploads");
     }
     driver
-        .launch_f32_persistent_sized(&mut arena, &kernel, &attention_uniform_bytes(&op), rows * query_heads * head_dim)
+        .launch_f32_persistent_sized(&mut arena, &kernel, op.dtype, &attention_uniform_bytes(&op), rows * query_heads * head_dim)
         .expect("attention launches");
     let actual = driver.read_f32(&arena, NodeId(8)).expect("output reads back");
 
@@ -4483,11 +4483,11 @@ async fn cuda_split_decode_attention_matches_f64_oracle(#[case] cached: usize) {
     ];
     for (index, values) in order.iter().enumerate() {
         let values = if values.is_empty() { &dummy[..] } else { values };
-        driver.upload_f32(&mut arena, NodeId(index as u32), values).expect("input uploads");
+        driver.upload_f32(&mut arena, NodeId(index as u32), op.dtype, values).expect("input uploads");
     }
     let vectors = query_heads as i64;
     driver
-        .launch_f32_persistent_sized(&mut arena, &kernel, &vectors.to_ne_bytes(), query_heads * head_dim)
+        .launch_f32_persistent_sized(&mut arena, &kernel, op.dtype, &vectors.to_ne_bytes(), query_heads * head_dim)
         .expect("split attention launches");
     let actual = driver.read_f32(&arena, NodeId(20)).expect("output reads back");
 
@@ -4675,10 +4675,10 @@ fn run_prefill_attention(
         order.extend([query_pass.as_slice(), cached_pass_plane, new_pass.as_slice()]);
     }
     for (index, values) in order.iter().enumerate() {
-        driver.upload_f32(&mut arena, NodeId(index as u32), values).expect("input uploads");
+        driver.upload_f32(&mut arena, NodeId(index as u32), op.dtype, values).expect("input uploads");
     }
     driver
-        .launch_f32_persistent_sized(&mut arena, &kernel, &attention_uniform_bytes(&op), rows * query_heads * head_dim)
+        .launch_f32_persistent_sized(&mut arena, &kernel, op.dtype, &attention_uniform_bytes(&op), rows * query_heads * head_dim)
         .expect("attention launches");
     let actual = driver.read_f32(&arena, NodeId(30)).expect("output reads back");
     (actual, kernel.entry.clone(), kernel.source.clone())
@@ -4800,11 +4800,11 @@ async fn tiled_prefill_attention_never_stores_past_the_last_query_row(#[case] ca
         vec![query_low, query_high, cached_low, cached_high, new_low, new_high, cached_values, new_values, &bound]
     };
     for (index, values) in order.iter().enumerate() {
-        driver.upload_f32(&mut arena, NodeId(index as u32), values).expect("input uploads");
+        driver.upload_f32(&mut arena, NodeId(index as u32), op.dtype, values).expect("input uploads");
     }
 
     driver
-        .launch_f32_persistent_sized(&mut arena, &kernel, &attention_uniform_bytes(&op), padded_rows * row_width)
+        .launch_f32_persistent_sized(&mut arena, &kernel, op.dtype, &attention_uniform_bytes(&op), padded_rows * row_width)
         .expect("tiled attention launches");
     let actual = driver.read_f32(&arena, NodeId(30)).expect("output reads back");
 

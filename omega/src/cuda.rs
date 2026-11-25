@@ -1673,11 +1673,16 @@ pub(crate) struct DeviceScalar {
     pub(crate) scalar: &'static str,
 }
 
+/// The Word-class device scalar: the one every layout without a narrower hardware type is computed in.
+pub(crate) fn word_scalar() -> Option<DeviceScalar> {
+    let row = crate::msl::layout_render::hardware_word()?;
+    Some(DeviceScalar { class: DeviceClass::Word, bytes: row.bytes as usize, scalar: row.scalar })
+}
+
 /// `None` for a layout wider than 32 bits, which no device scalar holds.
 pub(crate) fn device_scalar(dtype: DType) -> Option<DeviceScalar> {
-    use crate::msl::layout_render::{hardware_stage_type, hardware_word};
-    let row = hardware_word()?;
-    let word = DeviceScalar { class: DeviceClass::Word, bytes: row.bytes as usize, scalar: row.scalar };
+    use crate::msl::layout_render::hardware_stage_type;
+    let word = word_scalar()?;
     match dtype {
         DType::Layout(layout) if layout.width() <= 32 => {
             let Some(stage) = hardware_stage_type(&layout) else {
