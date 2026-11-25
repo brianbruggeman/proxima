@@ -245,6 +245,7 @@ cuda-driver = [
     "dep:sha2",
     "dep:libloading",
     "dep:bytemuck",
+    "dep:bon",
     "cudarc/driver",
     "cudarc/nvrtc",
     "cudarc/fallback-dynamic-loading",

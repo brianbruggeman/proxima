@@ -193,6 +193,11 @@ pub const SIMD_WIDTH: u64 = 32;
 // on a plan-stable decode, well under 4096) and the eviction-cost
 // rationale.
 
+// `OWNER_QUEUE_DEPTH`, `OWNER_PLAN_CAPACITY` and `OWNER_OWNED_HOST_BYTES`
+// (all `usize`) come in through the `include!` above -- the floor
+// `crate::owner_config::OwnerConfig` seeds its defaults from (`cuda-driver`
+// builds); see `omega-runtime.toml`'s `[owner]`.
+
 // `PACKED_ROW_BLOCK_SIMDGROUPS` comes in through the `include!` above --
 // number of independent `SIMD_WIDTH`-lane SIMD-groups Metal packs into one
 // threadgroup for the row-blocked packed-Q4_K/Q5_K/Q6_K matmul kernel

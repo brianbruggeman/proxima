@@ -6591,6 +6591,7 @@ mod recording_runtime {
 
     use std::collections::HashSet;
 
+    use crate::owner_config::OwnerConfig;
     use crate::device_owner::{
         Completion, DeviceHandle, DeviceKey, DeviceOwner, Frame, RegisterRequest, ResidentRef,
         StepOutcome, block_on_thread, launch_on_thread, run_device_owner,
@@ -6643,11 +6644,24 @@ mod recording_runtime {
         }
     }
 
-    fn recording_owner<Block>(runtime: RecordingRuntime) -> DeviceOwner<RecordingRuntime, Block>
+    fn recording_owner<Block>(
+        runtime: RecordingRuntime,
+        plan_capacity: usize,
+    ) -> DeviceOwner<RecordingRuntime, Block>
     where
         for<'block> QuantizedBlock<'block>: From<&'block Block>,
     {
-        DeviceOwner::new(DeviceKey(0), CudaDriver::recording_on(runtime), 8)
+        DeviceOwner::new(DeviceKey(0), CudaDriver::recording_on(runtime), plan_capacity)
+    }
+
+    const RECORDING_PLAN_CAPACITY: usize = 8;
+
+    fn recording_config(queue_depth: usize) -> OwnerConfig {
+        OwnerConfig::builder()
+            .queue_depth(queue_depth)
+            .plan_capacity(RECORDING_PLAN_CAPACITY)
+            .owned_host_bytes(OwnerConfig::default().owned_host_bytes)
+            .build()
     }
 
     async fn drive_plan<Value: Clone>(
@@ -6680,7 +6694,9 @@ mod recording_runtime {
     fn the_owner_runs_every_device_call_on_one_thread_that_is_not_a_caller() {
         let runtime = RecordingRuntime::new();
         let owner_runtime = runtime.clone();
-        let (handle, owner) = launch_on_thread(DeviceKey(0), 64, move || recording_owner(owner_runtime));
+        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(64), move |plan_capacity| {
+            recording_owner(owner_runtime, plan_capacity)
+        });
         let weight_first = Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0));
         let weight_second = Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0));
         let activation = Arc::from(weight_values(INPUT as usize, 3.0));
@@ -6730,7 +6746,9 @@ mod recording_runtime {
 
         let runtime = RecordingRuntime::new();
         let owner_runtime = runtime.clone();
-        let (handle, owner) = launch_on_thread(DeviceKey(0), 8, move || recording_owner(owner_runtime));
+        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), move |plan_capacity| {
+            recording_owner(owner_runtime, plan_capacity)
+        });
         let request = owner_request(
             &Arc::from(weight_first),
             &Arc::from(weight_second),
@@ -6748,7 +6766,9 @@ mod recording_runtime {
     fn release_and_step_racing_from_two_tasks_linearize() {
         let runtime = RecordingRuntime::new();
         let owner_runtime = runtime.clone();
-        let (handle, owner) = launch_on_thread(DeviceKey(0), 8, move || recording_owner(owner_runtime));
+        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), move |plan_capacity| {
+            recording_owner(owner_runtime, plan_capacity)
+        });
         let request = owner_request(
             &Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0)),
             &Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0)),
@@ -6785,7 +6805,7 @@ mod recording_runtime {
             for<'block> QuantizedBlock<'block>: From<&'block Block>,
         {
             let (_commands, receiver) = proxima_primitives::sync::mpsc::channel(1);
-            let future = run_device_owner(recording_owner::<Block>(RecordingRuntime::new()), receiver);
+            let future = run_device_owner(recording_owner::<Block>(RecordingRuntime::new(), RECORDING_PLAN_CAPACITY), receiver);
             assert_send(&future);
         }
         check(&held(&weight_values(1, 0.0)));

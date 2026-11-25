@@ -22,6 +22,7 @@ use proxima_tensor::{Evaluated, NodeId, Op, QuantizedBlock};
 use crate::config::RuntimeConfig;
 use crate::cuda_driver::{CudaDriver, DevicePlan};
 use crate::gpu_runtime::GpuRuntime;
+use crate::owner_config::OwnerConfig;
 use crate::{CudaDeviceSnapshot, CudaDriverError};
 
 /// Service-scoped identity for a registered plan generation.
@@ -703,9 +704,10 @@ pub fn block_on_thread<Output>(future: impl Future<Output = Output>) -> Output {
 
 /// Starts the owner loop on one dedicated std thread: `build` runs on that thread, so the
 /// driver opens there and every device call is made there. For tests and thread-per-device hosts.
+/// `config` sizes the command queue and hands `build` the plan capacity to construct the owner with.
 pub fn launch_on_thread<R, Block, Build>(
     key: DeviceKey,
-    queue_capacity: usize,
+    config: &OwnerConfig,
     build: Build,
 ) -> (DeviceHandle<Block>, JoinHandle<()>)
 where
@@ -713,10 +715,12 @@ where
     CudaDriverError: From<R::Error> + From<R::BuildError>,
     Block: Send + 'static,
     for<'block> QuantizedBlock<'block>: From<&'block Block>,
-    Build: FnOnce() -> DeviceOwner<R, Block> + Send + 'static,
+    Build: FnOnce(usize) -> DeviceOwner<R, Block> + Send + 'static,
 {
-    let (commands, receiver) = channel(queue_capacity);
-    let joined = thread::spawn(move || block_on_thread(run_device_owner(build(), receiver)));
+    let (commands, receiver) = channel(config.queue_depth);
+    let plan_capacity = config.plan_capacity;
+    let joined =
+        thread::spawn(move || block_on_thread(run_device_owner(build(plan_capacity), receiver)));
     (DeviceHandle::new(key, commands), joined)
 }
 

@@ -145,6 +145,8 @@ pub use cuda::{
 #[cfg(feature = "cuda-driver")]
 pub mod device_owner;
 #[cfg(feature = "cuda-driver")]
+pub mod owner_config;
+#[cfg(feature = "cuda-driver")]
 pub use cuda_driver::CudaF32Arena;
 #[cfg(feature = "cuda-driver")]
 pub use cuda_driver::CudaPlan;

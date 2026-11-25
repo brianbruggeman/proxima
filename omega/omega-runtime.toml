@@ -797,3 +797,23 @@ parallel_sequences = 1
 max_in_flight = 1
 warmup_runs = 1
 measurement_runs = 5
+
+[owner]
+# bounded depth of the device owner's command queue (`device_owner::launch_on_thread`,
+# `OwnerConfig::queue_depth`). A full queue back-pressures callers rather than
+# growing; raising it deepens the in-flight window at one command slot of memory
+# each. 32 is the depth interop passes today: `start()` hands `MAX_CUDA_PLANS`
+# as `max_jobs` (proxima-model-interop/src/cuda_async.rs:631-632, const at :38).
+# Overridable per-build via `OMEGA_OWNER_QUEUE_DEPTH`.
+queue_depth = 32
+
+# registered plans one owner keeps resident (`DeviceOwner::new`'s
+# `plan_capacity`). A register past the cap is refused, so lowering it trades
+# device memory for refusals. 32 is interop's `MAX_CUDA_PLANS`
+# (cuda_async.rs:38). Overridable per-build via `OMEGA_OWNER_PLAN_CAPACITY`.
+plan_capacity = 32
+
+# ceiling on host bytes the owner copies out of caller blocks while a plan is
+# alive. 268435456 (256 MiB) is interop's `DEFAULT_OWNED_HOST_BYTES`
+# (cuda_async.rs:39). Overridable per-build via `OMEGA_OWNER_OWNED_HOST_BYTES`.
+owned_host_bytes = 268435456
