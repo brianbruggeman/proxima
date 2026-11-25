@@ -6574,17 +6574,46 @@ pub mod rocm {
     /// calls unless this is defined; it is harmless on 6.3 and later.
     const HIPRTC_OPTIONS: &[&str] = &["-DHIP_ENABLE_WARP_SYNC_BUILTINS"];
 
+    /// Built functions by entry name, each bucket holding `(source, function)` pairs.
+    type FunctionCache<Function> = BTreeMap<String, Vec<(String, Function)>>;
+
+    /// The function built from exactly `source` under `entry`, running `build` only on a miss. Mirrors
+    /// the CUDA runtime's `cached_function`: a bucket per entry, matched on source text.
+    fn cached_by_source<Function: Clone, Failure>(
+        cache: &proxima_primitives::sync::blocking::Mutex<FunctionCache<Function>>,
+        entry: &str,
+        source: &str,
+        build: impl FnOnce() -> Result<Function, Failure>,
+    ) -> Result<Function, Failure> {
+        let found = cache
+            .lock()
+            .get(entry)
+            .and_then(|bucket| bucket.iter().find(|(built_from, _)| built_from == source))
+            .map(|(_, function)| function.clone());
+        if let Some(function) = found {
+            return Ok(function);
+        }
+        let function = build()?;
+        cache
+            .lock()
+            .entry(entry.to_owned())
+            .or_default()
+            .push((source.to_owned(), function.clone()));
+        Ok(function)
+    }
+
     /// The shared executor's runtime on a ROCm device: the [`GpuRuntime`] a `DevicePlan` runs on when
     /// the lowering is CUDA's and the kernels render as HIP C++ at `wave`.
     ///
     /// Teaching pointer: the cudarc runtime is the other [`GpuRuntime`]; both are built from the same
     /// executor bodies. Launch parameters come from [`KernelParams`] built over borrowed arguments,
-    /// and the module cache is keyed by the kernel's entry, which carries dialect and wave width.
+    /// and the function cache is keyed by the kernel's entry and then its exact source text, as the
+    /// CUDA runtime's is, so two sources that share an entry name never share a function.
     #[derive(Debug, Clone)]
     pub struct HipRuntime {
         device: Arc<HipDevice>,
         wave: HipWave,
-        functions: Arc<proxima_primitives::sync::blocking::Mutex<BTreeMap<String, HipFunction>>>,
+        functions: Arc<proxima_primitives::sync::blocking::Mutex<FunctionCache<HipFunction>>>,
         compile_counters: Arc<super::CompileCounters>,
     }
 
@@ -6595,7 +6624,7 @@ pub mod rocm {
             Self {
                 device: Arc::new(device),
                 wave,
-                functions: Arc::new(proxima_primitives::sync::blocking::Mutex::new(BTreeMap::new())),
+                functions: Arc::new(proxima_primitives::sync::blocking::Mutex::new(FunctionCache::new())),
                 compile_counters: Arc::new(super::CompileCounters::new(super::kernel_disk_store())),
             }
         }
@@ -6785,14 +6814,12 @@ pub mod rocm {
         }
 
         fn build_function(&self, kernel: &CudaKernel) -> Result<HipFunction, HipDriverError> {
-            if let Some(found) = self.functions.lock().get(&kernel.entry) {
-                return Ok(found.clone());
-            }
-            let module = Arc::new(self.device.compile(&kernel.source, HIPRTC_OPTIONS)?);
-            let function = HipFunction { handle: module.function(&kernel.entry)?, _module: module };
-            self.compile_counters.compilations.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            self.functions.lock().insert(kernel.entry.clone(), function.clone());
-            Ok(function)
+            cached_by_source(&self.functions, &kernel.entry, &kernel.source, || {
+                let module = Arc::new(self.device.compile(&kernel.source, HIPRTC_OPTIONS)?);
+                let function = HipFunction { handle: module.function(&kernel.entry)?, _module: module };
+                self.compile_counters.compilations.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                Ok(function)
+            })
         }
 
         fn image_from_source(source: &str) -> HipImage {
@@ -6923,7 +6950,32 @@ pub mod rocm {
 
     #[cfg(test)]
     mod runtime_tests {
-        use super::{HIPRTC_OPTIONS, compile_options, element_window};
+        use core::convert::Infallible;
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        use proxima_primitives::sync::blocking::Mutex;
+
+        use super::{FunctionCache, HIPRTC_OPTIONS, cached_by_source, compile_options, element_window};
+
+        fn build_counted(builds: &AtomicUsize, tag: &str) -> Result<String, Infallible> {
+            builds.fetch_add(1, Ordering::Relaxed);
+            Ok(tag.to_owned())
+        }
+
+        #[test]
+        fn two_sources_sharing_an_entry_get_distinct_functions() {
+            let cache = Mutex::new(FunctionCache::new());
+            let builds = AtomicUsize::new(0);
+
+            let first = cached_by_source(&cache, "k_add", "source a", || build_counted(&builds, "built from a"));
+            let second = cached_by_source(&cache, "k_add", "source b", || build_counted(&builds, "built from b"));
+            let first_again = cached_by_source(&cache, "k_add", "source a", || build_counted(&builds, "rebuilt"));
+
+            assert_eq!(first, Ok(String::from("built from a")));
+            assert_eq!(second, Ok(String::from("built from b")));
+            assert_eq!(first_again, Ok(String::from("built from a")), "the first source still resolves to its own function");
+            assert_eq!(builds.load(Ordering::Relaxed), 2, "a repeated source builds nothing");
+        }
 
         #[test]
         fn every_kernel_compiles_with_the_warp_sync_builtins_enabled() {
