@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::vec::Vec;
 
+use proxima_primitives::sync::mpsc::Receiver;
 use proxima_primitives::sync::oneshot;
 use proxima_tensor::NodeId;
 
@@ -242,6 +243,36 @@ pub enum OwnerCommand<Graph, Plan, Job, Completed, GraphError> {
         job: Job,
         reply: oneshot::Sender<Completed>,
     },
+}
+
+/// What the owner loop does after one command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerFlow {
+    Continue,
+    /// Stop serving: every command still queued is rejected, then the loop ends.
+    Drain,
+}
+
+/// The owner loop: awaits each command in FIFO order and lets `handle` serve it.
+///
+/// It yields the task while the queue is empty, so the owner shares its worker
+/// with whatever else that worker polls. `handle` may close the receiver and
+/// return [`OwnerFlow::Drain`]; every command already queued then goes to
+/// `reject`.
+pub async fn run_owner<Command, State>(
+    mut commands: Receiver<Command>,
+    mut state: State,
+    mut handle: impl FnMut(&mut State, &mut Receiver<Command>, Command) -> OwnerFlow,
+    mut reject: impl FnMut(&mut State, Command),
+) {
+    while let Some(command) = commands.recv().await {
+        if handle(&mut state, &mut commands, command) == OwnerFlow::Drain {
+            while let Some(queued) = commands.recv().await {
+                reject(&mut state, queued);
+            }
+            break;
+        }
+    }
 }
 
 #[cfg(test)]

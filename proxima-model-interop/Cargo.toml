@@ -197,6 +197,7 @@ hip = ["cuda", "interop-bgpool"]
 cuda = [
     "gpu",
     "omega/cuda-driver",
+    "prime/runtime-prime-bgpool-async",
     "kv-capacity-bucket",
     "cached-attention-streaming",
     "reduce-epilogue-fusion",

@@ -15,8 +15,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use conflaguration::Validate;
 use omega::config::{RuntimeConfig, SelectionMode};
 use omega::device_owner::{
-    OwnerCommand as DeviceOwnerCommand, PlanLease, PlanRegistry, PlanRegistryError,
-    execute_registered_plan,
+    OwnerCommand as DeviceOwnerCommand, OwnerFlow, PlanLease, PlanRegistry, PlanRegistryError,
+    execute_registered_plan, run_owner,
 };
 use prime::os::background::ProximaBackgroundPool;
 use proxima_core::ProximaError;
@@ -27,7 +27,9 @@ use proxima_primitives::pipe::{
 };
 #[cfg(test)]
 use proxima_primitives::sync::blocking::Mutex;
-use proxima_primitives::sync::mpsc::{Sender as CommandSender, channel as command_channel};
+use proxima_primitives::sync::mpsc::{
+    Receiver as CommandReceiver, Sender as CommandSender, channel as command_channel,
+};
 use proxima_primitives::sync::oneshot;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::{NodeId, Op};
@@ -200,6 +202,14 @@ enum RegisteredPlan {
         outputs: Vec<NodeId>,
         symbols: Vec<u64>,
     },
+}
+
+struct OwnerState {
+    plans: PlanRegistry<RegisteredPlan>,
+    driver: Option<omega::CudaDriver>,
+    completed_jobs: u64,
+    #[cfg(test)]
+    fake_owner_hold: Option<(Sender<()>, Receiver<()>)>,
 }
 
 struct CompletedGpuJob {
@@ -681,7 +691,7 @@ impl CudaGpuService<()> {
                 ProximaError::Config(String::from("invalid cuda owned byte capacity"))
             })?);
         let pool = ProximaBackgroundPool::with_threads(1)?;
-        let (commands, mut owner_commands) = command_channel(max_jobs);
+        let (commands, owner_commands) = command_channel(max_jobs);
         let commands = Arc::new(commands);
         let owner_job_gate = Arc::clone(&job_gate);
         let owner_byte_budget = Arc::clone(&byte_budget);
@@ -699,20 +709,32 @@ impl CudaGpuService<()> {
         let fake_execute_count = Arc::new(AtomicUsize::new(0));
         #[cfg(test)]
         let owner_fake_execute_count = Arc::clone(&fake_execute_count);
-        let owner = pool.spawn(move || {
-            let mut plans = PlanRegistry::new(owner_identity, MAX_CUDA_PLANS);
-            let mut driver = None;
-            let mut completed_jobs = 0_u64;
-            #[cfg(test)]
-            let mut fake_owner_hold = fake_owner_hold;
-            while let Some(command) = owner_commands.recv_blocking() {
+        let owner = pool.spawn_async(async move {
+            let state = OwnerState {
+                plans: PlanRegistry::new(owner_identity, MAX_CUDA_PLANS),
+                driver: None,
+                completed_jobs: 0,
+                #[cfg(test)]
+                fake_owner_hold,
+            };
+            let handle = move |state: &mut OwnerState,
+                               owner_commands: &mut CommandReceiver<OwnerCommand>,
+                               command: OwnerCommand| {
+                let OwnerState {
+                    plans,
+                    driver,
+                    completed_jobs,
+                    #[cfg(test)]
+                    fake_owner_hold,
+                } = state;
+                let mut flow = OwnerFlow::Continue;
                 match command {
                     OwnerCommand::DeviceSnapshot { reply } => {
                         let result =
                             match driver.take().map_or_else(|| omega::CudaDriver::new(0), Ok) {
                                 Ok(created) => {
                                     let snapshot = created.device_snapshot();
-                                    driver = Some(created);
+                                    *driver = Some(created);
                                     snapshot
                                 }
                                 Err(error) => Err(error),
@@ -758,7 +780,7 @@ impl CudaGpuService<()> {
                                     .map_err(CudaPlanRegistrationError::from);
                             }
                             if driver.is_none() {
-                                driver = Some(omega::CudaDriver::new(0)?);
+                                *driver = Some(omega::CudaDriver::new(0)?);
                             }
                             let Some(driver) = driver.as_ref() else {
                                 unreachable!("cuda driver was created above")
@@ -805,7 +827,7 @@ impl CudaGpuService<()> {
                                 sources.remove(node);
                             }
                         }
-                        let result = match &driver {
+                        let result = match driver.as_ref() {
                             Some(driver) => driver.invalidate_resident_buffers(&nodes),
                             None => Ok(()),
                         };
@@ -826,7 +848,7 @@ impl CudaGpuService<()> {
                             job: OwnedGpuJob { lease, inputs },
                             credit,
                         } = job;
-                        let result = execute_registered_plan(&mut plans, &lease, |plan| {
+                        let result = execute_registered_plan(plans, &lease, |plan| {
                             execute_cuda_plan(plan, &inputs)
                         })
                         .map_err(CudaExecutionError::Plan)
@@ -834,8 +856,8 @@ impl CudaGpuService<()> {
                         let execution_failed =
                             matches!(&result, Err(CudaExecutionError::Driver(_)));
                         drop(inputs);
-                        let completion_sequence = completed_jobs;
-                        completed_jobs += 1;
+                        let completion_sequence = *completed_jobs;
+                        *completed_jobs += 1;
                         if execution_failed {
                             owner_job_gate.close();
                             owner_byte_budget.gate.close();
@@ -847,14 +869,16 @@ impl CudaGpuService<()> {
                             _credit: credit,
                         });
                         if execution_failed {
-                            while let Some(command) = owner_commands.recv_blocking() {
-                                reject_after_execution_failure(command, completed_jobs);
-                            }
-                            break;
+                            flow = OwnerFlow::Drain;
                         }
                     }
                 }
-            }
+                flow
+            };
+            let reject = |state: &mut OwnerState, command: OwnerCommand| {
+                reject_after_execution_failure(command, state.completed_jobs);
+            };
+            run_owner(owner_commands, state, handle, reject).await;
             Ok(())
         });
 
