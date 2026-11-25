@@ -47,6 +47,9 @@ fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     (0..count).map(|_| lcg.next_unit()).collect()
 }
 
+/// The dtype of an unpacked operand in a parity program.
+const PLAIN_DTYPE: DType = DType::FLOAT32;
+
 /// `m`/`k`/`n` name the matmul shape for callers' readability; the
 /// projections below encode it structurally, so the function itself never
 /// reads them.
@@ -61,7 +64,7 @@ fn append_matmul(
     let product = append(
         program,
         Op::Elementwise {
-            dtype: DType::FLOAT32,
+            dtype: PLAIN_DTYPE,
             body: ScalarOp::Multiply,
             operands: vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -874,7 +877,7 @@ fn assert_packed_codec_parity(
         dequantize(row_blocks, row_f32).expect("a whole number of packed blocks");
     }
 
-    let (packed_program, packed_sum) = packed_matmul_program(rows, k, DType::UINT8);
+    let (packed_program, packed_sum) = packed_matmul_program(rows, k, PACKED_DTYPE);
     let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
         ("weight", to_block(&weight_blocks)),
         ("activation", QuantizedBlock::Float32(&activation)),
@@ -892,7 +895,7 @@ fn assert_packed_codec_parity(
     let cuda = execute_plan_named(&mut cuda_plan, &named)
         .expect("omega::backend runs the packed matmul on a real cuda device");
 
-    let (f32_program, f32_sum) = packed_matmul_program(rows, k, DType::FLOAT32);
+    let (f32_program, f32_sum) = packed_matmul_program(rows, k, PLAIN_DTYPE);
     let f32_named: Vec<(&str, QuantizedBlock<'_>)> = vec![
         ("weight", QuantizedBlock::Float32(&dequantized)),
         ("activation", QuantizedBlock::Float32(&activation)),
@@ -1270,29 +1273,65 @@ fn assert_batched_prefill_parity(
     codec_name: &str,
     block_bytes: usize,
     block_elements: usize,
-    quantize: fn(&[f32], &mut [u8]) -> Result<(), proxima_gguf::quant::QuantError>,
-    dequantize: fn(&[u8], &mut [f32]) -> Result<(), proxima_gguf::quant::QuantError>,
+    quantize: QuantizeFn,
+    dequantize: DequantizeFn,
     to_block: fn(&[u8]) -> QuantizedBlock<'_>,
     rows: u32,
     blocks_per_row: usize,
 ) {
     let k = (block_elements * blocks_per_row) as u32;
+    let packing = Packing { block_bytes, block_elements, quantize, dequantize, to_block };
+    assert_prefill_parity(codec_name, rows, k, &BATCHED_TOKEN_COUNTS, Some(packing));
+}
+
+type QuantizeFn = fn(&[f32], &mut [u8]) -> Result<(), proxima_gguf::quant::QuantError>;
+type DequantizeFn = fn(&[u8], &mut [f32]) -> Result<(), proxima_gguf::quant::QuantError>;
+
+/// How a weight is stored on the device when it is packed through a codec; a parity case with no
+/// packing stores the plain operand itself.
+struct Packing {
+    block_bytes: usize,
+    block_elements: usize,
+    quantize: QuantizeFn,
+    dequantize: DequantizeFn,
+    to_block: fn(&[u8]) -> QuantizedBlock<'_>,
+}
+
+/// An activation-by-constant contraction with no packed operand: the mel basis shape, then a
+/// ragged reduction that is not a whole stage.
+#[test]
+fn an_unpacked_contraction_takes_the_tiled_kernel_and_matches_the_cpu_on_cuda() {
+    assert_prefill_parity("unpacked", 201, 400, &[3000], None);
+    assert_prefill_parity("unpacked ragged", 37, 104, &BATCHED_TOKEN_COUNTS, None);
+}
+
+fn assert_prefill_parity(codec_name: &str, rows: u32, k: u32, token_counts: &[u32], packing: Option<Packing>) {
     let weight_f32: Vec<f32> = random_vec(37, rows as usize * k as usize)
         .into_iter()
         .map(|value| value * 4.0 - 2.0)
         .collect();
-    let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * block_bytes];
-    let mut dequantized: Vec<f32> = vec![0.0; rows as usize * k as usize];
-    for ((row_f32, row_blocks), row_dequantized) in weight_f32
-        .chunks_exact(k as usize)
-        .zip(weight_blocks.chunks_exact_mut(blocks_per_row * block_bytes))
-        .zip(dequantized.chunks_exact_mut(k as usize))
-    {
-        quantize(row_f32, row_blocks).expect("row length is a whole number of blocks");
-        dequantize(row_blocks, row_dequantized).expect("a whole number of packed blocks");
+    let mut weight_blocks = Vec::new();
+    let mut dequantized = weight_f32.clone();
+    if let Some(packing) = &packing {
+        let row_bytes = k as usize / packing.block_elements * packing.block_bytes;
+        weight_blocks = vec![0u8; rows as usize * row_bytes];
+        for ((row_values, row_blocks), row_dequantized) in weight_f32
+            .chunks_exact(k as usize)
+            .zip(weight_blocks.chunks_exact_mut(row_bytes))
+            .zip(dequantized.chunks_exact_mut(k as usize))
+        {
+            (packing.quantize)(row_values, row_blocks).expect("row length is a whole number of blocks");
+            (packing.dequantize)(row_blocks, row_dequantized).expect("a whole number of packed blocks");
+        }
     }
+    let reference_weight = QuantizedBlock::from(dequantized.as_slice());
+    let reference_dtype = PLAIN_DTYPE;
+    let (stored_weight, stored_dtype) = match &packing {
+        Some(packing) => ((packing.to_block)(&weight_blocks), PACKED_DTYPE),
+        None => (reference_weight, reference_dtype),
+    };
 
-    for tokens in BATCHED_TOKEN_COUNTS {
+    for &tokens in token_counts {
         let activation: Vec<f32> = random_vec(41 + u64::from(tokens), (k * tokens) as usize)
             .into_iter()
             .map(|value| value * 4.0 - 2.0)
@@ -1300,8 +1339,8 @@ fn assert_batched_prefill_parity(
         let (tiled, identities) = run_batched_program(
             Engine::Gpu,
             Some(GpuDriver::Cuda),
-            to_block(&weight_blocks),
-            DType::UINT8,
+            stored_weight,
+            stored_dtype,
             &activation,
             rows,
             k,
@@ -1316,8 +1355,8 @@ fn assert_batched_prefill_parity(
         let (reference, _) = run_batched_program(
             Engine::Cpu,
             None,
-            QuantizedBlock::Float32(&dequantized),
-            DType::FLOAT32,
+            reference_weight,
+            reference_dtype,
             &activation,
             rows,
             k,
@@ -1347,8 +1386,8 @@ fn assert_batched_prefill_parity(
             let (matvec, matvec_identities) = run_batched_program(
                 Engine::Gpu,
                 Some(GpuDriver::Cuda),
-                to_block(&weight_blocks),
-                DType::UINT8,
+                stored_weight,
+                stored_dtype,
                 &column_activation,
                 rows,
                 k,
@@ -3259,6 +3298,9 @@ fn cuda_cached_attention_diverges_when_cached_len_is_wrong() {
     );
 }
 
+/// The dtype of a packed weight's byte storage in a parity program.
+const PACKED_DTYPE: DType = DType::UINT8;
+
 /// Wall time of one planned prefill matmul per call at the shapes a 8B
 /// ternary checkpoint runs: asserts the tensor-core kernel agrees with the
 /// f32 oracle and prints the mean over `iterations` executes.
@@ -3274,7 +3316,7 @@ fn time_packed_prefill(rows: u32, k: u32, tokens: u32, iterations: u32) -> f64 {
         block[1] = 0x3C;
     }
     let activation = random_vec(59, (k * tokens) as usize);
-    let (program, root) = packed_batched_program(rows, k, Some(tokens), DType::UINT8);
+    let (program, root) = packed_batched_program(rows, k, Some(tokens), PACKED_DTYPE);
     let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
         (
             "weight",
