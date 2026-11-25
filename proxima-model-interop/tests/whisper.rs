@@ -995,6 +995,12 @@ mod golden {
 mod mel {
     use super::golden::*;
 
+    /// The reference's 80 x 4100 log-mel dump, shared by the mel, clamp,
+    /// encoder and route-census tests.
+    pub fn reference_mel() -> anyhow::Result<Vec<f32>> {
+        read_f32("mel.f32")
+    }
+
     #[test]
     fn log_mel_matches_the_reference_frames() -> anyhow::Result<()> {
         let wav = read_wav(&wav_path())?;
@@ -1003,15 +1009,15 @@ mod mel {
         let (program, output, named) = mel_program(&padded, &filters);
         let actual = run_named(&program, &named, output);
         assert_eq!(actual.len(), 80 * 3000);
-        let dump = read_f32("mel.f32")?;
-        let mut expected = vec![0.0_f32; 80 * 3000];
+        let dump = reference_mel()?;
+        let mut expected = vec![Default::default(); 80 * 3000];
         for row in 0..80 {
             for frame in 0..3000 {
                 expected[row * 3000 + frame] = dump[row * 4100 + frame];
             }
         }
         let (error, rms) = maxabs_rel(&actual, &expected);
-        // S0 measured the incumbent's own f32 FFT against a double-precision
+        // S0 measured the incumbent's own single-precision FFT against a double-precision
         // DFT of the same frames at 3.25e-5 maxabs_rel, so the effective
         // threshold is twice that (6.5e-5), not the DERIVED 1.2e-5.
         println!(
@@ -1029,14 +1035,14 @@ mod mel {
         let (program, output, named) = mel_program(&padded(&wav), &filters);
         let actual = run_named(&program, &named, output);
         assert_eq!(actual.len(), 80 * 3000);
-        let dump = read_f32("mel.f32")?;
+        let dump = super::mel::reference_mel()?;
         assert_eq!(dump.len(), 80 * 4100);
         Ok(())
     }
 
     #[test]
     fn clamp_raises_a_bin_far_below_the_peak() -> anyhow::Result<()> {
-        let dump = read_f32("mel.f32")?;
+        let dump = super::mel::reference_mel()?;
         // The dump is already `(log10 + 4)/4`, so the `max - 8` clamp lands
         // at `peak - 2` in dump units.
         let peak = dump.iter().copied().fold(f32::NEG_INFINITY, f32::max);
@@ -1092,7 +1098,7 @@ mod encoder {
             outputs.push(v);
         }
         // The mel input is the first 3000 of the reference's 4100 columns.
-        let dump = read_f32("mel.f32")?;
+        let dump = super::mel::reference_mel()?;
         let mut mel_data = vec![0.0_f32; 80 * 3000];
         for row in 0..80 {
             for frame in 0..3000 {
@@ -1435,6 +1441,138 @@ mod transcript {
         let audio = wav::read(&wav_path())?;
         assert_eq!(audio.sample_rate, 16_000);
         assert_eq!(audio.samples.len(), 176_000);
+        Ok(())
+    }
+}
+
+/// PROXNUM-683 route census: which reduce path each whisper-tiny encoder
+/// contraction takes on the CPU evaluator, and which tile gate declines it.
+#[cfg(feature = "instrument")]
+mod route_census {
+    use std::collections::BTreeMap;
+
+    use super::golden::*;
+    use super::mel::reference_mel;
+    use proxima_model_interop::families::encoder_decoder;
+    use proxima_tensor::instrument::{self, ReduceRouteRow};
+
+    fn path_of(row: &ReduceRouteRow) -> &'static str {
+        if row.dot_fast {
+            "dot-fast"
+        } else if row.width_fast || row.generic_width_fast {
+            "width-fast"
+        } else {
+            "generic"
+        }
+    }
+
+    fn work_of(row: &ReduceRouteRow) -> u64 {
+        row.leading_total * row.width * row.reduction_total
+    }
+
+    /// Mirrors the blocked tile's axis and flatness gates
+    /// (`gemm_dot_quant.rs:295-297`, `:373-376`): DERIVED from the recorded row.
+    fn contiguous_tile_verdict(row: &ReduceRouteRow) -> &'static str {
+        if row.leading_axes != 1 {
+            "dot-tile:leading_axes!=1"
+        } else if !row.operand_reduction_flat.iter().all(|flat| *flat) {
+            "dot-tile:reduction_not_flat"
+        } else {
+            "dot-tile:axes-pass(row_stride_b/seeded unchecked)"
+        }
+    }
+
+    /// Mirrors the width tile's `AxesShape` gate: DERIVED from the recorded row.
+    fn width_tile_verdict(row: &ReduceRouteRow) -> &'static str {
+        if row.leading_axes != 1 || row.reduction_dims != 1 {
+            "width-tile:AxesShape"
+        } else {
+            "width-tile:axes-pass(stride/narrow unchecked)"
+        }
+    }
+
+    #[test]
+    fn whisper_tiny_encoder_reduce_route_census() -> anyhow::Result<()> {
+        let tensors = Tensors::load()?;
+        let mut bound = Bound::new();
+        let mel = bound.leaf("mel", &[1, MELS, FRAMES]);
+        let stem = bound.stem(&tensors);
+        let layers: Vec<_> = (0..LAYERS as usize)
+            .map(|layer| bound.layer(layer, &tensors))
+            .collect();
+        let encoded = encoder_decoder::encoder(
+            &mut bound.program,
+            mel,
+            &stem,
+            &layers,
+            HEADS,
+            HEAD_DIM,
+            1e-5,
+            MELS,
+            FRAMES,
+        )?;
+        let dump = reference_mel()?;
+        let mel_data: Vec<_> = (0..80)
+            .flat_map(|row| dump[row * 4100..row * 4100 + 3000].iter().copied())
+            .collect();
+        bound.named.insert("mel".into(), mel_data);
+
+        instrument::reset_reduce_route();
+        instrument::reset_width_tile_decline();
+        let _ = bound.run(&[encoded]);
+        let rows = instrument::reduce_route_snapshot();
+        let measured_declines = instrument::width_tile_decline_snapshot();
+
+        println!(
+            "target_arch={} tile routes compiled={}",
+            std::env::consts::ARCH,
+            cfg!(target_arch = "aarch64")
+        );
+        println!(
+            "node calls gemm path extents lead_axes red_dims lead_total red_total width macs dot_gate width_gate"
+        );
+        let mut per_path: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
+        let mut per_gate: BTreeMap<&str, u64> = BTreeMap::new();
+        for row in &rows {
+            let (path, macs) = (path_of(row), work_of(row));
+            let (dot_gate, width_gate) = (contiguous_tile_verdict(row), width_tile_verdict(row));
+            println!(
+                "{} {} {} {} {:?} {} {} {} {} {} {} {} {}",
+                row.node,
+                row.calls,
+                row.gemm_shaped,
+                path,
+                row.extents,
+                row.leading_axes,
+                row.reduction_dims,
+                row.leading_total,
+                row.reduction_total,
+                row.width,
+                macs,
+                dot_gate,
+                width_gate
+            );
+            let entry = per_path.entry(path).or_default();
+            entry.0 += 1;
+            entry.1 += macs * row.calls;
+            if row.gemm_shaped {
+                *per_gate.entry(dot_gate).or_default() += macs * row.calls;
+                *per_gate.entry(width_gate).or_default() += macs * row.calls;
+            }
+        }
+        for (path, (nodes, macs)) in &per_path {
+            println!("PATH {path} nodes={nodes} macs={macs}");
+        }
+        for (gate, macs) in &per_gate {
+            println!("GATE {gate} gemm_macs_declined={macs}");
+        }
+        for (node, reason, calls, m, k, n, stride_a, stride_b) in &measured_declines {
+            println!(
+                "MEASURED width_decline node={node} {reason:?} calls={calls} m={m} k={k} n={n} sa={stride_a} sb={stride_b}"
+            );
+        }
+        println!("SUMMARY classified_reduce_nodes={}", rows.len());
+        assert!(!rows.is_empty(), "N==0 classified reduce nodes");
         Ok(())
     }
 }

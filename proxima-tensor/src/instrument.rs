@@ -1045,6 +1045,51 @@ pub fn reset_width_tile_decline() {
     buckets.clear();
 }
 
+/// One `run_reduce_planned` node's route inputs, first-observed (PROXNUM-683
+/// route census): the extents and axis split every tile gate reads, plus the
+/// three fast-path verdicts that decide [`Path`]. `calls` witnesses that the
+/// node reached the reduce loop more than once with the same fixed shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReduceRouteRow {
+    pub node: u32,
+    pub calls: u64,
+    pub extents: Vec<u64>,
+    pub leading_axes: usize,
+    pub reduction_dims: usize,
+    pub leading_total: u64,
+    pub reduction_total: u64,
+    pub width: u64,
+    pub gemm_shaped: bool,
+    pub width_fast: bool,
+    pub generic_width_fast: bool,
+    pub dot_fast: bool,
+    pub operand_width_strides: Vec<i64>,
+    pub operand_reduction_flat: Vec<bool>,
+}
+
+static REDUCE_ROUTE: Mutex<BTreeMap<u32, ReduceRouteRow>> = Mutex::new(BTreeMap::new());
+
+/// Records one reduce node's route inputs; only the first sighting stores the
+/// row, later sightings bump `calls`.
+pub fn record_reduce_route(row: ReduceRouteRow) {
+    let mut rows = REDUCE_ROUTE.lock().unwrap_or_else(PoisonError::into_inner);
+    rows.entry(row.node)
+        .and_modify(|seen| seen.calls += 1)
+        .or_insert(ReduceRouteRow { calls: 1, ..row });
+}
+
+/// Every recorded reduce node, sorted by node id.
+#[must_use]
+pub fn reduce_route_snapshot() -> Vec<ReduceRouteRow> {
+    let rows = REDUCE_ROUTE.lock().unwrap_or_else(PoisonError::into_inner);
+    rows.values().cloned().collect()
+}
+
+pub fn reset_reduce_route() {
+    let mut rows = REDUCE_ROUTE.lock().unwrap_or_else(PoisonError::into_inner);
+    rows.clear();
+}
+
 // rule-census task (2026-09-02): the elementwise-into-elementwise and
 // elementwise-into-reduce fusion decisions inline inside
 // `BoundOpBuilder::push` (`bind.rs:641`, `bind.rs:697`) were, before this,

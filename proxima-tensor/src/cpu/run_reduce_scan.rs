@@ -1559,6 +1559,23 @@ pub(super) fn run_reduce_planned<B: Deref<Target = [f32]>>(
     // single-operand reduces.
     #[cfg(feature = "instrument")]
     let is_gemm = reduce_is_gemm_shaped(resolved);
+    #[cfg(feature = "instrument")]
+    instrument::record_reduce_route(instrument::ReduceRouteRow {
+        node: resolved.node.0,
+        calls: 1,
+        extents: resolved.extents.clone(),
+        leading_axes: leading_output_axes.len(),
+        reduction_dims: reduction_dims.len(),
+        leading_total: odometer_len(&leading_extents),
+        reduction_total: odometer_len(&reduction_extents),
+        width: width as u64,
+        gemm_shaped: is_gemm,
+        width_fast: fast_path,
+        generic_width_fast: generic_fast_path,
+        dot_fast: reduction_fast_path,
+        operand_width_strides: strides.clone(),
+        operand_reduction_flat: reduction_strides.iter().map(|&stride| stride == 1).collect(),
+    });
     // per-path-kind wall time (residual-profile task, 2026-08-30): started
     // once `path` is known, committed at whichever of this function's three
     // early returns (or its own tail) actually fires — see
