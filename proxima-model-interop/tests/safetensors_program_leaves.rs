@@ -1085,6 +1085,34 @@ fn a_held_recode_is_never_adopted_under_a_different_rule_target() {
     );
 }
 
+fn le_bytes(words: [u16; 6]) -> Vec<u8> {
+    words.into_iter().flat_map(u16::to_le_bytes).collect()
+}
+
+#[test]
+fn the_recoded_bytes_of_each_element_target_are_pinned_to_the_store_layout_version() {
+    let manifest = proxima_safetensors::parse_complete(&safetensors_fixture()).expect("parses fixture");
+    let mut goldens = vec![
+        le_bytes([0x3c00, 0x4000, 0x4200, 0x4400, 0x4500, 0x4600]),
+        le_bytes([0x3f80, 0x4000, 0x4040, 0x4080, 0x40a0, 0x40c0]),
+    ];
+    let targets = fixture_two_byte_targets(&manifest);
+    assert_eq!(targets.len(), goldens.len(), "every persistable element target is pinned");
+
+    let mut recoded: Vec<Vec<u8>> = targets
+        .into_iter()
+        .map(|target| recoded_matrix_bytes(&ModelWeights::new(), target))
+        .collect();
+    recoded.sort();
+    goldens.sort();
+
+    assert_eq!(
+        recoded, goldens,
+        "a recode output changed: bump STORE_LAYOUT_VERSION in weight_store.rs so old store entries stop matching, then update this golden"
+    );
+    assert_eq!(proxima_model_interop::weight_store::STORE_LAYOUT_VERSION, 1);
+}
+
 #[test]
 fn persisting_a_model_that_recoded_nothing_substitutes_nothing() {
     let file_bytes = safetensors_fixture();
