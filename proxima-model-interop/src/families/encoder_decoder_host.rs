@@ -34,8 +34,9 @@ use crate::serving::apply_serving_config;
 use crate::serving_settings::ServingSettings;
 use crate::source::CheckpointMapping;
 use crate::weight_store::{
-    FileIdentity, device_alignment, emit_weight_store_hit, emit_weight_store_publish, ensure_writable,
-    header_prefix, lookup, publish, register_mapping, store_key, touch, unregister_mapping,
+    FileIdentity, device_alignment, emit_weight_store_hit, emit_weight_store_publish,
+    ensure_writable, header_prefix, lookup, publish, register_mapping, store_key, touch,
+    unregister_mapping,
 };
 
 const CHECKPOINT_FILE: &str = "model.safetensors";

@@ -150,9 +150,10 @@ impl Materialized {
     /// tensor in a written file: its codec has an element layout the shared
     /// binder reads back packed, and the bytes fill `entry`'s shape exactly.
     fn element_recode(&self, entry: &TensorEntry) -> Option<(DType, &[u8])> {
-        let (_, bytes, codec) = self.stores.packed_owned.iter().find(|(name, _, _)| {
-            name.len() > entry.name.len() && stored_for(name, &entry.name)
-        })?;
+        let (_, bytes, codec) =
+            self.stores.packed_owned.iter().find(|(name, _, _)| {
+                name.len() > entry.name.len() && stored_for(name, &entry.name)
+            })?;
         let dtype = DType::Layout(codec.element_layout()?);
         let elements = entry.shape.iter().product::<u64>();
         let fills_shape = bytes.len() as u64 == elements * dtype.size_bytes() as u64;

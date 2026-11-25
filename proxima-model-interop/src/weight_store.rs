@@ -148,7 +148,10 @@ pub fn lookup(dir: &Path, key: u128) -> Option<PathBuf> {
 pub fn ensure_writable(dir: &Path) -> Result<(), InteropError> {
     fs::create_dir_all(dir)?;
     let sequence = NEXT_TORN.fetch_add(1, Ordering::Relaxed);
-    let probe = dir.join(format!(".probe.{}.{sequence}.{TORN_EXTENSION}", process::id()));
+    let probe = dir.join(format!(
+        ".probe.{}.{sequence}.{TORN_EXTENSION}",
+        process::id()
+    ));
     File::create(&probe)?;
     fs::remove_file(&probe)?;
     Ok(())
@@ -178,7 +181,10 @@ pub fn publish(
 ) -> Result<PathBuf, InteropError> {
     fs::create_dir_all(dir)?;
     let sequence = NEXT_TORN.fetch_add(1, Ordering::Relaxed);
-    let torn = dir.join(format!("{key:032x}.{}.{sequence}.{TORN_EXTENSION}", process::id()));
+    let torn = dir.join(format!(
+        "{key:032x}.{}.{sequence}.{TORN_EXTENSION}",
+        process::id()
+    ));
     let target = store_path(dir, key);
     let written = write_synced(&torn, bytes).and_then(|()| fs::rename(&torn, &target));
     if let Err(error) = written {
@@ -227,7 +233,12 @@ pub fn evict_to_budget(dir: &Path, budget_bytes: u64, keep: &Path) {
     };
     let mut held: Vec<(SystemTime, u64, PathBuf)> = entries
         .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == STORE_EXTENSION))
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == STORE_EXTENSION)
+        })
         .filter_map(|entry| {
             let metadata = entry.metadata().ok()?;
             Some((metadata.modified().ok()?, metadata.len(), entry.path()))
@@ -334,7 +345,9 @@ mod tests {
         File::options()
             .write(true)
             .open(path)
-            .and_then(|file| file.set_modified(UNIX_EPOCH + Duration::from_secs(seconds_since_epoch)))
+            .and_then(|file| {
+                file.set_modified(UNIX_EPOCH + Duration::from_secs(seconds_since_epoch))
+            })
             .expect("sets the modification time");
     }
 
@@ -342,8 +355,12 @@ mod tests {
     fn an_orphaned_temp_older_than_the_bound_is_swept_at_publish_and_a_fresh_one_survives() {
         let directory = tempdir().expect("scratch store directory");
         let bytes = source_checkpoint();
-        let orphan = directory.path().join(format!("{:032x}.99.0.{TORN_EXTENSION}", 1u128));
-        let live = directory.path().join(format!("{:032x}.99.1.{TORN_EXTENSION}", 2u128));
+        let orphan = directory
+            .path()
+            .join(format!("{:032x}.99.0.{TORN_EXTENSION}", 1u128));
+        let live = directory
+            .path()
+            .join(format!("{:032x}.99.1.{TORN_EXTENSION}", 2u128));
         fs::write(&orphan, &bytes[..8]).expect("writes the orphan");
         fs::write(&live, &bytes[..8]).expect("writes a live writer's temp");
         aged(&orphan, 1);
@@ -351,7 +368,10 @@ mod tests {
         publish(directory.path(), 3, &bytes, UNBOUNDED, TORN_AGE).expect("publishes");
 
         assert!(!orphan.exists(), "an orphan past the bound is removed");
-        assert!(live.exists(), "a temp inside the bound is left to its writer");
+        assert!(
+            live.exists(),
+            "a temp inside the bound is left to its writer"
+        );
     }
 
     #[test]
@@ -359,7 +379,9 @@ mod tests {
         let directory = tempdir().expect("scratch store directory");
         let bytes = source_checkpoint();
         let entries: Vec<PathBuf> = (1..=3u128)
-            .map(|key| publish(directory.path(), key, &bytes, UNBOUNDED, TORN_AGE).expect("publishes"))
+            .map(|key| {
+                publish(directory.path(), key, &bytes, UNBOUNDED, TORN_AGE).expect("publishes")
+            })
             .collect();
         for (age, entry) in [100, 300, 200].into_iter().zip(&entries) {
             aged(entry, age);
@@ -371,7 +393,10 @@ mod tests {
         assert!(newest.exists(), "the entry just written is never evicted");
         assert!(!entries[0].exists(), "the oldest entry goes first");
         assert!(!entries[2].exists(), "the next oldest goes second");
-        assert!(entries[1].exists(), "the most recently used old entry stays within the budget");
+        assert!(
+            entries[1].exists(),
+            "the most recently used old entry stays within the budget"
+        );
     }
 
     #[test]
@@ -384,10 +409,17 @@ mod tests {
         aged(&second, 200);
 
         touch(&first);
-        evict_to_budget(directory.path(), bytes.len() as u64, &directory.path().join("none"));
+        evict_to_budget(
+            directory.path(),
+            bytes.len() as u64,
+            &directory.path().join("none"),
+        );
 
         assert!(first.exists(), "a hit refreshed the first entry");
-        assert!(!second.exists(), "the untouched entry is the least recently used");
+        assert!(
+            !second.exists(),
+            "the untouched entry is the least recently used"
+        );
     }
 
     fn source_checkpoint() -> Vec<u8> {
@@ -440,7 +472,14 @@ mod tests {
         let key = |identity: FileIdentity| store_key(header, &identity, &rules(), ALIGNMENT);
 
         assert_ne!(key(base), key(FileIdentity { inode: 11, ..base }), "inode");
-        assert_ne!(key(base), key(FileIdentity { ctime_nanos: 6, ..base }), "ctime");
+        assert_ne!(
+            key(base),
+            key(FileIdentity {
+                ctime_nanos: 6,
+                ..base
+            }),
+            "ctime"
+        );
         assert_ne!(key(base), key(FileIdentity { device: 2, ..base }), "device");
     }
 
@@ -452,7 +491,10 @@ mod tests {
         fs::write(&path, source_checkpoint()).expect("writes the checkpoint");
         let file = File::open(&path).expect("opens the checkpoint");
         let before = FileIdentity::of(&file).expect("fstat on the open file");
-        let mut edit = fs::OpenOptions::new().write(true).open(&path).expect("reopens for write");
+        let mut edit = fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("reopens for write");
 
         let mut after = before;
         while after.ctime_nanos == before.ctime_nanos {
@@ -502,7 +544,11 @@ mod tests {
             length: bytes.len() as u64 + 1,
             ..identity_of(&bytes, 7)
         };
-        assert_ne!(base, store_key(header, &longer, &rules(), ALIGNMENT), "file length");
+        assert_ne!(
+            base,
+            store_key(header, &longer, &rules(), ALIGNMENT),
+            "file length"
+        );
         assert_ne!(base, key_of(&bytes, 8, &rules()), "modification time");
         assert_ne!(
             base,
