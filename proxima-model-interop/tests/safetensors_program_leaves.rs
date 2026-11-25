@@ -1037,6 +1037,54 @@ fn a_model_reports_a_recode_to_publish_only_after_a_rule_recoded_a_leaf() {
     );
 }
 
+/// The two-byte targets the fixture itself stores a `[2, 3]` matrix at, in fixture order, each read off the manifest.
+fn fixture_two_byte_targets(manifest: &Manifest) -> Vec<GgmlType> {
+    manifest
+        .tensors
+        .iter()
+        .filter(|entry| entry.shape == [2, 3] && entry.dtype.size_bytes() == 2)
+        .map(|entry| {
+            GgmlType::from_numeric_format(&entry.dtype.numeric_format())
+                .expect("a stored two-byte dtype has a ggml wire type")
+        })
+        .collect()
+}
+
+fn recoded_matrix_bytes(model: &ModelWeights, target: GgmlType) -> Vec<u8> {
+    let file_bytes = safetensors_fixture();
+    let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses fixture");
+    let data_start = header_data_start(&file_bytes);
+    let identity = (
+        wide_fixture_tensor(&manifest, &[2, 3]),
+        wide_fixture_tensor(&manifest, &[2]),
+        target,
+    );
+    let leased = bind_stored_order(model, (&manifest, &file_bytes, data_start), identity);
+    let [(_, bytes, _)] = leased.packed_owned() else {
+        panic!("the rule matches exactly one leaf, so one buffer is recoded");
+    };
+    bytes.clone()
+}
+
+#[test]
+fn a_held_recode_is_never_adopted_under_a_different_rule_target() {
+    let manifest = proxima_safetensors::parse_complete(&safetensors_fixture()).expect("parses fixture");
+    let [first, second] = fixture_two_byte_targets(&manifest)[..] else {
+        panic!("the fixture stores a matrix at two distinct two-byte targets");
+    };
+    let model = ModelWeights::new();
+    let under_first = recoded_matrix_bytes(&model, first);
+
+    let under_second = recoded_matrix_bytes(&model, second);
+
+    assert_ne!(under_first, under_second, "the two targets recode the same values differently");
+    assert_eq!(
+        under_second,
+        recoded_matrix_bytes(&ModelWeights::new(), second),
+        "a model that held a recode at the first target binds the second exactly as a fresh model does"
+    );
+}
+
 #[test]
 fn persisting_a_model_that_recoded_nothing_substitutes_nothing() {
     let file_bytes = safetensors_fixture();

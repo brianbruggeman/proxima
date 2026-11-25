@@ -27,6 +27,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::ops::Deref;
 
+use proxima_gguf::types::GgmlType;
 use proxima_numeric::DType;
 use proxima_primitives::sync::blocking::Mutex;
 use proxima_safetensors::{
@@ -39,7 +40,7 @@ use crate::bind::BoundWeights;
 use crate::error::InteropError;
 use crate::hf_bind::{bind_program_leaves_reusing, expert_stack_codec, tensor_bytes};
 use crate::profiles::BindingProfile;
-use crate::serving::WeightPrecisionRule;
+use crate::serving::{NamePattern, WeightPrecisionRule};
 
 /// `name` is `leaf` itself or its recoded `<leaf>@<codec>` form.
 pub(crate) fn stored_for(name: &str, leaf: &str) -> bool {
@@ -47,6 +48,15 @@ pub(crate) fn stored_for(name: &str, leaf: &str) -> bool {
         || (name.len() > leaf.len()
             && name.as_bytes().get(leaf.len()) == Some(&b'@')
             && name.starts_with(leaf))
+}
+
+fn rule_signature(rule: &WeightPrecisionRule<'_>) -> (u8, String, GgmlType) {
+    let (kind, pattern) = match rule.pattern {
+        NamePattern::Exact(pattern) => (0, pattern),
+        NamePattern::Prefix(pattern) => (1, pattern),
+        NamePattern::Suffix(pattern) => (2, pattern),
+    };
+    (kind, pattern.to_string(), rule.target)
 }
 
 /// A buffer the model has never held under `name` is about to be kept: bytes a
@@ -69,6 +79,8 @@ pub(crate) struct Materialized {
     seen: BTreeMap<String, usize>,
     // buffers kept at an address new to their name; a plan built before this moved may trust a recycled address
     allocations: u64,
+    // the rule list the held recodes were made under: (pattern kind, pattern, target)
+    rules: Vec<(u8, String, GgmlType)>,
 }
 
 impl Materialized {
@@ -77,7 +89,26 @@ impl Materialized {
             stores: BoundWeights::new(&[]),
             seen: BTreeMap::new(),
             allocations: 0,
+            rules: Vec::new(),
         }
+    }
+
+    /// Drops every held recode when `rules` differ from the list they were made under, so a recode at one target is
+    /// never adopted for a rule naming another. Raises the allocation epoch so a held plan stops trusting them.
+    fn retarget(&mut self, rules: &[WeightPrecisionRule<'_>]) {
+        let incoming: Vec<(u8, String, GgmlType)> = rules.iter().map(rule_signature).collect();
+        if self.rules == incoming {
+            return;
+        }
+        self.rules = incoming;
+        if self.stores.packed_owned.is_empty() {
+            return;
+        }
+        for (name, _, _) in core::mem::take(&mut self.stores.packed_owned) {
+            self.seen.remove(&name);
+            begin_owner_generation(&name);
+        }
+        self.allocations += 1;
     }
 
     fn note_allocation(&mut self, name: &str, address: usize) {
@@ -210,7 +241,11 @@ impl ModelWeights {
         runtime_inputs: &[String],
         weight_precision: &[WeightPrecisionRule<'_>],
     ) -> Result<LeasedWeights<'file, 'store>, InteropError> {
-        let mut reuse = core::mem::replace(&mut *self.held.lock(), Materialized::new());
+        let mut reuse = {
+            let mut held = self.held.lock();
+            held.retarget(weight_precision);
+            core::mem::replace(&mut *held, Materialized::new())
+        };
         let bound = bind_program_leaves_reusing(
             manifest,
             file_bytes,
@@ -224,6 +259,8 @@ impl ModelWeights {
         {
             let mut held = self.held.lock();
             held.seen = core::mem::take(&mut reuse.seen);
+            held.rules = core::mem::take(&mut reuse.rules);
+            held.allocations += reuse.allocations;
             held.keep(&mut reuse.stores);
         }
         Ok(LeasedWeights {
