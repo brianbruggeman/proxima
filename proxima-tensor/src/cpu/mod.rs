@@ -219,6 +219,8 @@ mod run_block_quantize;
 mod run_int8_activation_dot;
 #[macro_use]
 mod elementwise_matmul;
+#[cfg(target_arch = "aarch64")]
+mod gemm_packed;
 #[macro_use]
 mod run_reduce_scan;
 #[macro_use]
@@ -250,6 +252,8 @@ pub use arena::*;
 use elementwise_matmul::*;
 pub use epilogue::*;
 pub use gemm_dot_quant::*;
+#[cfg(target_arch = "aarch64")]
+use gemm_packed::*;
 #[cfg(all(target_arch = "x86_64", feature = "q6k-int8-dot"))]
 use gemm_q6k_avx2::dot_q6k_q8k_block_avx2;
 pub use gemm_q8_0_act::matmul_q8_0_activation_f32;

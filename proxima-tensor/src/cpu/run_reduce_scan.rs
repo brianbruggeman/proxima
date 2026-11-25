@@ -1725,6 +1725,177 @@ pub(super) fn run_reduce_planned<B: Deref<Target = [f32]>>(
         }
     }
 
+    // A multiply-add reduce whose operand reduction does not coalesce to
+    // stride 1 (a conv's window: `ci` strides by the time length, `k` by 1)
+    // declined every tile above and fell to the per-element loop. The same
+    // dot tile serves it once that operand's reduction slice is packed into a
+    // contiguous panel (`PackedDotLayout`); decided from strides alone.
+    #[cfg(target_arch = "aarch64")]
+    if !fast_path
+        && !reduction_fast_path
+        && !reduction_dims.is_empty()
+        && let Some(plan) = packed_dot_tile_plan(
+            resolved,
+            &shape,
+            *reduce_op,
+            !matches!(init, ReduceInit::FirstElement),
+            &strides,
+            leading_output_axes,
+        )
+    {
+        let layout = PackedDotLayout::new(&PackedDotShape {
+            resolved,
+            plan: &plan,
+            reduction_strides: &reduction_strides,
+            reduction_dims: &reduction_dims,
+            leading_axis: leading_output_axes[0],
+            last_output_dim,
+            out_layout,
+            width,
+        });
+        let (data_a, data_b) = (raw[plan.index_a], raw[plan.index_b]);
+        let mut scratch_a = vec![seed; layout.scratch_a_len()];
+        let mut scratch_b = vec![seed; layout.scratch_b_len()];
+        let packed_stride = layout.reduction_len as i64;
+        let mut panel_start = 0usize;
+        while panel_start < layout.tiled_cols {
+            let panel_end = (panel_start + layout.panel_cols).min(layout.tiled_cols);
+            if layout.pack_b {
+                layout.pack_columns(data_b, &mut scratch_b, panel_start, panel_end);
+            }
+            let mut row_start = 0usize;
+            while row_start < layout.rows_total {
+                let rows = (layout.rows_total - row_start).min(TILE_ROWS);
+                if layout.pack_a {
+                    layout.pack_rows(data_a, &mut scratch_a, row_start, rows);
+                }
+                let (panel_a, start_a, step_a) = if layout.pack_a {
+                    (&scratch_a[..], 0, packed_stride)
+                } else {
+                    (
+                        data_a,
+                        layout.base_a + row_start as i64 * layout.row_stride,
+                        layout.row_stride,
+                    )
+                };
+                for column in (panel_start..panel_end).step_by(TILE_COLS) {
+                    let (panel_b, start_b, step_b) = if layout.pack_b {
+                        (
+                            &scratch_b[..],
+                            ((column - panel_start) * layout.reduction_len) as i64,
+                            packed_stride,
+                        )
+                    } else {
+                        (
+                            data_b,
+                            layout.base_b + column as i64 * layout.column_stride,
+                            layout.column_stride,
+                        )
+                    };
+                    let tile_a = || KStridedTile {
+                        data: panel_a,
+                        base: start_a,
+                        k_stride: step_a,
+                    };
+                    let tile_b = || KStridedTile {
+                        data: panel_b,
+                        base: start_b,
+                        k_stride: step_b,
+                    };
+                    let reduction_len = layout.reduction_len;
+                    // SAFETY: a packed operand's scratch holds `reduction_len`
+                    // elements per row/column slot and the tile reads slots
+                    // `0..rows` / `0..TILE_COLS` (a panel is a TILE_COLS multiple
+                    // wide); an unpacked operand is fully flat
+                    // (`reduction_strides == 1`), so `reduction_len` contiguous
+                    // elements follow every row/column origin in its extents.
+                    match rows {
+                        1 => {
+                            let mut tile_out = [[seed; TILE_COLS]; 1];
+                            unsafe {
+                                gemm_tile_neon::<1>(tile_a(), tile_b(), reduction_len, &mut tile_out);
+                            }
+                            layout.write_tile(&tile_out, output, row_start, column);
+                        }
+                        2 => {
+                            let mut tile_out = [[seed; TILE_COLS]; 2];
+                            unsafe {
+                                gemm_tile_neon::<2>(tile_a(), tile_b(), reduction_len, &mut tile_out);
+                            }
+                            layout.write_tile(&tile_out, output, row_start, column);
+                        }
+                        3 => {
+                            let mut tile_out = [[seed; TILE_COLS]; 3];
+                            unsafe {
+                                gemm_tile_neon::<3>(tile_a(), tile_b(), reduction_len, &mut tile_out);
+                            }
+                            layout.write_tile(&tile_out, output, row_start, column);
+                        }
+                        4 => {
+                            let mut tile_out = [[seed; TILE_COLS]; 4];
+                            unsafe {
+                                gemm_tile_neon::<4>(tile_a(), tile_b(), reduction_len, &mut tile_out);
+                            }
+                            layout.write_tile(&tile_out, output, row_start, column);
+                        }
+                        5 => {
+                            let mut tile_out = [[seed; TILE_COLS]; 5];
+                            unsafe {
+                                gemm_tile_neon::<5>(tile_a(), tile_b(), reduction_len, &mut tile_out);
+                            }
+                            layout.write_tile(&tile_out, output, row_start, column);
+                        }
+                        _ => {
+                            let mut tile_out = [[seed; TILE_COLS]; TILE_ROWS];
+                            unsafe {
+                                gemm_tile_neon::<TILE_ROWS>(
+                                    tile_a(),
+                                    tile_b(),
+                                    reduction_len,
+                                    &mut tile_out,
+                                );
+                            }
+                            layout.write_tile(&tile_out, output, row_start, column);
+                        }
+                    }
+                }
+                row_start += rows;
+            }
+            panel_start = panel_end;
+        }
+        for column in layout.tiled_cols..width {
+            let origin_b = layout.base_b + column as i64 * layout.column_stride;
+            for row in 0..layout.rows_total {
+                let origin_a = layout.base_a + row as i64 * layout.row_stride;
+                output[layout.output_position(row, column)] = layout
+                    .offsets_a
+                    .iter()
+                    .zip(&layout.offsets_b)
+                    .fold(seed, |accumulator, (&offset_a, &offset_b)| {
+                        data_a[(origin_a + offset_a) as usize]
+                            .mul_add(data_b[(origin_b + offset_b) as usize], accumulator)
+                    });
+            }
+        }
+        #[cfg(feature = "instrument")]
+        {
+            counters.kernel_calls += (leading_total).div_ceil(TILE_ROWS as u64)
+                * (width as u64).div_ceil(TILE_COLS as u64);
+            counters.mac_ops += leading_total * width as u64 * reduction_total;
+            counters.operand_loads += (leading_total + width as u64) * reduction_total;
+            counters.leading_iters += leading_total;
+            counters.output_writes += leading_total * width as u64;
+            let distinct_operand_elements: u64 = raw.iter().map(|buffer| buffer.len() as u64).sum();
+            counters.commit(Path::DotFast, distinct_operand_elements);
+            let elapsed = instrument::elapsed_ticks(commit_started);
+            instrument::record_reduce_path_ticks(Path::DotFast, elapsed);
+            if is_gemm {
+                instrument::record_reduce_gemm_path_ticks(Path::DotFast, elapsed);
+            }
+        }
+        return Ok(());
+    }
+
     // `Conv`'s own reduce shape (`docs/discipline.md` ROW 148/149): the
     // reduction body's two operands own DISJOINT subsets of
     // `leading_output_axes` (weight varies only with `co`, the materialized

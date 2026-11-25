@@ -8225,6 +8225,308 @@ fn evaluate_typed_float32_matmul_shaped_reduce_fires_the_neon_tile() {
     );
 }
 
+/// The element and index dtypes the conv fixtures below bind, read off the
+/// matmul and embedding fixtures above rather than spelled again here.
+fn conv_fixture_dtypes() -> (DType, DType) {
+    let (matmul, _) = matmul_program_rhs_transposed(1, 1, 1);
+    let (lookup, _) = embedding_lookup_program(1, 1, 1);
+    let (Op::Input { dtype: element, .. }, Op::Input { dtype: index, .. }) =
+        (&matmul[0], &lookup[1])
+    else {
+        panic!("the matmul and embedding fixtures start with Input nodes");
+    };
+    (*element, *index)
+}
+
+/// A strided convolution as one reduce: iteration space `(co, ox, ci, tap)`,
+/// `out[co, ox] = sum_{ci, tap} weight[co, ci, tap] * window[ci, ox, tap]`.
+/// `window` is the materialized im2col operand (`window[ci, ox, tap] =
+/// signal[ci, 2 * ox + tap]`), so its `ci` stride is `ox_count * taps` while
+/// `tap` strides by 1: the reduction does not coalesce to stride 1 on it, and
+/// does on `weight`. The same structure whisper's conv2 reduce binds.
+fn packed_window_program(
+    out_channels: u32,
+    ox_count: u32,
+    in_channels: u32,
+    taps: u32,
+) -> Vec<Op> {
+    let (element, _) = conv_fixture_dtypes();
+    let mut program = Vec::new();
+    let weight = block(
+        &mut program,
+        element,
+        &[
+            Extent::Static(out_channels),
+            Extent::Static(in_channels),
+            Extent::Static(taps),
+        ],
+    );
+    let window = block(
+        &mut program,
+        element,
+        &[
+            Extent::Static(in_channels),
+            Extent::Static(ox_count),
+            Extent::Static(taps),
+        ],
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: element,
+            body: ScalarOp::Multiply,
+            operands: alloc::vec![
+                (weight, IndexMap::Affine(map::projection(4, &[0, 2, 3]))),
+                (window, IndexMap::Affine(map::projection(4, &[2, 1, 3]))),
+            ],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: element,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
+            out_map: IndexMap::Affine(map::projection(4, &[0, 1])),
+            keep: Keep::Reduce,
+            name: Some("strided_conv_window_reduce".into()),
+        }),
+    );
+    program
+}
+
+/// Evaluates [`packed_window_program`] over a random signal and weight and
+/// asserts it matches the strict conv loop over the signal itself, within
+/// the tolerance the other tile tests use. Returns the program so a caller
+/// can look its reduce node up.
+fn assert_packed_window_matches_conv_loop(
+    out_channels: usize,
+    ox_count: usize,
+    in_channels: usize,
+    taps: usize,
+) -> Vec<Op> {
+    let program = packed_window_program(
+        out_channels as u32,
+        ox_count as u32,
+        in_channels as u32,
+        taps as u32,
+    );
+    let frames = 2 * (ox_count - 1) + taps;
+    let signal = random_vec(0x5eed_0683_c0de_0001, in_channels * frames);
+    let weight = random_vec(0x5eed_0683_c0de_0002, out_channels * in_channels * taps);
+    let mut window = vec![0.0; in_channels * ox_count * taps];
+    for channel in 0..in_channels {
+        for ox in 0..ox_count {
+            for tap in 0..taps {
+                window[(channel * ox_count + ox) * taps + tap] =
+                    signal[channel * frames + 2 * ox + tap];
+            }
+        }
+    }
+    let mut reference = vec![0.0; out_channels * ox_count];
+    for co in 0..out_channels {
+        for ox in 0..ox_count {
+            // Neumaier-compensated, so the oracle's own rounding does not
+            // grow with the reduction length and swamp the tile's.
+            let mut total = weight[0] * 0.0;
+            let mut compensation = total;
+            for channel in 0..in_channels {
+                for tap in 0..taps {
+                    let term = weight[(co * in_channels + channel) * taps + tap]
+                        * signal[channel * frames + 2 * ox + tap];
+                    let sum = total + term;
+                    compensation += if total.abs() >= term.abs() {
+                        (total - sum) + term
+                    } else {
+                        (term - sum) + total
+                    };
+                    total = sum;
+                }
+            }
+            reference[co * ox_count + ox] = total + compensation;
+        }
+    }
+    let evaluated =
+        evaluate(&program, &[], &[&weight, &window], &[]).expect("strided conv reduce evaluates");
+    assert_eq!(evaluated.shape(), &[out_channels as u64, ox_count as u64]);
+    assert!(!reference.is_empty(), "the conv fixture compared nothing");
+    assert_all_close(evaluated.root(), &reference, 1e-5);
+    program
+}
+
+#[test]
+fn a_ragged_strided_conv_reduce_matches_the_conv_loop() {
+    assert_packed_window_matches_conv_loop(13, 31, 7, 3);
+}
+
+#[test]
+fn a_tile_aligned_strided_conv_reduce_matches_the_conv_loop() {
+    assert_packed_window_matches_conv_loop(48, 100, 64, 3);
+}
+
+#[test]
+fn a_conv_reduce_wider_than_one_column_panel_matches_the_conv_loop() {
+    // 384 channels x 3 taps = 1152 reduction elements: 600 columns exceed one
+    // L2 column panel, so the packed panel is refilled midway through.
+    assert_packed_window_matches_conv_loop(6, 600, 384, 3);
+}
+
+#[test]
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+fn a_strided_conv_reduce_with_a_non_flat_window_fires_the_packed_neon_tile() {
+    crate::instrument::reset_dot_tile_decline();
+    let program = assert_packed_window_matches_conv_loop(13, 31, 7, 3);
+
+    let reduce_node = terminal(&program).0;
+    let outcomes: Vec<&str> = crate::instrument::dot_tile_decline_snapshot()
+        .into_iter()
+        .filter(|(node, _, _)| *node == reduce_node)
+        .map(|(_, reason, _)| reason)
+        .collect();
+    assert_eq!(
+        outcomes,
+        ["taken"],
+        "the non-flat window must reach the dot tile through packing"
+    );
+}
+
+/// The conv reduce with its window read through a gather
+/// (`table[ids[ox], tap, ci]`): the gathered operand's reduction is also
+/// non-flat, so only the gather check keeps it off the packed tile.
+fn gathered_window_program(
+    out_channels: u32,
+    ox_count: u32,
+    in_channels: u32,
+    taps: u32,
+    table_rows: u32,
+) -> Vec<Op> {
+    let (element, index) = conv_fixture_dtypes();
+    let mut program = Vec::new();
+    let weight = block(
+        &mut program,
+        element,
+        &[
+            Extent::Static(out_channels),
+            Extent::Static(in_channels),
+            Extent::Static(taps),
+        ],
+    );
+    let table = block(
+        &mut program,
+        element,
+        &[
+            Extent::Static(table_rows),
+            Extent::Static(taps),
+            Extent::Static(in_channels),
+        ],
+    );
+    let ids = block(&mut program, index, &[Extent::Static(ox_count)]);
+    let gathered_map = IndexMap::Computed {
+        indices: ids,
+        index_map: map::projection(4, &[1]),
+        base: map::IndexPattern {
+            iter_rank: 4,
+            axes: alloc::vec![
+                map::AxisIndex::default(),
+                map::AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(3)).collect(),
+                    offset: 0,
+                    len: None,
+                },
+                map::AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(2)).collect(),
+                    offset: 0,
+                    len: None,
+                },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: element,
+            body: ScalarOp::Multiply,
+            operands: alloc::vec![
+                (weight, IndexMap::Affine(map::projection(4, &[0, 2, 3]))),
+                (table, gathered_map),
+            ],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: element,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
+            out_map: IndexMap::Affine(map::projection(4, &[0, 1])),
+            keep: Keep::Reduce,
+            name: Some("gathered_window_reduce".into()),
+        }),
+    );
+    program
+}
+
+#[test]
+fn a_gathered_non_flat_window_reduce_matches_the_loop_and_declines_the_tile() {
+    let (out_channels, ox_count, in_channels, taps, table_rows) =
+        (13usize, 9usize, 7usize, 3usize, 12usize);
+    let program = gathered_window_program(
+        out_channels as u32,
+        ox_count as u32,
+        in_channels as u32,
+        taps as u32,
+        table_rows as u32,
+    );
+    let weight = random_vec(0x5eed_0683_c0de_0003, out_channels * in_channels * taps);
+    let table = random_vec(0x5eed_0683_c0de_0004, table_rows * taps * in_channels);
+    let id_values: Vec<usize> = (0..ox_count).map(|ox| (ox * 5) % table_rows).collect();
+    let ids: Vec<_> = id_values
+        .iter()
+        .map(|&row| Into::into(u8::try_from(row).expect("table row fits u8")))
+        .collect();
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    crate::instrument::reset_dot_tile_decline();
+
+    let evaluated = evaluate(&program, &[], &[&weight, &table, &ids], &[])
+        .expect("gathered window reduce evaluates");
+
+    let mut reference = vec![0.0; out_channels * ox_count];
+    for co in 0..out_channels {
+        for (ox, &row) in id_values.iter().enumerate() {
+            let mut total = 0.0;
+            for channel in 0..in_channels {
+                for tap in 0..taps {
+                    total += weight[(co * in_channels + channel) * taps + tap]
+                        * table[(row * taps + tap) * in_channels + channel];
+                }
+            }
+            reference[co * ox_count + ox] = total;
+        }
+    }
+    assert_all_close(evaluated.root(), &reference, 1e-5);
+    #[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+    {
+        let reduce_node = terminal(&program).0;
+        let outcomes: Vec<&str> = crate::instrument::dot_tile_decline_snapshot()
+            .into_iter()
+            .filter(|(node, _, _)| *node == reduce_node)
+            .map(|(_, reason, _)| reason)
+            .collect();
+        assert_eq!(
+            outcomes,
+            ["gathered"],
+            "the packed tile's gate must be asked and refuse the gathered operand"
+        );
+    }
+}
+
 #[test]
 fn evaluate_typed_rejects_a_block_whose_dtype_does_not_match_the_program() {
     let (program, _, _, _) = typed_add_program(DType::INT32, 2);

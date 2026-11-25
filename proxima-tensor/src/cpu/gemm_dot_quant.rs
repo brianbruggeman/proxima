@@ -309,6 +309,40 @@ pub(super) fn neon_tile_plan(
     decided.ok()
 }
 
+/// [`neon_tile_plan`] for a reduce whose operand reduction does not coalesce
+/// to stride 1: the same gate with the contraction-flatness check answered
+/// as if every operand were flat, because [`run_packed_dot_tile`] copies the
+/// non-flat operand's reduction slice into a contiguous panel before the
+/// tile reads it. Decided from strides and shapes only. Every other check
+/// (gathers, width-dim layout, `row_stride_b`, the seeded multiply-add body)
+/// still binds, so a gathered operand still declines.
+#[cfg(target_arch = "aarch64")]
+pub(super) fn packed_dot_tile_plan(
+    resolved: &BoundOp,
+    shape: &BodyShape,
+    reduce_op: ScalarOp,
+    seeded_always: bool,
+    strides: &[i64],
+    leading_output_axes: &[u16],
+) -> Option<NeonTilePlan> {
+    let flat_after_packing = vec![1i64; resolved.operands().len()];
+    let decided = neon_tile_decision(
+        resolved,
+        shape,
+        reduce_op,
+        seeded_always,
+        &flat_after_packing,
+        strides,
+        leading_output_axes,
+    );
+    #[cfg(feature = "instrument")]
+    match &decided {
+        Ok(_) => instrument::record_dot_tile_decline(resolved.node, "taken"),
+        Err(reason) => instrument::record_dot_tile_decline(resolved.node, reason),
+    }
+    decided.ok()
+}
+
 /// [`neon_tile_plan`]'s gate with the refusing check named: one
 /// reason name per early return, in gate order.
 #[cfg(target_arch = "aarch64")]
