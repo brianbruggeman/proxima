@@ -1866,6 +1866,9 @@ pub fn execute_plan_named(
 }
 
 #[cfg(test)]
+mod layout_parity_tests;
+
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use alloc::vec;
