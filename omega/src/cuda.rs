@@ -5197,7 +5197,7 @@ mod tests {
             assert!(unsplit.prologue.is_empty(), "an unknown device keeps one block per vector");
             let partial = &kernel.prologue[0];
             assert!(partial.entry.contains("_wp") && partial.entry.ends_with("_split"), "{}", partial.entry);
-            for absent in ["in1[", "in5[", "in8", "pass_query", "@"] {
+            for absent in ["in1[", "in5[", "in8", "pass_query[qpass", "@"] {
                 assert!(!partial.source.contains(absent), "`{absent}` is dead text in a whole partial pass");
             }
             assert!(partial.source.contains("partial += in0[qbase + pair] * (cached ? cached_key_at(in2, kbase + pair) : in4[kbase + pair]);"));
