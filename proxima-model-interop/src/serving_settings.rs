@@ -43,6 +43,8 @@ fn from_json<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, serde_json:
 }
 
 const DEFAULT_WEIGHT_STORE: &str = ".cache/proxima/weights";
+const DEFAULT_WEIGHT_STORE_BUDGET_BYTES: u64 = 17_179_869_184;
+const DEFAULT_WEIGHT_STORE_TORN_AGE_SECS: u64 = 3600;
 
 fn overlay_policy(named: serde_json::Value) -> Result<NumericPolicy, serde_json::Error> {
     let serde_json::Value::Object(fields) = named else {
@@ -348,6 +350,18 @@ pub struct ServingSettings {
     /// store off. Entries are keyed on the mapped source file's device, inode, length, mtime and ctime, its header and the
     /// `weight_precision` rules, so a replaced or edited checkpoint or a changed rule never reads a stale entry.
     pub weight_store: Option<String>,
+    /// Largest total size of the `.safetensors` entries the weight store keeps; a publish evicts the least recently used
+    /// entries (by file mtime, touched on every hit) past it and never the entry it just wrote. The starting value, 16 GiB,
+    /// holds a few large checkpoints; raise it on a host with a big cache disk. `0` evicts every other entry on each publish.
+    #[setting(default = 17_179_869_184)]
+    #[builder(default = DEFAULT_WEIGHT_STORE_BUDGET_BYTES)]
+    pub weight_store_budget_bytes: u64,
+    /// Seconds after which an unfinished `<key>.<pid>.<seq>.tmp` file in the weight store counts as orphaned by a crashed
+    /// writer and is removed at the next publish. A live writer finishes inside minutes, so this only needs to exceed the
+    /// slowest publish on the host; a value shorter than that would delete a temp file a slow writer is still filling.
+    #[setting(default = 3600)]
+    #[builder(default = DEFAULT_WEIGHT_STORE_TORN_AGE_SECS)]
+    pub weight_store_torn_age_secs: u64,
     /// `ServingConfig::gdn_prefill_backend`: where the gated delta net prefill runs.
     #[setting(resolve_with = "from_name", default_str = "cpu")]
     #[builder(default = GdnPrefillBackend::Cpu)]
@@ -1387,6 +1401,31 @@ target = "q8_0"
         assert_eq!(from_toml, built, "toml and builder agree");
         assert_eq!(from_env, built, "env and builder agree");
         assert_eq!(ServingSettings::default().weight_store, None);
+    }
+
+    #[test]
+    fn weight_store_limits_agree_across_toml_env_and_builder_and_start_at_sixteen_gibibytes_and_an_hour() {
+        let from_toml: ServingSettings = conflaguration::from_toml_str(
+            "weight_store_budget_bytes = 1048576\nweight_store_torn_age_secs = 60",
+        )
+        .expect("the weight store limits toml parses");
+        let built = ServingSettings::builder()
+            .weight_store_budget_bytes(1_048_576)
+            .weight_store_torn_age_secs(60)
+            .build();
+        let from_env = temp_env::with_vars(
+            [
+                ("PROXIMA_SERVING_WEIGHT_STORE_BUDGET_BYTES", Some("1048576")),
+                ("PROXIMA_SERVING_WEIGHT_STORE_TORN_AGE_SECS", Some("60")),
+            ],
+            || ServingSettings::from_env().expect("the weight store limits env parses"),
+        );
+
+        assert_eq!(from_toml, built, "toml and builder agree");
+        assert_eq!(from_env, built, "env and builder agree");
+        let defaults = ServingSettings::default();
+        assert_eq!(defaults.weight_store_budget_bytes, 16 * 1024 * 1024 * 1024);
+        assert_eq!(defaults.weight_store_torn_age_secs, 3600);
     }
 
     #[test]

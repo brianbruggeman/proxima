@@ -35,7 +35,7 @@ use crate::serving_settings::ServingSettings;
 use crate::source::CheckpointMapping;
 use crate::weight_store::{
     FileIdentity, device_alignment, emit_weight_store_hit, emit_weight_store_publish, ensure_writable,
-    header_prefix, lookup, publish, register_mapping, store_key, unregister_mapping,
+    header_prefix, lookup, publish, register_mapping, store_key, touch, unregister_mapping,
 };
 
 const CHECKPOINT_FILE: &str = "model.safetensors";
@@ -955,7 +955,9 @@ impl Model {
             return;
         };
         let key = store_key(header, identity, &rules, device_alignment());
-        match lookup(&store_dir, key).and_then(|path| read_checkpoint(&path).ok()) {
+        let stored = lookup(&store_dir, key)
+            .and_then(|path| read_checkpoint(&path).ok().inspect(|_| touch(&path)));
+        match stored {
             Some((mapping, manifest, data_start)) => {
                 emit_weight_store_hit(key, mapping.bytes().len());
                 self.mapping = mapping;
@@ -1010,7 +1012,14 @@ impl Model {
                 })
                 .map(Some)
         };
-        match built.and_then(|recoded| recoded.map(|_| publish(store_dir, *key, &stored)).transpose()) {
+        let torn_age = Duration::from_secs(self.settings.weight_store_torn_age_secs);
+        let budget = self.settings.weight_store_budget_bytes;
+        let published = built.and_then(|recoded| {
+            recoded
+                .map(|_| publish(store_dir, *key, &stored, budget, torn_age))
+                .transpose()
+        });
+        match published {
             Ok(Some(_)) => {
                 self.store_published.store(true, Ordering::Release);
                 emit_weight_store_publish(*key, stored.len(), true);

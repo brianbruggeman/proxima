@@ -29,6 +29,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use xxhash_rust::xxh3::Xxh3;
 
@@ -155,15 +156,26 @@ pub fn ensure_writable(dir: &Path) -> Result<(), InteropError> {
 
 /// Writes `bytes` as the entry for `key`: a temp file in `dir` is written and
 /// synced, then renamed over the final name, so a reader sees the whole entry
-/// or none of it. The temp name carries the process id, so two processes
-/// publishing the same key do not share a temp file; the later rename replaces
-/// the earlier with identical bytes.
+/// or none of it. The temp name carries the process id and a per-process
+/// counter, so neither two processes nor two threads publishing the same key
+/// share a temp file; the later rename replaces the earlier with identical bytes.
+///
+/// After the rename, best effort and never an error: temp files older than
+/// `torn_age` (orphans of a crashed writer) are removed, and the least recently
+/// used entries are evicted until the store holds at most `budget_bytes`, never
+/// the entry just written.
 ///
 /// # Errors
 ///
 /// [`InteropError::SidecarIo`] when the directory, the temp file or the rename
 /// fails; the temp file is removed first.
-pub fn publish(dir: &Path, key: u128, bytes: &[u8]) -> Result<PathBuf, InteropError> {
+pub fn publish(
+    dir: &Path,
+    key: u128,
+    bytes: &[u8],
+    budget_bytes: u64,
+    torn_age: Duration,
+) -> Result<PathBuf, InteropError> {
     fs::create_dir_all(dir)?;
     let sequence = NEXT_TORN.fetch_add(1, Ordering::Relaxed);
     let torn = dir.join(format!("{key:032x}.{}.{sequence}.{TORN_EXTENSION}", process::id()));
@@ -173,7 +185,64 @@ pub fn publish(dir: &Path, key: u128, bytes: &[u8]) -> Result<PathBuf, InteropEr
         let _ = fs::remove_file(&torn);
         return Err(error.into());
     }
+    sweep_torn(dir, SystemTime::now(), torn_age);
+    evict_to_budget(dir, budget_bytes, &target);
     Ok(target)
+}
+
+/// Marks `path` as used now, so eviction (oldest mtime first) keeps the entries a load hit. mtime and not atime,
+/// because `noatime` and `relatime` mounts do not maintain atime; a store the process cannot write is left as is.
+pub fn touch(path: &Path) {
+    let _ = fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.set_modified(SystemTime::now()));
+}
+
+/// Removes the temp files in `dir` last written more than `torn_age` before `now`.
+pub fn sweep_torn(dir: &Path, now: SystemTime, torn_age: Duration) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let stale = path.extension().is_some_and(|ext| ext == TORN_EXTENSION)
+            && entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age > torn_age);
+        if stale {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+/// Removes the least recently modified entries of `dir` until its `.safetensors` files total at most
+/// `budget_bytes`, never `keep`. A removed entry another process has mapped stays readable there on unix.
+pub fn evict_to_budget(dir: &Path, budget_bytes: u64, keep: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut held: Vec<(SystemTime, u64, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == STORE_EXTENSION))
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            Some((metadata.modified().ok()?, metadata.len(), entry.path()))
+        })
+        .collect();
+    let mut total: u64 = held.iter().map(|(_, length, _)| length).sum();
+    held.sort();
+    for (_, length, path) in held {
+        if total <= budget_bytes {
+            return;
+        }
+        if path != keep && fs::remove_file(&path).is_ok() {
+            total -= length;
+        }
+    }
 }
 
 fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -252,11 +321,74 @@ pub fn unregister_mapping(_bytes: &[u8]) {}
 mod tests {
     use proxima_gguf::types::GgmlType;
     use proxima_safetensors::{SafetensorsModel, TensorPayload, map_dtype, write_complete_aligned};
+    use std::time::UNIX_EPOCH;
     use tempfile::tempdir;
 
     use super::*;
 
     const ALIGNMENT: usize = 64;
+    const UNBOUNDED: u64 = u64::MAX;
+    const TORN_AGE: Duration = Duration::from_secs(3600);
+
+    fn aged(path: &Path, seconds_since_epoch: u64) {
+        File::options()
+            .write(true)
+            .open(path)
+            .and_then(|file| file.set_modified(UNIX_EPOCH + Duration::from_secs(seconds_since_epoch)))
+            .expect("sets the modification time");
+    }
+
+    #[test]
+    fn an_orphaned_temp_older_than_the_bound_is_swept_at_publish_and_a_fresh_one_survives() {
+        let directory = tempdir().expect("scratch store directory");
+        let bytes = source_checkpoint();
+        let orphan = directory.path().join(format!("{:032x}.99.0.{TORN_EXTENSION}", 1u128));
+        let live = directory.path().join(format!("{:032x}.99.1.{TORN_EXTENSION}", 2u128));
+        fs::write(&orphan, &bytes[..8]).expect("writes the orphan");
+        fs::write(&live, &bytes[..8]).expect("writes a live writer's temp");
+        aged(&orphan, 1);
+
+        publish(directory.path(), 3, &bytes, UNBOUNDED, TORN_AGE).expect("publishes");
+
+        assert!(!orphan.exists(), "an orphan past the bound is removed");
+        assert!(live.exists(), "a temp inside the bound is left to its writer");
+    }
+
+    #[test]
+    fn publishing_past_the_budget_evicts_the_least_recently_used_entries_and_keeps_the_new_one() {
+        let directory = tempdir().expect("scratch store directory");
+        let bytes = source_checkpoint();
+        let entries: Vec<PathBuf> = (1..=3u128)
+            .map(|key| publish(directory.path(), key, &bytes, UNBOUNDED, TORN_AGE).expect("publishes"))
+            .collect();
+        for (age, entry) in [100, 300, 200].into_iter().zip(&entries) {
+            aged(entry, age);
+        }
+        let budget = bytes.len() as u64 * 2;
+
+        let newest = publish(directory.path(), 4, &bytes, budget, TORN_AGE).expect("publishes");
+
+        assert!(newest.exists(), "the entry just written is never evicted");
+        assert!(!entries[0].exists(), "the oldest entry goes first");
+        assert!(!entries[2].exists(), "the next oldest goes second");
+        assert!(entries[1].exists(), "the most recently used old entry stays within the budget");
+    }
+
+    #[test]
+    fn a_touched_entry_outlives_an_untouched_one_under_eviction() {
+        let directory = tempdir().expect("scratch store directory");
+        let bytes = source_checkpoint();
+        let first = publish(directory.path(), 1, &bytes, UNBOUNDED, TORN_AGE).expect("publishes");
+        let second = publish(directory.path(), 2, &bytes, UNBOUNDED, TORN_AGE).expect("publishes");
+        aged(&first, 100);
+        aged(&second, 200);
+
+        touch(&first);
+        evict_to_budget(directory.path(), bytes.len() as u64, &directory.path().join("none"));
+
+        assert!(first.exists(), "a hit refreshed the first entry");
+        assert!(!second.exists(), "the untouched entry is the least recently used");
+    }
 
     fn source_checkpoint() -> Vec<u8> {
         let weights: Vec<u8> = (0..300u32).map(|index| (index % 251) as u8).collect();
@@ -387,7 +519,7 @@ mod tests {
         let key = key_of(&bytes, 7, &rules());
 
         assert_eq!(lookup(&store, key), None, "nothing is published yet");
-        let published = publish(&store, key, &bytes).expect("publishes");
+        let published = publish(&store, key, &bytes, UNBOUNDED, TORN_AGE).expect("publishes");
 
         assert_eq!(lookup(&store, key), Some(published.clone()));
         assert_eq!(fs::read(published).expect("reads the entry"), bytes);
@@ -412,7 +544,7 @@ mod tests {
         let bytes = source_checkpoint();
         let key = key_of(&bytes, 7, &rules());
 
-        publish(directory.path(), key, &bytes).expect("publishes");
+        publish(directory.path(), key, &bytes, UNBOUNDED, TORN_AGE).expect("publishes");
 
         let leftovers = fs::read_dir(directory.path())
             .expect("lists the store")
