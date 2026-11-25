@@ -3540,7 +3540,8 @@ fn push_lean_chunk_loops(
         }
     }
     source.push_str("    long long start = 0;\n");
-    let plain_vectors: Vec<usize> = if element_type == "float" {
+    let word_class = device_scalar(resolved.dtype).is_some_and(|scalar| scalar.class == DeviceClass::Word);
+    let plain_vectors: Vec<usize> = if word_class {
         quantized
             .iter()
             .enumerate()
