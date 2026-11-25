@@ -42,6 +42,8 @@ fn from_json<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, serde_json:
     serde_json::from_str(raw)
 }
 
+const DEFAULT_WEIGHT_STORE: &str = ".cache/proxima/weights";
+
 fn overlay_policy(named: serde_json::Value) -> Result<NumericPolicy, serde_json::Error> {
     let serde_json::Value::Object(fields) = named else {
         return serde_json::from_value(named);
@@ -341,7 +343,10 @@ pub struct ServingSettings {
     #[setting(resolve_with = "from_json", default_str = "[]")]
     #[builder(default)]
     pub weight_precision: Vec<WeightPrecisionRuleSettings>,
-    /// Directory of recoded, page-aligned checkpoints a host keeps between processes, e.g. `/var/cache/proxima/weights`; unset keeps the store off.
+    /// Directory of recoded, page-aligned checkpoints a host keeps between processes, e.g. `/var/cache/proxima/weights`.
+    /// Unset resolves to `~/.cache/proxima/weights` through [`ServingSettings::weight_store_dir`]; an empty value turns the
+    /// store off. Entries are keyed on the source checkpoint's header, length and mtime plus the `weight_precision`
+    /// rules, so a replaced checkpoint or a changed rule never reads a stale entry.
     pub weight_store: Option<String>,
     /// `ServingConfig::gdn_prefill_backend`: where the gated delta net prefill runs.
     #[setting(resolve_with = "from_name", default_str = "cpu")]
@@ -461,13 +466,18 @@ impl Default for ServingSettings {
 }
 
 impl ServingSettings {
-    /// The directory the weight store lives in: the configured one, or `None` when the value is unset or empty (off).
+    /// The directory the weight store lives in: the configured one, `~/.cache/proxima/weights` when unset, and `None`
+    /// when the value is empty (off) or the default needs a `$HOME` that is not set. Same contract as omega's
+    /// `kernel_cache_dir`, resolved here because bon refuses a `default` on an `Option` member and the builder, env
+    /// and toml surfaces must keep agreeing on "unset".
     #[must_use]
     pub fn weight_store_dir(&self) -> Option<std::path::PathBuf> {
-        self.weight_store
-            .as_deref()
-            .filter(|configured| !configured.is_empty())
-            .map(std::path::PathBuf::from)
+        match self.weight_store.as_deref() {
+            Some("") => None,
+            Some(configured) => Some(std::path::PathBuf::from(configured)),
+            None => std::env::var_os("HOME")
+                .map(|home| std::path::PathBuf::from(home).join(DEFAULT_WEIGHT_STORE)),
+        }
     }
 
     /// lowers each rule's target to the on-disk `GgmlType` the recode path binds at;
@@ -1380,13 +1390,20 @@ target = "q8_0"
     }
 
     #[test]
-    fn weight_store_dir_turns_an_empty_value_off_and_names_a_configured_one() {
-        let off = ServingSettings::builder().weight_store(String::new()).build();
-        let named = ServingSettings::builder().weight_store("/var/cache/proxima/weights".to_owned()).build();
-
-        assert_eq!(off.weight_store_dir(), None, "an empty value is off");
-        assert_eq!(named.weight_store_dir(), Some("/var/cache/proxima/weights".into()));
-        assert_eq!(ServingSettings::default().weight_store_dir(), None, "unset is off until the default lands");
+    fn weight_store_dir_defaults_under_the_home_cache_and_an_empty_value_turns_it_off() {
+        let home = tempfile::tempdir().expect("tempdir for home");
+        let home_path = home.path().to_str().expect("utf8 home");
+        temp_env::with_vars([("HOME", Some(home_path))], || {
+            let unset = ServingSettings::default();
+            assert_eq!(unset.weight_store_dir(), Some(home.path().join(".cache/proxima/weights")));
+            let off = ServingSettings::builder().weight_store(String::new()).build();
+            assert_eq!(off.weight_store_dir(), None, "an empty value is off");
+            let named = ServingSettings::builder().weight_store("/var/cache/proxima/weights".to_owned()).build();
+            assert_eq!(named.weight_store_dir(), Some("/var/cache/proxima/weights".into()));
+        });
+        temp_env::with_vars([("HOME", None::<&str>)], || {
+            assert_eq!(ServingSettings::default().weight_store_dir(), None, "no home, no default");
+        });
     }
 
     #[test]
