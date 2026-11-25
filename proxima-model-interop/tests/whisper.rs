@@ -1375,6 +1375,11 @@ mod transcript {
         settings: ServingSettings,
         calls: usize,
     ) -> anyhow::Result<Vec<Vec<u32>>> {
+        // an empty store path turns the weight store off, so no test run writes into the home cache
+        let settings = ServingSettings {
+            weight_store: Some(String::new()),
+            ..settings
+        };
         let model = Model::load(&super::fixture_dir()?)?.with_settings(settings);
         let audio = wav::read(&wav_path())?;
         (0..calls)
