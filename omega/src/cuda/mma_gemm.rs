@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 
 use proxima_tensor::{
     BoundOp, BoundOpKind, ContractionForm, ContractionLimits, Executes, Form, Keep, ProductContraction, ReduceInit, ScalarOp,
-    contraction_form, product_contraction,
+    contraction_form, unit_batched_product_contraction,
 };
 use proxima_numeric::{DType, NumericPolicy};
 
@@ -28,7 +28,7 @@ use super::{
     Q1_0_BLOCK_ELEMENTS, Q2_0_BLOCK_BYTES, Q2_0_BLOCK_ELEMENTS, Q4_0_BLOCK_BYTES,
     Q4_0_BLOCK_ELEMENTS, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS, Q5_0_BLOCK_BYTES,
     Q5_0_BLOCK_ELEMENTS, Q5K_BLOCK_BYTES, Q6K_BLOCK_BYTES, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS,
-    flat_packed_rows, push_reduce_epilogue_write, reduce_is_cooperative,
+    flat_packed_rows, packed_reduction_in_order, push_reduce_epilogue_write, reduce_is_cooperative,
     reduction_dims,
 };
 
@@ -40,6 +40,7 @@ const WARP_TILES: usize = WARP_TOKENS / 8;
 const _: () = assert!(WARP_TILES == 8 && WARP_TOKENS == 64 && ACT_REPS == 2);
 pub(super) const GEMM_THREADS: u64 = 256;
 const STAGE_K: usize = 32;
+const WHOLE_SEGMENT: u64 = 8;
 const STAGE_PAD: usize = 40;
 
 /// The structure a packed matmul must have for the tensor-core body: which
@@ -48,6 +49,9 @@ pub(super) struct MmaGemm {
     pub(super) weight: usize,
     pub(super) activation: usize,
     pub(super) codec: Codec,
+    /// The weight is an unpacked float operand, staged as an f16 high part plus an f16 low part
+    /// so the product keeps f32 accuracy; `codec` then only names the f16 staging granule.
+    pub(super) plain_weight: bool,
     pub(super) single_activation: bool,
     pub(super) int8: Option<Int8Gemm>,
     pub(super) feature_positions: Vec<usize>,
@@ -135,15 +139,23 @@ pub(super) fn mma_gemm_plan_for(
     let [first, second] = quantized else {
         return None;
     };
-    let (weight, codec, prequantized) = weight_slot(*first, *second)?;
+    let operands = resolved.operands();
+    let (weight, codec, prequantized, plain_weight) = match weight_slot(*first, *second) {
+        Some((weight, codec, prequantized)) => (weight, codec, prequantized, false),
+        None if form == ContractionForm::Tiled && first.is_none() && second.is_none() => {
+            let weight = plain_weight_slot(resolved, output_axes)?;
+            (weight, staging_codec()?, None, true)
+        }
+        None => return None,
+    };
     let mut weights_only = [*first, *second];
     weights_only[1 - weight] = None;
     let quantized = &weights_only[..];
-    codec_shape(codec)?;
+    let shape = codec_shape(codec)?;
     let activation = 1 - weight;
-    let operands = resolved.operands();
-    let contraction = product_contraction(resolved, weight)?;
+    let contraction = unit_batched_product_contraction(resolved, weight)?;
     let weight_layout = &operands[weight].1;
+    let reduction_granule = if shape.block_elements == 1 { WHOLE_SEGMENT } else { STAGE_K as u64 };
     let eligible = resolved.dtype == DType::FLOAT32
         && epilogue_broadcast_axes.is_empty()
         && (contraction.gathered_operands == 0) == (form == ContractionForm::Tiled)
@@ -151,7 +163,7 @@ pub(super) fn mma_gemm_plan_for(
         && flat_packed_rows(resolved, quantized)
         && reduce_is_cooperative(resolved, quantized, numeric_policy)
         && !reduction_dims(resolved, output_axes).is_empty()
-        && contraction.reduction_extent.is_multiple_of(STAGE_K as u64)
+        && contraction.reduction_extent.is_multiple_of(reduction_granule)
         && weight_layout.base.rem_euclid(256) == 0;
     if !eligible {
         return None;
@@ -172,12 +184,43 @@ pub(super) fn mma_gemm_plan_for(
             weight,
             activation,
             codec,
+            plain_weight,
             single_activation: numeric_policy.activation_quantization,
             int8,
             feature_positions,
             token_positions,
         },
     )
+}
+
+/// The decode-table codec that stores one element per unit, whose 8-element segment is the f16
+/// staging a plain float weight splits into; read from the table, never named.
+fn staging_codec() -> Option<Codec> {
+    Codec::ALL
+        .into_iter()
+        .find(|&codec| codec_shape(codec).is_some_and(|shape| shape.block_elements == 1))
+}
+
+/// The operand an activation-by-constant contraction reads as its weight: the slot whose rows
+/// the tile can stage, one flat reduction run per feature row at a row stride of the reduction
+/// total. The other operand keeps its strides (conv1's overlapping windows); the staging loop
+/// walks them coordinate by coordinate.
+fn plain_weight_slot(resolved: &BoundOp, output_axes: &[u16]) -> Option<usize> {
+    let operands = resolved.operands();
+    [0usize, 1].into_iter().find(|&slot| {
+        let Some(facts) = unit_batched_product_contraction(resolved, slot) else {
+            return false;
+        };
+        let layout = &operands[slot].1;
+        let mut expected = facts.reduction_extent as i64;
+        let rows_flat = facts.feature_positions.iter().rev().all(|&position| {
+            let axis = output_axes[position];
+            let matches = layout.stride(axis) == expected;
+            expected *= resolved.extents[axis as usize] as i64;
+            matches
+        });
+        rows_flat && packed_reduction_in_order(layout, output_axes, resolved)
+    })
 }
 
 /// The weight slot, its codec, and whether the other slot is an activation a `BlockQuantize`
@@ -402,6 +445,7 @@ pub(super) fn push_mma_gemm_body(
     let (block_bytes, block_elements) = (shape.block_bytes, shape.block_elements);
     let decode = shape.decode;
     let single = plan.single_activation;
+    let plain = plan.plain_weight;
 
     push_tile_origin(source, plan, FEATURE_TILE, TOKEN_TILE);
     let first = if route.is_some() { "0" } else { "token_first" };
@@ -446,6 +490,11 @@ pub(super) fn push_mma_gemm_body(
     source.push_str(&format!(
         "    __shared__ __align__(16) __half weight_q[{FEATURE_TILE}][{STAGE_PAD}];\n"
     ));
+    if plain {
+        source.push_str(&format!(
+            "    __shared__ __align__(16) __half weight_lo[{FEATURE_TILE}][{STAGE_PAD}];\n"
+        ));
+    }
     source.push_str(&format!(
         "    __shared__ __align__(16) __half act_high[{TOKEN_TILE}][{STAGE_PAD}];\n"
     ));
@@ -477,16 +526,40 @@ pub(super) fn push_mma_gemm_body(
     source.push_str("        float scale = 0.0f;\n        float minimum = 0.0f;\n");
     source.push_str("        __align__(16) __half2 weight_pairs[4];\n");
     source.push_str("        #pragma unroll\n        for (int pair = 0; pair < 4; pair++) { weight_pairs[pair] = __float2half2_rn(0.0f); }\n");
-    source.push_str("        if (feature_ok) {\n");
+    if plain {
+        source.push_str("        __align__(16) __half2 weight_low_pairs[4];\n");
+        source.push_str("        #pragma unroll\n        for (int pair = 0; pair < 4; pair++) { weight_low_pairs[pair] = __float2half2_rn(0.0f); }\n");
+    }
+    source.push_str("        if (feature_ok && stage_first + load_segment < u.reduction_total) {\n");
     source.push_str("            long long element = weight_row + stage_first + load_segment;\n");
-    source.push_str(&format!(
-        "            const unsigned char *block = (const unsigned char *)in{weight} + (element / {block_elements}) * {block_bytes};\n"
-    ));
-    source.push_str(&format!(
-        "            {decode}(block, (unsigned int)(element % {block_elements}), weight_pairs, &scale, &minimum);\n"
-    ));
+    if plain {
+        source.push_str(&format!(
+            "            const float4 first = *(const float4 *)(in{weight} + element);
+            const float4 second = *(const float4 *)(in{weight} + element + 4);
+            const float weight_values[8] = {{first.x, first.y, first.z, first.w, second.x, second.y, second.z, second.w}};
+            scale = 1.0f;
+            #pragma unroll
+            for (int pair = 0; pair < 4; pair++) {{
+                const __half high_a = __float2half_rn(weight_values[2 * pair]);
+                const __half high_b = __float2half_rn(weight_values[2 * pair + 1]);
+                weight_pairs[pair] = __halves2half2(high_a, high_b);
+                weight_low_pairs[pair] = __halves2half2(__float2half_rn(weight_values[2 * pair] - __half2float(high_a)), __float2half_rn(weight_values[2 * pair + 1] - __half2float(high_b)));
+            }}
+"
+        ));
+    } else {
+        source.push_str(&format!(
+            "            const unsigned char *block = (const unsigned char *)in{weight} + (element / {block_elements}) * {block_bytes};\n"
+        ));
+        source.push_str(&format!(
+            "            {decode}(block, (unsigned int)(element % {block_elements}), weight_pairs, &scale, &minimum);\n"
+        ));
+    }
     source.push_str("        }\n");
     source.push_str("        *(uint4 *)&weight_q[load_row][load_segment] = *(const uint4 *)weight_pairs;\n");
+    if plain {
+        source.push_str("        *(uint4 *)&weight_lo[load_row][load_segment] = *(const uint4 *)weight_low_pairs;\n");
+    }
     source.push_str("        if ((load_segment & 15) == 0) {\n");
     source.push_str("            weight_scale[load_row][load_segment >> 4] = scale;\n");
     if has_minimum {
@@ -503,7 +576,7 @@ pub(super) fn push_mma_gemm_body(
         source.push_str("        #pragma unroll
         for (int slot = 0; slot < 8; slot++) { act_values[slot] = 0.0f; }
 ");
-        source.push_str(&format!("        if (token_ok{rep}) {{
+        source.push_str(&format!("        if (token_ok{rep} && stage_first + load_segment < u.reduction_total) {{
 "));
         source.push_str("            long long reduce_rest = stage_first + load_segment;
 ");
@@ -627,11 +700,24 @@ pub(super) fn push_mma_gemm_body(
                 const unsigned int a_high = *(const unsigned int *)&weight_q[warp_feature * 16 + group + 8][{k_base}];
 "
             ));
-            let low_mma = if single {
+            if plain {
+                source.push_str(&format!(
+                    "                const unsigned int w_low_a = *(const unsigned int *)&weight_lo[warp_feature * 16 + group][{k_base}];
+                const unsigned int w_low_b = *(const unsigned int *)&weight_lo[warp_feature * 16 + group + 8][{k_base}];
+"
+                ));
+            }
+            let low_activation = if single {
                 String::new()
             } else {
                 format!("                    mma_m16n8k8(scratch{{tile}}, a_low, a_high, *(const unsigned int *)&act_low[token_row][{k_base}]);\n")
             };
+            let low_weight = if plain {
+                format!("                    mma_m16n8k8(scratch{{tile}}, w_low_a, w_low_b, *(const unsigned int *)&act_high[token_row][{k_base}]);\n")
+            } else {
+                String::new()
+            };
+            let low_mma = format!("{low_activation}{low_weight}");
             for tile in 0..WARP_TILES {
                 source.push_str(&format!(
                     "                if ({first} + warp_token * {WARP_TOKENS} + {} < {limit}) {{
@@ -776,7 +862,7 @@ pub(super) fn push_output_write(
          \x20       const long long feature = {feature_expr};\n\
          \x20       const long long token = {token_expr};\n\
          \x20       if (feature >= feature_total || token >= token_total) {{ continue; }}\n\
-         \x20       long long output_coord[{output_rank}];\n\
+         \x20       long long output_coord[{output_rank}] = {{0}};\n\
          \x20       long long feature_rest = feature;\n\
          \x20       long long token_rest = token;\n"
     ));

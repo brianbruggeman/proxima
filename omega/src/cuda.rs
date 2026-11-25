@@ -2071,7 +2071,8 @@ fn text_plan_token(
             Some(int8) => format!("_mma8x8x16s8c{}_gid64c9", int8.chunks),
             None => {
                 let single = if plan.single_activation { "h" } else { "" };
-                format!("_mma16x8x8{single}_gid64c9")
+                let plain = if plan.plain_weight { "p" } else { "" };
+                format!("_mma16x8x8{single}{plain}_gid64c9")
             }
         }
     } else if target
@@ -6734,6 +6735,19 @@ mod tests {
             assert!(kernel.entry.contains("_mma"), "{}", kernel.entry);
             assert!(!kernel.entry.contains("_grp1"), "{}", kernel.entry);
             assert!(grouped_pair(&bound, codec).is_none());
+        }
+    }
+
+    #[test]
+    fn an_activation_by_constant_product_takes_the_tiled_entry_with_no_packed_operand() {
+        for (rows, width, tokens) in [(128, 512, 200), (201, 400, 3000)] {
+            let bound = dense_expert_free_op(rows, width, tokens);
+            let kernel = emit_cuda_with_policy(&bound, &PackedOperands::new(), NumericPolicy::llama_relaxed()).expect("emit succeeds");
+            let case = format!("{rows} features, reduction {width}, {tokens} tokens");
+            assert!(kernel.entry.contains("_mma"), "{case}: {}", kernel.entry);
+            assert!(kernel.source.contains("w_low_a"), "{case}: the stored weight stages its low part");
+            assert!(kernel.source.contains("stage_first + load_segment < u.reduction_total"), "{case}: the tail stage is masked");
+            assert_eq!(kernel.grid.block_width(), Some(GEMM_THREADS), "{case}: one tile block per launch");
         }
     }
 
