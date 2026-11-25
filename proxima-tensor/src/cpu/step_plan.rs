@@ -532,6 +532,160 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_hands_the_policy_it_was_built_with_to_the_bound_step() {
+        let (program, _, sum) = matmul();
+        let policies = [
+            NumericPolicy::bit_exact(),
+            NumericPolicy::llama_relaxed(),
+            NumericPolicy::fast(),
+        ];
+
+        for policy in policies {
+            let mut plan = CpuStepPlan::with_numeric_policy(policy);
+            planned(&mut plan, 7, &program, 3, &[sum]).expect("bind under the policy");
+            let bound = plan.state.as_ref().map(|state| state.prepared.numeric_policy);
+            assert_eq!(bound, Some(policy), "the bound step carries the plan's policy");
+        }
+    }
+
+    /// The element dtype `matmul` binds, read off its first input rather than spelled.
+    fn element_dtype() -> DType {
+        let (program, _, _) = matmul();
+        match &program[0] {
+            Op::Input { dtype, .. } => *dtype,
+            other => panic!("matmul starts with an input, not {other:?}"),
+        }
+    }
+
+    /// `sum_k exp(scores[h,q,k] - shift[h,q])`: the reduce a softmax denominator is.
+    fn sum_of_exp_shifted() -> (Vec<Op>, NodeId) {
+        let dtype = element_dtype();
+        let all_axes = || IndexMap::Affine(map::projection(3, &[0, 1, 2]));
+        let row_axes = || IndexMap::Affine(map::projection(3, &[0, 1]));
+        let mut program = Vec::new();
+        let scores = append(
+            &mut program,
+            Op::Input {
+                dtype,
+                shape: vec![Extent::Symbolic(0), Extent::Symbolic(1), Extent::Symbolic(2)],
+                name: Some("scores".into()),
+            },
+        );
+        let shift = append(
+            &mut program,
+            Op::Input {
+                dtype,
+                shape: vec![Extent::Symbolic(0), Extent::Symbolic(1)],
+                name: Some("shift".into()),
+            },
+        );
+        let shifted = append(
+            &mut program,
+            Op::Elementwise {
+                dtype,
+                body: ScalarOp::Subtract,
+                operands: vec![(scores, all_axes()), (shift, row_axes())],
+                name: None,
+            },
+        );
+        let exponent = append(
+            &mut program,
+            Op::Elementwise {
+                dtype,
+                body: ScalarOp::Exponential,
+                operands: vec![(shifted, all_axes())],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(crate::op::Reduce {
+                dtype,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: exponent,
+                in_map: all_axes(),
+                out_map: row_axes(),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        (program, sum)
+    }
+
+    /// Runs the sum of exponentials at `extents` under an exact and a fast policy and
+    /// checks each against the naive k-order libm sum: bit for bit, then within the
+    /// documented 5e-6 relative tolerance (6e-7 per exp, plus the shifted accumulation).
+    fn assert_sum_of_exp(extents: [usize; 3]) {
+        let [heads, queries, keys] = extents;
+        let total = heads * queries * keys;
+        let scores: Vec<_> = activations(total.div_ceil(INNER) + 1)
+            .iter()
+            .cycle()
+            .take(total)
+            .map(|value| value * 6.0)
+            .collect();
+        let shifts: Vec<_> = scores
+            .chunks(keys)
+            .map(|row| row.iter().copied().fold(row[0], |best, value| best.max(value)))
+            .collect();
+        let expected: Vec<_> = scores
+            .chunks(keys)
+            .zip(&shifts)
+            .map(|(row, shift)| {
+                let mut sum = 0.0;
+                for value in row {
+                    sum += (value - shift).exp();
+                }
+                sum
+            })
+            .collect();
+        let (program, sum) = sum_of_exp_shifted();
+        let named = [
+            ("scores", scores.as_slice().into()),
+            ("shift", shifts.as_slice().into()),
+        ];
+        let symbols = extents.map(|extent| extent as u64);
+        let run = |policy: NumericPolicy| -> Vec<_> {
+            let evaluated = CpuStepPlan::with_numeric_policy(policy)
+                .execute(
+                    (&program, 11),
+                    (&symbols, &[sum]),
+                    &named,
+                    &mut BufferPools::default(),
+                    None,
+                    false,
+                )
+                .expect("the sum of exponentials runs");
+            evaluated.get(sum).expect("sum present").0.to_vec()
+        };
+
+        let exact = run(NumericPolicy::bit_exact());
+        let relaxed = run(NumericPolicy::fast());
+
+        let exact_bits: Vec<_> = exact.iter().map(|value| value.to_bits()).collect();
+        let expected_bits: Vec<_> = expected.iter().map(|value| value.to_bits()).collect();
+        assert_eq!(exact_bits, expected_bits, "an exact policy keeps libm exp and the k-order sum");
+        let worst = relaxed
+            .iter()
+            .zip(&expected)
+            .map(|(got, want)| ((got - want) / want).abs())
+            .fold(0.0, |worst, error| if error > worst { error } else { worst });
+        assert!(worst <= 5.0e-6, "relaxed sum of exp drifted {worst} relative to libm");
+        assert_ne!(relaxed, exact, "the relaxed policy never reached the approximate exp");
+    }
+
+    #[test]
+    fn the_sum_of_exp_over_a_ragged_attention_row_is_exact_or_within_tolerance_by_policy() {
+        assert_sum_of_exp([3, 37, 129]);
+    }
+
+    #[test]
+    fn the_sum_of_exp_over_a_whisper_encoder_score_block_is_exact_or_within_tolerance_by_policy() {
+        assert_sum_of_exp([6, 1500, 1500]);
+    }
+
+    #[test]
     fn an_unbound_input_name_is_refused_and_leaves_the_plan_unbound() {
         let (program, _, sum) = matmul();
         let mut plan = CpuStepPlan::new();
