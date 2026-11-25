@@ -1,3 +1,6 @@
+use std::ffi::OsString;
+use std::path::PathBuf;
+
 use bon::Builder;
 use conflaguration::{Settings, Validate};
 #[cfg(all(
@@ -11,6 +14,7 @@ use omega::{
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::{DispatchType, MathMode};
 use proxima_numeric::{NumericFormat, NumericPolicy};
+use proxima_primitives::home_path::expand_home;
 use proxima_tensor::spec::KvCacheShape;
 use serde::{Deserialize, Serialize};
 
@@ -42,7 +46,7 @@ fn from_json<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, serde_json:
     serde_json::from_str(raw)
 }
 
-const DEFAULT_WEIGHT_STORE: &str = ".cache/proxima/weights";
+const DEFAULT_WEIGHT_STORE: &str = "~/.cache/proxima/weights";
 const DEFAULT_WEIGHT_STORE_BUDGET_BYTES: u64 = 17_179_869_184;
 const DEFAULT_WEIGHT_STORE_TORN_AGE_SECS: u64 = 3600;
 
@@ -480,18 +484,28 @@ impl Default for ServingSettings {
 }
 
 impl ServingSettings {
-    /// The directory the weight store lives in: the configured one, `~/.cache/proxima/weights` when unset, and `None`
-    /// when the value is empty (off) or the default needs a `$HOME` that is not set. Same contract as omega's
-    /// `kernel_cache_dir`, resolved here because bon refuses a `default` on an `Option` member and the builder, env
-    /// and toml surfaces must keep agreeing on "unset".
+    /// The directory the weight store lives in: the configured one with a leading `~/` expanded, `~/.cache/proxima/weights`
+    /// when unset, and `None` when the value is empty (off) or needs a `$HOME` that is not set, which warns. Same contract
+    /// as omega's `kernel_cache_dir` and the same expansion ([`expand_home`]), resolved here because bon refuses a
+    /// `default` on an `Option` member and the builder, env and toml surfaces must keep agreeing on "unset".
     #[must_use]
-    pub fn weight_store_dir(&self) -> Option<std::path::PathBuf> {
-        match self.weight_store.as_deref() {
-            Some("") => None,
-            Some(configured) => Some(std::path::PathBuf::from(configured)),
-            None => std::env::var_os("HOME")
-                .map(|home| std::path::PathBuf::from(home).join(DEFAULT_WEIGHT_STORE)),
+    pub fn weight_store_dir(&self) -> Option<PathBuf> {
+        self.weight_store_dir_with_home(std::env::var_os("HOME"))
+    }
+
+    fn weight_store_dir_with_home(&self, home: Option<OsString>) -> Option<PathBuf> {
+        let configured = match self.weight_store.as_deref() {
+            Some("") => return None,
+            Some(value) => value,
+            None => DEFAULT_WEIGHT_STORE,
+        };
+        let expanded = expand_home(configured, home);
+        if expanded.is_none() {
+            proxima_telemetry::warn!(
+                "HOME is unset; weight store disabled until PROXIMA_SERVING_WEIGHT_STORE is set"
+            );
         }
+        expanded
     }
 
     /// lowers each rule's target to the on-disk `GgmlType` the recode path binds at;
@@ -1429,20 +1443,19 @@ target = "q8_0"
     }
 
     #[test]
-    fn weight_store_dir_defaults_under_the_home_cache_and_an_empty_value_turns_it_off() {
-        let home = tempfile::tempdir().expect("tempdir for home");
-        let home_path = home.path().to_str().expect("utf8 home");
-        temp_env::with_vars([("HOME", Some(home_path))], || {
-            let unset = ServingSettings::default();
-            assert_eq!(unset.weight_store_dir(), Some(home.path().join(".cache/proxima/weights")));
-            let off = ServingSettings::builder().weight_store(String::new()).build();
-            assert_eq!(off.weight_store_dir(), None, "an empty value is off");
-            let named = ServingSettings::builder().weight_store("/var/cache/proxima/weights".to_owned()).build();
-            assert_eq!(named.weight_store_dir(), Some("/var/cache/proxima/weights".into()));
-        });
-        temp_env::with_vars([("HOME", None::<&str>)], || {
-            assert_eq!(ServingSettings::default().weight_store_dir(), None, "no home, no default");
-        });
+    fn weight_store_dir_expands_a_leading_tilde_defaults_unset_and_turns_an_empty_value_off() {
+        let home = || Some(OsString::from("/home/proxima"));
+        let unset = ServingSettings::default();
+        let tilde = ServingSettings::builder().weight_store("~/stores/weights".to_owned()).build();
+        let off = ServingSettings::builder().weight_store(String::new()).build();
+        let named = ServingSettings::builder().weight_store("/var/cache/proxima/weights".to_owned()).build();
+
+        assert_eq!(unset.weight_store_dir_with_home(home()), Some("/home/proxima/.cache/proxima/weights".into()));
+        assert_eq!(tilde.weight_store_dir_with_home(home()), Some("/home/proxima/stores/weights".into()));
+        assert_eq!(off.weight_store_dir_with_home(home()), None, "an empty value is off");
+        assert_eq!(unset.weight_store_dir_with_home(None), None, "no home, no default");
+        assert_eq!(tilde.weight_store_dir_with_home(None), None, "no home, no expansion");
+        assert_eq!(named.weight_store_dir_with_home(None), Some("/var/cache/proxima/weights".into()), "an absolute path needs no home");
     }
 
     #[test]
