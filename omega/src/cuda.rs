@@ -913,9 +913,21 @@ pub fn same_text_modulo_extents(
     numeric_policy: NumericPolicy,
     device: EmitDevice,
 ) -> bool {
+    same_text_modulo_extents_on_target(Target::CUDA, old, new, packed, numeric_policy, device)
+}
+
+/// [`same_text_modulo_extents`] for an explicit [`Target`].
+pub(crate) fn same_text_modulo_extents_on_target(
+    target: Target,
+    old: &BoundOp,
+    new: &BoundOp,
+    packed: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    device: EmitDevice,
+) -> bool {
     old.dtype == new.dtype
         && project_text_kind(&old.kind) == project_text_kind(&new.kind)
-        && same_text_plan(Target::CUDA, old, new, packed, numeric_policy, device)
+        && same_text_plan(target, old, new, packed, numeric_policy, device)
 }
 
 /// Whether two ops emit the same CUDA C text. Layout stride and base values go

@@ -2823,13 +2823,15 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         let device = self.driver.runtime.emit_device();
         let grid_started = Instant::now();
         if matches!(next.kind, BoundOpKind::CachedAttention { .. }) {
-            let kept = crate::cuda::refit_kernel(
+            let kept = crate::cuda::refit_kernel_on_target(
+                self.driver.runtime.emit_target(),
                 &self.resolved[position],
                 next,
                 &mut self.kernels[position],
                 &self.packed_operands,
                 numeric_policy,
                 device,
+                &OperandDtypes::new(),
             )
             .map_err(emit_error)?;
             if !kept {
@@ -2837,8 +2839,15 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
             }
             follow.attention += elapsed_micros(grid_started);
         } else {
-            crate::cuda::refit_grid(&mut self.kernels[position], next, &self.packed_operands, numeric_policy, device)
-                .map_err(emit_error)?;
+            crate::cuda::refit_grid_on_target(
+                self.driver.runtime.emit_target(),
+                &mut self.kernels[position],
+                next,
+                &self.packed_operands,
+                numeric_policy,
+                device,
+            )
+            .map_err(emit_error)?;
             follow.grid += elapsed_micros(grid_started);
         }
         let uniform_started = Instant::now();
@@ -3031,6 +3040,7 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
     ) -> Result<bool, CudaDriverError> {
         let device = self.driver.runtime.emit_device();
         let packed = &self.packed_operands;
+        let target = self.driver.runtime.emit_target();
         if between.len() != previous.len() || previous.len() != self.resolved.len() {
             return Ok(false);
         }
@@ -3038,7 +3048,7 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
             let current = &self.resolved[position];
             let same_plan = |other: &BoundOp| {
                 between.len() == previous.len()
-                    && crate::cuda::same_text_modulo_extents(other, current, packed, numeric_policy, device)
+                    && crate::cuda::same_text_modulo_extents_on_target(target, other, current, packed, numeric_policy, device)
             };
             let first = same_plan(&previous[position]);
             let second = same_plan(&between[position]);
@@ -3069,7 +3079,8 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
             numeric_policy,
             &self.driver.runtime.executes(),
         );
-        let before = crate::emit_cuda_with_operand_dtypes(
+        let before = crate::cuda::emit_on_target(
+            self.driver.runtime.emit_target(),
             previous,
             &self.packed_operands,
             numeric_policy,
@@ -3124,7 +3135,8 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
                 numeric_policy,
                 &self.driver.runtime.executes(),
             );
-            let text_kept = crate::cuda::refit_kernel_with_operand_dtypes(
+            let text_kept = crate::cuda::refit_kernel_on_target(
+                self.driver.runtime.emit_target(),
                 &previous,
                 &self.resolved[position],
                 &mut self.kernels[position],
@@ -7576,11 +7588,17 @@ mod recording_runtime {
         log: Arc<Mutex<Vec<Event>>>,
         next_buffer: Arc<AtomicU64>,
         compile_counters: Arc<CompileCounters>,
+        target: Target,
     }
 
     impl RecordingRuntime {
         fn new() -> Self {
+            Self::on_target(CudarcRuntime::cuda_target())
+        }
+
+        fn on_target(target: Target) -> Self {
             Self {
+                target,
                 log: Arc::default(),
                 next_buffer: Arc::new(AtomicU64::new(1)),
                 compile_counters: Arc::new(CompileCounters::new(PtxStore::Disabled)),
@@ -7841,11 +7859,11 @@ mod recording_runtime {
         }
 
         fn executes(&self) -> Executes {
-            CudarcRuntime::cuda_grant()
+            cuda_executes(&self.target)
         }
 
         fn emit_target(&self) -> Target {
-            CudarcRuntime::cuda_target()
+            self.target
         }
 
         fn emit_device(&self) -> EmitDevice {
@@ -7939,8 +7957,12 @@ mod recording_runtime {
         /// The shared executor's driver over the recording runtime: the literal
         /// `CudaDriver::<HipRuntime>::open` builds, with a log in place of a device.
         fn recording() -> Self {
+            Self::recording_on(RecordingRuntime::new())
+        }
+
+        fn recording_on(runtime: RecordingRuntime) -> Self {
             Self {
-                runtime: RecordingRuntime::new(),
+                runtime,
                 resident_buffers: Arc::new(Mutex::new(ResidentLedger::default())),
                 packed_upload_bytes: Arc::new(AtomicU64::new(0)),
                 graph_uploads: Arc::new(AtomicU64::new(0)),
@@ -8287,5 +8309,42 @@ mod recording_runtime {
             "the execute after a replacement launches a function built from the new source"
         );
         assert!(!plan.replace_kernel_source(usize::MAX, String::new()), "an absent position replaces nothing");
+    }
+
+    #[test]
+    fn a_hip_target_runtime_emits_refits_and_compares_text_in_its_own_dialect() {
+        let (program, out) = two_layer_program();
+        let weight_first = weight_values((HIDDEN * INPUT) as usize, 1.0);
+        let weight_second = weight_values((OUTPUT * HIDDEN) as usize, 7.0);
+        let activation = weight_values(INPUT as usize, 3.0);
+        let named = named_blocks(&weight_first, &weight_second, &activation);
+        let driver = CudaDriver::<RecordingRuntime>::recording_on(RecordingRuntime::on_target(Target::hip_wave(64)));
+        let mut plan = driver
+            .plan_with_config(&program, &[], &[out], &named, &RuntimeConfig::default())
+            .expect("the recording driver plans the two-layer program under a HIP target");
+        let policy = plan.numeric_policy;
+        let device = driver.runtime.emit_device();
+        let cuda_differs = (0..plan.resolved.len()).any(|position| {
+            let cuda = crate::cuda::emit_on_target(Target::CUDA, &plan.resolved[position], &plan.packed_operands, policy, device, &OperandDtypes::new())
+                .expect("the op emits as CUDA too");
+            cuda.source != plan.kernels[position].source
+        });
+
+        assert!(cuda_differs, "the plan's kernels are HIP text, which CUDA emission does not reproduce");
+        for position in 0..plan.resolved.len() {
+            let previous = plan.resolved[position].clone();
+            assert!(
+                plan.emits_same_text(&previous, position, policy).expect("the op re-emits"),
+                "position {position}: the comparison emits under the runtime's HIP target, so it matches the plan's own text"
+            );
+        }
+        let before: Vec<String> = plan.kernels.iter().map(|kernel| kernel.source.clone()).collect();
+        let bound = plan.resolved.clone();
+        for (position, next) in bound.iter().enumerate() {
+            plan.follow_rows(position, next, policy, &mut FollowMicros::default())
+                .expect("a HIP plan refits its grid under its own target");
+        }
+        let after: Vec<String> = plan.kernels.iter().map(|kernel| kernel.source.clone()).collect();
+        assert_eq!(before, after, "refitting an unchanged op keeps its HIP text");
     }
 }
