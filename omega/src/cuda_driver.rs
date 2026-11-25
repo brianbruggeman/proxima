@@ -3365,10 +3365,14 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
 
     #[must_use]
     pub fn replace_kernel_source(&mut self, position: usize, source: String) -> bool {
-        self.kernels
-            .get_mut(position)
-            .map(|kernel| kernel.source = source)
-            .is_some()
+        let Some(kernel) = self.kernels.get_mut(position) else {
+            return false;
+        };
+        kernel.source = source;
+        if let Some(function) = self.functions.get_mut(position) {
+            *function = None;
+        }
+        true
     }
 
     #[must_use]
@@ -7204,6 +7208,7 @@ mod recording_runtime {
         },
         Launch {
             entry: String,
+            source: String,
             arguments: Vec<Argument>,
         },
         Synchronize,
@@ -7301,9 +7306,12 @@ mod recording_runtime {
     #[derive(Debug, Clone)]
     struct RecordingFunction {
         entry: String,
+        source: String,
     }
 
-    struct RecordingModule;
+    struct RecordingModule {
+        source: String,
+    }
 
     struct RecordingLaunch<'launch> {
         function: &'launch RecordingFunction,
@@ -7450,6 +7458,7 @@ mod recording_runtime {
         ) -> Result<RecordingFunction, RecordingFailure> {
             Ok(RecordingFunction {
                 entry: kernel.entry.clone(),
+                source: kernel.source.clone(),
             })
         }
 
@@ -7457,17 +7466,18 @@ mod recording_runtime {
             source.to_owned()
         }
 
-        fn load_module(&self, _image: String) -> Result<Arc<RecordingModule>, RecordingFailure> {
-            Ok(Arc::new(RecordingModule))
+        fn load_module(&self, image: String) -> Result<Arc<RecordingModule>, RecordingFailure> {
+            Ok(Arc::new(RecordingModule { source: image }))
         }
 
         fn load_function(
             &self,
-            _module: &Arc<RecordingModule>,
+            module: &Arc<RecordingModule>,
             entry: &str,
         ) -> Result<RecordingFunction, RecordingFailure> {
             Ok(RecordingFunction {
                 entry: entry.to_owned(),
+                source: module.source.clone(),
             })
         }
 
@@ -7485,6 +7495,7 @@ mod recording_runtime {
         ) -> Result<(), RecordingFailure> {
             self.record(Event::Launch {
                 entry: arguments.function.entry.clone(),
+                source: arguments.function.source.clone(),
                 arguments: arguments.arguments,
             });
             Ok(())
@@ -7678,6 +7689,21 @@ mod recording_runtime {
             .collect()
     }
 
+    fn named_blocks<'block, Value>(
+        weight_first: &'block [Value],
+        weight_second: &'block [Value],
+        activation: &'block [Value],
+    ) -> [(&'static str, QuantizedBlock<'block>); 3]
+    where
+        QuantizedBlock<'block>: From<&'block [Value]>,
+    {
+        [
+            ("w0", QuantizedBlock::from(weight_first)),
+            ("w1", QuantizedBlock::from(weight_second)),
+            ("x", QuantizedBlock::from(activation)),
+        ]
+    }
+
     fn uploads_of(events: &[Event], bytes: usize) -> usize {
         events.iter().filter(|event| matches!(event, Event::Upload { bytes: found, .. } | Event::UploadInPlace { bytes: found, .. } if *found == bytes)).count()
     }
@@ -7699,11 +7725,7 @@ mod recording_runtime {
         let weight_first = weight_values((HIDDEN * INPUT) as usize, 1.0);
         let weight_second = weight_values((OUTPUT * HIDDEN) as usize, 7.0);
         let activation = weight_values(INPUT as usize, 3.0);
-        let named = [
-            ("w0", QuantizedBlock::Float32(&weight_first)),
-            ("w1", QuantizedBlock::Float32(&weight_second)),
-            ("x", QuantizedBlock::Float32(&activation)),
-        ];
+        let named = named_blocks(&weight_first, &weight_second, &activation);
         let driver = CudaDriver::<RecordingRuntime>::recording();
         let mut plan = driver
             .plan_with_config(&program, &[], &[out], &named, &RuntimeConfig::default())
@@ -7840,14 +7862,6 @@ mod recording_runtime {
         );
     }
 
-    fn named_blocks<'a, Block: Into<QuantizedBlock<'a>>>(
-        first: Block,
-        second: Block,
-        activation: Block,
-    ) -> [(&'static str, QuantizedBlock<'a>); 3] {
-        [("w0", first.into()), ("w1", second.into()), ("x", activation.into())]
-    }
-
     #[test]
     fn two_named_plans_on_one_driver_upload_each_weight_once_in_total() {
         let (program, out) = two_layer_program();
@@ -7894,5 +7908,45 @@ mod recording_runtime {
         for bytes in [size_of_val(weight_first.as_slice()), size_of_val(weight_second.as_slice())] {
             assert_eq!(uploads_of(&after[before..], bytes), 0, "refit uploads no {bytes}-byte weight");
         }
+    }
+
+    fn launched_sources(events: &[Event]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Launch { source, .. } => Some(source.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_kernel_source_replaced_after_the_first_execute_is_the_one_the_next_execute_launches() {
+        let (program, out) = two_layer_program();
+        let weight_first = weight_values((HIDDEN * INPUT) as usize, 1.0);
+        let weight_second = weight_values((OUTPUT * HIDDEN) as usize, 7.0);
+        let activation = weight_values(INPUT as usize, 3.0);
+        let named = named_blocks(&weight_first, &weight_second, &activation);
+        let driver = CudaDriver::<RecordingRuntime>::recording();
+        let mut plan = driver
+            .plan_with_config(&program, &[], &[out], &named, &RuntimeConfig::default())
+            .expect("the recording driver plans the two-layer program");
+        let original = plan.kernels[0].source.clone();
+        let replacement = format!("{original}\n// refit text");
+
+        plan.execute_named(&named, None).expect("the first execute runs");
+        let first = driver.events();
+        assert!(plan.replace_kernel_source(0, replacement.clone()), "position 0 exists");
+        plan.execute_named(&named, None).expect("the second execute runs");
+        let all = driver.events();
+        let second = &all[first.len()..];
+
+        assert_eq!(launched_sources(&first)[0], original, "the first execute launches the planned source");
+        assert_eq!(
+            launched_sources(second)[0],
+            replacement,
+            "the execute after a replacement launches a function built from the new source"
+        );
+        assert!(!plan.replace_kernel_source(usize::MAX, String::new()), "an absent position replaces nothing");
     }
 }
