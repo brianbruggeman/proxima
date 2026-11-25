@@ -70,6 +70,8 @@ pub mod cuda_layout;
 pub mod cuda_encode;
 #[cfg(feature = "cuda-driver")]
 pub mod cuda_driver;
+#[cfg(feature = "cuda-driver")]
+pub mod gpu_runtime;
 #[cfg(feature = "alloc")]
 pub mod kernel_params;
 #[cfg(feature = "cuda-driver")]

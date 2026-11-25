@@ -23,6 +23,7 @@ use cudarc::driver::{
     CudaContext, CudaEvent, CudaFunction, CudaModule, CudaSlice, CudaStream, CudaView, CudaViewMut, DriverError, LaunchArgs,
     LaunchConfig, PushKernelArg,
 };
+use crate::gpu_runtime::{CudarcRuntime, GpuRuntime};
 use crate::encode_render::{EncodeRows, RenderedEncode, row_bytes};
 use cudarc::nvrtc::sys as nvrtc_sys;
 use cudarc::nvrtc::result as nvrtc_result;
@@ -259,6 +260,7 @@ pub struct CudaDriver {
     context: Arc<CudaContext>,
     device: EmitDevice,
     stream: Arc<CudaStream>,
+    runtime: CudarcRuntime,
     // synchronous ffi callers share these short cache mutations; compilation and dispatch happen outside the guard.
     modules: Arc<Mutex<BTreeMap<String, Vec<CachedCudaModule>>>>,
     resident_buffers: Arc<Mutex<ResidentBuffers>>,
@@ -691,6 +693,7 @@ impl CudaDriver {
         );
         Ok(Self {
             context,
+            runtime: CudarcRuntime::new(Arc::clone(&stream)),
             stream,
             device,
             modules: Arc::new(Mutex::new(BTreeMap::new())),
@@ -1365,11 +1368,11 @@ impl CudaDriver {
         if let Some(CudaGraphBuffer::F32(buffer)) = arena.buffers.get_mut(&node)
             && buffer.len() == values.len()
         {
-            self.stream.memcpy_htod(values, buffer)?;
+            self.runtime.upload_into(values, buffer)?;
             self.graph_uploads.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
-        let buffer = self.stream.clone_htod(values)?;
+        let buffer = self.runtime.upload(values)?;
         self.graph_uploads.fetch_add(1, Ordering::Relaxed);
         arena.buffers.insert(node, CudaGraphBuffer::F32(buffer));
         arena.allocations += 1;
@@ -1390,11 +1393,11 @@ impl CudaDriver {
             && shared.len() == values.len()
             && let Some(buffer) = Arc::get_mut(shared)
         {
-            self.stream.memcpy_htod(values, buffer)?;
+            self.runtime.upload_into(values, buffer)?;
             self.graph_uploads.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
-        let buffer = self.stream.clone_htod(values)?;
+        let buffer = self.runtime.upload(values)?;
         self.graph_uploads.fetch_add(1, Ordering::Relaxed);
         arena
             .buffers
@@ -1421,11 +1424,10 @@ impl CudaDriver {
         self.packed_upload_bytes
             .fetch_add(total as u64, Ordering::Relaxed);
         crate::backend::record_block_copied(total as u64);
-        let mut buffer = self.stream.alloc_zeros::<u8>(total)?;
+        let mut buffer = self.runtime.alloc_zeros::<u8>(total)?;
         let mut offset = 0;
         for run in runs {
-            let mut slot = buffer.slice_mut(offset..offset + run.len());
-            self.stream.memcpy_htod(run, &mut slot)?;
+            self.runtime.upload_at(run, &mut buffer, offset)?;
             offset += run.len();
         }
         self.graph_uploads.fetch_add(1, Ordering::Relaxed);
@@ -1452,13 +1454,13 @@ impl CudaDriver {
             if arena.uniform_host.get(&node).is_some_and(|held| held == values) {
                 return Ok(());
             }
-            self.stream.memcpy_htod(values, buffer)?;
+            self.runtime.upload_into(values, buffer)?;
             self.graph_uploads.fetch_add(1, Ordering::Relaxed);
             arena.launch_profile.uniform_uploads += 1;
             arena.uniform_host.insert(node, values.to_vec());
             return Ok(());
         }
-        let buffer = self.stream.clone_htod(values)?;
+        let buffer = self.runtime.upload(values)?;
         self.graph_uploads.fetch_add(1, Ordering::Relaxed);
         arena.uniform_host.insert(node, values.to_vec());
         arena.uniforms.insert(node, buffer);
@@ -1478,7 +1480,7 @@ impl CudaDriver {
             arena.allocations += 1;
             arena.buffers.insert(
                 node,
-                CudaGraphBuffer::F32(self.stream.alloc_zeros::<f32>(0)?),
+                CudaGraphBuffer::F32(self.runtime.alloc_zeros::<f32>(0)?),
             );
             return Ok(());
         }
@@ -1503,10 +1505,10 @@ impl CudaDriver {
             return Ok(());
         }
         let buffer = if output_len == 0 {
-            self.stream.alloc_zeros::<f32>(0)?
+            self.runtime.alloc_zeros::<f32>(0)?
         } else {
             let values = vec![value; output_len];
-            let buffer = self.stream.clone_htod(&values)?;
+            let buffer = self.runtime.upload(values.as_slice())?;
             self.graph_uploads.fetch_add(1, Ordering::Relaxed);
             buffer
         };
@@ -1535,9 +1537,9 @@ impl CudaDriver {
             u32::try_from(input.len()).map_err(|_| CudaDriverError::InputTooLarge(input.len()))?;
         let function =
             self.precompiled_function("smoke_add_one", "proxima_add_one", PRECOMPILED_ADD_ONE_PTX)?;
-        let device_input = self.stream.clone_htod(input)?;
-        let mut device_output = self.stream.alloc_zeros::<f32>(input.len())?;
-        let device_uniforms = self.stream.clone_htod(&n.to_ne_bytes())?;
+        let device_input = self.runtime.upload(input)?;
+        let mut device_output = self.runtime.alloc_zeros::<f32>(input.len())?;
+        let device_uniforms = self.runtime.upload::<u8>(&n.to_ne_bytes())?;
         let mut args = self.stream.launch_builder(&function);
         args.arg(&device_input);
         args.arg(&mut device_output);
@@ -1549,8 +1551,8 @@ impl CudaDriver {
                 shared_mem_bytes: 0,
             })
         }?;
-        self.stream.synchronize()?;
-        Ok(self.stream.clone_dtoh(&device_output)?)
+        self.runtime.synchronize()?;
+        Ok(self.runtime.download(&device_output)?)
     }
 
     /// Runs two add-one dispatches through one persistent arena. The returned
@@ -1567,7 +1569,7 @@ impl CudaDriver {
         let mut arena = self.new_arena();
         arena.buffers.insert(
             NodeId(0),
-            CudaGraphBuffer::F32(self.stream.clone_htod(input)?),
+            CudaGraphBuffer::F32(self.runtime.upload(input)?),
         );
         arena.allocations = 1;
         let first = add_one_kernel(NodeId(0), NodeId(1), input.len())?;
@@ -1609,10 +1611,10 @@ impl CudaDriver {
         let function = self.function_for(kernel)?;
         let device_inputs = inputs
             .iter()
-            .map(|input| self.stream.clone_htod(*input))
+            .map(|input| self.runtime.upload(input))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut device_output = self.stream.alloc_zeros::<f32>(output_len)?;
-        let device_uniforms = self.stream.clone_htod(uniforms)?;
+        let mut device_output = self.runtime.alloc_zeros::<f32>(output_len)?;
+        let device_uniforms = self.runtime.upload(uniforms)?;
         let config = LaunchConfig {
             grid_dim: (launch_blocks(&kernel.grid)?, 1, 1),
             block_dim: (kernel.grid.block_width_or_default() as u32, 1, 1),
@@ -1625,8 +1627,8 @@ impl CudaDriver {
         args.arg(&mut device_output);
         args.arg(&device_uniforms);
         unsafe { args.launch(config) }?;
-        self.stream.synchronize()?;
-        Ok(self.stream.clone_dtoh(&device_output)?)
+        self.runtime.synchronize()?;
+        Ok(self.runtime.download(&device_output)?)
     }
 
     /// Dispatches a kernel against persistent arena buffers. Inputs and the
@@ -1819,11 +1821,11 @@ impl CudaDriver {
             None => {
                 arena.allocations += 1;
                 arena.launch_profile.output_allocs += 1;
-                self.stream.alloc_zeros::<f32>(output_len)?
+                self.runtime.alloc_zeros::<f32>(output_len)?
             }
         };
         if device_output.len() != output_len {
-            let replacement = match self.stream.alloc_zeros::<f32>(output_len) {
+            let replacement = match self.runtime.alloc_zeros::<f32>(output_len) {
                 Ok(buffer) => buffer,
                 Err(error) => {
                     arena
@@ -1854,7 +1856,7 @@ impl CudaDriver {
             .filter(|binding| matches!(binding, Binding::Indices(_)))
             .count();
         let mut fault_buffer = (fault_count > 0 && deferred_fault.is_none())
-            .then(|| self.stream.alloc_zeros::<u32>(gather_slots))
+            .then(|| self.runtime.alloc_zeros::<u32>(gather_slots))
             .transpose()?;
         let fault_window =
             deferred_fault.map(|(array, offset, slots)| array.slice(offset..offset + slots));
@@ -1916,14 +1918,14 @@ impl CudaDriver {
         }
         self.graph_launches.fetch_add(1, Ordering::Relaxed);
         if synchronize {
-            if let Err(error) = self.stream.synchronize() {
+            if let Err(error) = self.runtime.synchronize() {
                 arena
                     .buffers
                     .insert(output_node, CudaGraphBuffer::F32(device_output));
                 return Err(error.into());
             }
             if let Some(fault_buffer) = fault_buffer.take() {
-                let faults = self.stream.clone_dtoh(&fault_buffer)?;
+                let faults = self.runtime.download(&fault_buffer)?;
                 if let Some(slot) = faults.iter().position(|value| *value != 0) {
                     let index = i32::from_ne_bytes(faults[slot].to_ne_bytes()) as i64;
                     arena
@@ -1954,7 +1956,7 @@ impl CudaDriver {
         }
         match held.remove(&node) {
             Some(buffer) if buffer.len() == words => Ok(Some(buffer)),
-            Some(_) | None => Ok(Some(self.stream.alloc_zeros::<u32>(words)?)),
+            Some(_) | None => Ok(Some(self.runtime.alloc_zeros::<u32>(words)?)),
         }
     }
 
@@ -2008,7 +2010,7 @@ impl CudaDriver {
             Some(CudaGraphBuffer::F32(_)) | None => {
                 arena.allocations += 1;
                 arena.launch_profile.extra_allocs += 1;
-                Ok(self.stream.alloc_zeros::<f32>(length)?)
+                Ok(self.runtime.alloc_zeros::<f32>(length)?)
             }
         }
     }
@@ -2041,7 +2043,7 @@ impl CudaDriver {
         let CudaGraphBuffer::F32(buffer) = buffer else {
             return Err(CudaDriverError::BindingContract);
         };
-        Ok(self.stream.clone_dtoh(buffer)?)
+        Ok(self.runtime.download(buffer)?)
     }
 }
 
@@ -3422,7 +3424,7 @@ impl CudaPlan {
         let CudaGraphBuffer::F32(slice) = buffer else {
             return Err(CudaDriverError::BindingContract);
         };
-        let values = self.driver.stream.clone_dtoh(&slice)?;
+        let values = self.driver.runtime.download(&slice)?;
         self.carry.host_bytes += (values.len() * std::mem::size_of::<f32>()) as u64;
         Ok((output, values))
     }
@@ -3583,7 +3585,7 @@ impl CudaPlan {
             return Err(CudaDriverError::BindingContract);
         };
         let valid = (valid_rows * row_width) as usize;
-        let values = self.driver.stream.clone_dtoh(&slice.slice(0..valid))?;
+        let values = self.driver.runtime.download_range(&slice, 0..valid)?;
         self.carry.host_bytes += (values.len() * std::mem::size_of::<f32>()) as u64;
         Ok((input, values))
     }
@@ -3641,12 +3643,10 @@ impl CudaPlan {
         let Some(CudaGraphBuffer::F32(current)) = self.arena.buffers.get(&input) else {
             return Err(CudaDriverError::MissingBuffer(input));
         };
-        let mut grown = self.driver.stream.alloc_zeros::<f32>(to_elements)?;
+        let mut grown = self.driver.runtime.alloc_zeros::<f32>(to_elements)?;
         let preserved = keep_elements.min(current.len());
         if preserved > 0 {
-            self.driver
-                .stream
-                .memcpy_dtod(&current.slice(0..preserved), &mut grown.slice_mut(0..preserved))?;
+            self.driver.runtime.copy_range(current, 0..preserved, &mut grown, 0)?;
         }
         self.arena.allocations += 1;
         self.arena.buffers.insert(input, CudaGraphBuffer::F32(grown));
@@ -3974,7 +3974,7 @@ impl CudaPlan {
             .last()
             .map_or(0, |(_, offset, slots)| offset + slots);
         let fault_array = (fault_total > 0)
-            .then(|| self.driver.stream.alloc_zeros::<u32>(fault_total))
+            .then(|| self.driver.runtime.alloc_zeros::<u32>(fault_total))
             .transpose()?;
         let event_timing = std::env::var_os("PROXIMA_CUDA_EVENT_TIMING").is_some();
         let mut event_rows: Vec<(NodeId, String, usize, CudaEvent)> = Vec::new();
@@ -4043,7 +4043,7 @@ impl CudaPlan {
                     self.arena.allocations += 1;
                     self.arena.buffers.insert(
                         bound.node,
-                        CudaGraphBuffer::F32(self.driver.stream.alloc_zeros::<f32>(0)?),
+                        CudaGraphBuffer::F32(self.driver.runtime.alloc_zeros::<f32>(0)?),
                     );
                 }
             } else if let BoundOpKind::Constant { value } = bound.kind {
@@ -4170,10 +4170,10 @@ impl CudaPlan {
         let submit_us = elapsed_micros(submit_started);
         let sync_phase_started = Instant::now();
         let sync_started = host_timing.then(std::time::Instant::now);
-        self.driver.stream.synchronize()?;
+        self.driver.runtime.synchronize()?;
         let sync_us = elapsed_micros(sync_phase_started);
         if let Some(array) = &fault_array {
-            let faults = self.driver.stream.clone_dtoh(array)?;
+            let faults = self.driver.runtime.download(array)?;
             for (node, offset, slots) in &fault_windows {
                 let window = &faults[*offset..*offset + *slots];
                 if let Some(slot) = window.iter().position(|value| *value != 0) {
