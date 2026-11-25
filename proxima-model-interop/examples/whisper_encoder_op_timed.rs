@@ -33,9 +33,13 @@ mod run {
     use proxima_model_interop::ServingSettings;
     use proxima_model_interop::audio::wav;
     use proxima_model_interop::families::encoder_decoder_host::Model;
+    use proxima_numeric::NumericPolicy;
     use proxima_tensor::instrument::ticks_to_nanos;
 
-    const GPU_TIMED: bool = cfg!(any(feature = "cuda", all(feature = "metal", target_os = "macos")));
+    const GPU_TIMED: bool = cfg!(any(
+        feature = "cuda",
+        all(feature = "metal", target_os = "macos")
+    ));
 
     fn median(sorted: &[u64]) -> u64 {
         let middle = sorted.len() / 2;
@@ -50,6 +54,7 @@ mod run {
         let mut wav_path: Option<PathBuf> = None;
         let mut model_path: Option<PathBuf> = None;
         let mut passes: usize = 5;
+        let mut cpu_policy: Option<String> = None;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -62,6 +67,12 @@ mod run {
                         .parse()
                         .context("--passes wants a positive integer")?;
                 }
+                "--cpu-policy" => {
+                    cpu_policy = Some(
+                        args.next()
+                            .context("--cpu-policy wants relaxed or approx")?,
+                    );
+                }
                 other => bail!("unknown argument {other}"),
             }
         }
@@ -69,13 +80,26 @@ mod run {
             bail!("--passes must be at least 1");
         }
         let audio = wav::read(&wav_path.context("--wav is required")?)?;
-        let settings =
+        let mut settings =
             <ServingSettings as Settings>::from_env().context("serving settings from env")?;
+        match cpu_policy.as_deref() {
+            None => {}
+            Some("relaxed") => settings.numeric_policy = NumericPolicy::llama_relaxed(),
+            Some("approx") => {
+                settings.numeric_policy =
+                    NumericPolicy::llama_relaxed().with_approx_functions(true);
+            }
+            Some(other) => bail!("--cpu-policy wants relaxed or approx, not {other}"),
+        }
         let on_gpu = settings.gpu_layers != 0 && GPU_TIMED;
         let model =
             Model::load(&model_path.context("--model is required")?)?.with_settings(settings);
         #[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
-        let model = if on_gpu { model.with_op_timings() } else { model };
+        let model = if on_gpu {
+            model.with_op_timings()
+        } else {
+            model
+        };
         let mut transcript = None;
         #[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
         let mut last_run_steps = 0;
