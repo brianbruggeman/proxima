@@ -21,9 +21,9 @@ use conflaguration::Settings;
 use cudarc::driver::sys as cuda_sys;
 use cudarc::driver::{
     CudaContext, CudaEvent, CudaFunction, CudaModule, CudaSlice, CudaStream, CudaView, CudaViewMut, DriverError, LaunchArgs,
-    LaunchConfig, PushKernelArg,
+    PushKernelArg,
 };
-use crate::gpu_runtime::{CudarcRuntime, GpuRuntime};
+use crate::gpu_runtime::{CudarcRuntime, GpuRuntime, LaunchShape};
 use crate::encode_render::{EncodeRows, RenderedEncode, row_bytes};
 use cudarc::nvrtc::sys as nvrtc_sys;
 use cudarc::nvrtc::result as nvrtc_result;
@@ -259,7 +259,6 @@ enum Completion<'fault> {
 pub struct CudaDriver {
     context: Arc<CudaContext>,
     device: EmitDevice,
-    stream: Arc<CudaStream>,
     runtime: CudarcRuntime,
     // synchronous ffi callers share these short cache mutations; compilation and dispatch happen outside the guard.
     modules: Arc<Mutex<BTreeMap<String, Vec<CachedCudaModule>>>>,
@@ -692,9 +691,8 @@ impl CudaDriver {
             "cuda driver created"
         );
         Ok(Self {
+            runtime: CudarcRuntime::new(Arc::clone(&context), Arc::clone(&stream)),
             context,
-            runtime: CudarcRuntime::new(Arc::clone(&stream)),
-            stream,
             device,
             modules: Arc::new(Mutex::new(BTreeMap::new())),
             resident_buffers: Arc::new(Mutex::new(ResidentLedger::default())),
@@ -844,16 +842,16 @@ impl CudaDriver {
         let kernel = encode_kernel(rendered, threads)?;
         let function = self.function_for(&kernel)?;
         let mut window = destination.slice_mut(range);
-        let mut args = self.stream.launch_builder(&function);
+        let mut args = self.runtime.launch_arguments(&function);
         args.arg(source);
         args.arg(&mut window);
         args.arg(&count);
-        let config = LaunchConfig {
+        let config = LaunchShape {
             grid_dim: (launch_blocks(&kernel.grid)?, 1, 1),
             block_dim: (kernel.grid.block_width_or_default() as u32, 1, 1),
             shared_mem_bytes: 0,
         };
-        unsafe { args.launch(config) }?;
+        unsafe { self.runtime.launch(args, config) }?;
         Ok(())
     }
 
@@ -912,7 +910,7 @@ impl CudaDriver {
         let nvrtc_us = elapsed_micros(nvrtc_started);
         store_ptx(&self.compile_counters.disk_store, &key, &ptx);
         let load_started = Instant::now();
-        let module = self.context.load_module(ptx)?;
+        let module = self.runtime.load_module(ptx)?;
         let load_us = elapsed_micros(load_started);
         self.record_compile(&kernel.entry, kernel.source.len(), nvrtc_us, load_us);
         Ok(module)
@@ -933,7 +931,7 @@ impl CudaDriver {
 
     fn timed_load_module(&self, image: Ptx) -> Result<Arc<CudaModule>, CudaDriverError> {
         let started = Instant::now();
-        let module = self.context.load_module(image);
+        let module = self.runtime.load_module(image);
         CompileCounters::add(&self.compile_counters.module_load_micros, started);
         Ok(module?)
     }
@@ -1068,7 +1066,7 @@ impl CudaDriver {
             None => build_module()?,
         };
         let load_started = Instant::now();
-        let function = module.load_function(entry);
+        let function = self.runtime.load_function(&module, entry);
         CompileCounters::add(&self.compile_counters.function_load_micros, load_started);
         let function = function?;
         proxima_telemetry::debug!(
@@ -1119,7 +1117,7 @@ impl CudaDriver {
     ) -> Result<CudaFunction, CudaDriverError> {
         let cache_key = format!("ptx:{module_key}");
         self.cached_function(&cache_key, entry, ptx_source, || {
-            let module = self.context.load_module(Ptx::from_src(ptx_source))?;
+            let module = self.runtime.load_module(CudarcRuntime::image_from_source(ptx_source))?;
             self.compile_counters
                 .compilations
                 .fetch_add(1, Ordering::Relaxed);
@@ -1540,12 +1538,12 @@ impl CudaDriver {
         let device_input = self.runtime.upload(input)?;
         let mut device_output = self.runtime.alloc_zeros::<f32>(input.len())?;
         let device_uniforms = self.runtime.upload::<u8>(&n.to_ne_bytes())?;
-        let mut args = self.stream.launch_builder(&function);
+        let mut args = self.runtime.launch_arguments(&function);
         args.arg(&device_input);
         args.arg(&mut device_output);
         args.arg(&device_uniforms);
         unsafe {
-            args.launch(LaunchConfig {
+            self.runtime.launch(args, LaunchShape {
                 grid_dim: ((input.len() as u32).div_ceil(256), 1, 1),
                 block_dim: (256, 1, 1),
                 shared_mem_bytes: 0,
@@ -1615,18 +1613,18 @@ impl CudaDriver {
             .collect::<Result<Vec<_>, _>>()?;
         let mut device_output = self.runtime.alloc_zeros::<f32>(output_len)?;
         let device_uniforms = self.runtime.upload(uniforms)?;
-        let config = LaunchConfig {
+        let config = LaunchShape {
             grid_dim: (launch_blocks(&kernel.grid)?, 1, 1),
             block_dim: (kernel.grid.block_width_or_default() as u32, 1, 1),
             shared_mem_bytes: 0,
         };
-        let mut args = self.stream.launch_builder(&function);
+        let mut args = self.runtime.launch_arguments(&function);
         for input in &device_inputs {
             args.arg(input);
         }
         args.arg(&mut device_output);
         args.arg(&device_uniforms);
-        unsafe { args.launch(config) }?;
+        unsafe { self.runtime.launch(args, config) }?;
         self.runtime.synchronize()?;
         Ok(self.runtime.download(&device_output)?)
     }
@@ -1845,7 +1843,7 @@ impl CudaDriver {
                 .insert(output_node, CudaGraphBuffer::F32(device_output));
             return Err(CudaDriverError::BindingContract);
         }
-        let config = LaunchConfig {
+        let config = LaunchShape {
             grid_dim: (launch_blocks(&kernel.grid)?, 1, 1),
             block_dim: (kernel.grid.block_width_or_default() as u32, 1, 1),
             shared_mem_bytes: 0,
@@ -1870,7 +1868,7 @@ impl CudaDriver {
             }
             None => Ok(()),
         };
-        let mut args = self.stream.launch_builder(function);
+        let mut args = self.runtime.launch_arguments(function);
         for binding in &kernel.bindings[..output_index] {
             match binding {
                 Binding::Input(node) | Binding::Indices(node) => match arena.buffers.get(node) {
@@ -1904,7 +1902,7 @@ impl CudaDriver {
             args.arg(buffer);
         }
         arena.launch_profile.mark(4, &mut lap);
-        let launch_result = prepass_result.and_then(|()| unsafe { args.launch(config) }.map_err(CudaDriverError::from));
+        let launch_result = prepass_result.and_then(|()| unsafe { self.runtime.launch(args, config) }.map_err(CudaDriverError::from));
         if let Some(buffer) = route_buffer.take() {
             arena.route_compaction.insert(output_node, buffer);
         }
@@ -1975,12 +1973,12 @@ impl CudaDriver {
             return Err(CudaDriverError::BindingContract);
         };
         let function = self.function_for(prepass)?;
-        let config = LaunchConfig {
+        let config = LaunchShape {
             grid_dim: (launch_blocks(&prepass.grid)?, 1, 1),
             block_dim: (prepass.grid.block_width_or_default() as u32, 1, 1),
             shared_mem_bytes: 0,
         };
-        let mut args = self.stream.launch_builder(&function);
+        let mut args = self.runtime.launch_arguments(&function);
         for binding in &prepass.bindings {
             match binding {
                 Binding::Indices(node) => match buffers.get(node) {
@@ -1993,7 +1991,7 @@ impl CudaDriver {
             };
         }
         args.arg(compaction);
-        unsafe { args.launch(config) }?;
+        unsafe { self.runtime.launch(args, config) }?;
         self.graph_launches.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -3979,7 +3977,7 @@ impl CudaPlan {
         let event_timing = std::env::var_os("PROXIMA_CUDA_EVENT_TIMING").is_some();
         let mut event_rows: Vec<(NodeId, String, usize, CudaEvent)> = Vec::new();
         let event_origin = event_timing
-            .then(|| self.driver.record_event(&self.driver.stream))
+            .then(|| self.driver.record_event(self.driver.runtime.stream()))
             .transpose()?;
         self.arena.launch_profile = LaunchProfile {
             enabled: host_timing,
@@ -4073,7 +4071,7 @@ impl CudaPlan {
                 };
                 let start_event = op_events
                     .as_ref()
-                    .map(|_| self.driver.record_event(&self.driver.stream))
+                    .map(|_| self.driver.record_event(self.driver.runtime.stream()))
                     .transpose()?;
                 let launch = if timing {
                     self.driver.launch_f32_persistent_sized(
@@ -4105,7 +4103,7 @@ impl CudaPlan {
                     },
                 })?;
                 if let (Some(events), Some(start)) = (op_events.as_deref_mut(), start_event) {
-                    let end = self.driver.record_event(&self.driver.stream)?;
+                    let end = self.driver.record_event(self.driver.runtime.stream())?;
                     events.push(LaunchEvents {
                         position,
                         start,
@@ -4122,7 +4120,7 @@ impl CudaPlan {
                     ));
                 }
                 if event_timing {
-                    let event = self.driver.record_event(&self.driver.stream)?;
+                    let event = self.driver.record_event(self.driver.runtime.stream())?;
                     event_rows.push((bound.node, format!("{}:{}", bound.kind.name(), kernel.entry), output_len, event));
                 }
             }
@@ -4513,11 +4511,12 @@ fn launch_blocks(grid: &CudaGridSpec) -> Result<u32, CudaDriverError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CudaDriver, CudaDriverError, CudaFunction, LaunchConfig, PRECOMPILED_ADD_ONE_PTX,
+        CudaDriver, CudaDriverError, CudaFunction, PRECOMPILED_ADD_ONE_PTX,
         PushKernelArg, add_one_kernel, cached_ptx, launch_blocks, packed_bytes, packed_codec,
         resolve_cuda_include_dir, store_ptx, validate_cuda_dtype,
     };
     use crate::cuda::CudaGridSpec;
+    use cudarc::driver::LaunchConfig;
     use crate::cuda_kernel_cache::CacheKey;
     use crate::cuda_ptx_store::PtxStore;
     use crate::lowering::Codec;
@@ -4839,16 +4838,16 @@ mod tests {
     }
 
     fn run_ptx(driver: &CudaDriver, function: &CudaFunction) -> Vec<f32> {
-        let device_input = driver.stream.clone_htod(&INPUT).expect("upload input");
+        let device_input = driver.runtime.stream().clone_htod(&INPUT).expect("upload input");
         let mut device_output = driver
-            .stream
+            .runtime.stream()
             .alloc_zeros::<f32>(INPUT.len())
             .expect("alloc output");
         let device_uniforms = driver
-            .stream
+            .runtime.stream()
             .clone_htod(&3u32.to_ne_bytes())
             .expect("upload uniforms");
-        let mut args = driver.stream.launch_builder(function);
+        let mut args = driver.runtime.stream().launch_builder(function);
         args.arg(&device_input);
         args.arg(&mut device_output);
         args.arg(&device_uniforms);
@@ -4858,9 +4857,9 @@ mod tests {
             shared_mem_bytes: 0,
         };
         unsafe { args.launch(config) }.expect("ptx launch");
-        driver.stream.synchronize().expect("ptx sync");
+        driver.runtime.stream().synchronize().expect("ptx sync");
         driver
-            .stream
+            .runtime.stream()
             .clone_dtoh(&device_output)
             .expect("ptx readback")
     }
@@ -5243,11 +5242,11 @@ mod tests {
             codec.encode(&values, &mut expected).expect("the host encodes");
 
             let rows = EncodeRows { element_count: values.len(), byte_offset: offset };
-            let source = driver.stream.clone_htod(&values).expect("upload rows");
-            let mut destination = driver.stream.clone_htod(&vec![guard_byte; offset + expected.len() + offset]).expect("upload guard");
+            let source = driver.runtime.stream().clone_htod(&values).expect("upload rows");
+            let mut destination = driver.runtime.stream().clone_htod(&vec![guard_byte; offset + expected.len() + offset]).expect("upload guard");
             driver.encode_rows(&rendered, &format, &source, &mut destination, rows).expect("the encode launches");
-            driver.stream.synchronize().expect("the encode completes");
-            let device = driver.stream.clone_dtoh(&destination).expect("read back");
+            driver.runtime.stream().synchronize().expect("the encode completes");
+            let device = driver.runtime.stream().clone_dtoh(&destination).expect("read back");
 
             assert!(device[..offset].iter().all(|byte| *byte == guard_byte), "{format:?}: bytes before the offset changed");
             assert!(device[offset + expected.len()..].iter().all(|byte| *byte == guard_byte), "{format:?}: bytes past the range changed");
@@ -5265,7 +5264,7 @@ mod tests {
     fn carry_cache_bytes<Row: cudarc::driver::DeviceRepr>(driver: &CudaDriver, cache: &cudarc::driver::CudaSlice<Row>) -> Vec<u8> {
         let bytes = cache.len() * core::mem::size_of::<Row>();
         let view = unsafe { cache.transmute::<u8>(bytes) }.expect("the cache reads as bytes");
-        driver.stream.clone_dtoh(&view).expect("read the cache back")
+        driver.runtime.stream().clone_dtoh(&view).expect("read the cache back")
     }
 
     fn carry_sentinel_cache<Row: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits>(
@@ -5273,10 +5272,10 @@ mod tests {
         bytes: usize,
     ) -> cudarc::driver::CudaSlice<Row> {
         let words = bytes.div_ceil(core::mem::size_of::<Row>());
-        let mut cache = driver.stream.alloc_zeros::<Row>(words).expect("allocate the sentinel cache");
+        let mut cache = driver.runtime.stream().alloc_zeros::<Row>(words).expect("allocate the sentinel cache");
         let total = words * core::mem::size_of::<Row>();
         let mut view = unsafe { cache.transmute_mut::<u8>(total) }.expect("the cache writes as bytes");
-        driver.stream.memcpy_htod(&vec![u8::MAX; total], &mut view).expect("fill the sentinel");
+        driver.runtime.stream().memcpy_htod(&vec![u8::MAX; total], &mut view).expect("fill the sentinel");
         cache
     }
 
@@ -5293,14 +5292,14 @@ mod tests {
         let infinity = maximum / (maximum * 0.0);
         let nan = infinity - infinity;
         let rows = [maximum * 0.0, -maximum * 0.0, 1.0, 0.1, maximum, layout.min_subnormal() * 0.5, infinity, -infinity, nan, -nan];
-        let source = driver.stream.clone_htod(&rows).expect("upload rows");
+        let source = driver.runtime.stream().clone_htod(&rows).expect("upload rows");
         let offset = 3;
         let filler = vec![rows[2] * 7.5; offset + rows.len() + offset];
-        let mut encoded = driver.stream.clone_htod(&filler).expect("upload cache");
-        let mut copied = driver.stream.clone_htod(&filler).expect("upload cache");
+        let mut encoded = driver.runtime.stream().clone_htod(&filler).expect("upload cache");
+        let mut copied = driver.runtime.stream().clone_htod(&filler).expect("upload cache");
         driver.encode_into_cache(&encode, &source, &mut encoded, offset, rows.len()).expect("the carry encodes");
-        driver.stream.memcpy_dtod(&source.slice(0..rows.len()), &mut copied.slice_mut(offset..offset + rows.len())).expect("the old copy");
-        driver.stream.synchronize().expect("the carry completes");
+        driver.runtime.stream().memcpy_dtod(&source.slice(0..rows.len()), &mut copied.slice_mut(offset..offset + rows.len())).expect("the old copy");
+        driver.runtime.stream().synchronize().expect("the carry completes");
         assert_eq!(carry_cache_bytes(&driver, &encoded), carry_cache_bytes(&driver, &copied));
     }
 
@@ -5327,11 +5326,11 @@ mod tests {
             codec.encode(&values, &mut expected).expect("the host encodes");
             let skipped = encode.rendered.elements_per_thread * 2;
             let byte_offset = format.packed_len(skipped).expect("whole blocks");
-            let source = driver.stream.clone_htod(&values).expect("upload rows");
+            let source = driver.runtime.stream().clone_htod(&values).expect("upload rows");
             let mut cache = carry_sentinel_cache(&driver, byte_offset + expected.len() + byte_offset);
             let before = carry_cache_bytes(&driver, &cache);
             driver.encode_into_cache(&encode, &source, &mut cache, skipped, values.len()).expect("the carry encodes");
-            driver.stream.synchronize().expect("the carry completes");
+            driver.runtime.stream().synchronize().expect("the carry completes");
             let after = carry_cache_bytes(&driver, &cache);
             assert_eq!(after[byte_offset..byte_offset + expected.len()], expected[..], "{format:?}: the rows are not the host codec's bytes");
             assert_eq!(after[..byte_offset], before[..byte_offset], "{format:?}: rows before the offset changed");
