@@ -1045,6 +1045,37 @@ pub fn reset_width_tile_decline() {
     buckets.clear();
 }
 
+static DOT_TILE_DECLINE: Mutex<BTreeMap<(u32, &'static str), u64>> = Mutex::new(BTreeMap::new());
+
+/// Records one `neon_tile_plan` decline for `node`, `reason` naming the first
+/// gate check that returned `None`.
+pub fn record_dot_tile_decline(node: NodeId, reason: &'static str) {
+    let mut buckets = DOT_TILE_DECLINE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    *buckets.entry((node.0, reason)).or_insert(0) += 1;
+}
+
+/// Every `(node, reason, calls)` dot-tile decline since the last
+/// [`reset_dot_tile_decline`], sorted by key.
+#[must_use]
+pub fn dot_tile_decline_snapshot() -> Vec<(u32, &'static str, u64)> {
+    let buckets = DOT_TILE_DECLINE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    buckets
+        .iter()
+        .map(|(&(node, reason), &calls)| (node, reason, calls))
+        .collect()
+}
+
+pub fn reset_dot_tile_decline() {
+    let mut buckets = DOT_TILE_DECLINE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    buckets.clear();
+}
+
 /// One `run_reduce_planned` node's route inputs, first-observed (PROXNUM-683
 /// route census): the extents and axis split every tile gate reads, plus the
 /// three fast-path verdicts that decide [`Path`]. `calls` witnesses that the

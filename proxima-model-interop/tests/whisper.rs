@@ -1519,9 +1519,17 @@ mod route_census {
 
         instrument::reset_reduce_route();
         instrument::reset_width_tile_decline();
+        instrument::reset_dot_tile_decline();
         let _ = bound.run(&[encoded]);
         let rows = instrument::reduce_route_snapshot();
         let measured_declines = instrument::width_tile_decline_snapshot();
+        let dot_declines = instrument::dot_tile_decline_snapshot();
+        let dot_reason_of = |node: u32| {
+            dot_declines
+                .iter()
+                .find(|(declined, _, _)| *declined == node)
+                .map_or("dot-tile:taken-or-not-asked", |(_, reason, _)| *reason)
+        };
 
         println!(
             "target_arch={} tile routes compiled={}",
@@ -1535,7 +1543,8 @@ mod route_census {
         let mut per_gate: BTreeMap<&str, u64> = BTreeMap::new();
         for row in &rows {
             let (path, macs) = (path_of(row), work_of(row));
-            let (dot_gate, width_gate) = (contiguous_tile_verdict(row), width_tile_verdict(row));
+            let (derived_gate, width_gate) = (contiguous_tile_verdict(row), width_tile_verdict(row));
+            let dot_gate = if row.dot_fast { dot_reason_of(row.node) } else { derived_gate };
             println!(
                 "{} {} {} {} {:?} {} {} {} {} {} {} {} {}",
                 row.node,

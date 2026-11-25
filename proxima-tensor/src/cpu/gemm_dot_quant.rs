@@ -292,39 +292,72 @@ pub(super) fn neon_tile_plan(
     strides: &[i64],
     leading_output_axes: &[u16],
 ) -> Option<NeonTilePlan> {
-    if !FUSED_MULTIPLY_ADD
-        || !seeded_always
-        || leading_output_axes.len() != 1
-        || reduce_op != ScalarOp::Add
-    {
-        return None;
+    let decided = neon_tile_decision(
+        resolved,
+        shape,
+        reduce_op,
+        seeded_always,
+        reduction_strides,
+        strides,
+        leading_output_axes,
+    );
+    #[cfg(feature = "instrument")]
+    if let Err(reason) = &decided {
+        instrument::record_dot_tile_decline(resolved.node, *reason);
+    }
+    decided.ok()
+}
+
+/// [`neon_tile_plan`]'s gate with the refusing check named: one
+/// reason name per early return, in gate order.
+#[cfg(target_arch = "aarch64")]
+fn neon_tile_decision(
+    resolved: &BoundOp,
+    shape: &BodyShape,
+    reduce_op: ScalarOp,
+    seeded_always: bool,
+    reduction_strides: &[i64],
+    strides: &[i64],
+    leading_output_axes: &[u16],
+) -> Result<NeonTilePlan, &'static str> {
+    if !FUSED_MULTIPLY_ADD {
+        return Err("fma_off");
+    }
+    if !seeded_always {
+        return Err("not_seeded");
+    }
+    if leading_output_axes.len() != 1 {
+        return Err("leading_axes");
+    }
+    if reduce_op != ScalarOp::Add {
+        return Err("reduce_op");
     }
     let BodyShape::Binary(op, a, b) = *shape else {
-        return None;
+        return Err("not_binary_body");
     };
     if op != ScalarOp::Multiply {
-        return None;
+        return Err("not_multiply_body");
     }
     let index_a = a as usize;
     let index_b = b as usize;
     let (_, _, gather_a) = &resolved.operands()[index_a];
     let (_, _, gather_b) = &resolved.operands()[index_b];
     if gather_a.is_some() || gather_b.is_some() {
-        return None;
+        return Err("gathered");
     }
     if reduction_strides[index_a] != 1 || reduction_strides[index_b] != 1 {
-        return None;
+        return Err("reduction_not_flat");
     }
     let (index_a, index_b) = match (strides[index_a], strides[index_b]) {
         (0, other) if other != 0 => (index_a, index_b),
         (other, 0) if other != 0 => (index_b, index_a),
-        _ => return None,
+        _ => return Err("width_stride_layout"),
     };
     let row_stride_a = resolved.operands()[index_a]
         .1
         .stride(leading_output_axes[0]);
     if row_stride_a < 0 {
-        return None;
+        return Err("negative_row_stride_a");
     }
     // GEMM precondition this gate never checked (`docs/discipline.md` ROW
     // 561, found by direct instrumentation on the recurrent-interval family's own partial-rotary
@@ -345,9 +378,9 @@ pub(super) fn neon_tile_plan(
         .1
         .stride(leading_output_axes[0]);
     if row_stride_b != 0 {
-        return None;
+        return Err("row_stride_b");
     }
-    Some(NeonTilePlan {
+    Ok(NeonTilePlan {
         index_a,
         index_b,
         row_stride_a: row_stride_a as usize,
