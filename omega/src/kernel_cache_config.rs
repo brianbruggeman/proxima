@@ -6,6 +6,7 @@
 //! trait path to load; there is no second loader.
 
 use conflaguration::{Settings, Validate};
+use proxima_primitives::home_path::expand_home;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::convert::Infallible;
 use std::path::PathBuf;
@@ -49,20 +50,13 @@ fn parse_kernel_cache_dir(value: &str) -> Result<Option<PathBuf>, Infallible> {
     if value.is_empty() {
         return Ok(None);
     }
-    let Some(relative) = value.strip_prefix("~/") else {
-        return Ok(Some(PathBuf::from(value)));
-    };
-    Ok(home_relative(relative))
-}
-
-fn home_relative(relative: &str) -> Option<PathBuf> {
-    let Some(home) = std::env::var_os("HOME") else {
+    let expanded = expand_home(value, std::env::var_os("HOME"));
+    if expanded.is_none() {
         proxima_telemetry::warn!(
             "HOME is unset; kernel disk cache disabled until PROXIMA_CUDA_KERNEL_CACHE_DIR is set"
         );
-        return None;
-    };
-    Some(PathBuf::from(home).join(relative))
+    }
+    Ok(expanded)
 }
 
 fn deserialize_kernel_cache_dir<'de, D>(deserializer: D) -> Result<Option<PathBuf>, D::Error>

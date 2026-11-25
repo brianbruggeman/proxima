@@ -47,6 +47,8 @@ extern crate alloc;
 extern crate std;
 
 pub mod driver;
+#[cfg(feature = "std")]
+pub mod home_path;
 pub mod pipe;
 pub mod stream;
 pub mod sync;
