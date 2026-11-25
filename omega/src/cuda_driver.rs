@@ -6532,13 +6532,32 @@ pub mod rocm {
     unsafe impl Sync for HipModule {}
 
     /// The element window `range` names inside a buffer of `total` elements of `size` bytes each, as
-    /// `(byte offset, byte length)`. A range past the end is clamped to it, never panics: the executor
-    /// derives every window from node sizes, so a clamp only shows if that derivation is wrong, and the
-    /// launch then reads or writes less rather than out of bounds.
-    fn element_window(total: usize, range: &core::ops::Range<usize>, size: usize) -> (usize, usize) {
-        let start = range.start.min(total);
-        let end = range.end.clamp(start, total);
-        (start * size, (end - start) * size)
+    /// `(byte offset, byte length)`. A range past the end is refused, never clamped: a kernel gets
+    /// only the pointer, so a clamped start would hand it an end-of-allocation pointer with no
+    /// length. The refusal rides the window and surfaces when the window is pushed to a launch.
+    fn element_window(total: usize, range: &core::ops::Range<usize>, size: usize) -> Result<(usize, usize), WindowRefusal> {
+        if range.start <= range.end && range.end <= total {
+            return Ok((range.start * size, (range.end - range.start) * size));
+        }
+        Err(WindowRefusal {
+            offset: range.start.saturating_mul(size),
+            len: range.end.saturating_sub(range.start).saturating_mul(size),
+            bytes: total.saturating_mul(size),
+        })
+    }
+
+    /// An out-of-range window request, kept on the window until a launch can return it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct WindowRefusal {
+        offset: usize,
+        len: usize,
+        bytes: usize,
+    }
+
+    impl WindowRefusal {
+        fn error(self) -> HipDriverError {
+            HipDriverError::ViewOutOfRange { offset: self.offset, len: self.len, bytes: self.bytes }
+        }
     }
 
     /// A HIP device allocation of `Element`s: the untyped [`HipBuffer`] plus the element count the
@@ -6564,12 +6583,14 @@ pub mod rocm {
     /// A shared window of `Element`s onto a [`HipSlice`].
     pub struct HipWindow<'buffer, Element> {
         view: HipView<'buffer>,
+        refusal: Option<WindowRefusal>,
         element: core::marker::PhantomData<fn() -> Element>,
     }
 
     /// A writable window of `Element`s onto a [`HipSlice`], exclusive for its lifetime.
     pub struct HipWindowMut<'buffer, Element> {
         view: HipView<'buffer>,
+        refusal: Option<WindowRefusal>,
         exclusive: core::marker::PhantomData<&'buffer mut HipBuffer>,
         element: core::marker::PhantomData<fn() -> Element>,
     }
@@ -6608,6 +6629,7 @@ pub mod rocm {
     pub struct HipLaunch<'launch> {
         function: &'launch HipFunction,
         parameters: KernelParams<'launch>,
+        refusal: Option<WindowRefusal>,
     }
 
     impl<'launch> LaunchArguments<'launch, HipRuntime> for HipLaunch<'launch> {
@@ -6622,11 +6644,13 @@ pub mod rocm {
         }
 
         fn push_view<Element: DeviceElement>(&mut self, view: &'launch HipWindow<'_, Element>) -> &mut Self {
+            self.refusal = self.refusal.or(view.refusal);
             self.parameters.push(view);
             self
         }
 
         fn push_view_mut<Element: DeviceElement>(&mut self, view: &'launch mut HipWindowMut<'_, Element>) -> &mut Self {
+            self.refusal = self.refusal.or(view.refusal);
             self.parameters.push(&*view);
             self
         }
@@ -6843,6 +6867,13 @@ pub mod rocm {
             })
         }
 
+        fn window_parts(window: Result<(usize, usize), WindowRefusal>) -> (usize, usize, Option<WindowRefusal>) {
+            match window {
+                Ok((offset, len)) => (offset, len, None),
+                Err(refusal) => (0, 0, Some(refusal)),
+            }
+        }
+
         fn sub_view<'any>(pointer: *mut c_void, offset: usize, len: usize) -> HipView<'any> {
             HipView { pointer: offset_pointer(pointer, offset), len, owner: core::marker::PhantomData }
         }
@@ -6966,10 +6997,13 @@ pub mod rocm {
         }
 
         fn launch_arguments<'a>(&'a self, function: &'a HipFunction) -> HipLaunch<'a> {
-            HipLaunch { function, parameters: KernelParams::new() }
+            HipLaunch { function, parameters: KernelParams::new(), refusal: None }
         }
 
         unsafe fn launch(&self, mut arguments: HipLaunch<'_>, shape: LaunchShape) -> Result<(), HipDriverError> {
+            if let Some(refusal) = arguments.refusal {
+                return Err(refusal.error());
+            }
             self.device.bind()?;
             let api = &self.device.api;
             // SAFETY: the caller matched the arguments to the kernel's parameter list; the params borrow
@@ -7012,14 +7046,15 @@ pub mod rocm {
         }
 
         fn view<Element: DeviceElement>(buffer: &HipSlice<Element>, range: core::ops::Range<usize>) -> HipWindow<'_, Element> {
-            let (offset, len) = element_window(buffer.len, &range, core::mem::size_of::<Element>());
-            HipWindow { view: Self::sub_view(buffer.buffer.pointer, offset, len), element: core::marker::PhantomData }
+            let (offset, len, refusal) = Self::window_parts(element_window(buffer.len, &range, core::mem::size_of::<Element>()));
+            HipWindow { view: Self::sub_view(buffer.buffer.pointer, offset, len), refusal, element: core::marker::PhantomData }
         }
 
         fn view_mut<Element: DeviceElement>(buffer: &mut HipSlice<Element>, range: core::ops::Range<usize>) -> HipWindowMut<'_, Element> {
-            let (offset, len) = element_window(buffer.len, &range, core::mem::size_of::<Element>());
+            let (offset, len, refusal) = Self::window_parts(element_window(buffer.len, &range, core::mem::size_of::<Element>()));
             HipWindowMut {
                 view: Self::sub_view(buffer.buffer.pointer, offset, len),
+                refusal,
                 exclusive: core::marker::PhantomData,
                 element: core::marker::PhantomData,
             }
@@ -7030,9 +7065,11 @@ pub mod rocm {
         }
 
         fn view_mut_range<'view, Element: DeviceElement>(view: &'view mut HipWindowMut<'_, Element>, range: core::ops::Range<usize>) -> HipWindowMut<'view, Element> {
-            let (offset, len) = element_window(Self::view_mut_len(view), &range, core::mem::size_of::<Element>());
+            let (offset, len, refusal) =
+                Self::window_parts(element_window(Self::view_mut_len(view), &range, core::mem::size_of::<Element>()));
             HipWindowMut {
                 view: Self::sub_view(view.view.pointer, offset, len),
+                refusal: view.refusal.or(refusal),
                 exclusive: core::marker::PhantomData,
                 element: core::marker::PhantomData,
             }
@@ -7042,6 +7079,7 @@ pub mod rocm {
             let bytes = buffer.len * core::mem::size_of::<Element>();
             Some(HipWindowMut {
                 view: Self::sub_view(buffer.buffer.pointer, 0, bytes),
+                refusal: None,
                 exclusive: core::marker::PhantomData,
                 element: core::marker::PhantomData,
             })
@@ -7089,7 +7127,7 @@ pub mod rocm {
         use proxima_primitives::sync::blocking::Mutex;
 
         use super::super::{CompileCounters, stored_or_compiled};
-        use super::{FunctionCache, HIPRTC_OPTIONS, cached_by_source, code_object_key, compile_options, element_window};
+        use super::{FunctionCache, HIPRTC_OPTIONS, HipDriverError, WindowRefusal, cached_by_source, code_object_key, compile_options, element_window};
         use crate::cuda_ptx_store::PtxStore;
 
         const SOURCE: &str = "#include <hip/hip_runtime.h>\nextern \"C\" __global__ void touch_first() { }\n";
@@ -7199,22 +7237,35 @@ pub mod rocm {
 
         #[test]
         fn a_window_inside_the_buffer_is_scaled_to_bytes() {
-            assert_eq!(element_window(100, &(10..30), 4), (40, 80));
+            assert_eq!(element_window(100, &(10..30), 4), Ok((40, 80)));
         }
 
         #[test]
-        fn a_window_past_the_end_is_clamped_to_the_buffer() {
-            assert_eq!(element_window(100, &(90..130), 4), (360, 40));
+        fn a_window_past_the_end_is_refused_with_its_byte_extent() {
+            let refusal = element_window(100, &(90..130), 4).expect_err("a window past the end is refused, not clamped");
+
+            assert_eq!(refusal, WindowRefusal { offset: 360, len: 160, bytes: 400 });
+            assert!(
+                matches!(refusal.error(), HipDriverError::ViewOutOfRange { offset: 360, len: 160, bytes: 400 }),
+                "the refusal is the typed view error"
+            );
         }
 
         #[test]
-        fn a_window_starting_past_the_end_is_empty() {
-            assert_eq!(element_window(100, &(120..130), 4), (400, 0));
+        fn a_window_starting_past_the_end_is_refused() {
+            assert!(element_window(100, &(120..130), 4).is_err(), "a start past the end would hand the kernel an end pointer");
+        }
+
+        #[test]
+        fn a_reversed_range_is_refused() {
+            let reversed = core::ops::Range { start: 30, end: 10 };
+
+            assert!(element_window(100, &reversed, 4).is_err(), "a reversed range names no window");
         }
 
         #[test]
         fn an_empty_range_is_an_empty_window_at_its_start() {
-            assert_eq!(element_window(100, &(30..30), 1), (30, 0));
+            assert_eq!(element_window(100, &(30..30), 1), Ok((30, 0)));
         }
     }
 
