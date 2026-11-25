@@ -5,13 +5,23 @@
 //! [`OwnerCommand`]s and receive replies on [`proxima_primitives::sync::oneshot`]
 //! channels. The registry is generic over the plan type the owner drives.
 
+use std::collections::BTreeSet;
+use std::future::Future;
+use std::ops::Range;
+use std::pin::pin;
 use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
+use std::thread::{self, JoinHandle, Thread};
 use std::vec::Vec;
 
-use proxima_primitives::sync::mpsc::Receiver;
-use proxima_primitives::sync::oneshot;
-use proxima_tensor::NodeId;
+use proxima_core::ring::Ring;
+use proxima_primitives::sync::mpsc::{Receiver, Sender, channel};
+use proxima_primitives::sync::{Notify, oneshot};
+use proxima_tensor::{Evaluated, NodeId, Op, QuantizedBlock};
 
+use crate::config::RuntimeConfig;
+use crate::cuda_driver::{CudaDriver, DevicePlan};
+use crate::gpu_runtime::GpuRuntime;
 use crate::{CudaDeviceSnapshot, CudaDriverError};
 
 /// Service-scoped identity for a registered plan generation.
@@ -273,6 +283,441 @@ pub async fn run_owner<Command, State>(
             break;
         }
     }
+}
+
+/// Names one device an owner serves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DeviceKey(pub u32);
+
+/// A weight already on the device: the registered block `slot`, its device `address` and `len` in bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResidentRef {
+    pub slot: u32,
+    pub address: u64,
+    pub len: usize,
+}
+
+/// One step's inputs: resident refs plus owned dynamic activations. The owner hands it back
+/// in the reply so the caller refills the same vectors and a step grows no capacity.
+#[derive(Debug)]
+pub struct Frame<Block> {
+    pub residents: Vec<ResidentRef>,
+    pub dynamic: Vec<(Arc<str>, Block)>,
+}
+
+impl<Block> Default for Frame<Block> {
+    fn default() -> Self {
+        Self {
+            residents: Vec::new(),
+            dynamic: Vec::new(),
+        }
+    }
+}
+
+impl<Block> Frame<Block> {
+    /// Empties both lists and keeps their capacity.
+    pub fn clear(&mut self) {
+        self.residents.clear();
+        self.dynamic.clear();
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DeviceOwnerError {
+    #[error("device driver failed: {0}")]
+    Driver(#[from] CudaDriverError),
+    #[error("device plan registry refused the command: {0}")]
+    Registry(#[from] PlanRegistryError),
+    #[error("device owner stopped")]
+    Stopped,
+}
+
+/// What one step produced: the outputs, or the resident slots the owner does not hold.
+pub enum StepOutcome<Block> {
+    Done {
+        evaluated: Evaluated,
+        frame: Frame<Block>,
+    },
+    NeedResident {
+        slots: Vec<u32>,
+        frame: Frame<Block>,
+    },
+}
+
+pub type StepReply<Block> = Result<StepOutcome<Block>, DeviceOwnerError>;
+
+/// One reusable reply slot: a ring and a [`Notify`] permit, so a reply is a push and a wake.
+///
+/// Composes [`proxima_core::ring::Ring`] and [`proxima_primitives::sync::notify::Notify`].
+/// `Ring` rounds capacity up to 2 (its Vyukov protocol is degenerate at 1), so the slot holds
+/// two; the protocol is one outstanding step per slot.
+pub struct Completion<Value> {
+    ring: Ring<Value>,
+    ready: Notify,
+}
+
+impl<Value> Completion<Value> {
+    #[must_use]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            ring: Ring::with_capacity(1),
+            ready: Notify::new(),
+        })
+    }
+
+    fn complete(&self, value: Value) {
+        if self.ring.push(value).is_ok() {
+            self.ready.notify_one();
+        }
+    }
+
+    /// Awaits the owner's reply.
+    pub async fn wait(&self) -> Value {
+        loop {
+            if let Some(value) = self.ring.dequeue() {
+                return value;
+            }
+            self.ready.notified().await;
+        }
+    }
+}
+
+/// Everything a registration plans from; `blocks` are owned, as interop registers today.
+pub struct RegisterRequest<Block> {
+    pub program: Vec<Op>,
+    pub symbols: Vec<u64>,
+    pub outputs: Vec<NodeId>,
+    pub blocks: Vec<(Arc<str>, Block)>,
+    pub resident_names: Vec<Arc<str>>,
+    pub config: RuntimeConfig,
+}
+
+/// Every message a [`DeviceOwner`] accepts; each carries its own typed reply.
+pub enum Command<Block> {
+    Register {
+        // boxed: the request holds the program and config and would size every command; registration is setup
+        request: Box<RegisterRequest<Block>>,
+        reply: oneshot::Sender<Result<PlanLease, DeviceOwnerError>>,
+    },
+    Step {
+        lease: PlanLease,
+        frame: Frame<Block>,
+        completion: Arc<Completion<StepReply<Block>>>,
+    },
+    Retire {
+        lease: PlanLease,
+        reply: oneshot::Sender<Result<(), DeviceOwnerError>>,
+    },
+    ReleaseNames {
+        names: Vec<Arc<str>>,
+        reply: oneshot::Sender<()>,
+    },
+    ReleaseRanges {
+        ranges: Vec<Range<usize>>,
+        reply: oneshot::Sender<()>,
+    },
+    Shutdown {
+        reply: oneshot::Sender<()>,
+    },
+}
+
+struct OwnedPlan<R: GpuRuntime, Block> {
+    plan: DevicePlan<R>,
+    blocks: Vec<(Arc<str>, Block)>,
+}
+
+/// The sans-IO owner of one device: a driver, the plans registered on it, and `serve`.
+///
+/// `Block` is the caller's owned payload; the executor reads it through
+/// `QuantizedBlock: From<&Block>`. Composes [`CudaDriver`] and [`PlanRegistry`].
+pub struct DeviceOwner<R: GpuRuntime, Block> {
+    key: DeviceKey,
+    driver: CudaDriver<R>,
+    registry: PlanRegistry<OwnedPlan<R, Block>>,
+}
+
+impl<R: GpuRuntime, Block> DeviceOwner<R, Block>
+where
+    CudaDriverError: From<R::Error> + From<R::BuildError>,
+    for<'block> QuantizedBlock<'block>: From<&'block Block>,
+{
+    #[must_use]
+    pub fn new(key: DeviceKey, driver: CudaDriver<R>, plan_capacity: usize) -> Self {
+        Self {
+            key,
+            driver,
+            registry: PlanRegistry::new(Arc::new(()), plan_capacity),
+        }
+    }
+
+    #[must_use]
+    pub const fn key(&self) -> DeviceKey {
+        self.key
+    }
+
+    pub fn serve(&mut self, command: Command<Block>) -> OwnerFlow {
+        match command {
+            Command::Register { request, reply } => {
+                let _ = reply.send(self.register(*request));
+            }
+            Command::Step {
+                lease,
+                frame,
+                completion,
+            } => completion.complete(self.step(&lease, frame)),
+            Command::Retire { lease, reply } => {
+                let _ = reply.send(self.registry.retire(&lease).map_err(Into::into));
+            }
+            Command::ReleaseNames { names, reply } => {
+                self.driver
+                    .release_resident_names(names.iter().map(AsRef::as_ref));
+                let _ = reply.send(());
+            }
+            Command::ReleaseRanges { ranges, reply } => {
+                self.driver.release_resident_ranges(&ranges);
+                let _ = reply.send(());
+            }
+            Command::Shutdown { reply } => {
+                let _ = reply.send(());
+                return OwnerFlow::Drain;
+            }
+        }
+        OwnerFlow::Continue
+    }
+
+    fn register(&mut self, request: RegisterRequest<Block>) -> Result<PlanLease, DeviceOwnerError> {
+        let mut plan = {
+            let named = request
+                .blocks
+                .iter()
+                .map(|(name, block)| (name.as_ref(), QuantizedBlock::from(block)))
+                .collect::<Vec<_>>();
+            self.driver.plan_with_config(
+                &request.program,
+                &request.symbols,
+                &request.outputs,
+                &named,
+                &request.config,
+            )?
+        };
+        let resident = request
+            .resident_names
+            .iter()
+            .map(AsRef::as_ref)
+            .collect::<BTreeSet<&str>>();
+        plan.mark_resident(&resident);
+        let owned = OwnedPlan {
+            plan,
+            blocks: request.blocks,
+        };
+        Ok(self.registry.register(owned)?)
+    }
+
+    fn step(&mut self, lease: &PlanLease, frame: Frame<Block>) -> StepReply<Block> {
+        let outcome =
+            execute_registered_plan(&mut self.registry, lease, |owned| Self::run(owned, &frame))??;
+        Ok(match outcome {
+            Ok(evaluated) => StepOutcome::Done { evaluated, frame },
+            Err(slots) => StepOutcome::NeedResident { slots, frame },
+        })
+    }
+
+    fn run(
+        owned: &mut OwnedPlan<R, Block>,
+        frame: &Frame<Block>,
+    ) -> Result<Result<Evaluated, Vec<u32>>, CudaDriverError> {
+        let missing = frame
+            .residents
+            .iter()
+            .filter(|resident| owned.blocks.get(resident.slot as usize).is_none())
+            .map(|resident| resident.slot)
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Ok(Err(missing));
+        }
+        let named = frame
+            .residents
+            .iter()
+            .filter_map(|resident| owned.blocks.get(resident.slot as usize))
+            .chain(frame.dynamic.iter())
+            .map(|(name, block)| (name.as_ref(), QuantizedBlock::from(block)))
+            .collect::<Vec<_>>();
+        owned.plan.execute_named(&named, None).map(Ok)
+    }
+
+    fn reject(command: Command<Block>) {
+        match command {
+            Command::Register { reply, .. } => {
+                let _ = reply.send(Err(DeviceOwnerError::Stopped));
+            }
+            Command::Step { completion, .. } => completion.complete(Err(DeviceOwnerError::Stopped)),
+            Command::Retire { reply, .. } => {
+                let _ = reply.send(Err(DeviceOwnerError::Stopped));
+            }
+            Command::ReleaseNames { reply, .. }
+            | Command::ReleaseRanges { reply, .. }
+            | Command::Shutdown { reply } => {
+                let _ = reply.send(());
+            }
+        }
+    }
+}
+
+/// The owner loop as a future for the caller to spawn on any executor.
+///
+/// Composes [`run_owner`]: `Shutdown` closes the queue and every queued command is rejected
+/// with [`DeviceOwnerError::Stopped`].
+pub async fn run_device_owner<R: GpuRuntime, Block>(
+    owner: DeviceOwner<R, Block>,
+    commands: Receiver<Command<Block>>,
+) where
+    CudaDriverError: From<R::Error> + From<R::BuildError>,
+    for<'block> QuantizedBlock<'block>: From<&'block Block>,
+{
+    run_owner(
+        commands,
+        owner,
+        |owner, commands, command| {
+            let flow = owner.serve(command);
+            if flow == OwnerFlow::Drain {
+                commands.close();
+            }
+            flow
+        },
+        |_, command| DeviceOwner::<R, Block>::reject(command),
+    )
+    .await;
+}
+
+/// A cloneable, `Send + Sync` sender of commands to one device owner.
+pub struct DeviceHandle<Block> {
+    key: DeviceKey,
+    commands: Sender<Command<Block>>,
+}
+
+impl<Block> Clone for DeviceHandle<Block> {
+    fn clone(&self) -> Self {
+        Self {
+            key: self.key,
+            commands: self.commands.clone(),
+        }
+    }
+}
+
+impl<Block> DeviceHandle<Block> {
+    #[must_use]
+    pub fn new(key: DeviceKey, commands: Sender<Command<Block>>) -> Self {
+        Self { key, commands }
+    }
+
+    #[must_use]
+    pub const fn key(&self) -> DeviceKey {
+        self.key
+    }
+
+    async fn ask<Reply>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<Reply>) -> Command<Block>,
+    ) -> Result<Reply, DeviceOwnerError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(build(reply))
+            .await
+            .map_err(|_| DeviceOwnerError::Stopped)?;
+        answer.await.map_err(|_| DeviceOwnerError::Stopped)
+    }
+
+    pub async fn register(
+        &self,
+        request: RegisterRequest<Block>,
+    ) -> Result<PlanLease, DeviceOwnerError> {
+        self.ask(|reply| Command::Register {
+            request: Box::new(request),
+            reply,
+        })
+        .await?
+    }
+
+    /// Runs one step; `completion` is the plan's reusable reply slot.
+    pub async fn step(
+        &self,
+        lease: &PlanLease,
+        frame: Frame<Block>,
+        completion: &Arc<Completion<StepReply<Block>>>,
+    ) -> StepReply<Block> {
+        let command = Command::Step {
+            lease: lease.clone(),
+            frame,
+            completion: Arc::clone(completion),
+        };
+        self.commands
+            .send(command)
+            .await
+            .map_err(|_| DeviceOwnerError::Stopped)?;
+        completion.wait().await
+    }
+
+    pub async fn retire(&self, lease: &PlanLease) -> Result<(), DeviceOwnerError> {
+        self.ask(|reply| Command::Retire {
+            lease: lease.clone(),
+            reply,
+        })
+        .await?
+    }
+
+    pub async fn release_names(&self, names: Vec<Arc<str>>) -> Result<(), DeviceOwnerError> {
+        self.ask(|reply| Command::ReleaseNames { names, reply })
+            .await
+    }
+
+    pub async fn release_ranges(&self, ranges: Vec<Range<usize>>) -> Result<(), DeviceOwnerError> {
+        self.ask(|reply| Command::ReleaseRanges { ranges, reply })
+            .await
+    }
+
+    pub async fn shutdown(&self) -> Result<(), DeviceOwnerError> {
+        self.ask(|reply| Command::Shutdown { reply }).await
+    }
+}
+
+struct ThreadWaker(Thread);
+
+impl Wake for ThreadWaker {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+}
+
+/// Drives `future` to completion on the calling thread, parking between wakes.
+pub fn block_on_thread<Output>(future: impl Future<Output = Output>) -> Output {
+    let waker = Waker::from(Arc::new(ThreadWaker(thread::current())));
+    let mut context = Context::from_waker(&waker);
+    let mut future = pin!(future);
+    loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        thread::park();
+    }
+}
+
+/// Starts the owner loop on one dedicated std thread: `build` runs on that thread, so the
+/// driver opens there and every device call is made there. For tests and thread-per-device hosts.
+pub fn launch_on_thread<R, Block, Build>(
+    key: DeviceKey,
+    queue_capacity: usize,
+    build: Build,
+) -> (DeviceHandle<Block>, JoinHandle<()>)
+where
+    R: GpuRuntime,
+    CudaDriverError: From<R::Error> + From<R::BuildError>,
+    Block: Send + 'static,
+    for<'block> QuantizedBlock<'block>: From<&'block Block>,
+    Build: FnOnce() -> DeviceOwner<R, Block> + Send + 'static,
+{
+    let (commands, receiver) = channel(queue_capacity);
+    let joined = thread::spawn(move || block_on_thread(run_device_owner(build(), receiver)));
+    (DeviceHandle::new(key, commands), joined)
 }
 
 #[cfg(test)]
