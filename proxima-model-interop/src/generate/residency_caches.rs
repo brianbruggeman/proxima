@@ -98,7 +98,9 @@ pub(crate) fn validate_omega_runtime_config(config: &ServingConfig) -> Result<()
     Ok(())
 }
 
+// a test names its failure with expect, as the crate's other test modules do
 #[cfg(all(test, feature = "gpu"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod configured_runtime_tests {
     use super::*;
     use crate::generate::prompt_cache_key::CacheKey;
@@ -661,19 +663,38 @@ mod narrow_cache_refusal_tests {
     }
 }
 
+/// Bytes of `elements` rows in the element type an [`Evaluated`] hands back, taken from a witness
+/// slice so a placed output is sized by the same type the host path would have read.
+#[cfg(all(
+    feature = "std",
+    feature = "proxima-autograd",
+    feature = "metal-output-placement",
+    target_os = "macos"
+))]
+fn row_bytes<Element>(elements: usize, _witness: &[Element]) -> usize {
+    elements * core::mem::size_of::<Element>()
+}
+
+/// Whether the configured omega runtime caps host or device buffers, which caller-owned
+/// placement buffers escape; placement is refused under a ceiling.
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+fn has_resource_ceilings(config: Option<&RuntimeConfig>) -> bool {
+    config.is_some_and(|config| {
+        config.constraints.max_host_tensor_bytes.is_some()
+            || config.constraints.max_device_buffer_bytes.is_some()
+            || config.constraints.max_single_device_buffer_bytes.is_some()
+    })
+}
+
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 fn reject_bounded_placed_execution(
     config: Option<&RuntimeConfig>,
     input_placements: &[(NodeId, &PlacedBuffer, usize)],
     output_placements: &[(NodeId, &PlacedBuffer, usize)],
 ) -> Result<(), InteropError> {
-    let Some(config) = config else {
-        return Ok(());
-    };
-    let bounded = config.constraints.max_host_tensor_bytes.is_some()
-        || config.constraints.max_device_buffer_bytes.is_some()
-        || config.constraints.max_single_device_buffer_bytes.is_some();
-    if bounded && (!input_placements.is_empty() || !output_placements.is_empty()) {
+    if has_resource_ceilings(config)
+        && (!input_placements.is_empty() || !output_placements.is_empty())
+    {
         return Err(InteropError::UnsupportedServingConfig(String::from(
             "configured omega resource ceilings cannot account for caller-owned placement buffers",
         )));
@@ -3274,6 +3295,10 @@ pub(super) struct SsmPlacement<'buffers> {
     pub(super) use_second_as_input: bool,
 }
 
+/// Nodes of one segment paired with the names a neighbouring segment binds them under.
+#[cfg(all(feature = "gpu", feature = "std", feature = "proxima-autograd"))]
+pub(crate) type HandoffNames<'names> = &'names [(NodeId, &'names str)];
+
 #[cfg(feature = "gpu")]
 pub struct BackendRuntime {
     pub(super) omega_runtime: Option<omega::config::RuntimeConfig>,
@@ -3398,6 +3423,17 @@ pub struct BackendRuntime {
     /// insert without recording a use), is handled by `evict_to`.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) placed_order: Vec<resident_plans::DecodePlanKey>,
+    /// Device buffers a segment's handed-off outputs live in, by the name the
+    /// consuming segment binds them under ([`Self::evaluate_segment_handoff`]).
+    /// Session-owned and rewritten in place by each producer run, so a consumer
+    /// plan that holds one keeps a stable buffer across calls.
+    #[cfg(all(
+        feature = "std",
+        feature = "proxima-autograd",
+        feature = "metal-output-placement",
+        target_os = "macos"
+    ))]
+    pub(super) handoffs: alloc::collections::BTreeMap<String, (usize, PlacedBuffer)>,
     /// `ServingConfig::resident_prefill_plan_bytes`, read once at
     /// construction: the output-slot bytes [`Self::placed_plans`] may keep
     /// resident, within a call and across calls through [`resident_plans`].
@@ -3630,6 +3666,13 @@ impl BackendRuntime {
             placed_segment_plans: alloc::collections::BTreeMap::new(),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             placed_order: Vec::new(),
+            #[cfg(all(
+                feature = "std",
+                feature = "proxima-autograd",
+                feature = "metal-output-placement",
+                target_os = "macos"
+            ))]
+            handoffs: alloc::collections::BTreeMap::new(),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             resident_prefill_plan_bytes: config.resident_prefill_plan_bytes,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -4446,6 +4489,164 @@ impl BackendRuntime {
         )
     }
 
+    /// Evaluates one segment whose outputs `handoff.0` (node, name) a later segment consumes, and
+    /// which itself consumes `handoff.1` (node, name) from an earlier one. `outputs` are the nodes
+    /// the host reads. Where the backend can place outputs ([`Self::retains_handoffs`]) a handed-off
+    /// output is written into a session-owned device buffer and a consumed one is read from it: no
+    /// readback, no host copy, no upload. Elsewhere a handed-off output comes back in the
+    /// [`Evaluated`] beside `outputs` and the caller binds it by name as a host block, exactly as
+    /// before. The consumer's `named` must not carry a name the device holds.
+    #[cfg(all(feature = "std", feature = "proxima-autograd"))]
+    pub(crate) fn evaluate_segment_handoff(
+        &mut self,
+        (program_key, program): (usize, &[Op]),
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
+        handoff: (HandoffNames<'_>, HandoffNames<'_>),
+    ) -> Result<Evaluated, InteropError> {
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        if self.retains_handoffs() {
+            return self.evaluate_segment_placed_handoff(
+                (program_key, program),
+                symbols,
+                named,
+                outputs,
+                resident_names,
+                handoff,
+            );
+        }
+        let mut host_outputs = outputs.to_vec();
+        host_outputs.extend(handoff.0.iter().map(|(node, _)| *node));
+        self.evaluate_segment_keyed(
+            (program_key, program),
+            symbols,
+            named,
+            &host_outputs,
+            resident_names,
+            None,
+        )
+    }
+
+    /// Whether this runtime keeps a handed-off output on the device: the selected engine is the
+    /// Metal driver and no omega resource ceiling forbids caller-owned placement buffers. CPU and
+    /// CUDA answer false and take the host path until CUDA has a device-output primitive.
+    #[cfg(all(
+        feature = "std",
+        feature = "proxima-autograd",
+        feature = "metal-output-placement",
+        target_os = "macos"
+    ))]
+    pub(crate) fn retains_handoffs(&self) -> bool {
+        matches!(self.engine, Engine::Gpu)
+            && matches!(self.gpu_driver, Some(omega::backend::GpuDriver::Metal))
+            && !has_resource_ceilings(self.omega_runtime.as_ref())
+    }
+
+    /// See the placed form of this method: without output placement nothing is retained.
+    #[cfg(all(
+        feature = "std",
+        feature = "proxima-autograd",
+        not(all(feature = "metal-output-placement", target_os = "macos"))
+    ))]
+    #[allow(clippy::unused_self)] // same signature on every backend; cuda has no device-output primitive yet
+    pub(crate) fn retains_handoffs(&self) -> bool {
+        false
+    }
+
+    #[cfg(all(
+        feature = "std",
+        feature = "proxima-autograd",
+        feature = "metal-output-placement",
+        target_os = "macos"
+    ))]
+    fn evaluate_segment_placed_handoff(
+        &mut self,
+        (program_key, program): (usize, &[Op]),
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
+        (handoff_out, handoff_in): (HandoffNames<'_>, HandoffNames<'_>),
+    ) -> Result<Evaluated, InteropError> {
+        let mut inputs = Vec::new();
+        for (node, name) in handoff_in {
+            let Some((_, buffer)) = self.handoffs.get(*name) else {
+                continue;
+            };
+            if named.iter().any(|(host_name, _)| host_name == name) {
+                return Err(InteropError::HandoffNameIsHostSourced {
+                    name: (*name).into(),
+                });
+            }
+            inputs.push((*node, buffer.clone(), 0usize));
+        }
+        let mut written = Vec::new();
+        for (node, name) in handoff_out {
+            if named.iter().any(|(host_name, _)| host_name == name) {
+                return Err(InteropError::HandoffNameIsHostSourced {
+                    name: (*name).into(),
+                });
+            }
+            let buffer = self.handoff_buffer(program_key, program, symbols, *node, name)?;
+            written.push((*node, buffer, 0usize));
+        }
+        let input_refs: Vec<(NodeId, &PlacedBuffer, usize)> = inputs
+            .iter()
+            .map(|(node, buffer, offset)| (*node, buffer, *offset))
+            .collect();
+        let output_refs: Vec<(NodeId, &PlacedBuffer, usize)> = written
+            .iter()
+            .map(|(node, buffer, offset)| (*node, buffer, *offset))
+            .collect();
+        let mut planned = outputs.to_vec();
+        planned.extend(written.iter().map(|(node, _, _)| *node));
+        self.evaluate_segment_with_placements_keyed(
+            (program_key, program),
+            symbols,
+            named,
+            &planned,
+            resident_names,
+            &SegmentMetalBindings {
+                input_placements: &input_refs,
+                output_placements: &output_refs,
+                expert_sources: &BTreeMap::new(),
+            },
+        )
+    }
+
+    /// The session-owned buffer `name`'s producer writes `node` into. Allocated once per producing
+    /// program (`program_key` is structural, so a rebuilt identical program finds it) and rewritten
+    /// in place by every later run, so a consumer plan holding it sees one stable buffer.
+    #[cfg(all(
+        feature = "std",
+        feature = "proxima-autograd",
+        feature = "metal-output-placement",
+        target_os = "macos"
+    ))]
+    fn handoff_buffer(
+        &mut self,
+        program_key: usize,
+        program: &[Op],
+        symbols: &[u64],
+        node: NodeId,
+        name: &str,
+    ) -> Result<PlacedBuffer, InteropError> {
+        if let Some((owner, buffer)) = self.handoffs.get(name)
+            && *owner == program_key
+        {
+            return Ok(buffer.clone());
+        }
+        let shapes = proxima_tensor::infer(program, symbols)?;
+        let elements: u64 = shapes.of(node).iter().product();
+        let rows = Evaluated::from_parts(node, Vec::new(), None);
+        let buffer = allocate_placed_buffer(row_bytes(elements as usize, rows.root()))?;
+        self.handoffs
+            .insert(name.into(), (program_key, buffer.clone()));
+        Ok(buffer)
+    }
+
     /// [`Self::evaluate_segment`] with the plan-cache program identity named by
     /// the caller. The address default suits a program that lives as long as the
     /// runtime (the llm's partitions); a caller that rebuilds an identical
@@ -4725,12 +4926,35 @@ impl BackendRuntime {
         resident_names: &BTreeSet<&str>,
         bindings: &SegmentMetalBindings<'_, '_>,
     ) -> Result<Evaluated, InteropError> {
+        self.evaluate_segment_with_placements_keyed(
+            (program.as_ptr() as usize, program),
+            symbols,
+            named,
+            outputs,
+            resident_names,
+            bindings,
+        )
+    }
+
+    /// [`Self::evaluate_segment_with_placements_and_expert_sources`] with the plan-cache program
+    /// identity named by the caller, as [`Self::evaluate_segment_keyed`] does for the unplaced path:
+    /// a caller that rebuilds an identical program per call passes its structural key so the plans
+    /// survive the rebuild.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) fn evaluate_segment_with_placements_keyed(
+        &mut self,
+        (program_key, program): (usize, &[Op]),
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
+        bindings: &SegmentMetalBindings<'_, '_>,
+    ) -> Result<Evaluated, InteropError> {
         reject_bounded_placed_execution(
             self.omega_runtime.as_ref(),
             bindings.input_placements,
             bindings.output_placements,
         )?;
-        let program_key = program.as_ptr() as usize;
         let new_count = symbols.first().copied().unwrap_or_default() as usize;
         let kv_bound_extent = symbols.get(1).copied().unwrap_or_default() as usize;
         let numerics = PlanNumerics {
@@ -7991,5 +8215,209 @@ mod host_cache_format_tests {
 
         assert_eq!(host, 2 * 2 * SLIDING_HEAD_DIM);
         assert_eq!(device, 2 * 2 * SLIDING_HEAD_DIM);
+    }
+}
+
+// a test names its failure with expect, as the crate's other test modules do
+#[cfg(all(test, feature = "gpu", feature = "proxima-autograd"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod segment_handoff_tests {
+    use super::*;
+    use crate::families::encoder_decoder::ACTIVATION;
+    use proxima_tensor::ScalarOp;
+    use proxima_tensor::map::{self, IndexMap};
+
+    const WIDTH: u32 = 4;
+    const PRODUCER_KEY: usize = 101;
+    const CONSUMER_KEY: usize = 102;
+    const ROUND_TRIP_KEY: usize = 103;
+
+    fn negate_program(input: &str) -> Vec<Op> {
+        let mut program = vec![
+            Op::Input {
+                dtype: ACTIVATION,
+                shape: vec![Extent::Static(WIDTH)],
+                name: Some(String::from(input)),
+            },
+            Op::Elementwise {
+                dtype: ACTIVATION,
+                body: ScalarOp::Negate,
+                operands: vec![(NodeId(0), IndexMap::Affine(map::projection(1, &[0])))],
+                name: None,
+            },
+        ];
+        program.push(Op::Elementwise {
+            dtype: ACTIVATION,
+            body: ScalarOp::Negate,
+            operands: vec![(NodeId(1), IndexMap::Affine(map::projection(1, &[0])))],
+            name: None,
+        });
+        program
+    }
+
+    fn runtime(layers: i32) -> BackendRuntime {
+        BackendRuntime::new(&ServingConfig {
+            gpu_layers: layers,
+            ..ServingConfig::default()
+        })
+    }
+
+    fn produce(runtime: &mut BackendRuntime, activations: QuantizedBlock<'_>) -> Evaluated {
+        runtime
+            .evaluate_segment_handoff(
+                (PRODUCER_KEY, &negate_program("activations")),
+                &[],
+                &[("activations", activations)],
+                &[NodeId(2)],
+                &BTreeSet::new(),
+                (&[(NodeId(1), "handed")], &[]),
+            )
+            .expect("the producer evaluates")
+    }
+
+    fn consume(runtime: &mut BackendRuntime) -> Evaluated {
+        runtime
+            .evaluate_segment_handoff(
+                (CONSUMER_KEY, &negate_program("handed")),
+                &[],
+                &[],
+                &[NodeId(1)],
+                &BTreeSet::new(),
+                (&[], &[(NodeId(0), "handed")]),
+            )
+            .expect("the consumer reads the handed-off buffer by name")
+    }
+
+    fn host_round_trip(runtime: &mut BackendRuntime, activations: QuantizedBlock<'_>) -> Evaluated {
+        let produced = runtime
+            .evaluate_segment_keyed(
+                (ROUND_TRIP_KEY, &negate_program("activations")),
+                &[],
+                &[("activations", activations)],
+                &[NodeId(1)],
+                &BTreeSet::new(),
+                None,
+            )
+            .expect("the producer evaluates on the host path");
+        let handed = produced
+            .get(NodeId(1))
+            .expect("the host path reads the output")
+            .0
+            .to_vec();
+        runtime
+            .evaluate_segment_keyed(
+                (ROUND_TRIP_KEY + 1, &negate_program("handed")),
+                &[],
+                &[("handed", QuantizedBlock::from(handed.as_slice()))],
+                &[NodeId(1)],
+                &BTreeSet::new(),
+                None,
+            )
+            .expect("the consumer evaluates the host round trip")
+    }
+
+    #[test]
+    fn a_runtime_without_output_placement_hands_the_output_back_to_the_host() {
+        let activations = vec![1.0, -2.5, 3.25, 0.5];
+
+        let produced = produce(
+            &mut runtime(0),
+            QuantizedBlock::from(activations.as_slice()),
+        );
+
+        let (values, _) = produced
+            .get(NodeId(1))
+            .expect("the host path returns the handed-off output");
+        let expected: Vec<_> = activations.iter().map(|value| -value).collect();
+        assert_eq!(values, expected.as_slice());
+    }
+
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    #[test]
+    fn a_handed_off_output_feeds_the_next_segment_without_a_host_read() {
+        let mut device = runtime(GPU_LAYERS_ALL);
+        assert!(
+            device.retains_handoffs(),
+            "the metal driver retains handed-off outputs"
+        );
+        let activations = vec![1.0, -2.5, 3.25, 0.5];
+
+        let produced = produce(&mut device, QuantizedBlock::from(activations.as_slice()));
+        let consumed = consume(&mut device);
+
+        assert!(
+            produced.get(NodeId(1)).is_none(),
+            "the handed-off output is not in the host read set"
+        );
+        assert!(
+            produced.is_placed(NodeId(1)),
+            "the output was written into the session buffer"
+        );
+        assert!(
+            produced.get(NodeId(2)).is_some(),
+            "the output the host asked for is read"
+        );
+        let (values, _) = consumed
+            .get(NodeId(1))
+            .expect("the consumer output is read");
+        let round_trip = host_round_trip(
+            &mut runtime(GPU_LAYERS_ALL),
+            QuantizedBlock::from(activations.as_slice()),
+        );
+        let (expected, _) = round_trip
+            .get(NodeId(1))
+            .expect("the round trip output is read");
+        assert_eq!(values, expected, "the handoff equals the host round trip");
+        assert_eq!(values, activations.as_slice());
+    }
+
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    #[test]
+    fn the_session_buffer_is_rewritten_in_place_by_each_producer_run() {
+        let mut device = runtime(GPU_LAYERS_ALL);
+        for activations in [vec![1.0, -2.5, 3.25, 0.5], vec![-0.125, 8.0, -16.5, 0.0]] {
+            produce(&mut device, QuantizedBlock::from(activations.as_slice()));
+
+            let consumed = consume(&mut device);
+
+            let (values, _) = consumed
+                .get(NodeId(1))
+                .expect("the consumer output is read");
+            assert_eq!(values, activations.as_slice());
+        }
+        assert_eq!(
+            device.handoffs.len(),
+            1,
+            "one session buffer served both runs"
+        );
+        assert_eq!(
+            device.plan_counts().1,
+            2,
+            "the producer and consumer plans were each built once"
+        );
+    }
+
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    #[test]
+    fn a_device_written_name_offered_as_a_host_block_is_refused() {
+        let mut device = runtime(GPU_LAYERS_ALL);
+        let activations = vec![1.0, -2.5, 3.25, 0.5];
+        produce(&mut device, QuantizedBlock::from(activations.as_slice()));
+
+        let refusal = device
+            .evaluate_segment_handoff(
+                (CONSUMER_KEY, &negate_program("handed")),
+                &[],
+                &[("handed", QuantizedBlock::from(activations.as_slice()))],
+                &[NodeId(1)],
+                &BTreeSet::new(),
+                (&[], &[(NodeId(0), "handed")]),
+            )
+            .expect_err("a name cannot be both device-written and host-sourced");
+
+        assert!(
+            matches!(refusal, InteropError::HandoffNameIsHostSourced { .. }),
+            "{refusal:?}"
+        );
     }
 }

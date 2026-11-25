@@ -152,6 +152,11 @@ struct Bound<'a> {
     call_resident: Vec<String>,
     /// leaves an earlier segment's outputs fill, in the order those outputs arrive
     carried_inputs: Vec<NodeId>,
+    /// outputs a later segment consumes by name; the runtime keeps them on the device when it
+    /// can, otherwise they come back after the read outputs and the caller binds them as blocks
+    handoff_out: Vec<(NodeId, String)>,
+    /// leaves this program reads from an earlier segment's handed-off outputs, by name
+    handoff_in: Vec<(NodeId, String)>,
     shape: Shape,
     /// the plan-cache key of `program`, hashed on first run once the program is complete
     key: std::cell::OnceCell<usize>,
@@ -171,6 +176,8 @@ impl<'a> Bound<'a> {
             runtime_inputs: Vec::new(),
             call_resident: Vec::new(),
             carried_inputs: Vec::new(),
+            handoff_out: Vec::new(),
+            handoff_in: Vec::new(),
             shape,
             key: std::cell::OnceCell::new(),
         }
@@ -180,13 +187,18 @@ impl<'a> Bound<'a> {
     /// value is constant for every run of this program, so the name is
     /// declared resident for the call; the owner releases it when the runs end.
     fn carry(&mut self, input: NodeId) -> Result<String> {
+        let name = self.input_name(input)?;
+        self.call_resident.push(name.clone());
+        Ok(name)
+    }
+
+    fn input_name(&self, input: NodeId) -> Result<String> {
         let Some(Op::Input {
             name: Some(name), ..
         }) = self.program.get(input.0 as usize)
         else {
             bail!("node {input:?} is not a named input leaf");
         };
-        self.call_resident.push(name.clone());
         Ok(name.clone())
     }
 
@@ -243,8 +255,8 @@ impl<'a> Bound<'a> {
         let leaves: Vec<_> = (0..self.shape.decoder_layers)
             .map(|layer| {
                 (
-                    self.leaf(&format!("cross_k_{layer}"), &dims),
-                    self.leaf(&format!("cross_v_{layer}"), &dims),
+                    self.leaf(&cross_leaf_name("k", layer), &dims),
+                    self.leaf(&cross_leaf_name("v", layer), &dims),
                 )
             })
             .collect();
@@ -543,36 +555,56 @@ impl<'a> Bound<'a> {
         let prep = run_started.elapsed();
         #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
         if let Some(cell) = &self.op_timings {
+            let timed_outputs: Vec<NodeId> = outputs
+                .iter()
+                .copied()
+                .chain(self.handoff_out.iter().map(|(node, _)| *node))
+                .collect();
             let (evaluated, timings) = runtime
                 .evaluate_segment_op_timed(
                     &self.program,
                     symbols,
                     &named,
-                    outputs,
+                    &timed_outputs,
                     &resident,
                     &BTreeMap::new(),
                 )
                 .map_err(|error| anyhow::anyhow!("{stage} segment does not evaluate: {error:?}"))?;
             let _ = cell.set(timings);
-            return collect_outputs(&evaluated, outputs);
+            return collect_outputs(&evaluated, outputs, &self.handoff_out);
         }
         #[cfg(feature = "instrument")]
         let evaluate_started = Instant::now();
+        let handed_out: Vec<(NodeId, &str)> = self
+            .handoff_out
+            .iter()
+            .map(|(node, name)| (*node, name.as_str()))
+            .collect();
+        let handed_in: Vec<(NodeId, &str)> = self
+            .handoff_in
+            .iter()
+            .map(|(node, name)| (*node, name.as_str()))
+            .collect();
         let evaluated = runtime
-            .evaluate_segment_keyed(
+            .evaluate_segment_handoff(
                 (self.program_key(), &self.program),
                 symbols,
                 &named,
                 outputs,
                 &resident,
-                None,
+                (&handed_out, &handed_in),
             )
             .map_err(|error| anyhow::anyhow!("{stage} segment does not evaluate: {error:?}"))?;
         #[cfg(feature = "instrument")]
         let evaluate = evaluate_started.elapsed();
         #[cfg(feature = "instrument")]
         let collect_started = Instant::now();
-        let collected = collect_outputs(&evaluated, outputs);
+        let returned: &[(NodeId, String)] = if runtime.retains_handoffs() {
+            &[]
+        } else {
+            &self.handoff_out
+        };
+        let collected = collect_outputs(&evaluated, outputs, returned);
         #[cfg(feature = "instrument")]
         proxima_telemetry::debug!(
             stage = stage,
@@ -586,9 +618,19 @@ impl<'a> Bound<'a> {
     }
 }
 
+/// The name a decoder layer's cross-attention `plane` ("k" or "v") leaf is bound under, which the
+/// encoder hands its output off as.
+fn cross_leaf_name(plane: &str, layer: impl core::fmt::Display) -> String {
+    format!("cross_{plane}_{layer}")
+}
+
 #[cfg_attr(feature = "instrument", proxima_telemetry::instrument(level = "debug"))]
-fn collect_outputs(evaluated: &Evaluated, outputs: &[NodeId]) -> Result<Vec<Vec<f32>>> {
-    outputs
+fn collect_outputs(
+    evaluated: &Evaluated,
+    outputs: &[NodeId],
+    handed_off: &[(NodeId, String)],
+) -> Result<Vec<Vec<f32>>> {
+    let mut collected = outputs
         .iter()
         .map(|node| {
             evaluated
@@ -596,7 +638,14 @@ fn collect_outputs(evaluated: &Evaluated, outputs: &[NodeId]) -> Result<Vec<Vec<
                 .map(|(values, _)| values.to_vec())
                 .with_context(|| format!("evaluated program has no output for node {node:?}"))
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    // a handed-off output is here only when the backend did not keep it on the device
+    collected.extend(
+        handed_off
+            .iter()
+            .filter_map(|(node, _)| evaluated.get(*node).map(|(values, _)| values.to_vec())),
+    );
+    Ok(collected)
 }
 
 /// Makes every closed `#[instrument]` span emit a `debug!` carrying its name and
@@ -1027,10 +1076,10 @@ impl Model {
             )?;
             cross.push((k, v));
         }
-        let mut outputs = vec![memory];
-        for (k, v) in &cross {
-            outputs.push(*k);
-            outputs.push(*v);
+        let outputs = vec![memory];
+        for (layer, (k, v)) in cross.iter().enumerate() {
+            bound.handoff_out.push((*k, cross_leaf_name("k", layer)));
+            bound.handoff_out.push((*v, cross_leaf_name("v", layer)));
         }
         #[cfg(feature = "instrument")]
         let bind_started = Instant::now();
@@ -1061,6 +1110,10 @@ impl Model {
         let mut decoder = Bound::new(self.shape.clone());
         let step_outputs = decoder.decoder_graph()?;
         let carried = decoder.carried_inputs.clone();
+        for input in &carried {
+            let name = decoder.input_name(*input)?;
+            decoder.handoff_in.push((*input, name));
+        }
         for (input, value) in carried.into_iter().zip(values.drain(1..)) {
             let name = decoder.carry(input)?;
             decoder.named.insert(name, value);
@@ -1116,7 +1169,9 @@ impl Model {
         };
         let outcome = decode_steps();
         let held: Vec<&str> = decoder.call_resident.iter().map(String::as_str).collect();
-        runtime.release_call_residents_of(&held, decoder.program_key());
+        if !held.is_empty() {
+            runtime.release_call_residents_of(&held, decoder.program_key());
+        }
         outcome?;
         let decode = decode_start.elapsed();
         let generated = &tokens[policy.prompt().len()..];

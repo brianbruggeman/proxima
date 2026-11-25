@@ -527,6 +527,12 @@ pub enum InteropError {
     #[error("unsupported serving config: {0}")]
     UnsupportedServingConfig(String),
 
+    /// A name a segment's output is handed off under was also offered as a host
+    /// block. A device-written name is never host-sourced: the host-identity rule
+    /// (`omega::resident_identity`) cannot apply to bytes the host never held.
+    #[error("handoff name {name:?} is also bound as a host block")]
+    HandoffNameIsHostSourced { name: String },
+
     /// `generate::decode::run_decode_loop_placed_kv`'s per-step
     /// `omega::metal::MetalStageTotals::gpu_exec_calls` reading exceeded
     /// [`crate::serving::ServingConfig::max_command_buffers_per_token`].

@@ -1400,7 +1400,7 @@ mod transcript {
     }
 
     #[test]
-    fn a_second_transcription_reuses_the_mel_and_encode_plans_the_first_built() -> anyhow::Result<()> {
+    fn a_second_transcription_reuses_every_plan_the_first_built() -> anyhow::Result<()> {
         let model = Model::load(&super::fixture_dir()?)?;
         let audio = wav::read(&wav_path())?;
         let expected: Vec<u32> = read_i32("tokens.i32")?
@@ -1424,15 +1424,26 @@ mod transcript {
             misses_after_first >= mel_and_encode_plans,
             "the first call builds at least the mel and encode plans: {misses_after_first}"
         );
-        assert_eq!(
-            misses_after_second - misses_after_first,
-            misses_after_first - mel_and_encode_plans,
-            "the second call misses only on the decoder plans, whose cross-attention inputs are per call"
-        );
-        assert!(
-            hits_after_second - hits_after_first >= mel_and_encode_plans,
-            "the mel and encode plans are hits on the second call"
-        );
+        if cfg!(all(feature = "metal", target_os = "macos")) {
+            assert_eq!(
+                misses_after_second, misses_after_first,
+                "the second call builds no plan: the decoder reads the encoder's cross K/V from session buffers"
+            );
+            assert!(
+                hits_after_second - hits_after_first >= misses_after_first,
+                "every plan the first call built is a hit on the second call"
+            );
+        } else {
+            assert_eq!(
+                misses_after_second - misses_after_first,
+                misses_after_first - mel_and_encode_plans,
+                "without device output placement the second call misses only on the decoder plans, whose cross-attention inputs are per call"
+            );
+            assert!(
+                hits_after_second - hits_after_first >= mel_and_encode_plans,
+                "the mel and encode plans are hits on the second call"
+            );
+        }
         Ok(())
     }
 
