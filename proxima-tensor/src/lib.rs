@@ -242,6 +242,7 @@ pub enum LoopCdMode {
     FixedHidden,
 }
 
+#[cfg(any(feature = "std", feature = "alloc"))]
 pub mod physical;
 // pure over `&[Op]`/`NodeId`/`shape::infer`, so it lives at the same tier as
 // both — see the module's own doc for what it produces and why no new type
