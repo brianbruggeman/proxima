@@ -1343,6 +1343,7 @@ mod transcript {
     use super::golden::*;
     use proxima_model_interop::audio::wav;
     use proxima_model_interop::families::encoder_decoder_host::Model;
+    #[cfg(feature = "gpu")]
     use proxima_model_interop::ServingSettings;
 
     #[test]
@@ -1367,10 +1368,12 @@ mod transcript {
         Ok(())
     }
 
+    #[cfg(feature = "gpu")]
     fn settings_from(text: &str) -> anyhow::Result<ServingSettings> {
         Ok(toml::from_str(text)?)
     }
 
+    #[cfg(feature = "gpu")]
     fn transcribe_repeatedly(
         settings: ServingSettings,
         calls: usize,
@@ -1387,6 +1390,7 @@ mod transcript {
             .collect()
     }
 
+    #[cfg(feature = "gpu")]
     #[test]
     fn a_second_transcription_in_one_process_returns_the_same_ids() -> anyhow::Result<()> {
         let ids = transcribe_repeatedly(
@@ -1404,6 +1408,7 @@ mod transcript {
         Ok(())
     }
 
+    #[cfg(feature = "gpu")]
     #[test]
     fn a_second_transcription_reuses_every_plan_the_first_built() -> anyhow::Result<()> {
         let model = Model::load(&super::fixture_dir()?)?;
@@ -1452,6 +1457,7 @@ mod transcript {
         Ok(())
     }
 
+    #[cfg(feature = "gpu")]
     #[test]
     fn a_second_transcription_under_a_precision_rule_returns_the_same_ids() -> anyhow::Result<()> {
         let ids = transcribe_repeatedly(
