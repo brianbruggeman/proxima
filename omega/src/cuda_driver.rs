@@ -5457,6 +5457,8 @@ pub mod rocm {
     use proxima_tensor::bind::kv_read_only_by_fused_attention;
     use proxima_tensor::{BoundOp, Evaluated, NodeId, Op, QuantizedBlock, Shapes, block_node_ids, infer, resolve_named_blocks};
     use crate::lowering::Binding;
+    use crate::cuda::CudaKernel;
+    use crate::gpu_runtime::{DeviceElement, EventMillis, GpuRuntime, LaunchArguments, LaunchShape};
 
     /// Shared objects the runtime half probes, in order. The versioned names come
     /// first so a host with several ROCm installs resolves the one on its linker
@@ -5573,6 +5575,10 @@ pub mod rocm {
         MissingBuffer(NodeId),
         #[error("a {len}-byte view at offset {offset} passes the end of a {bytes}-byte allocation")]
         ViewOutOfRange { offset: usize, len: usize, bytes: usize },
+        #[error("hip events are not recorded by this runtime, so launch timing is skipped")]
+        EventsUnsupported,
+        #[error("this hip runtime does not export hipMemGetInfo")]
+        MemoryInfoUnavailable,
     }
 
     type HipInit = unsafe extern "C" fn(u32) -> c_int;
@@ -5585,6 +5591,7 @@ pub mod rocm {
     type HipFree = unsafe extern "C" fn(*mut c_void) -> c_int;
     type HipMemcpy = unsafe extern "C" fn(*mut c_void, *const c_void, usize, c_int) -> c_int;
     type HipMemset = unsafe extern "C" fn(*mut c_void, c_int, usize) -> c_int;
+    type HipMemGetInfo = unsafe extern "C" fn(*mut usize, *mut usize) -> c_int;
     type HipGetErrorString = unsafe extern "C" fn(c_int) -> *const c_char;
     type HipModuleLoadData = unsafe extern "C" fn(*mut *mut c_void, *const c_void) -> c_int;
     type HipModuleGetFunction =
@@ -5698,6 +5705,7 @@ pub mod rocm {
         hip_free: HipFree,
         hip_memcpy: HipMemcpy,
         hip_memset: HipMemset,
+        hip_mem_get_info: Option<HipMemGetInfo>,
         hip_get_error_string: HipGetErrorString,
         hip_module_load_data: HipModuleLoadData,
         hip_module_get_function: HipModuleGetFunction,
@@ -5748,6 +5756,7 @@ pub mod rocm {
                 hip_free: resolve(&runtime, runtime_name, "hipFree")?,
                 hip_memcpy: resolve(&runtime, runtime_name, "hipMemcpy")?,
                 hip_memset: resolve(&runtime, runtime_name, "hipMemset")?,
+                hip_mem_get_info: resolve(&runtime, runtime_name, "hipMemGetInfo").ok(),
                 hip_get_error_string: resolve(&runtime, runtime_name, "hipGetErrorString")?,
                 hip_module_load_data: resolve(&runtime, runtime_name, "hipModuleLoadData")?,
                 hip_module_get_function: resolve(&runtime, runtime_name, "hipModuleGetFunction")?,
@@ -6686,6 +6695,422 @@ pub mod rocm {
                 let lanes = device.warp_size()?;
                 HipWave::from_lanes(u64::from(lanes)).ok_or(HipDriverError::UnsupportedWaveWidth(lanes))
             }
+        }
+    }
+
+    // SAFETY (the four impls below): a HIP allocation, code object and function handle are process-wide
+    // runtime state addressed by pointer; the host never dereferences them, so moving or sharing the
+    // owning handle across threads cannot alias host memory, and the device serializes on its queue.
+    unsafe impl Send for HipBuffer {}
+    unsafe impl Sync for HipBuffer {}
+    unsafe impl Send for HipModule {}
+    unsafe impl Sync for HipModule {}
+
+    /// The element window `range` names inside a buffer of `total` elements of `size` bytes each, as
+    /// `(byte offset, byte length)`. A range past the end is clamped to it, never panics: the executor
+    /// derives every window from node sizes, so a clamp only shows if that derivation is wrong, and the
+    /// launch then reads or writes less rather than out of bounds.
+    fn element_window(total: usize, range: &core::ops::Range<usize>, size: usize) -> (usize, usize) {
+        let start = range.start.min(total);
+        let end = range.end.clamp(start, total);
+        (start * size, (end - start) * size)
+    }
+
+    /// A HIP device allocation of `Element`s: the untyped [`HipBuffer`] plus the element count the
+    /// shared executor's typed buffers carry.
+    pub struct HipSlice<Element> {
+        buffer: Arc<HipBuffer>,
+        len: usize,
+        element: core::marker::PhantomData<fn() -> Element>,
+    }
+
+    impl<Element> Clone for HipSlice<Element> {
+        fn clone(&self) -> Self {
+            Self { buffer: Arc::clone(&self.buffer), len: self.len, element: core::marker::PhantomData }
+        }
+    }
+
+    impl<Element> core::fmt::Debug for HipSlice<Element> {
+        fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            formatter.debug_struct("HipSlice").field("len", &self.len).finish_non_exhaustive()
+        }
+    }
+
+    /// A shared window of `Element`s onto a [`HipSlice`].
+    pub struct HipWindow<'buffer, Element> {
+        view: HipView<'buffer>,
+        element: core::marker::PhantomData<fn() -> Element>,
+    }
+
+    /// A writable window of `Element`s onto a [`HipSlice`], exclusive for its lifetime.
+    pub struct HipWindowMut<'buffer, Element> {
+        view: HipView<'buffer>,
+        exclusive: core::marker::PhantomData<&'buffer mut HipBuffer>,
+        element: core::marker::PhantomData<fn() -> Element>,
+    }
+
+    impl<Element> KernelArgument for HipWindow<'_, Element> {
+        fn slot(&self) -> *mut c_void {
+            self.view.slot()
+        }
+    }
+
+    impl<Element> KernelArgument for HipWindowMut<'_, Element> {
+        fn slot(&self) -> *mut c_void {
+            self.view.slot()
+        }
+    }
+
+    /// A kernel's source, awaiting [`GpuRuntime::load_module`].
+    #[derive(Debug)]
+    pub struct HipImage(String);
+
+    /// A compiled entry point; cloning shares the loaded module.
+    #[derive(Debug, Clone)]
+    pub struct HipFunction {
+        // keeps the code object loaded while any handle to its function lives
+        _module: Arc<HipModule>,
+        handle: *mut c_void,
+    }
+
+    // SAFETY: see the impls above; the handle is only passed to the launch call.
+    unsafe impl Send for HipFunction {}
+    unsafe impl Sync for HipFunction {}
+
+    /// The borrowed parameter array of one HIP launch: every argument is borrowed by the
+    /// [`KernelParams`] until the launch returns.
+    pub struct HipLaunch<'launch> {
+        function: &'launch HipFunction,
+        parameters: KernelParams<'launch>,
+    }
+
+    impl<'launch> LaunchArguments<'launch, HipRuntime> for HipLaunch<'launch> {
+        fn push<Element: DeviceElement>(&mut self, buffer: &'launch HipSlice<Element>) -> &mut Self {
+            self.parameters.push(&*buffer.buffer);
+            self
+        }
+
+        fn push_mut<Element: DeviceElement>(&mut self, buffer: &'launch mut HipSlice<Element>) -> &mut Self {
+            self.parameters.push(&*buffer.buffer);
+            self
+        }
+
+        fn push_view<Element: DeviceElement>(&mut self, view: &'launch HipWindow<'_, Element>) -> &mut Self {
+            self.parameters.push(view);
+            self
+        }
+
+        fn push_view_mut<Element: DeviceElement>(&mut self, view: &'launch mut HipWindowMut<'_, Element>) -> &mut Self {
+            self.parameters.push(&*view);
+            self
+        }
+
+        fn push_value<Element: DeviceElement>(&mut self, value: &'launch Element) -> &mut Self {
+            self.parameters.push_value(value);
+            self
+        }
+    }
+
+    impl HipApi {
+        fn copy(
+            &self,
+            call: &'static str,
+            destination: *mut c_void,
+            source: *const c_void,
+            bytes: usize,
+            direction: c_int,
+        ) -> Result<(), HipDriverError> {
+            if bytes == 0 {
+                return Ok(());
+            }
+            // SAFETY: every caller bounds-checked both sides against live allocations or host slices of `bytes`.
+            let status = unsafe { (self.hip_memcpy)(destination, source, bytes, direction) };
+            if status != HIP_SUCCESS {
+                return Err(self.runtime_error(call, status));
+            }
+            Ok(())
+        }
+    }
+
+    /// The shared executor's runtime on a ROCm device: the [`GpuRuntime`] a `DevicePlan` runs on when
+    /// the lowering is CUDA's and the kernels render as HIP C++ at `wave`.
+    ///
+    /// Teaching pointer: the cudarc runtime is the other [`GpuRuntime`]; both are built from the same
+    /// executor bodies. Launch parameters come from [`KernelParams`] built over borrowed arguments,
+    /// and the module cache is keyed by the kernel's entry, which carries dialect and wave width.
+    #[derive(Debug, Clone)]
+    pub struct HipRuntime {
+        device: Arc<HipDevice>,
+        wave: HipWave,
+        functions: Arc<proxima_primitives::sync::blocking::Mutex<BTreeMap<String, HipFunction>>>,
+        compile_counters: Arc<super::CompileCounters>,
+    }
+
+    impl HipRuntime {
+        /// A runtime over an opened `device`, emitting for `wave`.
+        #[must_use]
+        pub fn new(device: HipDevice, wave: HipWave) -> Self {
+            Self {
+                device: Arc::new(device),
+                wave,
+                functions: Arc::new(proxima_primitives::sync::blocking::Mutex::new(BTreeMap::new())),
+                compile_counters: Arc::new(super::CompileCounters::new(super::kernel_disk_store())),
+            }
+        }
+
+        /// The device this runtime launches on.
+        #[must_use]
+        pub fn device(&self) -> &HipDevice {
+            &self.device
+        }
+
+        fn slice_from<Element: DeviceElement>(buffer: HipBuffer, len: usize) -> HipSlice<Element> {
+            HipSlice { buffer: Arc::new(buffer), len, element: core::marker::PhantomData }
+        }
+
+        fn byte_len<Element>(len: usize) -> Result<usize, HipDriverError> {
+            len.checked_mul(core::mem::size_of::<Element>()).ok_or(HipDriverError::InputTooLarge(len))
+        }
+
+        fn check_range<Element>(buffer: &HipSlice<Element>, range: &core::ops::Range<usize>) -> Result<(), HipDriverError> {
+            let size = core::mem::size_of::<Element>();
+            (range.start <= range.end && range.end <= buffer.len).then_some(()).ok_or(HipDriverError::ViewOutOfRange {
+                offset: range.start * size,
+                len: range.end.saturating_sub(range.start) * size,
+                bytes: buffer.len * size,
+            })
+        }
+
+        fn sub_view<'any>(pointer: *mut c_void, offset: usize, len: usize) -> HipView<'any> {
+            HipView { pointer: offset_pointer(pointer, offset), len, owner: core::marker::PhantomData }
+        }
+    }
+
+    impl GpuRuntime for HipRuntime {
+        type Error = HipDriverError;
+        type BuildError = HipDriverError;
+        type Buffer<Element: DeviceElement> = HipSlice<Element>;
+        type View<'a, Element: DeviceElement> = HipWindow<'a, Element>;
+        type ViewMut<'a, Element: DeviceElement> = HipWindowMut<'a, Element>;
+        type Event = core::convert::Infallible;
+        type Function = HipFunction;
+        type Module = HipModule;
+        type Image = HipImage;
+        type Launch<'a> = HipLaunch<'a>;
+
+        fn alloc_zeros<Element: DeviceElement>(&self, len: usize) -> Result<HipSlice<Element>, HipDriverError> {
+            let buffer = self.device.allocate_zeroed_bytes(Self::byte_len::<Element>(len)?)?;
+            Ok(Self::slice_from(buffer, len))
+        }
+
+        fn upload<Element: DeviceElement>(&self, values: &[Element]) -> Result<HipSlice<Element>, HipDriverError> {
+            // SAFETY: the elements are plain device-representable values, read as their own bytes.
+            let bytes = unsafe { core::slice::from_raw_parts(values.as_ptr().cast::<u8>(), core::mem::size_of_val(values)) };
+            let buffer = self.device.upload_bytes(bytes)?;
+            Ok(Self::slice_from(buffer, values.len()))
+        }
+
+        fn upload_into<Element: DeviceElement>(&self, values: &[Element], buffer: &mut HipSlice<Element>) -> Result<(), HipDriverError> {
+            self.upload_at(values, buffer, 0)
+        }
+
+        fn upload_at<Element: DeviceElement>(&self, values: &[Element], buffer: &mut HipSlice<Element>, offset: usize) -> Result<(), HipDriverError> {
+            let range = offset..offset + values.len();
+            Self::check_range(buffer, &range)?;
+            let size = core::mem::size_of::<Element>();
+            let destination = offset_pointer(buffer.buffer.pointer, offset * size);
+            self.device.api.copy("hipMemcpy", destination, values.as_ptr().cast::<c_void>(), core::mem::size_of_val(values), MEMCPY_HOST_TO_DEVICE)
+        }
+
+        fn download<Element: DeviceElement>(&self, buffer: &HipSlice<Element>) -> Result<Vec<Element>, HipDriverError> {
+            self.download_range(buffer, 0..buffer.len)
+        }
+
+        fn download_range<Element: DeviceElement>(&self, buffer: &HipSlice<Element>, range: core::ops::Range<usize>) -> Result<Vec<Element>, HipDriverError> {
+            Self::check_range(buffer, &range)?;
+            let size = core::mem::size_of::<Element>();
+            let mut values = Vec::<Element>::with_capacity(range.len());
+            let source = offset_pointer(buffer.buffer.pointer, range.start * size).cast_const();
+            self.device.api.copy("hipMemcpy", values.as_mut_ptr().cast::<c_void>(), source, range.len() * size, MEMCPY_DEVICE_TO_HOST)?;
+            // SAFETY: the copy initialized `range.len()` elements, and every bit pattern is a valid element.
+            unsafe { values.set_len(range.len()) };
+            Ok(values)
+        }
+
+        fn copy_range<Element: DeviceElement>(
+            &self,
+            source: &HipSlice<Element>,
+            range: core::ops::Range<usize>,
+            destination: &mut HipSlice<Element>,
+            offset: usize,
+        ) -> Result<(), HipDriverError> {
+            Self::check_range(source, &range)?;
+            Self::check_range(destination, &(offset..offset + range.len()))?;
+            let size = core::mem::size_of::<Element>();
+            let from = offset_pointer(source.buffer.pointer, range.start * size).cast_const();
+            let to = offset_pointer(destination.buffer.pointer, offset * size);
+            self.device.api.copy("hipMemcpy", to, from, range.len() * size, MEMCPY_DEVICE_TO_DEVICE)
+        }
+
+        fn build_function(&self, kernel: &CudaKernel) -> Result<HipFunction, HipDriverError> {
+            if let Some(found) = self.functions.lock().get(&kernel.entry) {
+                return Ok(found.clone());
+            }
+            let module = Arc::new(self.device.compile(&kernel.source, &[])?);
+            let function = HipFunction { handle: module.function(&kernel.entry)?, _module: module };
+            self.compile_counters.compilations.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            self.functions.lock().insert(kernel.entry.clone(), function.clone());
+            Ok(function)
+        }
+
+        fn image_from_source(source: &str) -> HipImage {
+            HipImage(source.to_owned())
+        }
+
+        fn load_module(&self, image: HipImage) -> Result<Arc<HipModule>, HipDriverError> {
+            Ok(Arc::new(self.device.compile(&image.0, &[])?))
+        }
+
+        fn load_function(&self, module: &Arc<HipModule>, entry: &str) -> Result<HipFunction, HipDriverError> {
+            Ok(HipFunction { handle: module.function(entry)?, _module: Arc::clone(module) })
+        }
+
+        fn launch_arguments<'a>(&'a self, function: &'a HipFunction) -> HipLaunch<'a> {
+            HipLaunch { function, parameters: KernelParams::new() }
+        }
+
+        unsafe fn launch(&self, mut arguments: HipLaunch<'_>, shape: LaunchShape) -> Result<(), HipDriverError> {
+            let api = &self.device.api;
+            // SAFETY: the caller matched the arguments to the kernel's parameter list; the params borrow
+            // every argument until this call returns, and the launch is on the default stream.
+            let status = unsafe {
+                (api.hip_module_launch_kernel)(
+                    arguments.function.handle,
+                    shape.grid_dim.0,
+                    shape.grid_dim.1,
+                    shape.grid_dim.2,
+                    shape.block_dim.0,
+                    shape.block_dim.1,
+                    shape.block_dim.2,
+                    shape.shared_mem_bytes,
+                    ptr::null_mut(),
+                    arguments.parameters.as_mut_ptr(),
+                    ptr::null_mut(),
+                )
+            };
+            if status != HIP_SUCCESS {
+                return Err(api.runtime_error("hipModuleLaunchKernel", status));
+            }
+            Ok(())
+        }
+
+        fn executes(&self) -> proxima_tensor::Executes {
+            crate::cuda::executes(&self.emit_target())
+        }
+
+        fn emit_target(&self) -> crate::cuda::target::Target {
+            crate::cuda::target::Target::hip_wave(self.wave.lanes())
+        }
+
+        fn emit_device(&self) -> EmitDevice {
+            EmitDevice::default()
+        }
+
+        fn len<Element: DeviceElement>(buffer: &HipSlice<Element>) -> usize {
+            buffer.len
+        }
+
+        fn view<Element: DeviceElement>(buffer: &HipSlice<Element>, range: core::ops::Range<usize>) -> HipWindow<'_, Element> {
+            let (offset, len) = element_window(buffer.len, &range, core::mem::size_of::<Element>());
+            HipWindow { view: Self::sub_view(buffer.buffer.pointer, offset, len), element: core::marker::PhantomData }
+        }
+
+        fn view_mut<Element: DeviceElement>(buffer: &mut HipSlice<Element>, range: core::ops::Range<usize>) -> HipWindowMut<'_, Element> {
+            let (offset, len) = element_window(buffer.len, &range, core::mem::size_of::<Element>());
+            HipWindowMut {
+                view: Self::sub_view(buffer.buffer.pointer, offset, len),
+                exclusive: core::marker::PhantomData,
+                element: core::marker::PhantomData,
+            }
+        }
+
+        fn view_mut_len<Element: DeviceElement>(view: &HipWindowMut<'_, Element>) -> usize {
+            view.view.len / core::mem::size_of::<Element>()
+        }
+
+        fn view_mut_range<'view, Element: DeviceElement>(view: &'view mut HipWindowMut<'_, Element>, range: core::ops::Range<usize>) -> HipWindowMut<'view, Element> {
+            let (offset, len) = element_window(Self::view_mut_len(view), &range, core::mem::size_of::<Element>());
+            HipWindowMut {
+                view: Self::sub_view(view.view.pointer, offset, len),
+                exclusive: core::marker::PhantomData,
+                element: core::marker::PhantomData,
+            }
+        }
+
+        fn bytes_mut<Element: DeviceElement>(buffer: &mut HipSlice<Element>) -> Option<HipWindowMut<'_, u8>> {
+            let bytes = buffer.len * core::mem::size_of::<Element>();
+            Some(HipWindowMut {
+                view: Self::sub_view(buffer.buffer.pointer, 0, bytes),
+                exclusive: core::marker::PhantomData,
+                element: core::marker::PhantomData,
+            })
+        }
+
+        fn record_event(&self) -> Result<core::convert::Infallible, HipDriverError> {
+            Err(HipDriverError::EventsUnsupported)
+        }
+
+        fn elapsed_ms(_start: &core::convert::Infallible, _end: &core::convert::Infallible) -> Result<EventMillis, HipDriverError> {
+            Err(HipDriverError::EventsUnsupported)
+        }
+
+        fn synchronize(&self) -> Result<(), HipDriverError> {
+            self.device.synchronize()
+        }
+
+        fn memory_info(&self) -> Result<(usize, usize), HipDriverError> {
+            let api = &self.device.api;
+            let query = api.hip_mem_get_info.ok_or(HipDriverError::MemoryInfoUnavailable)?;
+            let (mut free, mut total) = (0usize, 0usize);
+            // SAFETY: both out-parameters are valid for the call.
+            let status = unsafe { query(&mut free, &mut total) };
+            if status != HIP_SUCCESS {
+                return Err(api.runtime_error("hipMemGetInfo", status));
+            }
+            Ok((free, total))
+        }
+
+        fn device_identity(&self) -> Result<String, HipDriverError> {
+            Ok(format!("hip:{}:{}", self.device.ordinal, self.device.name))
+        }
+
+        fn compile_counters(&self) -> &super::CompileCounters {
+            &self.compile_counters
+        }
+    }
+
+    #[cfg(test)]
+    mod runtime_tests {
+        use super::element_window;
+
+        #[test]
+        fn a_window_inside_the_buffer_is_scaled_to_bytes() {
+            assert_eq!(element_window(100, &(10..30), 4), (40, 80));
+        }
+
+        #[test]
+        fn a_window_past_the_end_is_clamped_to_the_buffer() {
+            assert_eq!(element_window(100, &(90..130), 4), (360, 40));
+        }
+
+        #[test]
+        fn a_window_starting_past_the_end_is_empty() {
+            assert_eq!(element_window(100, &(120..130), 4), (400, 0));
+        }
+
+        #[test]
+        fn an_empty_range_is_an_empty_window_at_its_start() {
+            assert_eq!(element_window(100, &(30..30), 1), (30, 0));
         }
     }
 

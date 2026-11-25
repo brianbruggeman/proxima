@@ -23,6 +23,9 @@ use proxima_primitives::sync::blocking::Mutex;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// Milliseconds between two recorded events, as the device runtimes report them.
+pub type EventMillis = f32;
+
 /// An element a runtime moves between host and device.
 ///
 /// Implemented per type, never blanket, so the set of element types a kernel
@@ -205,7 +208,7 @@ pub trait GpuRuntime: core::fmt::Debug + Clone {
     ///
     /// # Errors
     /// An event has not completed or the runtime cannot time it.
-    fn elapsed_ms(start: &Self::Event, end: &Self::Event) -> Result<f32, Self::Error>;
+    fn elapsed_ms(start: &Self::Event, end: &Self::Event) -> Result<EventMillis, Self::Error>;
 
     /// Blocks until every queued device operation finished.
     ///
@@ -382,7 +385,7 @@ impl GpuRuntime for CudarcRuntime {
         Ok(event)
     }
 
-    fn elapsed_ms(start: &CudaEvent, end: &CudaEvent) -> Result<f32, DriverError> {
+    fn elapsed_ms(start: &CudaEvent, end: &CudaEvent) -> Result<EventMillis, DriverError> {
         start.elapsed_ms(end)
     }
 

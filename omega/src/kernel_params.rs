@@ -80,6 +80,13 @@ impl<'arguments> KernelParams<'arguments> {
         self
     }
 
+    /// Appends a scalar kernel parameter: its slot is its own address, so the
+    /// scalar is borrowed until these params are dropped.
+    pub fn push_value<Value: Copy>(&mut self, value: &'arguments Value) -> &mut Self {
+        self.slots.push(core::ptr::from_ref(value).cast_mut().cast());
+        self
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.slots.len()
@@ -198,6 +205,21 @@ mod tests {
             let device_pointer = unsafe { *slot.cast::<*mut c_void>() };
             assert_eq!(device_pointer, argument.pointer);
         }
+    }
+
+    #[test]
+    fn kernel_params_read_back_a_scalar_after_a_buffer_in_launch_order() {
+        let buffer = Argument::of(0x7000, 64);
+        let rows: u32 = 48;
+        let mut params = KernelParams::new();
+        params.push(&buffer).push_value(&rows);
+
+        let array = params.as_mut_ptr();
+
+        // SAFETY: `array` holds two live slots: the buffer's pointer field, then `rows`.
+        let (pointer, scalar) = unsafe { (*(*array).cast::<*mut c_void>(), *(*array.add(1)).cast::<u32>()) };
+        assert_eq!(pointer, buffer.pointer);
+        assert_eq!(scalar, rows);
     }
 
     #[test]
