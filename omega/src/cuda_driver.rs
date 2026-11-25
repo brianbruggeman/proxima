@@ -7280,6 +7280,13 @@ pub mod rocm {
             Extent, IndexMap, Keep, Reduce, ReduceInit, ScalarOp, append, bind, infer, map,
         };
 
+        fn activation_dtype() -> DType {
+            proxima_numeric::Numerics::default()
+                .activation
+                .to_dtype()
+                .expect("activation format has a dtype")
+        }
+
         #[test]
         fn hip_compile_options_name_the_open_devices_gcn_arch() {
             assert_eq!(
@@ -7510,11 +7517,12 @@ pub mod rocm {
         /// a host without ROCm names the skip instead of pretending to have compiled.
         #[test]
         fn hiprtc_compiles_the_emitted_wave32_and_wave64_masks() {
+            let dtype = activation_dtype();
             let mut program = Vec::new();
             let input = append(
                 &mut program,
                 Op::Input {
-                    dtype: DType::FLOAT32,
+                    dtype,
                     shape: vec![Extent::Static(4), Extent::Static(4096)],
                     name: None,
                 },
@@ -7522,7 +7530,7 @@ pub mod rocm {
             let root = append(
                 &mut program,
                 Op::Reduce(Reduce {
-                    dtype: DType::FLOAT32,
+                    dtype,
                     body: ScalarOp::Add,
                     init: ReduceInit::Zero,
                     operand: input,
@@ -8037,22 +8045,41 @@ mod recording_runtime {
     const HIDDEN: u32 = 5;
     const OUTPUT: u32 = 3;
 
-    fn input_node(program: &mut Vec<Op>, rows: u32, columns: u32, name: &str) -> NodeId {
+    fn activation_dtype() -> DType {
+        proxima_numeric::Numerics::default()
+            .activation
+            .to_dtype()
+            .expect("activation format has a dtype")
+    }
+
+    fn input_node(
+        program: &mut Vec<Op>,
+        dtype: DType,
+        rows: u32,
+        columns: u32,
+        name: &str,
+    ) -> NodeId {
         append(
             program,
             Op::Input {
-                dtype: DType::FLOAT32,
+                dtype,
                 shape: vec![Extent::Static(rows), Extent::Static(columns)],
                 name: Some(name.into()),
             },
         )
     }
 
-    fn matmul(program: &mut Vec<Op>, weight: NodeId, activation: NodeId, name: &str) -> NodeId {
+    fn matmul(
+        program: &mut Vec<Op>,
+        dtype: DType,
+        weight: NodeId,
+        activation: NodeId,
+        name: &str,
+    ) -> NodeId {
         let product = append(
             program,
             Op::Elementwise {
-                dtype: DType::FLOAT32,
+                dtype,
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -8064,7 +8091,7 @@ mod recording_runtime {
         append(
             program,
             Op::Reduce(Reduce {
-                dtype: DType::FLOAT32,
+                dtype,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
@@ -8078,16 +8105,17 @@ mod recording_runtime {
 
     /// `out = (w1 . (w0 . x)) + (w1 . (w0 . x))`: two matmuls over named weights and an elementwise add.
     fn two_layer_program() -> (Vec<Op>, NodeId) {
+        let dtype = activation_dtype();
         let mut program = Vec::new();
-        let weight_first = input_node(&mut program, HIDDEN, INPUT, "w0");
-        let weight_second = input_node(&mut program, OUTPUT, HIDDEN, "w1");
-        let activation = input_node(&mut program, INPUT, 1, "x");
-        let hidden = matmul(&mut program, weight_first, activation, "hidden");
-        let logits = matmul(&mut program, weight_second, hidden, "logits");
+        let weight_first = input_node(&mut program, dtype, HIDDEN, INPUT, "w0");
+        let weight_second = input_node(&mut program, dtype, OUTPUT, HIDDEN, "w1");
+        let activation = input_node(&mut program, dtype, INPUT, 1, "x");
+        let hidden = matmul(&mut program, dtype, weight_first, activation, "hidden");
+        let logits = matmul(&mut program, dtype, weight_second, hidden, "logits");
         let out = append(
             &mut program,
             Op::Elementwise {
-                dtype: DType::FLOAT32,
+                dtype,
                 body: ScalarOp::Add,
                 operands: vec![
                     (logits, IndexMap::Affine(map::projection(2, &[0, 1]))),
