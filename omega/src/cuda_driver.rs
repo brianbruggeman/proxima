@@ -7127,3 +7127,692 @@ pub mod rocm {
         }
     }
 }
+
+/// A [`GpuRuntime`] that moves no data and runs no kernel: it appends every device call to a shared
+/// log, so a test can prove what the shared executor uploads, downloads and launches with no GPU.
+///
+/// Teaching pointer: this is the third runtime of the one executor, beside the cudarc and HIP ones.
+/// It binds the program CUDA binds ([`CudarcRuntime::cuda_grant`], [`CudarcRuntime::cuda_target`]), so
+/// the plan it builds is the plan a CUDA device would run.
+#[cfg(test)]
+mod recording_runtime {
+    use super::*;
+
+    use core::convert::Infallible;
+    use core::marker::PhantomData;
+    use core::mem::zeroed;
+
+    use crate::gpu_runtime::EventMillis;
+
+    use proxima_tensor::{Extent, IndexMap, Keep, Reduce, ReduceInit, ScalarOp, append, map};
+
+    /// One launch argument: a buffer the kernel reads, a buffer it writes, or a scalar.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Argument {
+        Read(u64),
+        Write(u64),
+        Scalar,
+    }
+
+    /// One device call, with the buffer identity and the byte count it moved.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Event {
+        Alloc {
+            buffer: u64,
+            bytes: usize,
+        },
+        Upload {
+            buffer: u64,
+            bytes: usize,
+        },
+        UploadInPlace {
+            buffer: u64,
+            bytes: usize,
+        },
+        Download {
+            buffer: u64,
+            bytes: usize,
+        },
+        DeviceCopy {
+            source: u64,
+            destination: u64,
+            bytes: usize,
+        },
+        Launch {
+            entry: String,
+            arguments: Vec<Argument>,
+        },
+        Synchronize,
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    enum RecordingFailure {
+        #[error("the recording runtime keeps no device events")]
+        EventsUnsupported,
+        #[error("window {start}..{end} lies outside a buffer of {len} elements")]
+        OutOfRange {
+            start: usize,
+            end: usize,
+            len: usize,
+        },
+    }
+
+    impl From<RecordingFailure> for CudaDriverError {
+        fn from(failure: RecordingFailure) -> Self {
+            Self::Driver(failure.to_string())
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct RecordingRuntime {
+        log: Arc<Mutex<Vec<Event>>>,
+        next_buffer: Arc<AtomicU64>,
+        compile_counters: Arc<CompileCounters>,
+    }
+
+    impl RecordingRuntime {
+        fn new() -> Self {
+            Self {
+                log: Arc::default(),
+                next_buffer: Arc::new(AtomicU64::new(1)),
+                compile_counters: Arc::new(CompileCounters::new(PtxStore::Disabled)),
+            }
+        }
+
+        fn record(&self, event: Event) {
+            self.log.lock().push(event);
+        }
+
+        fn fresh<Element: DeviceElement>(&self, len: usize) -> RecordingBuffer<Element> {
+            let buffer = self.next_buffer.fetch_add(1, Ordering::Relaxed);
+            RecordingBuffer {
+                id: buffer,
+                len,
+                element: PhantomData,
+            }
+        }
+
+        fn check(range: &Range<usize>, len: usize) -> Result<(), RecordingFailure> {
+            if range.start <= range.end && range.end <= len {
+                return Ok(());
+            }
+            Err(RecordingFailure::OutOfRange {
+                start: range.start,
+                end: range.end,
+                len,
+            })
+        }
+
+        fn bytes_of<Element>(elements: usize) -> usize {
+            elements * size_of::<Element>()
+        }
+
+        fn zeros<Element: DeviceElement>(len: usize) -> Vec<Element> {
+            // SAFETY: `DeviceElement` requires `ValidAsZeroBits`, so the all-zero pattern is a valid element.
+            vec![unsafe { zeroed::<Element>() }; len]
+        }
+    }
+
+    /// A buffer's identity and length; the bytes are never kept, since no kernel reads them.
+    #[derive(Debug, Clone)]
+    struct RecordingBuffer<Element> {
+        id: u64,
+        len: usize,
+        element: PhantomData<fn() -> Element>,
+    }
+
+    struct RecordingView<'buffer, Element> {
+        id: u64,
+        borrow: PhantomData<&'buffer ()>,
+        element: PhantomData<fn() -> Element>,
+    }
+
+    struct RecordingViewMut<'buffer, Element> {
+        id: u64,
+        len: usize,
+        borrow: PhantomData<&'buffer mut ()>,
+        element: PhantomData<fn() -> Element>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct RecordingFunction {
+        entry: String,
+    }
+
+    struct RecordingModule;
+
+    struct RecordingLaunch<'launch> {
+        function: &'launch RecordingFunction,
+        arguments: Vec<Argument>,
+    }
+
+    impl<'launch> LaunchArguments<'launch, RecordingRuntime> for RecordingLaunch<'launch> {
+        fn push<Element: DeviceElement>(
+            &mut self,
+            buffer: &'launch RecordingBuffer<Element>,
+        ) -> &mut Self {
+            self.arguments.push(Argument::Read(buffer.id));
+            self
+        }
+
+        fn push_mut<Element: DeviceElement>(
+            &mut self,
+            buffer: &'launch mut RecordingBuffer<Element>,
+        ) -> &mut Self {
+            self.arguments.push(Argument::Write(buffer.id));
+            self
+        }
+
+        fn push_view<Element: DeviceElement>(
+            &mut self,
+            view: &'launch RecordingView<'_, Element>,
+        ) -> &mut Self {
+            self.arguments.push(Argument::Read(view.id));
+            self
+        }
+
+        fn push_view_mut<Element: DeviceElement>(
+            &mut self,
+            view: &'launch mut RecordingViewMut<'_, Element>,
+        ) -> &mut Self {
+            self.arguments.push(Argument::Write(view.id));
+            self
+        }
+
+        fn push_value<Element: DeviceElement>(&mut self, _value: &'launch Element) -> &mut Self {
+            self.arguments.push(Argument::Scalar);
+            self
+        }
+    }
+
+    impl GpuRuntime for RecordingRuntime {
+        type Error = RecordingFailure;
+        type BuildError = RecordingFailure;
+        type Buffer<Element: DeviceElement> = RecordingBuffer<Element>;
+        type View<'a, Element: DeviceElement> = RecordingView<'a, Element>;
+        type ViewMut<'a, Element: DeviceElement> = RecordingViewMut<'a, Element>;
+        type Event = Infallible;
+        type Function = RecordingFunction;
+        type Module = RecordingModule;
+        type Image = String;
+        type Launch<'a> = RecordingLaunch<'a>;
+
+        fn alloc_zeros<Element: DeviceElement>(
+            &self,
+            len: usize,
+        ) -> Result<RecordingBuffer<Element>, RecordingFailure> {
+            let buffer = self.fresh::<Element>(len);
+            self.record(Event::Alloc {
+                buffer: buffer.id,
+                bytes: Self::bytes_of::<Element>(len),
+            });
+            Ok(buffer)
+        }
+
+        fn upload<Element: DeviceElement>(
+            &self,
+            values: &[Element],
+        ) -> Result<RecordingBuffer<Element>, RecordingFailure> {
+            let buffer = self.fresh::<Element>(values.len());
+            self.record(Event::Upload {
+                buffer: buffer.id,
+                bytes: size_of_val(values),
+            });
+            Ok(buffer)
+        }
+
+        fn upload_into<Element: DeviceElement>(
+            &self,
+            values: &[Element],
+            buffer: &mut RecordingBuffer<Element>,
+        ) -> Result<(), RecordingFailure> {
+            self.upload_at(values, buffer, 0)
+        }
+
+        fn upload_at<Element: DeviceElement>(
+            &self,
+            values: &[Element],
+            buffer: &mut RecordingBuffer<Element>,
+            offset: usize,
+        ) -> Result<(), RecordingFailure> {
+            Self::check(&(offset..offset + values.len()), buffer.len)?;
+            self.record(Event::UploadInPlace {
+                buffer: buffer.id,
+                bytes: size_of_val(values),
+            });
+            Ok(())
+        }
+
+        fn download<Element: DeviceElement>(
+            &self,
+            buffer: &RecordingBuffer<Element>,
+        ) -> Result<Vec<Element>, RecordingFailure> {
+            self.download_range(buffer, 0..buffer.len)
+        }
+
+        fn download_range<Element: DeviceElement>(
+            &self,
+            buffer: &RecordingBuffer<Element>,
+            range: Range<usize>,
+        ) -> Result<Vec<Element>, RecordingFailure> {
+            Self::check(&range, buffer.len)?;
+            self.record(Event::Download {
+                buffer: buffer.id,
+                bytes: Self::bytes_of::<Element>(range.len()),
+            });
+            Ok(Self::zeros(range.len()))
+        }
+
+        fn copy_range<Element: DeviceElement>(
+            &self,
+            source: &RecordingBuffer<Element>,
+            range: Range<usize>,
+            destination: &mut RecordingBuffer<Element>,
+            offset: usize,
+        ) -> Result<(), RecordingFailure> {
+            Self::check(&range, source.len)?;
+            Self::check(&(offset..offset + range.len()), destination.len)?;
+            self.record(Event::DeviceCopy {
+                source: source.id,
+                destination: destination.id,
+                bytes: Self::bytes_of::<Element>(range.len()),
+            });
+            Ok(())
+        }
+
+        fn build_function(
+            &self,
+            kernel: &CudaKernel,
+        ) -> Result<RecordingFunction, RecordingFailure> {
+            Ok(RecordingFunction {
+                entry: kernel.entry.clone(),
+            })
+        }
+
+        fn image_from_source(source: &str) -> String {
+            source.to_owned()
+        }
+
+        fn load_module(&self, _image: String) -> Result<Arc<RecordingModule>, RecordingFailure> {
+            Ok(Arc::new(RecordingModule))
+        }
+
+        fn load_function(
+            &self,
+            _module: &Arc<RecordingModule>,
+            entry: &str,
+        ) -> Result<RecordingFunction, RecordingFailure> {
+            Ok(RecordingFunction {
+                entry: entry.to_owned(),
+            })
+        }
+
+        fn launch_arguments<'a>(&'a self, function: &'a RecordingFunction) -> RecordingLaunch<'a> {
+            RecordingLaunch {
+                function,
+                arguments: Vec::new(),
+            }
+        }
+
+        unsafe fn launch(
+            &self,
+            arguments: RecordingLaunch<'_>,
+            _shape: LaunchShape,
+        ) -> Result<(), RecordingFailure> {
+            self.record(Event::Launch {
+                entry: arguments.function.entry.clone(),
+                arguments: arguments.arguments,
+            });
+            Ok(())
+        }
+
+        fn executes(&self) -> Executes {
+            CudarcRuntime::cuda_grant()
+        }
+
+        fn emit_target(&self) -> Target {
+            CudarcRuntime::cuda_target()
+        }
+
+        fn emit_device(&self) -> EmitDevice {
+            EmitDevice::default()
+        }
+
+        fn len<Element: DeviceElement>(buffer: &RecordingBuffer<Element>) -> usize {
+            buffer.len
+        }
+
+        fn view<Element: DeviceElement>(
+            buffer: &RecordingBuffer<Element>,
+            _range: Range<usize>,
+        ) -> RecordingView<'_, Element> {
+            RecordingView {
+                id: buffer.id,
+                borrow: PhantomData,
+                element: PhantomData,
+            }
+        }
+
+        fn view_mut<Element: DeviceElement>(
+            buffer: &mut RecordingBuffer<Element>,
+            range: Range<usize>,
+        ) -> RecordingViewMut<'_, Element> {
+            RecordingViewMut {
+                id: buffer.id,
+                len: range.len(),
+                borrow: PhantomData,
+                element: PhantomData,
+            }
+        }
+
+        fn view_mut_len<Element: DeviceElement>(view: &RecordingViewMut<'_, Element>) -> usize {
+            view.len
+        }
+
+        fn view_mut_range<'view, Element: DeviceElement>(
+            view: &'view mut RecordingViewMut<'_, Element>,
+            range: Range<usize>,
+        ) -> RecordingViewMut<'view, Element> {
+            RecordingViewMut {
+                id: view.id,
+                len: range.len(),
+                borrow: PhantomData,
+                element: PhantomData,
+            }
+        }
+
+        fn bytes_mut<Element: DeviceElement>(
+            buffer: &mut RecordingBuffer<Element>,
+        ) -> Option<RecordingViewMut<'_, u8>> {
+            Some(RecordingViewMut {
+                id: buffer.id,
+                len: Self::bytes_of::<Element>(buffer.len),
+                borrow: PhantomData,
+                element: PhantomData,
+            })
+        }
+
+        fn record_event(&self) -> Result<Infallible, RecordingFailure> {
+            Err(RecordingFailure::EventsUnsupported)
+        }
+
+        fn elapsed_ms(
+            _start: &Infallible,
+            _end: &Infallible,
+        ) -> Result<EventMillis, RecordingFailure> {
+            Err(RecordingFailure::EventsUnsupported)
+        }
+
+        fn synchronize(&self) -> Result<(), RecordingFailure> {
+            self.record(Event::Synchronize);
+            Ok(())
+        }
+
+        fn memory_info(&self) -> Result<(usize, usize), RecordingFailure> {
+            Ok((1 << 40, 1 << 40))
+        }
+
+        fn device_identity(&self) -> Result<String, RecordingFailure> {
+            Ok(String::from("recording:0"))
+        }
+
+        fn compile_counters(&self) -> &CompileCounters {
+            &self.compile_counters
+        }
+    }
+
+    impl CudaDriver<RecordingRuntime> {
+        /// The shared executor's driver over the recording runtime: the literal
+        /// `CudaDriver::<HipRuntime>::open` builds, with a log in place of a device.
+        fn recording() -> Self {
+            Self {
+                runtime: RecordingRuntime::new(),
+                resident_buffers: Arc::new(Mutex::new(ResidentLedger::default())),
+                packed_upload_bytes: Arc::new(AtomicU64::new(0)),
+                graph_uploads: Arc::new(AtomicU64::new(0)),
+                graph_launches: Arc::new(AtomicU64::new(0)),
+                parked_state: Arc::default(),
+                parked_appends: Arc::default(),
+                baseline_used_bytes: 0,
+            }
+        }
+
+        fn events(&self) -> Vec<Event> {
+            self.runtime.log.lock().clone()
+        }
+    }
+
+    const INPUT: u32 = 8;
+    const HIDDEN: u32 = 5;
+    const OUTPUT: u32 = 3;
+
+    fn input_node(program: &mut Vec<Op>, rows: u32, columns: u32, name: &str) -> NodeId {
+        append(
+            program,
+            Op::Input {
+                dtype: DType::FLOAT32,
+                shape: vec![Extent::Static(rows), Extent::Static(columns)],
+                name: Some(name.into()),
+            },
+        )
+    }
+
+    fn matmul(program: &mut Vec<Op>, weight: NodeId, activation: NodeId, name: &str) -> NodeId {
+        let product = append(
+            program,
+            Op::Elementwise {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (weight, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                    (activation, IndexMap::Affine(map::projection(3, &[2, 1]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            program,
+            Op::Reduce(Reduce {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: Some(name.into()),
+            }),
+        )
+    }
+
+    /// `out = (w1 . (w0 . x)) + (w1 . (w0 . x))`: two matmuls over named weights and an elementwise add.
+    fn two_layer_program() -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let weight_first = input_node(&mut program, HIDDEN, INPUT, "w0");
+        let weight_second = input_node(&mut program, OUTPUT, HIDDEN, "w1");
+        let activation = input_node(&mut program, INPUT, 1, "x");
+        let hidden = matmul(&mut program, weight_first, activation, "hidden");
+        let logits = matmul(&mut program, weight_second, hidden, "logits");
+        let out = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Add,
+                operands: vec![
+                    (logits, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                    (logits, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                ],
+                name: Some("out".into()),
+            },
+        );
+        (program, out)
+    }
+
+    fn weight_values(count: usize, seed: f32) -> Vec<f32> {
+        (0..count)
+            .map(|index| ((index as f32 + seed) * 0.37).sin())
+            .collect()
+    }
+
+    fn uploads_of(events: &[Event], bytes: usize) -> usize {
+        events.iter().filter(|event| matches!(event, Event::Upload { bytes: found, .. } | Event::UploadInPlace { bytes: found, .. } if *found == bytes)).count()
+    }
+
+    fn launches_of(events: &[Event]) -> Vec<(usize, &Vec<Argument>)> {
+        events
+            .iter()
+            .enumerate()
+            .filter_map(|(position, event)| match event {
+                Event::Launch { arguments, .. } => Some((position, arguments)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_shared_executor_uploads_each_weight_once_and_downloads_only_outputs() {
+        let (program, out) = two_layer_program();
+        let weight_first = weight_values((HIDDEN * INPUT) as usize, 1.0);
+        let weight_second = weight_values((OUTPUT * HIDDEN) as usize, 7.0);
+        let activation = weight_values(INPUT as usize, 3.0);
+        let named = [
+            ("w0", QuantizedBlock::Float32(&weight_first)),
+            ("w1", QuantizedBlock::Float32(&weight_second)),
+            ("x", QuantizedBlock::Float32(&activation)),
+        ];
+        let driver = CudaDriver::<RecordingRuntime>::recording();
+        let mut plan = driver
+            .plan_with_config(&program, &[], &[out], &named, &RuntimeConfig::default())
+            .expect("the recording driver plans the two-layer program");
+        plan.mark_resident(&BTreeSet::from(["w0", "w1"]));
+        let kernel_count = plan.kernel_launches().len();
+        let weight_bytes = [
+            size_of_val(weight_first.as_slice()),
+            size_of_val(weight_second.as_slice()),
+        ];
+        let activation_bytes = size_of_val(activation.as_slice());
+        assert_eq!(
+            plan.executes(),
+            CudarcRuntime::cuda_grant(),
+            "the plan binds the grant CUDA binds"
+        );
+
+        let mut windows = Vec::new();
+        for _ in 0..2 {
+            let before = driver.events().len();
+            plan.execute_named(&named, None)
+                .expect("the recording runtime executes the plan");
+            windows.push(driver.events()[before..].to_vec());
+        }
+        let all = driver.events();
+
+        for bytes in weight_bytes {
+            assert_eq!(
+                uploads_of(&all, bytes),
+                1,
+                "a {bytes}-byte weight uploads once across both executes"
+            );
+            assert_eq!(
+                uploads_of(&windows[1], bytes),
+                0,
+                "the second execute re-uploads no weight"
+            );
+        }
+        assert_eq!(
+            uploads_of(&windows[0], activation_bytes),
+            1,
+            "the activation uploads on the first execute"
+        );
+        assert_eq!(
+            uploads_of(&windows[1], activation_bytes),
+            1,
+            "the activation refreshes on the second execute"
+        );
+
+        for (index, window) in windows.iter().enumerate() {
+            let launches = launches_of(window);
+            assert_eq!(
+                launches.len(),
+                kernel_count,
+                "execute {index} launches the plan's kernel count"
+            );
+            let downloads: Vec<&Event> = window
+                .iter()
+                .filter(|event| matches!(event, Event::Download { .. }))
+                .collect();
+            assert_eq!(
+                downloads.len(),
+                1,
+                "execute {index} downloads exactly the plan's one output: {downloads:?}"
+            );
+            let Event::Download {
+                buffer: downloaded,
+                bytes,
+            } = downloads[0]
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                *bytes,
+                OUTPUT as usize * 4,
+                "the download is the output's byte count"
+            );
+            let (last_position, last_arguments) = launches[launches.len() - 1];
+            assert!(
+                last_arguments.contains(&Argument::Write(*downloaded)),
+                "the downloaded buffer is written by the final launch"
+            );
+            for (_, arguments) in &launches[..launches.len() - 1] {
+                assert!(
+                    !arguments.contains(&Argument::Write(*downloaded))
+                        || arguments.contains(&Argument::Read(*downloaded)),
+                    "no earlier launch owns the downloaded buffer: an intermediate is never read back"
+                );
+            }
+            let first_position = launches[0].0;
+            let between = &window[first_position..=last_position];
+            assert!(
+                between.iter().all(|event| !matches!(
+                    event,
+                    Event::Download { .. } | Event::DeviceCopy { .. }
+                )),
+                "execute {index} reads back or copies between launches: {between:?}"
+            );
+            let between_uploads: Vec<usize> = between
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Upload { bytes, .. } | Event::UploadInPlace { bytes, .. } => {
+                        Some(*bytes)
+                    }
+                    _ => None,
+                })
+                .collect();
+            let later_uniforms: Vec<usize> = if index == 0 {
+                plan.uniforms.iter().skip(1).map(Vec::len).collect()
+            } else {
+                Vec::new()
+            };
+            assert_eq!(
+                between_uploads, later_uniforms,
+                "execute {index}: the first execute uploads only the later kernels uniform blocks between launches (the second reuses them), never a weight or activation"
+            );
+        }
+        eprintln!(
+            "recorded uploads: first execute {:?}, second execute {:?}",
+            windows[0]
+                .iter()
+                .filter(|event| matches!(event, Event::Upload { .. } | Event::UploadInPlace { .. }))
+                .collect::<Vec<_>>(),
+            windows[1]
+                .iter()
+                .filter(|event| matches!(event, Event::Upload { .. } | Event::UploadInPlace { .. }))
+                .collect::<Vec<_>>()
+        );
+        eprintln!(
+            "recorded downloads: {:?}",
+            all.iter()
+                .filter(|event| matches!(event, Event::Download { .. }))
+                .collect::<Vec<_>>()
+        );
+    }
+}
