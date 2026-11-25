@@ -1,6 +1,7 @@
 
 static inline uint probe(float value) {
     float scaled = value * 1e0f;
-    int clamped = (int)clamp(rint(scaled), -128.0f, 127.0f);
-    return (uint)clamped & 0xffu;
+    float rounded = (as_type<uint>(value) & 0x7fffffffu) > 0x7f800000u ? 0.0f : rint(scaled);
+    int clamped = (int)clamp(rounded, -128.0f, 127.0f);
+    return rounded > 127.0f ? 0x7fu : ((uint)clamped & 0xffu);
 }

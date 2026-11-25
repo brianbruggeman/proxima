@@ -229,46 +229,96 @@ fn integer_store<D: Dialect>(
         "scaled",
         &format!("value * {}", tokens.literal(&unscale)),
     );
-    let rounded = dialect.intrinsic(Intrinsic::RoundEven, &["scaled"]);
-    let top = tokens.literal(&format!("{mask}.0"));
+    let zero = tokens.literal("0.0");
+    // a bit test, not `scaled != scaled`: the metal compiler's fast math assumes no nan and folds the self-compare away
+    let is_nan = format!(
+        "({} & {:#010x}{suffix}) > {:#010x}{suffix}",
+        dialect.bitcast(word, "value"),
+        tokens.abs_mask(),
+        infinity_code(&tokens.layout)
+    );
+    let rounded = dialect.declare(
+        &tokens.ty,
+        "rounded",
+        &dialect.select(
+            &is_nan,
+            &zero,
+            &dialect.intrinsic(Intrinsic::RoundEven, &["scaled"]),
+        ),
+    );
+    let digits = u32::from(tokens.layout.mantissa_bits) + 1;
+    let limit = tokens.literal(&format!("{}.0", largest_float_within(mask, digits)));
+    let saturated = format!("{mask:#x}{suffix}");
     let body = match layout.sign {
         SignEncoding::Absent => {
-            let zero = tokens.literal("0.0");
             let clamped = dialect.intrinsic(
                 Intrinsic::Clamp,
-                &[rounded.as_str(), zero.as_str(), top.as_str()],
+                &["rounded", zero.as_str(), limit.as_str()],
             );
-            format!("    return {};", dialect.cast(word, &clamped))
+            let code = dialect.select(
+                &format!("rounded > {limit}"),
+                &saturated,
+                &dialect.cast(word, &clamped),
+            );
+            format!("    {rounded}\n    return {code};")
         }
         SignEncoding::Magnitude => {
-            let absolute = dialect.intrinsic(Intrinsic::Abs, &["scaled"]);
-            let rounded_absolute = dialect.intrinsic(Intrinsic::RoundEven, &[absolute.as_str()]);
-            let minimum =
-                dialect.intrinsic(Intrinsic::Min, &[rounded_absolute.as_str(), top.as_str()]);
-            let declaration = dialect.declare(word, "magnitude", &dialect.cast(word, &minimum));
+            let extent = dialect.declare(
+                &tokens.ty,
+                "extent",
+                &dialect.intrinsic(Intrinsic::Abs, &["rounded"]),
+            );
+            let minimum = dialect.intrinsic(Intrinsic::Min, &["extent", limit.as_str()]);
+            let code = dialect.select(
+                &format!("extent > {limit}"),
+                &saturated,
+                &dialect.cast(word, &minimum),
+            );
+            let magnitude = dialect.declare(word, "magnitude", &code);
             let sign_bit = dialect.bitcast(word, "scaled");
             let sign_position = tokens.top_bit();
+            let sign = format!(
+                "({})",
+                dialect.select(
+                    &is_nan,
+                    &format!("0{suffix}"),
+                    &format!(
+                        "(({sign_bit} >> {sign_position}{suffix}) << {mantissa_bits}{suffix})"
+                    ),
+                )
+            );
             format!(
-                "    {declaration}\n    return magnitude | (({sign_bit} >> {sign_position}{suffix}) << {mantissa_bits}{suffix});"
+                "    {rounded}\n    {extent}\n    {magnitude}\n    return magnitude | {sign};"
             )
         }
         SignEncoding::TwosComplement => {
             let negative = tokens.literal(&format!("-{}.0", 1u64 << mantissa_bits));
             let clamped = dialect.intrinsic(
                 Intrinsic::Clamp,
-                &[rounded.as_str(), negative.as_str(), top.as_str()],
+                &["rounded", negative.as_str(), limit.as_str()],
             );
             let signed = tokens.signed(tokens.wide.bytes())?;
             let declaration = dialect.declare(&signed, "clamped", &dialect.cast(&signed, &clamped));
             let full_mask = (1u64 << (mantissa_bits + 1)) - 1;
-            format!(
-                "    {declaration}\n    return {} & {full_mask:#x}{suffix};",
-                dialect.cast(word, "clamped")
-            )
+            let code = dialect.select(
+                &format!("rounded > {limit}"),
+                &saturated,
+                &format!("({} & {full_mask:#x}{suffix})", dialect.cast(word, "clamped")),
+            );
+            format!("    {rounded}\n    {declaration}\n    return {code};")
         }
     };
     let head = tokens.word_head(name, &dialect.parameter(&tokens.ty, "value"));
     Ok(format!("\n{head} {{\n    {scaled}\n{body}\n}}\n"))
+}
+
+/// The largest float of `digits` significant bits that is no greater than `mask`: a 32-bit
+/// code's `2^32 - 1` is not a float, and the float above it would admit a value the integer
+/// conversion cannot take.
+fn largest_float_within(mask: u64, digits: u32) -> u64 {
+    let width = u64::BITS - mask.leading_zeros();
+    let dropped = width.saturating_sub(digits);
+    (mask >> dropped) << dropped
 }
 
 /// Renders the function `name` that takes the `layout.width()`-bit `code` and returns its value in

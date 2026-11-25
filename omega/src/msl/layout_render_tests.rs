@@ -18,6 +18,16 @@ use proxima_numeric::block_layout::BlockLayout;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_numeric::decode_scalar;
 use proxima_numeric::float_layout::{FloatLayout, NanPolicy, SignEncoding, Specials};
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use proxima_numeric::float_layout::NAMED_LAYOUTS;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use proxima_numeric::float_layout_codec::{decode, encode};
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use super::dialect::Msl;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use crate::render::{Dialect, HardwareScalar};
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use super::layout_render::layout_unpack_msl;
@@ -672,6 +682,48 @@ async fn a_rendered_wide_integer_load_equals_the_host_decode_bit_for_bit_on_boun
         source.contains("(long)"),
         wide_arm,
         "only a signed layout past 30 mantissa bits takes the long arm"
+    );
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test]
+fn a_rendered_integer_store_equals_the_host_encode_bit_for_bit_on_nan_inf_and_range_edges() {
+    let wide = HardwareScalar::widest(&Msl).expect("the metal dialect spells a wide scalar");
+    let value_type = Msl.scalar(wide).expect("metal spells the wide scalar");
+    let word_type = Msl.unsigned(wide.bytes()).expect("metal spells the wide word");
+    let inputs: alloc::vec::Vec<u32> = alloc::vec![
+        0x0000_0000, 0x8000_0000, 0x3f00_0000, 0xbf00_0000, 0x3fc0_0000, 0x42fe_0000,
+        0x4300_0000, 0xc300_0000, 0x4700_0000, 0xc700_0000, 0x4f00_0000, 0x4f00_0001,
+        0xcf00_0000, 0x4f80_0000, 0x4f7f_ffff, 0x7f7f_fffe, 0x7f7f_ffff, 0xff7f_ffff,
+        0x7f80_0000, 0xff80_0000, 0x7f80_0001, 0x7fc0_0000, 0x7fff_ffff, 0xffc0_0000,
+        0xffff_fffe, 0xffff_ffff,
+    ];
+    let input: alloc::vec::Vec<u8> = inputs.iter().flat_map(|bits| bits.to_le_bytes()).collect();
+    let mut compared = 0usize;
+    let mut differing = alloc::vec::Vec::new();
+
+    for (layout, name) in NAMED_LAYOUTS
+        .iter()
+        .filter(|(layout, _)| !layout.is_float() && layout.width() <= wide.layout().width())
+    {
+        let source = format!(
+            "#include <metal_stdlib>\nusing namespace metal;\n{}\nkernel void probe(device const {value_type} *values [[buffer(0)]], device {word_type} *codes [[buffer(1)]], uint gid [[thread_position_in_grid]]) {{\n    codes[gid] = probe_store(values[gid]);\n}}\n",
+            layout_store_msl(*layout, "probe_store")
+        );
+        let observed = run_probe_source(&source, &input, inputs.len());
+        for (bits, seen) in inputs.iter().zip(observed) {
+            let expected = encode(decode(*bits, wide.layout()), *layout);
+            compared += 1;
+            if seen.to_bits() != expected {
+                differing.push((*name, *bits, seen.to_bits(), expected));
+            }
+        }
+    }
+
+    assert!(compared > 0, "no integer layout was compared");
+    assert!(
+        differing.is_empty(),
+        "(layout, input, metal, host) differ: {differing:x?}"
     );
 }
 
