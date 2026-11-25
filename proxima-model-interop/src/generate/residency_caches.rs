@@ -4955,6 +4955,8 @@ impl BackendRuntime {
             bindings.input_placements,
             bindings.output_placements,
         )?;
+        let host_timing = event_enabled(module_path!(), Level::DEBUG);
+        let resolve_started = std::time::Instant::now();
         let new_count = symbols.first().copied().unwrap_or_default() as usize;
         let kv_bound_extent = symbols.get(1).copied().unwrap_or_default() as usize;
         let numerics = PlanNumerics {
@@ -4997,13 +4999,37 @@ impl BackendRuntime {
                 )
             },
         )?;
-        Ok(execute_plan_named_with_placements_and_expert_sources(
+        let resolve_elapsed_us = resolve_started.elapsed().as_micros();
+        let execute_started = std::time::Instant::now();
+        let result = execute_plan_named_with_placements_and_expert_sources(
             plan,
             named,
             bindings.input_placements,
             bindings.output_placements,
             bindings.expert_sources,
-        )?)
+        )
+        .map_err(InteropError::from);
+        if host_timing {
+            proxima_telemetry::debug!(
+                resolve_us = resolve_elapsed_us as u64,
+                execute_us = execute_started.elapsed().as_micros() as u64,
+                plan_hits = self.plan_hits as u64,
+                plan_misses = self.plan_misses as u64,
+                "recurrent segment host timing after placed plan execute"
+            );
+            #[cfg(feature = "instrument")]
+            {
+                let stage = omega::backend::stage_totals();
+                proxima_telemetry::debug!(
+                    gpu_exec_nanos = stage.gpu_exec_nanos,
+                    readback_nanos = stage.readback_nanos,
+                    block_upload_nanos = stage.block_upload_nanos,
+                    block_copied_bytes = stage.block_copied_bytes,
+                    "recurrent segment stage totals after placed plan execute"
+                );
+            }
+        }
+        result
     }
 
     #[cfg(all(
