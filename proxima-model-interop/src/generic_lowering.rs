@@ -1,7 +1,10 @@
 //! The model-free lowerings of `proxima_tensor::spec::generic_lowering`, run on
 //! the host evaluator against naive references on shapes no diffusion model uses.
 
+use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
+use alloc::{format, vec};
 
 use proxima_numeric::float_layout::NAMED_LAYOUTS;
 use proxima_numeric::{DType, Philox};
