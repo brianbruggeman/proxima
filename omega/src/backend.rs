@@ -2303,13 +2303,17 @@ fn plan_named_cuda(
     outputs: &[NodeId],
     numeric_policy: NumericPolicy,
 ) -> Result<Plan, BackendError> {
-    Ok(Plan::Cuda(Box::new(cuda_driver()?.plan(
-        program,
-        symbols,
-        outputs,
-        numeric_policy,
-        named,
-    )?)))
+    let started = Instant::now();
+    let driver = cuda_driver()?;
+    let driver_us = started.elapsed().as_micros() as u64;
+    let planned = Instant::now();
+    let plan = driver.plan(program, symbols, outputs, numeric_policy, named)?;
+    proxima_telemetry::debug!(
+        driver_us = driver_us,
+        plan_us = planned.elapsed().as_micros() as u64,
+        "cuda plan acquired the shared driver"
+    );
+    Ok(Plan::Cuda(Box::new(plan)))
 }
 
 #[cfg(feature = "cuda-driver")]

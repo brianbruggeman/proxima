@@ -655,6 +655,7 @@ impl CudaDriver {
     /// visible NVIDIA device it returns a typed `Driver` error rather than
     /// pretending that emitted CUDA source is executable.
     pub fn new(ordinal: usize) -> Result<Self, CudaDriverError> {
+        let created = Instant::now();
         prefetch_nvrtc_version();
         // the dynamic loader otherwise panics before it can return a driver error.
         if !unsafe { cuda_sys::is_culib_present() } {
@@ -662,20 +663,39 @@ impl CudaDriver {
                 "cuda driver library unavailable".into(),
             ));
         }
+        let library_us = elapsed_micros(created);
+        let step = Instant::now();
         let context = CudaContext::new(ordinal)?;
+        let context_us = elapsed_micros(step);
+        let step = Instant::now();
         let device = EmitDevice { multiprocessors: multiprocessor_count(&context)? };
+        let multiprocessors_us = elapsed_micros(step);
         // every launch runs on this one default stream, so per-buffer read/write events order nothing and cost two cuEventCreate per buffer
         unsafe { context.disable_event_tracking() };
         let stream = context.default_stream();
+        let step = Instant::now();
         let (free, total) = context.mem_get_info()?;
+        let mem_info_us = elapsed_micros(step);
         let baseline_used_bytes = total.saturating_sub(free) as u64;
+        let step = Instant::now();
+        let compile_counters = Arc::new(CompileCounters::new(kernel_disk_store()));
+        let store_us = elapsed_micros(step);
+        proxima_telemetry::debug!(
+            library_us = library_us,
+            context_us = context_us,
+            multiprocessors_us = multiprocessors_us,
+            mem_info_us = mem_info_us,
+            store_us = store_us,
+            total_us = elapsed_micros(created),
+            "cuda driver created"
+        );
         Ok(Self {
             context,
             stream,
             device,
             modules: Arc::new(Mutex::new(BTreeMap::new())),
             resident_buffers: Arc::new(Mutex::new(ResidentLedger::default())),
-            compile_counters: Arc::new(CompileCounters::new(kernel_disk_store())),
+            compile_counters,
             packed_upload_bytes: Arc::new(AtomicU64::new(0)),
             graph_uploads: Arc::new(AtomicU64::new(0)),
             graph_launches: Arc::new(AtomicU64::new(0)),
@@ -1197,6 +1217,7 @@ impl CudaDriver {
             config,
         } = policy;
         validate_storage(activation_storage)?;
+        let plan_started = Instant::now();
         let blocks = resolve_named_blocks(program, named).map_err(|_| {
             CudaDriverError::UnsupportedGraph {
                 node: NodeId(0),
@@ -1246,6 +1267,8 @@ impl CudaDriver {
             }
         }
         let unfused = config.is_some_and(|value| !value.allow_fusion);
+        let resolve_us = elapsed_micros(plan_started);
+        let bind_started = Instant::now();
         let (resolved, packed_operands, mut micros) = bind_resolved(
             program,
             &shapes,
@@ -1262,6 +1285,8 @@ impl CudaDriver {
             numeric_policy,
             &plan_grant(),
         );
+        let bind_us = elapsed_micros(bind_started);
+        let emit_started = Instant::now();
         let (kernels, uniforms) = emit_and_pack(
             &resolved,
             None,
@@ -1271,6 +1296,8 @@ impl CudaDriver {
             &operand_dtypes,
             &mut micros,
         )?;
+        let emit_us = elapsed_micros(emit_started);
+        let assemble_started = Instant::now();
         let pool = Box::new(PoolSchedule::build(&resolved, &kernels, outputs));
         let mut plan = CudaPlan {
             pool,
@@ -1313,6 +1340,16 @@ impl CudaDriver {
         } else {
             plan.learn_rows_at_build(symbols, numeric_policy);
         }
+        proxima_telemetry::debug!(
+            resolve_us = resolve_us,
+            bind_us = bind_us,
+            emit_us = emit_us,
+            assemble_us = elapsed_micros(assemble_started),
+            total_us = elapsed_micros(plan_started),
+            node_count = program.len(),
+            kernel_count = plan.kernels.len(),
+            "cuda plan built"
+        );
         Ok(plan)
     }
 
