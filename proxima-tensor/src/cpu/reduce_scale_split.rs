@@ -51,6 +51,10 @@ fn tile_gate_open(op: &BoundOp) -> bool {
         .collect();
     let flat = vec![1i64; op.operands().len()];
     let shape = body_shape(op.element_body());
+    // a width-stepped body takes the width tile, not the dot tile this probes
+    if body_shape_is_affine_fast_path(op, &shape, &strides) {
+        return false;
+    }
     neon_tile_decision(
         op,
         &shape,
