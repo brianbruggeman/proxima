@@ -107,7 +107,7 @@ grouped_min_tokens = 64
 # the numeric format name the CUDA tensor-core instruction accepts as a multiplicand, split into a
 # high and a low part so an f32 operand keeps its accuracy. A device fact `Target::mma_operand`
 # resolves through `Codec::from_name`; emitted only when the `cuda` feature is active.
-cuda_mma_operand = "f16"
+cuda_mma_operand = "float16"
 
 [tiled_gemm]
 # below this many activation rows (tokens) in one dispatch, the row-blocked
