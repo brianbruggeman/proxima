@@ -119,6 +119,22 @@ pub fn product_contraction(bound: &BoundOp, weight: usize) -> Option<ProductCont
     product_facts(bound, weight).filter(|facts| facts.batch_positions.is_empty())
 }
 
+/// [`product_contraction`] that also accepts output positions neither operand strides over an
+/// extent of one (a leading unit batch such as conv1's `[1, ..]`): they contribute coordinate 0
+/// and change no tile, so a backend's tiled body serves them as it serves the plain product.
+#[must_use]
+pub fn unit_batched_product_contraction(bound: &BoundOp, weight: usize) -> Option<ProductContraction> {
+    let BoundOpKind::Reduce { output_axes, .. } = &bound.kind else {
+        return None;
+    };
+    product_facts(bound, weight).filter(|facts| {
+        facts
+            .batch_positions
+            .iter()
+            .all(|&position| bound.extents[output_axes[position] as usize] == 1)
+    })
+}
+
 /// The batch-aware reading of a dense two-operand product: the weight operand
 /// index, and the facts narrowed to one matrix. Roles come from stride
 /// ownership, never from packed-ness: the weight owns the last exclusively
