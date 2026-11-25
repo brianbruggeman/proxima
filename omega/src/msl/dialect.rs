@@ -5,6 +5,7 @@
 //! hardware types that use them. Which steps a layout takes is `crate::render::{load, store,
 //! unpack}`.
 
+use alloc::borrow::Cow;
 use alloc::format;
 use alloc::string::String;
 
@@ -16,32 +17,36 @@ use crate::render::{Dialect, HardwareScalar, Intrinsic};
 pub struct Msl;
 
 impl Dialect for Msl {
-    fn scalar(&self, scalar: HardwareScalar) -> &'static str {
-        SCALAR_SPELLINGS[scalar.index()].0
+    fn scalar(&self, scalar: HardwareScalar) -> Option<Cow<'static, str>> {
+        SCALAR_SPELLINGS[scalar.index()].map(|(name, _)| Cow::Borrowed(name))
     }
 
     fn literal(&self, scalar: HardwareScalar, digits: &str) -> String {
-        match SCALAR_SPELLINGS[scalar.index()].1 {
-            Some(suffix) => format!("{digits}{suffix}"),
-            None => format!("({}){digits}f", self.scalar(scalar)),
+        let spelling = SCALAR_SPELLINGS[scalar.index()];
+        match spelling {
+            Some((_, Some(suffix))) => format!("{digits}{suffix}"),
+            Some((name, None)) => format!("({name}){digits}f"),
+            None => format!("{digits}f"),
         }
     }
 
-    fn unsigned(&self, bytes: u8) -> &'static str {
+    fn unsigned(&self, bytes: u8) -> Option<Cow<'static, str>> {
         match bytes {
-            1 => "uchar",
-            2 => "ushort",
-            4 => "uint",
-            _ => "ulong",
+            1 => Some(Cow::Borrowed("uchar")),
+            2 => Some(Cow::Borrowed("ushort")),
+            4 => Some(Cow::Borrowed("uint")),
+            8 => Some(Cow::Borrowed("ulong")),
+            _ => None,
         }
     }
 
-    fn signed(&self, bytes: u8) -> &'static str {
+    fn signed(&self, bytes: u8) -> Option<Cow<'static, str>> {
         match bytes {
-            1 => "char",
-            2 => "short",
-            4 => "int",
-            _ => "long",
+            1 => Some(Cow::Borrowed("char")),
+            2 => Some(Cow::Borrowed("short")),
+            4 => Some(Cow::Borrowed("int")),
+            8 => Some(Cow::Borrowed("long")),
+            _ => None,
         }
     }
 

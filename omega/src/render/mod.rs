@@ -13,6 +13,8 @@ mod layout;
 mod refusal;
 
 pub use dialect::{Dialect, Intrinsic};
+#[cfg(test)]
+pub(crate) use hardware::HARDWARE;
 pub(crate) use hardware::HARDWARE_COUNT;
 pub use hardware::HardwareScalar;
 #[cfg(feature = "wgpu-backend")]

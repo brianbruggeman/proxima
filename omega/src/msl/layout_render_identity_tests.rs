@@ -22,14 +22,14 @@ use proxima_numeric::float_layout::{
 
 use super::dialect::Msl;
 use super::layout_render::{
-    field_store_nan_branch_msl, layout_load_msl, layout_store_msl, layout_unpack_msl,
+    field_store_nan_branch_msl, hardware_stage_type, layout_load_msl, layout_store_msl, layout_unpack_msl,
 };
-use crate::render::{self, HardwareScalar, Refusal};
+use crate::render::{self, HARDWARE, HardwareScalar, Refusal};
 
 const NO_FLAT_ADDRESS: &str = "none";
 
 fn wide() -> HardwareScalar {
-    HardwareScalar::widest().expect("the hardware table has a wide scalar")
+    HardwareScalar::widest(&Msl).expect("the metal dialect spells a wide scalar")
 }
 
 fn held_by_the_wide_scalar() -> Vec<(FloatLayout, &'static str)> {
@@ -195,6 +195,51 @@ fn a_layout_wider_than_the_wide_scalar_is_refused_by_load_store_and_unpack_with_
             "{name} msl unpack"
         );
     }
+}
+
+#[test]
+fn a_named_ieee_layout_wider_than_the_metal_wide_scalar_has_no_metal_row() {
+    let word_bits = wide().layout().width();
+    let ieee_wider: Vec<(FloatLayout, &str)> = NAMED_LAYOUTS
+        .iter()
+        .filter(|(layout, _)| {
+            layout.is_float()
+                && layout.bias_override.is_none()
+                && layout.sign == SignEncoding::Magnitude
+                && layout.specials == Specials::InfinityOnOverflow
+                && layout.width() > word_bits
+        })
+        .copied()
+        .collect();
+
+    assert!(
+        !ieee_wider.is_empty(),
+        "no named ieee layout is wider than the metal wide scalar"
+    );
+    for (layout, name) in ieee_wider {
+        assert!(HARDWARE.contains(&layout), "{name} is a hardware row");
+        assert_eq!(HardwareScalar::of(&Msl, &layout), None, "{name} metal row");
+    }
+}
+
+#[test]
+fn every_metal_spelling_names_a_row_of_its_byte_width() {
+    let word_bits = wide().layout().width();
+    let mut spelled = 0;
+    let mut cast_form = 0;
+
+    for scalar in HardwareScalar::all(&Msl) {
+        let layout = scalar.layout();
+        let ty = hardware_stage_type(&layout).expect("a spelled row has a type");
+
+        assert_eq!(ty.bytes, u64::from(scalar.bytes()), "{} bytes", ty.scalar);
+        assert!(layout.width() <= word_bits, "{} fits the wide word", ty.scalar);
+        spelled += usize::from(true);
+        cast_form += usize::from(ty.zero_literal().starts_with('('));
+    }
+
+    assert_eq!(spelled, 3, "spelled rows");
+    assert_eq!(cast_form, 1, "rows with no literal suffix");
 }
 
 #[test]

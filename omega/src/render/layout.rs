@@ -8,6 +8,7 @@
 //! wide scalar contributes (fraction width, infinity code, quiet bit, absolute-value mask) comes
 //! from `wide.layout()`, so a different wide scalar is a different argument and not a code edit.
 
+use alloc::borrow::Cow;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -71,29 +72,43 @@ pub(crate) const fn reserves_all_ones(layout: &FloatLayout) -> bool {
     )
 }
 
+fn unsigned_of<D: Dialect>(dialect: &D, bytes: u8) -> Result<Cow<'static, str>, Refusal> {
+    dialect
+        .unsigned(bytes)
+        .ok_or(Refusal::NoIntegerOfWidth { bytes })
+}
+
+fn scalar_of<D: Dialect>(dialect: &D, row: HardwareScalar) -> Result<Cow<'static, str>, Refusal> {
+    dialect.scalar(row).ok_or(Refusal::NoWideScalar)
+}
+
 /// The dialect plus the wide scalar the steps compute in, with every token and constant the wide
 /// scalar contributes resolved once.
 struct Tokens<'dialect, D: Dialect> {
     dialect: &'dialect D,
     wide: HardwareScalar,
     layout: FloatLayout,
-    ty: &'static str,
-    word: &'static str,
-    signed: &'static str,
+    ty: Cow<'static, str>,
+    word: Cow<'static, str>,
     suffix: &'static str,
 }
 
 impl<'dialect, D: Dialect> Tokens<'dialect, D> {
-    fn new(dialect: &'dialect D, wide: HardwareScalar) -> Self {
-        Self {
+    fn new(dialect: &'dialect D, wide: HardwareScalar) -> Result<Self, Refusal> {
+        Ok(Self {
             dialect,
             wide,
             layout: wide.layout(),
-            ty: dialect.scalar(wide),
-            word: dialect.unsigned(wide.bytes()),
-            signed: dialect.signed(wide.bytes()),
+            ty: dialect.scalar(wide).ok_or(Refusal::NoWideScalar)?,
+            word: unsigned_of(dialect, wide.bytes())?,
             suffix: dialect.unsigned_suffix(),
-        }
+        })
+    }
+
+    fn signed(&self, bytes: u8) -> Result<Cow<'static, str>, Refusal> {
+        self.dialect
+            .signed(bytes)
+            .ok_or(Refusal::NoIntegerOfWidth { bytes })
     }
 
     fn literal(&self, digits: &str) -> String {
@@ -126,11 +141,11 @@ impl<'dialect, D: Dialect> Tokens<'dialect, D> {
     }
 
     fn word_head(&self, name: &str, parameters: &str) -> String {
-        self.dialect.function(self.word, name, parameters)
+        self.dialect.function(&self.word, name, parameters)
     }
 
     fn wide_head(&self, name: &str, parameters: &str) -> String {
-        self.dialect.function(self.ty, name, parameters)
+        self.dialect.function(&self.ty, name, parameters)
     }
 }
 
@@ -162,12 +177,7 @@ fn integer_load<D: Dialect>(
     let (scale, _) = integer_scales(tokens, layout)?;
     // 64-bit integer arithmetic here slowed the q8_0 k-cache load on metal, so the wide type is used only when 32 bits cannot hold the signed difference; the q8_0 arm of cached_attention_decode_split_times_a_binary16_k_cache_against_a_q4_0_k_cache (omega/tests/cached_attention_decode_split_parity.rs, feature instrument) prints that load's per-step gpu time, and a_rendered_wide_integer_load_equals_the_host_decode_bit_for_bit_on_boundary_codes (layout_render_tests.rs) pins the long arm
     let fits = u32::from(mantissa_bits) + 2 <= tokens.word_bits();
-    let signed = dialect.signed(if fits {
-        tokens.wide.bytes()
-    } else {
-        tokens.wide.bytes() * 2
-    });
-    let mantissa = dialect.cast(tokens.ty, "mantissa");
+    let mantissa = dialect.cast(&tokens.ty, "mantissa");
     let value = match layout.sign {
         SignEncoding::Absent => mantissa,
         SignEncoding::Magnitude => dialect.select(
@@ -176,19 +186,24 @@ fn integer_load<D: Dialect>(
             &format!("-{mantissa}"),
         ),
         SignEncoding::TwosComplement => {
-            let low = dialect.cast(signed, "mantissa");
+            let signed = tokens.signed(if fits {
+                tokens.wide.bytes()
+            } else {
+                tokens.wide.bytes() * 2
+            })?;
+            let low = dialect.cast(&signed, "mantissa");
             let high = dialect.cast(
-                signed,
+                &signed,
                 &format!(
                     "(((code >> {mantissa_bits}{suffix}) & 1{suffix}) << {mantissa_bits}{suffix})"
                 ),
             );
-            dialect.cast(tokens.ty, &format!("({low} - {high})"))
+            dialect.cast(&tokens.ty, &format!("({low} - {high})"))
         }
     };
     let head = tokens.wide_head(name, &format!("{} code", tokens.word));
     let declaration = dialect.declare(
-        tokens.word,
+        &tokens.word,
         "mantissa",
         &format!("code & {mask:#x}{suffix}"),
     );
@@ -205,12 +220,12 @@ fn integer_store<D: Dialect>(
 ) -> Result<String, Refusal> {
     let dialect = tokens.dialect;
     let suffix = tokens.suffix;
-    let word = tokens.word;
+    let word = tokens.word.as_ref();
     let mantissa_bits = layout.mantissa_bits;
     let mask = (1u64 << mantissa_bits) - 1;
     let (_, unscale) = integer_scales(tokens, layout)?;
     let scaled = dialect.declare(
-        tokens.ty,
+        &tokens.ty,
         "scaled",
         &format!("value * {}", tokens.literal(&unscale)),
     );
@@ -243,11 +258,8 @@ fn integer_store<D: Dialect>(
                 Intrinsic::Clamp,
                 &[rounded.as_str(), negative.as_str(), top.as_str()],
             );
-            let declaration = dialect.declare(
-                tokens.signed,
-                "clamped",
-                &dialect.cast(tokens.signed, &clamped),
-            );
+            let signed = tokens.signed(tokens.wide.bytes())?;
+            let declaration = dialect.declare(&signed, "clamped", &dialect.cast(&signed, &clamped));
             let full_mask = (1u64 << (mantissa_bits + 1)) - 1;
             format!(
                 "    {declaration}\n    return {} & {full_mask:#x}{suffix};",
@@ -271,26 +283,34 @@ pub fn load<D: Dialect>(
     layout: FloatLayout,
     name: &str,
 ) -> Result<String, Refusal> {
-    let tokens = Tokens::new(dialect, wide);
+    let tokens = Tokens::new(dialect, wide)?;
     tokens.admit(&layout)?;
     if !layout.is_float() {
         return integer_load(&tokens, &layout, name);
     }
-    let value = match HardwareScalar::of(&layout) {
-        Some(row) if row == wide => dialect.bitcast(tokens.ty, "code"),
+    let value = match HardwareScalar::of(dialect, &layout) {
+        Some(row) if row == wide => dialect.bitcast(&tokens.ty, "code"),
         Some(row) => {
-            let storage = dialect.cast(dialect.unsigned(row.bytes()), "code");
-            dialect.cast(tokens.ty, &dialect.bitcast(dialect.scalar(row), &storage))
+            let storage = dialect.cast(&unsigned_of(dialect, row.bytes())?, "code");
+            dialect.cast(
+                &tokens.ty,
+                &dialect.bitcast(&scalar_of(dialect, row)?, &storage),
+            )
         }
-        None => return Ok(field_load(&tokens, &layout, name)),
+        None => return field_load(&tokens, &layout, name),
     };
     let head = tokens.wide_head(name, &format!("{} code", tokens.word));
     Ok(format!("\n{head} {{\n    return {value};\n}}\n"))
 }
 
-fn field_load<D: Dialect>(tokens: &Tokens<'_, D>, layout: &FloatLayout, name: &str) -> String {
+fn field_load<D: Dialect>(
+    tokens: &Tokens<'_, D>,
+    layout: &FloatLayout,
+    name: &str,
+) -> Result<String, Refusal> {
     let dialect = tokens.dialect;
-    let (word, suffix, signed) = (tokens.word, tokens.suffix, tokens.signed);
+    let signed_type = tokens.signed(tokens.wide.bytes())?;
+    let (word, suffix, signed) = (tokens.word.as_ref(), tokens.suffix, signed_type.as_ref());
     let mantissa_bits = layout.mantissa_bits;
     let field_mask = mantissa_mask(layout);
     let field_ones = exponent_ones(layout);
@@ -365,10 +385,10 @@ fn field_load<D: Dialect>(tokens: &Tokens<'_, D>, layout: &FloatLayout, name: &s
         ),
     );
     let result = dialect.bitcast(
-        tokens.ty,
+        &tokens.ty,
         &format!("sign | {name}_scaled_bits(significand, scale)"),
     );
-    format!(
+    Ok(format!(
         "
 {scaled_head} {{
     if (significand == 0{suffix}) {{
@@ -398,7 +418,7 @@ fn field_load<D: Dialect>(tokens: &Tokens<'_, D>, layout: &FloatLayout, name: &s
     return {result};
 }}
 "
-    )
+    ))
 }
 
 fn field_load_reserved<D: Dialect>(
@@ -416,7 +436,7 @@ fn field_load_reserved<D: Dialect>(
     };
     if layout.specials == Specials::NanOnly {
         let value = tokens.dialect.bitcast(
-            tokens.ty,
+            &tokens.ty,
             &format!("sign | {infinity:#010x}{suffix} | {quiet:#x}{suffix}{payload}"),
         );
         return format!(
@@ -428,7 +448,7 @@ fn field_load_reserved<D: Dialect>(
         return String::new();
     }
     let value = tokens.dialect.bitcast(
-        tokens.ty,
+        &tokens.ty,
         &format!(
             "sign | {infinity:#010x}{suffix} | (mantissa == 0{suffix} ? 0{suffix} : ({quiet:#x}{suffix}{payload}))"
         ),
@@ -448,21 +468,21 @@ pub fn store<D: Dialect>(
     layout: FloatLayout,
     name: &str,
 ) -> Result<String, Refusal> {
-    let tokens = Tokens::new(dialect, wide);
+    let tokens = Tokens::new(dialect, wide)?;
     tokens.admit(&layout)?;
     if !layout.is_float() {
         return integer_store(&tokens, &layout, name);
     }
-    let value = match HardwareScalar::of(&layout) {
-        Some(row) if row == wide => dialect.bitcast(tokens.word, "value"),
+    let value = match HardwareScalar::of(dialect, &layout) {
+        Some(row) if row == wide => dialect.bitcast(&tokens.word, "value"),
         Some(row) => {
-            let narrow = dialect.cast(dialect.scalar(row), "value");
+            let narrow = dialect.cast(&scalar_of(dialect, row)?, "value");
             dialect.cast(
-                tokens.word,
-                &dialect.bitcast(dialect.unsigned(row.bytes()), &narrow),
+                &tokens.word,
+                &dialect.bitcast(&unsigned_of(dialect, row.bytes())?, &narrow),
             )
         }
-        None => return Ok(field_store(&tokens, &layout, name)),
+        None => return field_store(&tokens, &layout, name),
     };
     let head = tokens.word_head(name, &format!("{} value", tokens.ty));
     Ok(format!("\n{head} {{\n    return {value};\n}}\n"))
@@ -497,18 +517,21 @@ fn field_store_nan<D: Dialect>(tokens: &Tokens<'_, D>, layout: &FloatLayout) -> 
 
 /// The statements that send a NaN `value` to the layout's own NaN code, the one step a hardware
 /// conversion cannot be trusted with because it emits a single canonical NaN.
-#[must_use]
 pub fn store_nan_branch<D: Dialect>(
     dialect: &D,
     wide: HardwareScalar,
     layout: &FloatLayout,
-) -> String {
-    let tokens = Tokens::new(dialect, wide);
+) -> Result<String, Refusal> {
+    let tokens = Tokens::new(dialect, wide)?;
     let suffix = tokens.suffix;
     let nan = field_store_nan(&tokens, layout);
-    let bits = dialect.declare(tokens.word, "bits", &dialect.bitcast(tokens.word, "value"));
+    let bits = dialect.declare(
+        &tokens.word,
+        "bits",
+        &dialect.bitcast(&tokens.word, "value"),
+    );
     let sign = dialect.declare(
-        tokens.word,
+        &tokens.word,
         "sign",
         &format!(
             "(bits >> {}{suffix}) << {}{suffix}",
@@ -521,12 +544,19 @@ pub fn store_nan_branch<D: Dialect>(
         tokens.abs_mask(),
         infinity_code(&tokens.layout)
     ));
-    format!("    {bits}\n    {sign}\n    {branch}\n{nan}    }}\n")
+    Ok(format!(
+        "    {bits}\n    {sign}\n    {branch}\n{nan}    }}\n"
+    ))
 }
 
-fn field_store<D: Dialect>(tokens: &Tokens<'_, D>, layout: &FloatLayout, name: &str) -> String {
+fn field_store<D: Dialect>(
+    tokens: &Tokens<'_, D>,
+    layout: &FloatLayout,
+    name: &str,
+) -> Result<String, Refusal> {
     let dialect = tokens.dialect;
-    let (word, suffix, signed) = (tokens.word, tokens.suffix, tokens.signed);
+    let signed_type = tokens.signed(tokens.wide.bytes())?;
+    let (word, suffix, signed) = (tokens.word.as_ref(), tokens.suffix, signed_type.as_ref());
     let mantissa_bits = layout.mantissa_bits;
     let field_sign = sign_shift(layout);
     let bias = layout.bias();
@@ -624,7 +654,7 @@ fn field_store<D: Dialect>(tokens: &Tokens<'_, D>, layout: &FloatLayout, name: &
     );
     let limit = format!("{overflow:#x}{suffix}");
     let bounded = dialect.intrinsic(Intrinsic::Min, &["code", limit.as_str()]);
-    format!(
+    Ok(format!(
         "
 {round_head} {{
     if (shift == 0{suffix}) {{
@@ -661,7 +691,7 @@ fn field_store<D: Dialect>(tokens: &Tokens<'_, D>, layout: &FloatLayout, name: &
     return sign | {bounded};
 }}
 "
-    )
+    ))
 }
 
 /// Renders the flat element accessor `name(payload, index)`: element `index` of a densely packed
@@ -677,29 +707,30 @@ pub fn unpack<D: Dialect>(
     layout: FloatLayout,
     name: &str,
 ) -> Result<String, Refusal> {
-    let tokens = Tokens::new(dialect, wide);
+    let tokens = Tokens::new(dialect, wide)?;
     tokens.admit(&layout)?;
     let suffix = tokens.suffix;
+    let word = tokens.word.as_ref();
     let width = u32::from(layout.width());
     let value_name = format!("{name}_value");
     let code = if width % 8 == 0 {
         let bytes = width / 8;
         let gathered = (0..bytes)
             .map(|byte| {
-                let read = dialect.cast(tokens.word, &format!("payload[offset + {byte}{suffix}]"));
+                let read = dialect.cast(word, &format!("payload[offset + {byte}{suffix}]"));
                 format!("({read} << {}{suffix})", byte * 8)
             })
             .collect::<Vec<_>>()
             .join(" | ");
-        let offset = dialect.declare(tokens.word, "offset", &format!("index * {bytes}{suffix}"));
-        let code = dialect.declare(tokens.word, "code", &gathered);
+        let offset = dialect.declare(word, "offset", &format!("index * {bytes}{suffix}"));
+        let code = dialect.declare(word, "code", &gathered);
         format!("    {offset}\n    {code}\n")
     } else if 8 % width == 0 {
         let mask = (1u32 << width) - 1;
-        let bit = dialect.declare(tokens.word, "bit", &format!("index * {width}{suffix}"));
-        let read = dialect.cast(tokens.word, &format!("payload[bit / 8{suffix}]"));
+        let bit = dialect.declare(word, "bit", &format!("index * {width}{suffix}"));
+        let read = dialect.cast(word, &format!("payload[bit / 8{suffix}]"));
         let code = dialect.declare(
-            tokens.word,
+            word,
             "code",
             &format!("({read} >> (bit % 8{suffix})) & {mask:#x}{suffix}"),
         );
@@ -726,7 +757,7 @@ pub fn unpack<D: Dialect>(
 /// field reaches into it, so the last element never reads past the payload.
 fn straddling_unpack<D: Dialect>(tokens: &Tokens<'_, D>, width: u32) -> String {
     let dialect = tokens.dialect;
-    let (word, suffix) = (tokens.word, tokens.suffix);
+    let (word, suffix) = (tokens.word.as_ref(), tokens.suffix);
     let mask = (1u32 << width) - 1;
     let spans = (7 + width).div_ceil(8);
     let joined = (1..spans)

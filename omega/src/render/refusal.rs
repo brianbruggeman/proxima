@@ -13,7 +13,10 @@ pub enum Refusal {
     /// The layout's code is wider than the word the wide scalar's steps are spelled in.
     #[error("a {width}-bit code is wider than the wide scalar's word")]
     CodeWiderThanWord { width: u8 },
-    /// The hardware table holds no scalar to compute in.
-    #[error("the hardware table has no wide scalar")]
+    /// The dialect does not spell the wide row.
+    #[error("the dialect does not spell the wide row")]
     NoWideScalar,
+    /// The dialect has no integer type of this many bytes.
+    #[error("the dialect has no {bytes}-byte integer")]
+    NoIntegerOfWidth { bytes: u8 },
 }

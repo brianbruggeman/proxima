@@ -6,12 +6,11 @@
 
 use proxima_numeric::float_layout::{FloatLayout, NAMED_LAYOUTS, SignEncoding, Specials};
 
-const WIDEST_HARDWARE_BITS: u8 = 32;
+use super::dialect::Dialect;
 
 const fn is_hardware(layout: &FloatLayout) -> bool {
     layout.is_float()
         && layout.accumulates_in_place()
-        && layout.width() <= WIDEST_HARDWARE_BITS
         && layout.bias_override.is_none()
         && matches!(layout.specials, Specials::InfinityOnOverflow)
         && matches!(layout.sign, SignEncoding::Magnitude)
@@ -54,31 +53,32 @@ pub(crate) const HARDWARE: [FloatLayout; HARDWARE_COUNT] = hardware_table();
 pub struct HardwareScalar(u8);
 
 impl HardwareScalar {
-    /// Every row, in table order.
-    pub fn all() -> impl Iterator<Item = Self> {
-        (0..HARDWARE_COUNT).filter_map(|index| u8::try_from(index).ok().map(Self))
+    /// Every row `dialect` spells, in table order.
+    pub fn all<D: Dialect>(dialect: &D) -> impl Iterator<Item = Self> {
+        (0..HARDWARE_COUNT)
+            .filter_map(|index| u8::try_from(index).ok().map(Self))
+            .filter(|row| dialect.scalar(*row).is_some())
     }
 
-    /// The widest row: the scalar every layout without a narrower row is computed in.
+    /// The widest row `dialect` spells: the scalar every layout without a narrower row is
+    /// computed in.
     #[must_use]
-    pub fn widest() -> Option<Self> {
-        Self::all().max_by_key(|scalar| scalar.bytes())
+    pub fn widest<D: Dialect>(dialect: &D) -> Option<Self> {
+        Self::all(dialect).max_by_key(|scalar| scalar.bytes())
     }
 
-    /// The row whose fields equal `layout`'s, compared field by field and never by name.
+    /// The row `dialect` spells whose fields equal `layout`'s, compared field by field and never
+    /// by name.
     #[must_use]
-    pub fn of(layout: &FloatLayout) -> Option<Self> {
-        HARDWARE
-            .iter()
-            .position(|row| {
-                row.exponent_bits == layout.exponent_bits
-                    && row.mantissa_bits == layout.mantissa_bits
-                    && row.specials == layout.specials
-                    && row.bias() == layout.bias()
-                    && row.sign == layout.sign
-            })
-            .and_then(|index| u8::try_from(index).ok())
-            .map(Self)
+    pub fn of<D: Dialect>(dialect: &D, layout: &FloatLayout) -> Option<Self> {
+        Self::all(dialect).find(|scalar| {
+            let row = scalar.layout();
+            row.exponent_bits == layout.exponent_bits
+                && row.mantissa_bits == layout.mantissa_bits
+                && row.specials == layout.specials
+                && row.bias() == layout.bias()
+                && row.sign == layout.sign
+        })
     }
 
     /// Its position in [`HARDWARE`]; a dialect's spelling table is indexed by it.

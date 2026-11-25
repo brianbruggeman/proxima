@@ -17,7 +17,7 @@ use proxima_numeric::block_layout::{BlockLayout, CodeRegion, Coded, Field, Plane
 use proxima_numeric::float_layout::FloatLayout;
 use proxima_numeric::{DType, FormatCodec, LevelFormat, LevelGeometry, LevelTable, NumericFormat};
 
-use crate::render::{self, Dialect, HARDWARE_COUNT, HardwareScalar, Refusal};
+use crate::render::{self, HARDWARE_COUNT, HardwareScalar, Refusal};
 
 use super::dialect::Msl;
 
@@ -31,9 +31,14 @@ pub(crate) const F32_QUIET_BIT: u32 = 1 << 22;
 pub(crate) const F32_ABS_MASK: u32 = 0x7fff_ffff;
 
 /// The Metal spelling of each row of the hardware table, in table order: the type name and, when
-/// Metal gives it one, the literal suffix. [`Msl`] reads this table.
-pub(crate) const SCALAR_SPELLINGS: [(&str, Option<&str>); HARDWARE_COUNT] =
-    [("float", Some("f")), ("half", Some("h")), ("bfloat", None)];
+/// Metal gives it one, the literal suffix; a row Metal does not spell is `None`. [`Msl`] reads this
+/// table.
+pub(crate) const SCALAR_SPELLINGS: [Option<(&str, Option<&str>)>; HARDWARE_COUNT] = [
+    Some(("float", Some("f"))),
+    None,
+    Some(("half", Some("h"))),
+    Some(("bfloat", None)),
+];
 
 /// A Metal scalar type a [`FloatLayout`] equals field by field: its name and the bytes one
 /// element occupies. The vector and `simdgroup` 8x8 spellings derive from the name.
@@ -45,12 +50,12 @@ pub struct HardwareType {
 }
 
 impl HardwareType {
-    fn from_scalar(scalar: HardwareScalar) -> Self {
-        Self {
-            scalar: Msl.scalar(scalar),
+    fn from_scalar(scalar: HardwareScalar) -> Option<Self> {
+        SCALAR_SPELLINGS[scalar.index()].map(|(name, zero_suffix)| Self {
+            scalar: name,
             bytes: u64::from(scalar.bytes()),
-            zero_suffix: SCALAR_SPELLINGS[scalar.index()].1,
-        }
+            zero_suffix,
+        })
     }
     /// The zero literal of this type: `0.0h` for `half`, `0.0f` for `float`, and the scalar cast
     /// of `0.0f` for a type Metal gives no literal suffix.
@@ -87,15 +92,15 @@ impl HardwareType {
 /// `None`, never a fallback.
 #[must_use]
 pub fn hardware_stage_type(layout: &FloatLayout) -> Option<HardwareType> {
-    HardwareScalar::of(layout).map(HardwareType::from_scalar)
+    HardwareScalar::of(&Msl, layout).and_then(HardwareType::from_scalar)
 }
 
 /// The bytes one element of the hardware scalar named `scalar` (`float`, `half`, `bfloat`)
 /// occupies, for a caller that holds a class by name.
 #[must_use]
 pub fn hardware_scalar_bytes(scalar: &str) -> Option<u64> {
-    HardwareScalar::all()
-        .map(HardwareType::from_scalar)
+    HardwareScalar::all(&Msl)
+        .filter_map(HardwareType::from_scalar)
         .find(|row| row.scalar == scalar)
         .map(|row| row.bytes)
 }
@@ -105,7 +110,7 @@ pub fn hardware_scalar_bytes(scalar: &str) -> Option<u64> {
 #[must_use]
 pub fn hardware_word() -> Option<HardwareType> {
     // why: the emitter computes every non-half/bfloat layout in the widest hardware float
-    HardwareScalar::widest().map(HardwareType::from_scalar)
+    HardwareScalar::widest(&Msl).and_then(HardwareType::from_scalar)
 }
 
 /// The Metal scalar type name of [`hardware_stage_type`].
@@ -132,7 +137,7 @@ pub fn device_row_store_dtype(format: &NumericFormat) -> Option<DType> {
 }
 
 fn wide_scalar() -> Result<HardwareScalar, Refusal> {
-    HardwareScalar::widest().ok_or(Refusal::NoWideScalar)
+    HardwareScalar::widest(&Msl).ok_or(Refusal::NoWideScalar)
 }
 
 // why: the public emitters return text, so a refusal becomes an `#error` line and the kernel
@@ -165,7 +170,7 @@ pub fn layout_store_msl(layout: FloatLayout, name: &str) -> String {
 #[must_use]
 pub fn field_store_nan_branch_msl(layout: &FloatLayout) -> String {
     wide_scalar()
-        .map(|wide| render::store_nan_branch(&Msl, wide, layout))
+        .and_then(|wide| render::store_nan_branch(&Msl, wide, layout))
         .unwrap_or_else(refused)
 }
 
@@ -1296,12 +1301,13 @@ fn run_element_msl(layout: &BlockLayout, name: &str, lane: usize) -> String {
 #[cfg(test)]
 mod hardware_type_tests {
     use super::HardwareType;
+    use crate::msl::dialect::Msl;
     use crate::render::HardwareScalar;
 
     #[test]
     fn zero_literal_takes_the_suffix_column_and_casts_a_type_with_no_suffix() {
-        let types = HardwareScalar::all()
-            .map(HardwareType::from_scalar)
+        let types = HardwareScalar::all(&Msl)
+            .filter_map(HardwareType::from_scalar)
             .collect::<Vec<_>>();
 
         let literals = types

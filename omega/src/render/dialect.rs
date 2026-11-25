@@ -5,6 +5,7 @@
 //! [`crate::render::load`] and friends; they are generic over `D: Dialect`, so a dialect is a type
 //! parameter and never a trait object.
 
+use alloc::borrow::Cow;
 use alloc::string::String;
 
 use super::hardware::HardwareScalar;
@@ -21,14 +22,14 @@ pub enum Intrinsic {
 
 /// The target-language spelling of the render steps.
 pub trait Dialect {
-    /// The type name of a hardware scalar.
-    fn scalar(&self, scalar: HardwareScalar) -> &'static str;
+    /// The type name of a hardware scalar, or `None` when the dialect does not spell that row.
+    fn scalar(&self, scalar: HardwareScalar) -> Option<Cow<'static, str>>;
     /// A literal of `scalar` from its `digits`.
     fn literal(&self, scalar: HardwareScalar, digits: &str) -> String;
-    /// The unsigned integer type that is `bytes` wide.
-    fn unsigned(&self, bytes: u8) -> &'static str;
-    /// The signed integer type that is `bytes` wide.
-    fn signed(&self, bytes: u8) -> &'static str;
+    /// The unsigned integer type that is `bytes` wide, or `None` when the dialect has none.
+    fn unsigned(&self, bytes: u8) -> Option<Cow<'static, str>>;
+    /// The signed integer type that is `bytes` wide, or `None` when the dialect has none.
+    fn signed(&self, bytes: u8) -> Option<Cow<'static, str>>;
     /// The suffix of an unsigned integer literal.
     fn unsigned_suffix(&self) -> &'static str;
     /// Convert `value` to `ty`.
