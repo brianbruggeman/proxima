@@ -11,7 +11,9 @@
 //!   [`StageTotals`] at read time (`crate::metal::shared_stage_totals`).
 //! - CUDA and wgpu call [`record_block_copied`] at each host-to-device upload
 //!   of a named block and [`record_pipeline_compile`] after each kernel or
-//!   pipeline build; the fields they cannot measure stay `0`.
+//!   pipeline build; the fields they cannot measure stay `0`. CUDA also calls
+//!   [`record_stage_phases`] once per executed plan with its upload, submit,
+//!   device-wait and readback times.
 //!
 //! `block_copied_bytes` is the same quantity as Metal's `BLOCK_COPIED_BYTES`:
 //! bytes that crossed host-to-device because the block was copied, never bytes
@@ -26,6 +28,15 @@ pub static BLOCK_COPIED_BYTES: Counter = Counter::new("omega.backend.block_copie
 pub static PIPELINE_MISSES: Counter = Counter::new("omega.backend.pipeline_misses");
 /// Wall-clock nanoseconds spent building those kernels or pipelines.
 pub static PIPELINE_COMPILE_NANOS: Counter = Counter::new("omega.backend.pipeline_compile_nanos");
+
+/// Wall-clock nanoseconds a device backend spent resolving and uploading named inputs.
+pub static BLOCK_UPLOAD_NANOS: Counter = Counter::new("omega.backend.block_upload_nanos");
+/// Wall-clock nanoseconds spent submitting kernel launches to the device queue.
+pub static ENCODE_DISPATCH_NANOS: Counter = Counter::new("omega.backend.encode_dispatch_nanos");
+/// Wall-clock nanoseconds spent waiting for the device to finish submitted work.
+pub static GPU_EXEC_NANOS: Counter = Counter::new("omega.backend.gpu_exec_nanos");
+/// Wall-clock nanoseconds spent copying outputs from device to host.
+pub static READBACK_NANOS: Counter = Counter::new("omega.backend.readback_nanos");
 
 /// One read's worth of stage counters, in backend-neutral units (bytes,
 /// counts, nanoseconds). A backend that cannot measure a field leaves it `0`.
@@ -79,6 +90,24 @@ pub fn record_pipeline_compile(nanos: u64) {
     counter!(PIPELINE_COMPILE_NANOS, nanos);
 }
 
+/// One executed plan's phase costs in nanoseconds, recorded by a backend that
+/// times its own upload, submit, device-wait and readback phases.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StagePhases {
+    pub block_upload_nanos: u64,
+    pub encode_dispatch_nanos: u64,
+    pub gpu_exec_nanos: u64,
+    pub readback_nanos: u64,
+}
+
+/// Adds one executed plan's phase costs to the shared counters.
+pub fn record_stage_phases(phases: StagePhases) {
+    counter!(BLOCK_UPLOAD_NANOS, phases.block_upload_nanos);
+    counter!(ENCODE_DISPATCH_NANOS, phases.encode_dispatch_nanos);
+    counter!(GPU_EXEC_NANOS, phases.gpu_exec_nanos);
+    counter!(READBACK_NANOS, phases.readback_nanos);
+}
+
 /// Reads and resets every backend's stage counters in one call: the shared
 /// counters CUDA and wgpu feed, plus Metal's own counters mapped into the same
 /// fields. Snapshot-and-reset, so the result is the delta since the last read.
@@ -88,6 +117,10 @@ pub fn stage_totals() -> StageTotals {
         block_copied_bytes: BLOCK_COPIED_BYTES.snapshot_and_reset(),
         pipeline_misses: PIPELINE_MISSES.snapshot_and_reset(),
         pipeline_compile_nanos: PIPELINE_COMPILE_NANOS.snapshot_and_reset(),
+        block_upload_nanos: BLOCK_UPLOAD_NANOS.snapshot_and_reset(),
+        encode_dispatch_nanos: ENCODE_DISPATCH_NANOS.snapshot_and_reset(),
+        gpu_exec_nanos: GPU_EXEC_NANOS.snapshot_and_reset(),
+        readback_nanos: READBACK_NANOS.snapshot_and_reset(),
         ..StageTotals::default()
     };
     #[cfg(all(feature = "metal", target_os = "macos"))]

@@ -67,7 +67,10 @@
 //! free-function pair stays.
 
 mod stage_totals;
-pub use stage_totals::{StageTotals, record_block_copied, record_pipeline_compile, stage_totals};
+pub use stage_totals::{
+    StagePhases, StageTotals, record_block_copied, record_pipeline_compile, record_stage_phases,
+    stage_totals,
+};
 
 use crate::config::{KvPaddingPolicy, RuntimeConfig, SelectionMode};
 use conflaguration::Validate;

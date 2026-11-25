@@ -4107,6 +4107,12 @@ impl CudaPlan {
                 self.outputs.len()
             );
         }
+        crate::backend::record_stage_phases(crate::backend::StagePhases {
+            block_upload_nanos: upload_phase_us.saturating_mul(1_000),
+            encode_dispatch_nanos: submit_us.saturating_mul(1_000),
+            gpu_exec_nanos: sync_us.saturating_mul(1_000),
+            readback_nanos: elapsed_micros(readback_phase_started).saturating_mul(1_000),
+        });
         proxima_telemetry::debug!(
             upload_phase_us = upload_phase_us,
             upload_call_us = upload_call_us,
