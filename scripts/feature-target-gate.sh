@@ -68,11 +68,14 @@ done
 # plus those features (empty = bare). --lib because tests and examples need std;
 # the tier claim is that the library itself builds without it, and a default-
 # features --all-targets build can never notice that break.
+# crate:@libtest: is `cargo test --lib --no-run` with default features: the lib's own
+# test target, without the examples and integration tests that need std.
 # crate:@nodefault:feature-set is `cargo check --all-targets --no-default-features`
 # plus those features: it compiles TEST targets for a feature set that excludes the
 # crate's default features (omega defaults to metal; std,cuda never builds with it).
 matrix=(
     "proxima-tensor:std"
+    "proxima-model-interop:@libtest:"
     "proxima-model-interop:std"
     "proxima-model-interop:std,metal,instrument"
     "proxima-model-interop:std,cuda"
@@ -265,6 +268,7 @@ while IFS=: read -r crate features tier_features; do
         *" $crate "*) ;;
         *) continue ;;
     esac
+    verb=(check)
     if [ "$features" = "@nostd" ]; then
         if [ -n "$tier_features" ]; then
             label="$crate --lib --no-default-features --features $tier_features"
@@ -273,6 +277,10 @@ while IFS=: read -r crate features tier_features; do
             label="$crate --lib --no-default-features"
             args=(-p "$crate" --lib --no-default-features)
         fi
+    elif [ "$features" = "@libtest" ]; then
+        label="$crate lib test (default features)"
+        verb=(test --no-run)
+        args=(-p "$crate" --lib)
     elif [ "$features" = "@nodefault" ]; then
         label="$crate --all-targets --no-default-features --features $tier_features"
         args=(-p "$crate" --all-targets --no-default-features --features "$tier_features")
@@ -284,7 +292,7 @@ while IFS=: read -r crate features tier_features; do
         args=(-p "$crate" --all-targets)
     fi
     printf '== %s ... ' "$label"
-    if output="$("${cargo_cmd[@]}" check "${args[@]}" --message-format short 2>&1)"; then
+    if output="$("${cargo_cmd[@]}" "${verb[@]}" "${args[@]}" --message-format short 2>&1)"; then
         errors="$(printf '%s\n' "$output" | grep -cE '^error' || true)"
         if [ "$errors" != 0 ]; then
             printf 'FAIL (%s errors)\n' "$errors"
