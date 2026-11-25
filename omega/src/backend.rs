@@ -1969,14 +1969,12 @@ pub fn clear_expert_source_cache() {}
 /// compiled in, matching every other Metal-only knob in this module
 /// ([`mark_resident`], [`register_checkpoint_mapping`]).
 ///
-/// This is the one release every owner of host bytes calls: it advances each
-/// name's owner generation ([`crate::resident_identity::owner_generation`]),
-/// which the CUDA identity check reads, and then evicts the backend's cached
-/// buffers, so a name rebound to new bytes can never be served from the old
+/// This is the one release every owner of host bytes calls: each CUDA and HIP
+/// driver's resident ledger ([`crate::resident_identity::ResidentLedger::advance_names`])
+/// advances the name's owner generation and evicts its cached buffer in one
+/// step, so a name rebound to new bytes can never be served from the old
 /// upload.
 pub fn release_resident_names<'name>(names: impl IntoIterator<Item = &'name str>) {
-    let names: Vec<&str> = names.into_iter().collect();
-    crate::resident_identity::advance_owner_generation(names.iter().copied());
     evict_resident_names(names);
 }
 
@@ -1995,8 +1993,12 @@ fn evict_resident_names<'name>(names: impl IntoIterator<Item = &'name str>) {
 )]
 fn evict_resident_names<'name>(names: impl IntoIterator<Item = &'name str>) {
     #[cfg(feature = "cuda-driver")]
-    if let Some(Ok(driver)) = CUDA_DRIVER.get() {
-        driver.release_resident_names(names);
+    {
+        let names: Vec<&str> = names.into_iter().collect();
+        if let Some(Ok(driver)) = CUDA_DRIVER.get() {
+            driver.release_resident_names(names.iter().copied());
+        }
+        crate::silicon::hip::shared::release_resident_names(&names);
     }
 }
 

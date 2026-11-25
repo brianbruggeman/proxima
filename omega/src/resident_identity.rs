@@ -55,51 +55,6 @@ impl ResidentIdentity {
     }
 }
 
-/// Owner generations: the one epoch per resident name that owners of host
-/// bytes advance (through `backend::release_resident_names`) whenever they
-/// free or reallocate the bytes under that name, and that every backend reads
-/// when it forms an offered [`ResidentIdentity`]. A name never advanced is
-/// generation 0.
-#[cfg(feature = "std")]
-mod owner_generations {
-    use std::sync::OnceLock;
-
-    use alloc::collections::BTreeMap;
-    use alloc::string::{String, ToString};
-    use proxima_primitives::sync::blocking::Mutex;
-
-    static GENERATIONS: OnceLock<Mutex<BTreeMap<String, u64>>> = OnceLock::new();
-
-    fn generations() -> &'static Mutex<BTreeMap<String, u64>> {
-        GENERATIONS.get_or_init(|| Mutex::new(BTreeMap::new()))
-    }
-
-    pub(super) fn current(name: &str) -> u64 {
-        generations().lock().get(name).copied().unwrap_or(0)
-    }
-
-    pub(super) fn advance<'name>(names: impl IntoIterator<Item = &'name str>) {
-        let mut held = generations().lock();
-        for name in names {
-            let next = held.get(name).copied().unwrap_or(0) + 1;
-            held.insert(name.to_string(), next);
-        }
-    }
-}
-
-/// The generation the owner of `name`'s host bytes currently stands at.
-#[cfg(feature = "std")]
-#[must_use]
-pub fn owner_generation(name: &str) -> u64 {
-    owner_generations::current(name)
-}
-
-/// Advances these names' owner generation: their previous host bytes are gone.
-#[cfg(feature = "std")]
-pub fn advance_owner_generation<'name>(names: impl IntoIterator<Item = &'name str>) {
-    owner_generations::advance(names);
-}
-
 /// A name was offered at an identity other than the one it was cached with.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
@@ -132,15 +87,23 @@ pub fn check_resident_identity(
 }
 
 /// Name-keyed resident cache over a backend's own buffer handle.
+///
+/// The ledger also owns each name's owner generation (a name never advanced is
+/// generation 0): [`Self::advance_names`] bumps it in the same call that
+/// evicts, so the generation and the eviction are ordered together, and the
+/// reader that forms an offered [`ResidentIdentity`] asks the ledger it already
+/// holds ([`Self::generation`]) rather than a process-global lock.
 #[derive(Debug, Clone)]
 pub struct ResidentLedger<Handle> {
     entries: BTreeMap<String, (ResidentIdentity, Handle)>,
+    generations: BTreeMap<String, u64>,
 }
 
 impl<Handle> Default for ResidentLedger<Handle> {
     fn default() -> Self {
         Self {
             entries: BTreeMap::new(),
+            generations: BTreeMap::new(),
         }
     }
 }
@@ -185,7 +148,24 @@ impl<Handle: Clone> ResidentLedger<Handle> {
 }
 
 impl<Handle> ResidentLedger<Handle> {
-    /// Evicts these names; the shared release every backend's cache honors.
+    /// The generation the owner of `name`'s host bytes currently stands at.
+    #[must_use]
+    pub fn generation(&self, name: &str) -> u64 {
+        self.generations.get(name).copied().unwrap_or(0)
+    }
+
+    /// The owner release: advances each name's generation (its previous host
+    /// bytes are gone) and evicts the cached buffer, in one step.
+    pub fn advance_names<'name>(&mut self, names: impl IntoIterator<Item = &'name str>) {
+        for name in names {
+            let next = self.generation(name) + 1;
+            self.generations.insert(name.to_string(), next);
+            self.entries.remove(name);
+        }
+    }
+
+    /// Evicts these names without advancing their generation: the cache drops a
+    /// buffer it cannot reuse while the owner's bytes are unchanged.
     pub fn release_names<'name>(&mut self, names: impl IntoIterator<Item = &'name str>) {
         for name in names {
             self.entries.remove(name);
@@ -288,23 +268,23 @@ mod tests {
         let name = "rb1.shared_release.weight";
         let mut ledger = ResidentLedger::default();
         let block = vec![1_u8; 256];
-        let before = crate::resident_identity::owner_generation(name);
+        let before = ledger.generation(name);
         serve(&mut ledger, name, &block, before).expect("first upload");
 
         // the owner reallocates: the release every owner calls, same address, same length.
-        crate::backend::release_resident_names([name]);
-        let after = crate::resident_identity::owner_generation(name);
+        let mut stale = ledger.clone();
+        ledger.advance_names([name]);
+        let after = ledger.generation(name);
         assert_eq!(
             after,
             before + 1,
             "the release advanced the owner generation"
         );
 
-        let refusal = serve(&mut ledger, name, &block, after)
+        let refusal = serve(&mut stale, name, &block, after)
             .expect_err("a ledger the release did not reach refuses the rebound generation");
         assert_eq!(refusal.cached.address, refusal.offered.address);
 
-        ledger.release_names([name]);
         let rebound = vec![7_u8; 256];
         let buffer = serve(&mut ledger, name, &rebound, after).expect("fresh upload");
         assert_eq!(buffer, rebound, "the evicted name serves the new bytes");

@@ -3044,7 +3044,6 @@ mod resident_weights {
             "a changed source under a cached name must refuse, never serve stale: {refused:?}"
         );
 
-        omega::resident_identity::advance_owner_generation(["weight"]);
         driver.release_resident_names(["weight"]);
         let (changed_output, changed_upload) = run_call(&driver, &changed, &activation);
         assert_eq!(
@@ -3095,7 +3094,6 @@ mod resident_weights {
 
         assert_eq!(replacement.len(), weight.len(), "same length, same address");
         weight.copy_from_slice(&replacement);
-        omega::resident_identity::advance_owner_generation(["weight"]);
         driver.release_resident_names(["weight"]);
         let second = plan
             .execute_named(&named_inputs(&weight, &activation), None)

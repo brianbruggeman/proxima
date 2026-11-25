@@ -42,6 +42,17 @@ type HipDriverTable =
 
 static HIP_DRIVERS: OnceLock<HipDriverTable> = OnceLock::new();
 
+/// The owner release for every HIP driver opened so far: each one's ledger advances these
+/// names' generation and evicts them, so no HIP plan reuses bytes a loader replaced.
+pub fn release_resident_names(names: &[&str]) {
+    let Some(drivers) = HIP_DRIVERS.get() else {
+        return;
+    };
+    for driver in drivers.lock().values() {
+        driver.release_resident_names(names.iter().copied());
+    }
+}
+
 /// The process's one driver for `(config.hip_device, wave)`, opened on first use: the HIP
 /// counterpart of the single CUDA driver, so every plan shares its device context, weight ledger
 /// and kernel cache. Clones share state (every field is an `Arc`). A failed open is not cached,

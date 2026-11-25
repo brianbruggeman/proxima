@@ -40,7 +40,7 @@ use crate::cuda_kernel_cache::{
     CacheKey, decode_binary_entry, decode_entry, encode_binary_entry, encode_entry, header_digest,
 };
 use crate::kernel_cache_config::KernelCacheConfig;
-use crate::resident_identity::{ResidentIdentity, ResidentLedger, ResidentRefusal, owner_generation};
+use crate::resident_identity::{ResidentIdentity, ResidentLedger, ResidentRefusal};
 use crate::cuda_ptx_store::PtxStore;
 use crate::bind_plan::{BindConfig, bind_plan, finish_bound};
 use crate::derived_quantize::{ActivationRefusal, validate_storage};
@@ -886,7 +886,7 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
     /// dropped model frees its device memory and its address range cannot
     /// alias a later mapping.
     pub fn release_resident_names<'name>(&self, names: impl IntoIterator<Item = &'name str>) {
-        self.resident_buffers.lock().release_names(names);
+        self.resident_buffers.lock().advance_names(names);
     }
 
     /// Evicts every device buffer cached for a host block starting inside one
@@ -3981,18 +3981,19 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
             if self.carry.state.is_live(&node) || self.carry.rows.is_live(&node) {
                 continue;
             }
+            let mut held = resident.then(|| self.driver.resident_buffers.lock());
+            let generation = held.as_ref().map_or(0, |ledger| ledger.generation(name));
             let identity = ResidentIdentity::new(block_address(block), block_length(block))
-                .with_generation(if resident { owner_generation(name) } else { 0 });
+                .with_generation(generation);
             if resident && self.arena.resident_sources.get(&node) == Some(&identity) {
                 resident_hits += 1;
                 continue;
             }
             let cacheable = resident && !name.is_empty();
-            if cacheable {
+            if let Some(mut ledger) = held.take().filter(|_| cacheable) {
                 let packed =
                     !matches!(block, QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_));
                 let cached = {
-                    let mut ledger = self.driver.resident_buffers.lock();
                     let found = ledger.lookup(name, identity)?;
                     if found
                         .as_ref()
@@ -6253,6 +6254,39 @@ mod recording_runtime {
         for bytes in [size_of_val(weight_first.as_slice()), size_of_val(weight_second.as_slice())] {
             assert_eq!(uploads_of(&all, bytes), 1, "a {bytes}-byte weight uploads once across both plans");
         }
+    }
+
+    #[test]
+    fn a_released_weight_name_uploads_again_and_an_unreleased_one_does_not() {
+        let (program, out) = two_layer_program();
+        let weight_first = weight_values((HIDDEN * INPUT) as usize, 1.0);
+        let weight_second = weight_values((OUTPUT * HIDDEN) as usize, 7.0);
+        let activation = weight_values(INPUT as usize, 3.0);
+        let named = named_blocks(weight_first.as_slice(), weight_second.as_slice(), activation.as_slice());
+        let driver = CudaDriver::<RecordingRuntime>::recording();
+        let mut plan = driver
+            .plan(&program, &[], &[out], NumericPolicy::default(), &named)
+            .expect("the shared named-plan entry plans the two-layer program");
+        plan.mark_resident(&BTreeSet::from(["w0", "w1"]));
+        plan.execute_named(&named, None)
+            .expect("the recording runtime executes the plan");
+        let before = driver.events().len();
+
+        driver.release_resident_names(["w0"]);
+        plan.execute_named(&named, None)
+            .expect("the recording runtime re-executes after the release");
+
+        let window = &driver.events()[before..];
+        assert_eq!(
+            uploads_of(window, size_of_val(weight_first.as_slice())),
+            1,
+            "the released w0 uploads again"
+        );
+        assert_eq!(
+            uploads_of(window, size_of_val(weight_second.as_slice())),
+            0,
+            "the unreleased w1 is still served from the ledger"
+        );
     }
 
     #[test]
