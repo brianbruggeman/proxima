@@ -5692,7 +5692,7 @@ mod recording_runtime {
 
     #[derive(Debug, Clone)]
     struct RecordingRuntime {
-        log: Arc<Mutex<Vec<Event>>>,
+        log: Arc<Mutex<Vec<(thread::ThreadId, Event)>>>,
         next_buffer: Arc<AtomicU64>,
         compile_counters: Arc<CompileCounters>,
         target: Target,
@@ -5713,7 +5713,7 @@ mod recording_runtime {
         }
 
         fn record(&self, event: Event) {
-            self.log.lock().push(event);
+            self.log.lock().push((thread::current().id(), event));
         }
 
         fn fresh<Element: DeviceElement>(&self, len: usize) -> RecordingBuffer<Element> {
@@ -6081,9 +6081,8 @@ mod recording_runtime {
         }
 
         fn events(&self) -> Vec<Event> {
-            self.runtime.log.lock().clone()
-        }
-    }
+            self.runtime.log.lock().iter().map(|(_, event)| event.clone()).collect()
+        }    }
 
     const INPUT: u32 = 8;
     const HIDDEN: u32 = 5;
