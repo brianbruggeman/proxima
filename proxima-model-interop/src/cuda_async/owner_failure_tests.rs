@@ -11,8 +11,8 @@ use proxima_numeric::{DType, NumericPolicy};
 use std::sync::Arc;
 
 use super::{
-    CudaExecutionError, CudaGpuService, CudaPlanLease, CudaPlanOptions, DEFAULT_OWNED_HOST_BYTES,
-    GpuAdmissionError, GpuPipeError, OwnedBlock, OwnedGpuInputs, OwnedInputError,
+    CudaExecutionError, CudaGpuService, CudaPlanOptions, DEFAULT_OWNED_HOST_BYTES,
+    GpuAdmissionError, GpuPipeError, OwnedBlock, OwnedGpuInputs, OwnedInputError, PlanLease,
 };
 
 async fn failing_inputs<Owner>(service: &CudaGpuService<Owner>) -> OwnedGpuInputs
@@ -26,7 +26,7 @@ where
         .expect("one malformed graph input should fit the byte budget")
 }
 
-async fn failing_fake_plan<Owner>(service: &CudaGpuService<Owner>) -> CudaPlanLease
+async fn failing_fake_plan<Owner>(service: &CudaGpuService<Owner>) -> PlanLease
 where
     Owner: Future<Output = Result<(), ProximaError>> + Send,
 {

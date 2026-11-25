@@ -65,7 +65,7 @@ pub enum InteropError {
 
     #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
     #[error(transparent)]
-    AsyncCudaRegistry(#[from] crate::cuda_async::CudaPlanRegistryError),
+    AsyncCudaRegistry(#[from] omega::device_owner::PlanRegistryError),
 
     #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
     #[error(transparent)]

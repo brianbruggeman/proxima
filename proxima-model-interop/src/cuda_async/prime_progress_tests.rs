@@ -14,8 +14,8 @@ use proxima_primitives::sync::mpsc::{Receiver as CommandReceiver, channel as com
 use proxima_tensor::{Evaluated, NodeId};
 
 use super::{
-    AdmittedGpuJob, CompletedGpuJob, CudaExecutionPipe, CudaPlanLease, GpuCapacityGate,
-    OwnedByteBudget, OwnedGpuJob, OwnerCommand, ReservationSink,
+    AdmittedGpuJob, CompletedGpuJob, CudaExecutionPipe, GpuCapacityGate, OwnedByteBudget,
+    OwnedGpuJob, OwnerCommand, PlanRegistry, ReservationSink,
 };
 
 async fn owned_gpu_job() -> OwnedGpuJob {
@@ -25,11 +25,9 @@ async fn owned_gpu_job() -> OwnedGpuJob {
         .await
         .expect("empty owned inputs");
     OwnedGpuJob {
-        lease: CudaPlanLease {
-            service: Arc::new(()),
-            slotindex: 0,
-            generation: 0,
-        },
+        lease: PlanRegistry::new(Arc::new(()), 1)
+            .register(())
+            .expect("empty registry should accept a plan"),
         inputs,
     }
 }

@@ -12,9 +12,10 @@ use super::warm_up::WarmUp;
 use super::cuda_resident_plans::{CudaPlanIdentity, CudaPlanKey, CudaResidentPlans, same_width_class};
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 use crate::cuda_async::{
-    CudaGpuService, CudaPlanLease, CudaPlanOptions, OwnedBlock, OwnedGpuInputs,
-    validate_cuda_plan_options,
+    CudaGpuService, CudaPlanOptions, OwnedBlock, OwnedGpuInputs, validate_cuda_plan_options,
 };
+#[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+use omega::device_owner::PlanLease;
 use crate::rope_scaling::rope_cos_sin;
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 use proxima_core::ProximaError;
@@ -3303,11 +3304,11 @@ pub(crate) type HandoffNames<'names> = &'names [(NodeId, &'names str)];
 pub struct BackendRuntime {
     pub(super) omega_runtime: Option<omega::config::RuntimeConfig>,
     #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
-    cuda_plans: alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool, u64), CudaPlanLease>,
+    cuda_plans: alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool, u64), PlanLease>,
     #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
     cuda_program: Vec<Op>,
     #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
-    pending_cuda_retire: Vec<CudaPlanLease>,
+    pending_cuda_retire: Vec<PlanLease>,
     #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
     cuda_resident_names: BTreeSet<String>,
     #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
@@ -7315,7 +7316,7 @@ mod omega_async_serving_tests {
         assert!(matches!(
             stale,
             Err(GpuPipeError::Execution(CudaExecutionError::Plan(
-                crate::cuda_async::CudaPlanRegistryError::Stale
+                omega::device_owner::PlanRegistryError::Stale
             )))
         ));
         let current = runtime
@@ -7353,7 +7354,7 @@ mod omega_async_serving_tests {
         assert!(matches!(
             stale,
             Err(GpuPipeError::Execution(CudaExecutionError::Plan(
-                crate::cuda_async::CudaPlanRegistryError::Stale
+                omega::device_owner::PlanRegistryError::Stale
             )))
         ));
         assert_eq!((runtime.plan_misses, runtime.plan_hits), (3, 0));
@@ -7397,7 +7398,7 @@ mod omega_async_serving_tests {
         assert!(matches!(
             stale,
             Err(GpuPipeError::Execution(CudaExecutionError::Plan(
-                crate::cuda_async::CudaPlanRegistryError::Stale
+                omega::device_owner::PlanRegistryError::Stale
             )))
         ));
         service.shutdown().await.expect("owner should drain");
