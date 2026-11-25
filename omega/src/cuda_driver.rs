@@ -533,6 +533,16 @@ enum CudaGraphBuffer {
     Bytes(Arc<CudaSlice<u8>>),
 }
 
+/// The event pair bracketing one launch of a timed execute, with the operand bytes read at launch.
+// the fields are read only by the `instrument`-gated `op_timing`; the serving path never builds one
+#[cfg_attr(not(feature = "instrument"), allow(dead_code))]
+struct LaunchEvents {
+    position: usize,
+    start: CudaEvent,
+    end: CudaEvent,
+    operand_bytes: u64,
+}
+
 fn push_buffer<'a, 'b>(args: &'b mut LaunchArgs<'a>, buffer: &'a CudaGraphBuffer) -> &'b mut LaunchArgs<'a> {
     match buffer {
         CudaGraphBuffer::F32(input) => args.arg(input),
@@ -3666,6 +3676,83 @@ impl CudaPlan {
         named: &[(&str, QuantizedBlock<'_>)],
         resident_names: Option<&BTreeSet<&str>>,
     ) -> Result<Evaluated, CudaDriverError> {
+        self.execute_named_launch_events(named, resident_names, None)
+    }
+
+    /// Diagnostic twin of [`Self::execute_named`]: the same launches on the same stream, each
+    /// bracketed by a pair of CUDA events, returning one [`crate::OpGpuTiming`] per launched op in
+    /// plan order -- the record Metal's `execute_plan_named_op_timed` returns. `gpu_ns` is the
+    /// GPU-timeline gap between the op's start and end event (event resolution is about 0.5 us), so
+    /// a 3 us kernel reads as a few ticks and host launch gaps between ops are not charged to it.
+    /// Ops the plan never launches (idle grids, constants) have no record. Two event records per
+    /// launch is the whole overhead, which is why serving never takes this entry.
+    ///
+    /// # Errors
+    /// Propagates every error [`Self::execute_named`] can raise, plus event-timing failures.
+    #[cfg(feature = "instrument")]
+    pub fn execute_named_op_timed(
+        &mut self,
+        named: &[(&str, QuantizedBlock<'_>)],
+        resident_names: Option<&BTreeSet<&str>>,
+    ) -> Result<(Evaluated, Vec<crate::OpGpuTiming>), CudaDriverError> {
+        let mut launches: Vec<LaunchEvents> = Vec::with_capacity(self.resolved.len());
+        let evaluated = self.execute_named_launch_events(named, resident_names, Some(&mut launches))?;
+        let timings = launches
+            .iter()
+            .map(|launch| self.op_timing(launch))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((evaluated, timings))
+    }
+
+    #[cfg(feature = "instrument")]
+    fn op_timing(&self, launch: &LaunchEvents) -> Result<crate::OpGpuTiming, CudaDriverError> {
+        let bound = &self.resolved[launch.position];
+        let millis = launch.start.elapsed_ms(&launch.end)?;
+        Ok(crate::OpGpuTiming {
+            node: bound.node,
+            kind: bound.kind.name(),
+            extents: bound.extents.clone(),
+            output_axes: match &bound.kind {
+                BoundOpKind::Reduce { output_axes, .. } => output_axes.to_vec(),
+                _ => Vec::new(),
+            },
+            operand_bytes: launch.operand_bytes,
+            bound_buffer_bytes: launch.operand_bytes,
+            gpu_ns: (millis * 1_000_000.0).max(0.0) as u64,
+            weight_name: bound
+                .operands()
+                .iter()
+                .find_map(|(source, _, _)| self.program[source.0 as usize].name())
+                .map(str::to_owned),
+            operand_count: bound.operands().len(),
+            packed_codec: bound
+                .operands()
+                .iter()
+                .find_map(|(source, _, _)| self.packed_operands.get(source).copied()),
+            packed_kernel_variant: "",
+            packed_row_block_rejection: None,
+        })
+    }
+
+    /// Bytes of the device buffers `bound` reads, as the arena holds them right now.
+    fn operand_buffer_bytes(&self, bound: &BoundOp) -> u64 {
+        bound
+            .operands()
+            .iter()
+            .filter_map(|(source, _, _)| self.arena.buffers.get(source))
+            .map(|buffer| match buffer {
+                CudaGraphBuffer::Bytes(values) => values.num_bytes() as u64,
+                plain => cuda_float_bytes(&[buffer_elements(plain)]).unwrap_or(0),
+            })
+            .sum()
+    }
+
+    fn execute_named_launch_events(
+        &mut self,
+        named: &[(&str, QuantizedBlock<'_>)],
+        resident_names: Option<&BTreeSet<&str>>,
+        mut op_events: Option<&mut Vec<LaunchEvents>>,
+    ) -> Result<Evaluated, CudaDriverError> {
         let host_timing = std::env::var_os("PROXIMA_CUDA_HOST_TIMING").is_some();
         let upload_started = host_timing.then(std::time::Instant::now);
         let phase_started = Instant::now();
@@ -3942,6 +4029,15 @@ impl CudaPlan {
                     self.arena.seat_pooled(bound.node, output_len);
                 }
                 let launch_started = host_timing.then(Instant::now);
+                let operand_bytes_before = if op_events.is_some() {
+                    self.operand_buffer_bytes(bound)
+                } else {
+                    0
+                };
+                let start_event = op_events
+                    .as_ref()
+                    .map(|_| self.driver.record_event(&self.driver.stream))
+                    .transpose()?;
                 let launch = if timing {
                     self.driver.launch_f32_persistent_sized(
                         &mut self.arena,
@@ -3971,6 +4067,15 @@ impl CudaPlan {
                         error: other.to_string(),
                     },
                 })?;
+                if let (Some(events), Some(start)) = (op_events.as_deref_mut(), start_event) {
+                    let end = self.driver.record_event(&self.driver.stream)?;
+                    events.push(LaunchEvents {
+                        position,
+                        start,
+                        end,
+                        operand_bytes: operand_bytes_before,
+                    });
+                }
                 if let Some(started) = node_started {
                     timing_rows.push((
                         bound.node,

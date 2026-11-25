@@ -101,6 +101,10 @@ pub mod metal;
 pub mod mlx;
 #[cfg(feature = "alloc")]
 pub mod encode_render;
+#[cfg(feature = "instrument")]
+pub mod op_timing;
+#[cfg(feature = "instrument")]
+pub use op_timing::OpGpuTiming;
 #[cfg(feature = "alloc")]
 pub mod msl;
 #[cfg(feature = "onnx-door")]

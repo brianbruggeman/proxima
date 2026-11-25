@@ -2393,6 +2393,28 @@ pub fn execute_plan_named_metal_op_timed_with_expert_sources(
     }
 }
 
+/// CUDA counterpart of [`execute_plan_named_metal_op_timed`]: the same launches as
+/// [`execute_plan_named_with_resident_names`], each bracketed by CUDA events, returning the one
+/// [`crate::OpGpuTiming`] record Metal returns. Diagnostic only; serving never calls it.
+///
+/// # Errors
+/// Propagates the CUDA driver's execution and event-timing failures; reports any non-CUDA plan as
+/// [`BackendError::NotImplemented`].
+#[cfg(all(feature = "cuda-driver", feature = "instrument"))]
+pub fn execute_plan_named_cuda_op_timed(
+    plan: &mut Plan,
+    named: &[(&str, QuantizedBlock<'_>)],
+    resident_names: Option<&BTreeSet<&str>>,
+) -> Result<(Evaluated, Vec<crate::OpGpuTiming>), BackendError> {
+    match plan {
+        Plan::Cuda(cuda_plan) => Ok(cuda_plan
+            .execute_named_op_timed(named, resident_names)
+            .map_err(map_cuda_configuration_error)?),
+        #[allow(unreachable_patterns)]
+        _ => Err(BackendError::NotImplemented { backend: "non-cuda" }),
+    }
+}
+
 /// Keeps the listed `(state input, state output)` pairs on the device across
 /// [`execute_plan_named_with_resident_names`] calls of a [`Plan::Cuda`]. Returns
 /// whether the plan carries them; every other backend returns `false`.

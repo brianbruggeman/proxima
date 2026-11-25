@@ -4122,6 +4122,45 @@ mod pooled_intermediates {
         assert_eq!(actual.root().len(), (ROWS * WIDTH) as usize, "degenerate gate: output compared");
         assert!(worst < 1e-4, "pooled chain diverges from cpu: worst relative {worst}");
     }
+
+    #[cfg(feature = "instrument")]
+    #[test]
+    fn the_op_timed_execute_returns_one_record_per_launched_op_in_plan_order_with_the_same_result() {
+        let (program, root) = chain_program();
+        let activation = random_vec(7, (ROWS * WIDTH) as usize);
+        let weights = weights();
+        let names: Vec<String> = (0..CHAIN).map(|link| format!("w{link}")).collect();
+        let mut named: Vec<(&str, QuantizedBlock<'_>)> =
+            vec![("x", QuantizedBlock::from(activation.as_slice()))];
+        named.extend(
+            names
+                .iter()
+                .zip(&weights)
+                .map(|(name, values)| (name.as_str(), QuantizedBlock::from(values.as_slice()))),
+        );
+        let driver = CudaDriver::new(0).expect("a real cuda device");
+        let mut plan = driver
+            .plan(&program, &[], &[root], NumericPolicy::default().with_flash_narrowing(true), &named)
+            .expect("cuda plans the matmul chain");
+        let untimed = plan.execute_named(&named, None).expect("cuda runs the matmul chain");
+        let launched = plan.kernel_launches().len();
+
+        let (timed, timings) = plan
+            .execute_named_op_timed(&named, None)
+            .expect("cuda runs the matmul chain with per-launch events");
+
+        assert!(launched >= CHAIN, "degenerate gate: the chain must launch at least one kernel per link, got {launched}");
+        assert_eq!(timings.len(), launched, "one timing record per launched op");
+        assert!(
+            timings.windows(2).all(|pair| pair[0].node.0 < pair[1].node.0),
+            "records follow plan order: {:?}",
+            timings.iter().map(|timing| timing.node.0).collect::<Vec<_>>()
+        );
+        assert_eq!(timings.last().map(|timing| timing.node), Some(root), "the last launched op is the chain root");
+        assert!(timings.iter().all(|timing| !timing.extents.is_empty()), "every record carries its op extents");
+        assert!(timings.iter().map(|timing| timing.gpu_ns).sum::<u64>() > 0, "events measured some GPU time");
+        assert_eq!(timed.root(), untimed.root(), "timing the launches must not change the result");
+    }
 }
 
 fn attention_oracle(
