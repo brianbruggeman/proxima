@@ -27,6 +27,7 @@ use criterion::{BenchmarkId, Criterion};
 use omega::config::RuntimeConfig;
 #[cfg(feature = "cuda")]
 use omega::OperandDtypes;
+#[cfg(feature = "cuda")]
 use omega::cuda::{EmitDevice, HipWave, emit_hip_at_wave};
 #[cfg(feature = "cuda")]
 use proxima_numeric::DType;

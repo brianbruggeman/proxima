@@ -77,6 +77,8 @@ pub enum CudaDriverError {
     InputContractChanged { node: NodeId, reason: &'static str },
     #[error("CUDA driver: {0}")]
     Driver(String),
+    #[error(transparent)]
+    Hip(#[from] rocm::HipDriverError),
     #[error("CUDA NVRTC: {0}")]
     Nvrtc(String),
     #[error("CUDA header `{header}` not found; tried: {tried}")]
@@ -124,12 +126,6 @@ pub enum CudaDriverError {
     KvCarry(String),
     #[error("CUDA cannot store activations in the configured format: {0}")]
     ActivationStorage(#[from] Box<ActivationRefusal>),
-}
-
-impl From<rocm::HipDriverError> for CudaDriverError {
-    fn from(error: rocm::HipDriverError) -> Self {
-        Self::Driver(error.to_string())
-    }
 }
 
 impl From<StateCarryError<NodeId>> for CudaDriverError {
@@ -274,8 +270,8 @@ pub struct CudaDriver<R: GpuRuntime = CudarcRuntime> {
     baseline_used_bytes: u64,
 }
 
-/// The grant every `CudaPlan` binds under; the operand-dtype table reads the same one, so the
-/// table names the dtypes the bind produced. HIP binds through its own driver in `rocm`.
+/// The CUDA runtime's grant, used by [`probe_bound_graph`]. Plans bind under their own runtime's
+/// [`GpuRuntime::executes`], so HIP plans through the same executor use the HIP grant.
 fn plan_grant() -> Executes {
     cuda_executes(&Target::CUDA)
 }
