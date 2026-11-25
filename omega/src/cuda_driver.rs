@@ -44,7 +44,9 @@ use crate::cuda_ptx_store::PtxStore;
 use crate::bind_plan::{BindConfig, bind_plan, finish_bound};
 use crate::derived_quantize::{ActivationRefusal, validate_storage};
 use proxima_numeric::NumericFormat;
-use crate::lowering::{Binding, Codec, PackedOperands, gather_count};
+use crate::lowering::{
+    Binding, Codec, OperandDtypes, PackedOperands, gather_count, program_operand_dtypes,
+};
 use proxima_tensor::bind::{
     RefreshRefusal, changed_nodes, kv_read_only_by_fused_attention, refit_cached_attention_at,
     RowTemplate, SymbolsTemplate, apply_row_template, apply_symbols_template, refresh_bound_ops,
@@ -1237,10 +1239,26 @@ impl CudaDriver {
             }
         }
         let unfused = config.is_some_and(|value| !value.allow_fusion);
-        let (resolved, packed_operands, mut micros) =
-            bind_resolved(program, &shapes, outputs, &packed_operands, numeric_policy, unfused, activation_storage)?;
-        let (kernels, uniforms) =
-            emit_and_pack(&resolved, None, &packed_operands, numeric_policy, self.device, &mut micros)?;
+        let (resolved, packed_operands, mut micros) = bind_resolved(
+            program,
+            &shapes,
+            outputs,
+            &packed_operands,
+            numeric_policy,
+            unfused,
+            activation_storage,
+        )?;
+        let operand_dtypes =
+            program_operand_dtypes(program, &resolved, &packed_operands, numeric_policy);
+        let (kernels, uniforms) = emit_and_pack(
+            &resolved,
+            None,
+            &packed_operands,
+            numeric_policy,
+            self.device,
+            &operand_dtypes,
+            &mut micros,
+        )?;
         let pool = Box::new(PoolSchedule::build(&resolved, &kernels, outputs));
         let mut plan = CudaPlan {
             pool,
@@ -2041,10 +2059,6 @@ fn bind_resolved(
     })?;
     let (resolved, packed, numeric_policy) = (bound.resolved, bound.packed, bound.policy);
     validate_resolved(&resolved, numeric_policy)?;
-    crate::lowering::reject_mixed_dtype_elementwise(program, &resolved, &packed, numeric_policy).map_err(|error| CudaDriverError::Emit {
-        node: resolved.first().map_or(NodeId(0), |bound| bound.node),
-        error: error.to_string(),
-    })?;
     let micros = LowerMicros {
         bind: bind_started.elapsed().as_micros() as u64,
         ..LowerMicros::default()
@@ -2068,18 +2082,20 @@ fn emit_and_pack(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
     device: EmitDevice,
+    operand_dtypes: &OperandDtypes,
     micros: &mut LowerMicros,
 ) -> Result<(Vec<CudaKernel>, Vec<Vec<u8>>), CudaDriverError> {
     let emit_started = Instant::now();
     let (prior_bound, prior_kernels) =
         prior.map_or((&[][..], Vec::new()), |prior| (prior.bound, prior.kernels));
-    let (kernels, reused) = crate::emit_cuda_reusing(
+    let (kernels, reused) = crate::emit_cuda_reusing_with_operand_dtypes(
         prior_bound,
         prior_kernels,
         resolved,
         packed_operands,
         numeric_policy,
         device,
+        operand_dtypes,
     )
     .map_err(|(node, error)| CudaDriverError::Emit {
         node,
@@ -2503,12 +2519,19 @@ impl CudaPlan {
                     bound: &previous_bound,
                     kernels: std::mem::take(&mut self.kernels),
                 };
+                let operand_dtypes = program_operand_dtypes(
+                    &self.program,
+                    &resolved,
+                    &self.packed_operands,
+                    numeric_policy,
+                );
                 let (kernels, uniforms) = emit_and_pack(
                     &resolved,
                     Some(prior),
                     &self.packed_operands,
                     numeric_policy,
                     self.driver.device,
+                    &operand_dtypes,
                     &mut micros,
                 )?;
                 ("refresh", touched, "none", resolved, kernels, uniforms, micros)
@@ -2528,12 +2551,19 @@ impl CudaPlan {
                     self.activation_storage,
                 )?;
                 self.packed_operands = packed;
+                let operand_dtypes = program_operand_dtypes(
+                    &self.program,
+                    &resolved,
+                    &self.packed_operands,
+                    numeric_policy,
+                );
                 let (kernels, uniforms) = emit_and_pack(
                     &resolved,
                     prior,
                     &self.packed_operands,
                     numeric_policy,
                     self.driver.device,
+                    &operand_dtypes,
                     &mut micros,
                 )?;
                 ("full", 0, refused, resolved, kernels, uniforms, micros)
@@ -2887,11 +2917,23 @@ impl CudaPlan {
         position: usize,
         numeric_policy: NumericPolicy,
     ) -> Result<bool, CudaDriverError> {
-        let before = crate::emit_cuda_on_device(previous, &self.packed_operands, numeric_policy, self.driver.device)
-            .map_err(|error| CudaDriverError::Emit {
-                node: previous.node,
-                error: error.to_string(),
-            })?;
+        let operand_dtypes = program_operand_dtypes(
+            &self.program,
+            core::slice::from_ref(previous),
+            &self.packed_operands,
+            numeric_policy,
+        );
+        let before = crate::emit_cuda_with_operand_dtypes(
+            previous,
+            &self.packed_operands,
+            numeric_policy,
+            self.driver.device,
+            &operand_dtypes,
+        )
+        .map_err(|error| CudaDriverError::Emit {
+            node: previous.node,
+            error: error.to_string(),
+        })?;
         let after = &self.kernels[position];
         let prologue_text = |kernel: &crate::cuda::CudaKernel| -> Vec<(String, String)> {
             kernel
@@ -2929,13 +2971,20 @@ impl CudaPlan {
         for (position, bound) in patches {
             let previous = std::mem::replace(&mut self.resolved[position], bound);
             lengths_moved |= previous.output_len() != self.resolved[position].output_len();
-            let text_kept = crate::cuda::refit_kernel(
+            let operand_dtypes = program_operand_dtypes(
+                &self.program,
+                core::slice::from_ref(&self.resolved[position]),
+                &self.packed_operands,
+                numeric_policy,
+            );
+            let text_kept = crate::cuda::refit_kernel_with_operand_dtypes(
                 &previous,
                 &self.resolved[position],
                 &mut self.kernels[position],
                 &self.packed_operands,
                 numeric_policy,
                 self.driver.device,
+                &operand_dtypes,
             )
             .map_err(|error| CudaDriverError::Emit {
                 node: previous.node,

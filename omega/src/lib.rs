@@ -122,8 +122,9 @@ mod layout_text_tests;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{
-    CudaGridSpec, CudaKernel, EmitDevice, WARP_SIZE, emit_cuda, emit_cuda_for_program, emit_cuda_on_device, emit_cuda_reusing,
-    emit_cuda_with_policy,
+    CudaGridSpec, CudaKernel, EmitDevice, WARP_SIZE, emit_cuda, emit_cuda_for_program,
+    emit_cuda_on_device, emit_cuda_reusing, emit_cuda_reusing_with_operand_dtypes,
+    emit_cuda_with_operand_dtypes, emit_cuda_with_policy,
 };
 #[cfg(feature = "cuda-driver")]
 pub use cuda_driver::CudaF32Arena;
@@ -132,6 +133,7 @@ pub use cuda_driver::CudaPlan;
 #[cfg(feature = "cuda-driver")]
 pub use cuda_driver::{CudaDeviceSnapshot, CudaDriver, CudaDriverError};
 pub use error::EmitError;
+pub use lowering::{OperandDtypes, operand_dtype, operand_dtypes};
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 pub use metal::{
     CapturedDispatch, execute_plan_timed, flush_gpu_caches, pipeline_cache_keys,
@@ -192,7 +194,7 @@ pub use wgpu_driver::{
     plan_named as plan_named_wgpu, probe as probe_wgpu,
 };
 #[cfg(feature = "wgpu-backend")]
-pub use wgsl::{WORKGROUP_SIZE, WgslCaps, WgslKernel, emit_wgsl, emit_wgsl_for_program};
+pub use wgsl::{WORKGROUP_SIZE, WgslCaps, WgslKernel, emit_wgsl, emit_wgsl_with_policy};
 #[cfg(test)]
 #[cfg(feature = "cuda-driver")]
 mod int8_emit_snapshot;

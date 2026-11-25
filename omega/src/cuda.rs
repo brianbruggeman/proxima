@@ -80,8 +80,9 @@ use crate::grid::checked_product;
 use crate::identity::{op_token, operand_codecs, reduce_epilogue_is_identity};
 use target::Target;
 use crate::lowering::{
-    Binding, Codec, PackedOperands, dispatch_bindings, gather_count, gather_is_reduction_invariant,
-    gather_slots, is_cooperative_reduce_op, reduction_dims, reject_mixed_dtype_elementwise,
+    Binding, Codec, OperandDtypes, PackedOperands, dispatch_bindings, gather_count,
+    gather_is_reduction_invariant, gather_slots, is_cooperative_reduce_op, operand_dtype,
+    program_operand_dtypes, reduction_dims,
 };
 
 pub mod target;
@@ -230,20 +231,31 @@ pub struct EmitDevice {
     pub multiprocessors: u32,
 }
 
-/// [`emit_cuda_with_policy`] for an op bound from `program`: first refuses an elementwise op that
-/// reads an operand of another dtype than its own, which this emitter has no table to convert and
-/// would misread. Composes [`reject_mixed_dtype_elementwise`].
+/// [`emit_cuda_with_operand_dtypes`] for an op bound from `program`: the operand-dtype table is
+/// built from the program by [`program_operand_dtypes`], the one table every emitter reads, so an
+/// elementwise operand of another dtype than the op's own is converted on read.
 ///
 /// # Errors
-/// [`EmitError::MixedDTypeOperand`], else whatever [`emit_cuda_with_policy`] returns.
+/// Whatever [`emit_cuda_with_operand_dtypes`] returns.
 pub fn emit_cuda_for_program(
     program: &[Op],
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
 ) -> Result<CudaKernel, EmitError> {
-    reject_mixed_dtype_elementwise(program, core::slice::from_ref(resolved), packed_operands, numeric_policy)?;
-    emit_cuda_with_policy(resolved, packed_operands, numeric_policy)
+    let table = program_operand_dtypes(
+        program,
+        core::slice::from_ref(resolved),
+        packed_operands,
+        numeric_policy,
+    );
+    emit_cuda_with_operand_dtypes(
+        resolved,
+        packed_operands,
+        numeric_policy,
+        EmitDevice::default(),
+        &table,
+    )
 }
 
 pub fn emit_cuda_with_policy(
@@ -261,16 +273,36 @@ pub fn emit_cuda_on_device(
     numeric_policy: NumericPolicy,
     device: EmitDevice,
 ) -> Result<CudaKernel, EmitError> {
+    emit_cuda_with_operand_dtypes(
+        resolved,
+        packed_operands,
+        numeric_policy,
+        device,
+        &OperandDtypes::new(),
+    )
+}
+
+/// [`emit_cuda_on_device`] reading each elementwise operand in the dtype `operand_dtypes` records
+/// for its producing node (the shared [`OperandDtypes`] table Metal reads too); an absent node
+/// reads in the op's own dtype.
+pub fn emit_cuda_with_operand_dtypes(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    device: EmitDevice,
+    operand_dtypes: &OperandDtypes,
+) -> Result<CudaKernel, EmitError> {
     emit_on_target(
         Target::CUDA,
         resolved,
         packed_operands,
         numeric_policy,
         device,
+        operand_dtypes,
     )
 }
 
-/// [`emit_cuda_on_device`] for an explicit [`Target`] — the one renderer both
+/// [`emit_cuda_with_operand_dtypes`] for an explicit [`Target`] — the one renderer both
 /// card-C dialects go through. Every ISA and warp-width decision below reads
 /// `target`; nothing in the emitted text is CUDA-specific by assumption.
 pub(crate) fn emit_on_target(
@@ -279,6 +311,7 @@ pub(crate) fn emit_on_target(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
     device: EmitDevice,
+    operand_dtypes: &OperandDtypes,
 ) -> Result<CudaKernel, EmitError> {
     validate(resolved)?;
     if let Some(grouped) = grouped_kernel(target, resolved, packed_operands, numeric_policy, device)? {
@@ -298,8 +331,15 @@ pub(crate) fn emit_on_target(
         }
         _ => entry_name(target, resolved, packed_operands, &quantized, numeric_policy, device),
     };
+    let operand_types = elementwise_operand_types(target, resolved, operand_dtypes)?;
+    let entry = format!(
+        "{entry}{}",
+        operand_type_suffix(target, resolved, &quantized, &operand_types)?
+    );
     let source = match &resolved.kind {
-        BoundOpKind::Elementwise { .. } => render_elementwise(target, resolved, &entry, &quantized)?,
+        BoundOpKind::Elementwise { .. } => {
+            render_elementwise(target, resolved, &entry, &quantized, &operand_types)?
+        }
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
         } => render_reduce(target, resolved, &entry, &quantized, numeric_policy, device, None)?,
@@ -654,6 +694,28 @@ pub fn emit_cuda_reusing(
     numeric_policy: NumericPolicy,
     device: EmitDevice,
 ) -> Result<(Vec<CudaKernel>, usize), (NodeId, EmitError)> {
+    emit_cuda_reusing_with_operand_dtypes(
+        previous_bound,
+        previous_kernels,
+        resolved,
+        packed_operands,
+        numeric_policy,
+        device,
+        &OperandDtypes::new(),
+    )
+}
+
+/// [`emit_cuda_reusing`] reading operands from the shared [`OperandDtypes`] table; the caller owns
+/// the premise that `operand_dtypes` is the same one the previous kernels were emitted under.
+pub fn emit_cuda_reusing_with_operand_dtypes(
+    previous_bound: &[BoundOp],
+    previous_kernels: Vec<CudaKernel>,
+    resolved: &[BoundOp],
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    device: EmitDevice,
+    operand_dtypes: &OperandDtypes,
+) -> Result<(Vec<CudaKernel>, usize), (NodeId, EmitError)> {
     emit_reusing_on_target(
         Target::CUDA,
         previous_bound,
@@ -662,9 +724,11 @@ pub fn emit_cuda_reusing(
         packed_operands,
         numeric_policy,
         device,
+        operand_dtypes,
     )
 }
 
+#[allow(clippy::too_many_arguments)] // one context per argument; a bundle would be a type that only relocates them
 pub(crate) fn emit_reusing_on_target(
     target: Target,
     previous_bound: &[BoundOp],
@@ -673,6 +737,7 @@ pub(crate) fn emit_reusing_on_target(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
     device: EmitDevice,
+    operand_dtypes: &OperandDtypes,
 ) -> Result<(Vec<CudaKernel>, usize), (NodeId, EmitError)> {
     let mut previous: BTreeMap<NodeId, (&BoundOp, Option<CudaKernel>)> = previous_bound
         .iter()
@@ -694,8 +759,15 @@ pub(crate) fn emit_reusing_on_target(
                 refit_extent_fields(target, kernel, bound, packed_operands, numeric_policy, device)
                     .map_err(|error| (bound.node, error))?
             }
-            None => emit_on_target(target, bound, packed_operands, numeric_policy, device)
-                .map_err(|error| (bound.node, error))?,
+            None => emit_on_target(
+                target,
+                bound,
+                packed_operands,
+                numeric_policy,
+                device,
+                operand_dtypes,
+            )
+            .map_err(|error| (bound.node, error))?,
         });
     }
     Ok((kernels, reused))
@@ -715,6 +787,30 @@ pub fn refit_kernel(
     numeric_policy: NumericPolicy,
     device: EmitDevice,
 ) -> Result<bool, EmitError> {
+    refit_kernel_with_operand_dtypes(
+        old,
+        new,
+        kernel,
+        packed_operands,
+        numeric_policy,
+        device,
+        &OperandDtypes::new(),
+    )
+}
+
+/// [`refit_kernel`] regenerating from the shared [`OperandDtypes`] table when the text changed.
+///
+/// # Errors
+/// The emit error of `new` when the text has to be regenerated.
+pub fn refit_kernel_with_operand_dtypes(
+    old: &BoundOp,
+    new: &BoundOp,
+    kernel: &mut CudaKernel,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    device: EmitDevice,
+    operand_dtypes: &OperandDtypes,
+) -> Result<bool, EmitError> {
     refit_kernel_on_target(
         Target::CUDA,
         old,
@@ -723,9 +819,11 @@ pub fn refit_kernel(
         packed_operands,
         numeric_policy,
         device,
+        operand_dtypes,
     )
 }
 
+#[allow(clippy::too_many_arguments)] // one context per argument; a bundle would be a type that only relocates them
 pub(crate) fn refit_kernel_on_target(
     target: Target,
     old: &BoundOp,
@@ -734,9 +832,17 @@ pub(crate) fn refit_kernel_on_target(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
     device: EmitDevice,
+    operand_dtypes: &OperandDtypes,
 ) -> Result<bool, EmitError> {
     if !same_emitted_text(target, old, new, packed_operands, numeric_policy, device) {
-        *kernel = emit_on_target(target, new, packed_operands, numeric_policy, device)?;
+        *kernel = emit_on_target(
+            target,
+            new,
+            packed_operands,
+            numeric_policy,
+            device,
+            operand_dtypes,
+        )?;
         return Ok(false);
     }
     refit_extent_fields_in_place(target, kernel, new, packed_operands, numeric_policy, device)?;
@@ -2454,10 +2560,32 @@ fn kernel_signature(
     entry: &str,
     element_type: &str,
 ) {
+    kernel_signature_with_operand_types(
+        source,
+        quantized,
+        epilogue_operand_count,
+        gather_count,
+        entry,
+        element_type,
+        &[],
+    );
+}
+
+/// [`kernel_signature`] declaring each plain input in `operand_types[index]` (the scalar its
+/// producer wrote) where given; an empty slice declares every plain input in `element_type`.
+fn kernel_signature_with_operand_types(
+    source: &mut String,
+    quantized: &[Option<Codec>],
+    epilogue_operand_count: usize,
+    gather_count: usize,
+    entry: &str,
+    element_type: &str,
+    operand_types: &[&str],
+) {
     source.push_str(&format!("extern \"C\" __global__ void {entry}(\n"));
     for (index, &codec) in quantized.iter().enumerate() {
         let binding_type = match codec {
-            None => element_type,
+            None => operand_types.get(index).copied().unwrap_or(element_type),
             Some(Codec::Float16) => "__half",
             Some(_) => "unsigned char",
         };
@@ -2684,11 +2812,62 @@ fn operand_read(
     }
 }
 
+/// The device scalar each plain operand's buffer holds: the token of the dtype
+/// `operand_dtypes` records for its producing node, the op's own dtype when none is recorded. Empty
+/// for any op that is not elementwise, which is the only kind that reads mixed-dtype operands.
+fn elementwise_operand_types(
+    target: Target,
+    resolved: &BoundOp,
+    operand_dtypes: &OperandDtypes,
+) -> Result<Vec<&'static str>, EmitError> {
+    if !matches!(resolved.kind, BoundOpKind::Elementwise { .. }) {
+        return Ok(Vec::new());
+    }
+    resolved
+        .operands()
+        .iter()
+        .map(|(node, _, _)| {
+            type_token(
+                target,
+                *node,
+                operand_dtype(operand_dtypes, *node, resolved.dtype),
+            )
+        })
+        .collect()
+}
+
+/// An entry-name suffix naming every plain operand buffer that is not the op's own scalar, so two
+/// kernels that read the same node ids in different scalars never share a compiled module.
+fn operand_type_suffix(
+    target: Target,
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    operand_types: &[&'static str],
+) -> Result<String, EmitError> {
+    if operand_types.is_empty() {
+        return Ok(String::new());
+    }
+    let element_type = type_token(target, resolved.node, resolved.dtype)?;
+    let mixed = operand_types
+        .iter()
+        .zip(quantized)
+        .any(|(token, codec)| codec.is_none() && *token != element_type);
+    if !mixed {
+        return Ok(String::new());
+    }
+    let tokens: Vec<&str> = operand_types
+        .iter()
+        .map(|token| token.trim_start_matches('_'))
+        .collect();
+    Ok(format!("_rd_{}", tokens.join("_")))
+}
+
 fn render_elementwise(
     target: Target,
     resolved: &BoundOp,
     entry: &str,
     quantized: &[Option<Codec>],
+    operand_types: &[&'static str],
 ) -> Result<String, EmitError> {
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
@@ -2710,7 +2889,15 @@ fn render_elementwise(
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, quantized, 0, gather_count, entry, element_type);
+    kernel_signature_with_operand_types(
+        &mut source,
+        quantized,
+        0,
+        gather_count,
+        entry,
+        element_type,
+        operand_types,
+    );
     source.push_str("    if (gid >= u.total_elements) { return; }\n");
 
     if rank > 0 {
@@ -2747,10 +2934,14 @@ fn render_elementwise(
         operand_count.max(1)
     ));
     for (index, &codec) in quantized.iter().enumerate() {
-        source.push_str(&format!(
-            "    scratch[{index}] = {};\n",
-            operand_read(resolved.node, index, &format!("off{index}"), codec)?
-        ));
+        let read = operand_read(resolved.node, index, &format!("off{index}"), codec)?;
+        let read = match operand_types.get(index) {
+            Some(token) if codec.is_none() && *token != element_type => {
+                format!("({element_type}){read}")
+            }
+            _ => read,
+        };
+        source.push_str(&format!("    scratch[{index}] = {read};\n"));
     }
 
     let result = push_body_steps(&mut source, resolved.element_body(), "    ", element_type);
@@ -6107,6 +6298,10 @@ mod tests {
         stacked_expert_op_with_activation(experts, rows, width, slots, false)
     }
 
+    fn index_dtype() -> DType {
+        DType::INT32
+    }
+
     /// With `per_slot` the activation is `[slots, width]`, as a stacked down product reads one
     /// SwiGLU row per routed expert.
     fn stacked_expert_op_with_activation(experts: u32, rows: u32, width: u32, slots: u32, per_slot: bool) -> BoundOp {
@@ -6122,7 +6317,7 @@ mod tests {
         let ids = append(
             &mut program,
             Op::Input {
-                dtype: DType::INT32,
+                dtype: index_dtype(),
                 shape: vec![Extent::Static(slots)],
                 name: None,
             },
@@ -6621,7 +6816,51 @@ mod tests {
     }
 
     #[test]
-    fn a_float16_node_pulls_in_the_half_header() {
+    fn an_index_op_reading_a_wide_operand_emits_without_a_refusal_or_a_cast() {
+        let wide_dtype = elementwise_tanh_op(4).dtype;
+        let mut program = Vec::new();
+        let source = append(
+            &mut program,
+            Op::Input {
+                dtype: wide_dtype,
+                shape: vec![Extent::Static(8)],
+                name: None,
+            },
+        );
+        let computed = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: index_dtype(),
+                body: ScalarOp::Tanh,
+                operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
+                name: None,
+            },
+        );
+        let shapes = infer(&program, &[]).expect("infer succeeds");
+        let bound = bind(&program, &shapes, &[computed], NumericPolicy::default())
+            .expect("bind succeeds")
+            .remove(0);
+        let own =
+            type_token(Target::CUDA, bound.node, bound.dtype).expect("the index dtype has a token");
+        let operand =
+            type_token(Target::CUDA, source, wide_dtype).expect("the operand dtype has a token");
+        assert_eq!(
+            own, operand,
+            "the index and operand dtypes share one device scalar"
+        );
+
+        let kernel =
+            emit_cuda_for_program(&program, &bound, &no_packed(), NumericPolicy::default())
+                .expect("an index op reading a wide operand is not refused");
+
+        assert!(
+            kernel.source.contains("scratch[0] = in0[off0];"),
+            "{}",
+            kernel.source
+        );
+    }
+
+    fn half_width_tanh_op() -> BoundOp {
         let mut program = Vec::new();
         let source = append(
             &mut program,
@@ -6648,10 +6887,88 @@ mod tests {
             proxima_numeric::NumericPolicy::default(),
         )
         .expect("bind succeeds");
-        let bound = bound.into_iter().next().expect("one bound op");
+        bound.into_iter().next().expect("one bound op")
+    }
+
+    #[test]
+    fn a_float16_node_pulls_in_the_half_header() {
+        let bound = half_width_tanh_op();
         let kernel = emit_cuda(&bound, &no_packed()).expect("emit succeeds");
         assert!(kernel.source.contains("#include <cuda_fp16.h>"));
         assert!(kernel.source.contains("__half"));
+    }
+
+    #[test]
+    fn an_operand_of_another_dtype_is_declared_in_its_producers_scalar_and_converted_on_read() {
+        let bound = half_width_tanh_op();
+        let producer = bound.operands()[0].0;
+        let wider = elementwise_tanh_op(4).dtype;
+        let table = OperandDtypes::from([(producer, wider)]);
+        let own =
+            type_token(Target::CUDA, bound.node, bound.dtype).expect("the op dtype has a token");
+        let operand =
+            type_token(Target::CUDA, producer, wider).expect("the operand dtype has a token");
+        assert_ne!(
+            own, operand,
+            "the pair must render as different scalars to need a conversion"
+        );
+
+        let kernel = emit_cuda_with_operand_dtypes(
+            &bound,
+            &no_packed(),
+            NumericPolicy::default(),
+            EmitDevice::default(),
+            &table,
+        )
+        .expect("a mixed-dtype operand converts instead of being refused");
+
+        assert!(
+            kernel
+                .source
+                .contains(&format!("const {operand}* __restrict__ in0")),
+            "{}",
+            kernel.source
+        );
+        assert!(
+            kernel
+                .source
+                .contains(&format!("scratch[0] = ({own})in0[off0];")),
+            "{}",
+            kernel.source
+        );
+    }
+
+    #[test]
+    fn the_operand_dtype_table_changes_the_entry_name_so_compiled_modules_never_collide() {
+        let bound = half_width_tanh_op();
+        let table = OperandDtypes::from([(bound.operands()[0].0, elementwise_tanh_op(4).dtype)]);
+        let converted = emit_cuda_with_operand_dtypes(
+            &bound,
+            &no_packed(),
+            NumericPolicy::default(),
+            EmitDevice::default(),
+            &table,
+        )
+        .expect("the converting kernel emits");
+        let plain = emit_cuda(&bound, &no_packed()).expect("the unconverted kernel emits");
+        assert_ne!(converted.entry, plain.entry);
+    }
+
+    #[test]
+    fn an_operand_the_table_names_in_the_ops_own_dtype_adds_no_cast() {
+        let bound = half_width_tanh_op();
+        let table = OperandDtypes::from([(bound.operands()[0].0, bound.dtype)]);
+        let kernel = emit_cuda_with_operand_dtypes(
+            &bound,
+            &no_packed(),
+            NumericPolicy::default(),
+            EmitDevice::default(),
+            &table,
+        )
+        .expect("a same-dtype operand emits");
+        let plain = emit_cuda(&bound, &no_packed()).expect("the plain kernel emits");
+        assert_eq!(kernel.source, plain.source);
+        assert_eq!(kernel.entry, plain.entry);
     }
 
     #[test]
@@ -7215,7 +7532,14 @@ pub fn emit_hip_at_wave(
     numeric_policy: NumericPolicy,
     device: EmitDevice,
 ) -> Result<HipKernel, EmitError> {
-    emit_on_target(wave.target(), resolved, packed_operands, numeric_policy, device)
+    emit_on_target(
+        wave.target(),
+        resolved,
+        packed_operands,
+        numeric_policy,
+        device,
+        &OperandDtypes::new(),
+    )
 }
 
 /// Emits a whole bound program, moving a previous HIP kernel across when the
@@ -7242,6 +7566,7 @@ pub fn emit_hip_reusing(
         packed_operands,
         numeric_policy,
         device,
+        &OperandDtypes::new(),
     )
 }
 
@@ -7268,6 +7593,7 @@ pub fn refit_hip_kernel(
         packed_operands,
         numeric_policy,
         device,
+        &OperandDtypes::new(),
     )
 }
 
@@ -7572,6 +7898,7 @@ mod rocm_tests {
             &no_packed(),
             NumericPolicy::default(),
             EmitDevice::default(),
+            &OperandDtypes::new(),
         )
         .expect("cuda emits");
 

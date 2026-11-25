@@ -8,7 +8,6 @@
 //! through `RuntimeConfig::builder().with_emit(..)`, or read the environment once with
 //! [`EmitKnobs::from_env`] and pass the value on.
 
-use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -17,6 +16,7 @@ use proxima_numeric::float_layout::FloatLayout;
 use proxima_tensor::NodeId;
 
 use super::GroupedGemmFormats;
+use crate::lowering::{OperandDtypes, operand_dtype};
 
 #[cfg(feature = "std")]
 use core::convert::Infallible;
@@ -185,7 +185,7 @@ pub struct EmitKnobs {
     pub grouped_gemm_out_tile: Option<FloatLayout>,
     /// Element type of every node a plan's elementwise ops read, keyed by producing node. Not a switch: `plan_from_prepared` fills it from the program so an operand is read in the dtype of the node that wrote it; an absent node reads in the op's own dtype.
     #[cfg_attr(feature = "std", serde(skip), setting(skip))]
-    pub operand_dtypes: BTreeMap<NodeId, DType>,
+    pub operand_dtypes: OperandDtypes,
 }
 
 impl Default for EmitKnobs {
@@ -225,7 +225,7 @@ impl Default for EmitKnobs {
             grouped_gemm_mma_b: None,
             grouped_gemm_accumulator: None,
             grouped_gemm_out_tile: None,
-            operand_dtypes: BTreeMap::new(),
+            operand_dtypes: OperandDtypes::new(),
         }
     }
 }
@@ -257,7 +257,7 @@ impl EmitKnobs {
 
     /// Set the producing-node dtype table elementwise operands are read in.
     #[must_use]
-    pub fn with_operand_dtypes(mut self, value: BTreeMap<NodeId, DType>) -> Self {
+    pub fn with_operand_dtypes(mut self, value: OperandDtypes) -> Self {
         self.operand_dtypes = value;
         self
     }
@@ -265,7 +265,7 @@ impl EmitKnobs {
     /// The dtype `node` is read in, or `fallback` for a node the plan never recorded.
     #[must_use]
     pub fn operand_dtype(&self, node: NodeId, fallback: DType) -> DType {
-        self.operand_dtypes.get(&node).copied().unwrap_or(fallback)
+        operand_dtype(&self.operand_dtypes, node, fallback)
     }
 
     /// Set the packed rows-per-simdgroup override.

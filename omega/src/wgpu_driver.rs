@@ -51,7 +51,7 @@ use crate::bind_plan::{BindConfig, bind_plan};
 use crate::config::{ResourceConstraints, RuntimeConfig};
 use crate::error::EmitError;
 use crate::lowering::{Binding, Codec, PackedOperands, gather_count, reduction_dims};
-use crate::wgsl::{WgslCaps, WgslKernel, emit_wgsl_for_program};
+use crate::wgsl::{WgslCaps, WgslKernel, emit_wgsl_with_policy};
 
 /// How many adapter/device/queue triples [`acquire_device`] built — one per
 /// [`WgpuPlan`]. A caller seeing this climb with the call count, rather than
@@ -662,8 +662,7 @@ fn plan_with_options(
     if config.is_some() {
         plan.validate_resources()?;
         for bound in &plan.resolved {
-            let kernel = emit_wgsl_for_program(
-                &plan.program,
+            let kernel = emit_wgsl_with_policy(
                 bound,
                 plan.caps,
                 &plan.packed_operands,
@@ -888,8 +887,7 @@ impl WgpuPlan {
         self.resolved
             .iter()
             .map(|bound| {
-                let kernel = emit_wgsl_for_program(
-                    &self.program,
+                let kernel = emit_wgsl_with_policy(
                     bound,
                     self.caps,
                     &self.packed_operands,
@@ -1565,7 +1563,7 @@ pub fn execute_plan(
     let max_workgroups_per_dimension = plan.device.limits().max_compute_workgroups_per_dimension;
     for bound in &plan.resolved {
         let kernel =
-            emit_wgsl_for_program(&plan.program, bound, plan.caps, &plan.packed_operands, plan.numeric_policy)?;
+            emit_wgsl_with_policy(bound, plan.caps, &plan.packed_operands, plan.numeric_policy)?;
         // pre-validate against the device's real limit BEFORE
         // `pipeline_for` reaches `create_compute_pipeline` -- the binding
         // count is fully known here (every `Binding` is a `var<storage,

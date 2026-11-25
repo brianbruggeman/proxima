@@ -243,19 +243,6 @@ pub enum EmitError {
     #[error("node {node} declares dtype {dtype:?}, which this metal backend does not emit")]
     UnsupportedDType { node: NodeId, dtype: DType },
 
-    /// An elementwise op reads an operand whose dtype differs from the op's own, on a backend whose
-    /// emitter declares every input in the op's dtype (WGSL, CUDA): the read would reinterpret the
-    /// buffer's bits. Metal converts it from `EmitKnobs::operand_dtypes` instead.
-    #[error(
-        "node {node} computes in {own:?} but reads node {operand} as {operand_dtype:?}; this emitter has no operand-dtype table and would misread it"
-    )]
-    MixedDTypeOperand {
-        node: NodeId,
-        operand: NodeId,
-        own: DType,
-        operand_dtype: DType,
-    },
-
     /// `wgsl::emit_wgsl`'s v1 scope has no gather kernel (no fault buffer, no
     /// indices binding) — see that module's own doc for why this is a
     /// deliberate v1 boundary rather than an oversight. Gated with the module

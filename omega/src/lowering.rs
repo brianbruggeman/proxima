@@ -1,17 +1,15 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-pub use proxima_numeric::codec::Codec;
-use proxima_tensor::{BoundOp, NodeId, ScalarOp, gathered_operand_count};
-#[cfg(any(feature = "cuda", feature = "wgpu-backend"))]
+use proxima_numeric::DType;
+#[cfg(feature = "cuda")]
 use proxima_numeric::NumericPolicy;
-#[cfg(any(feature = "cuda", feature = "wgpu-backend"))]
+pub use proxima_numeric::codec::Codec;
+#[cfg(feature = "cuda")]
+use proxima_tensor::Op;
+#[cfg(feature = "cuda")]
 use proxima_tensor::bind::narrow_accumulations;
-#[cfg(any(feature = "cuda", feature = "wgpu-backend"))]
-use proxima_tensor::{BoundOpKind, Op};
-
-#[cfg(any(feature = "cuda", feature = "wgpu-backend"))]
-use crate::error::EmitError;
+use proxima_tensor::{BoundOp, NodeId, ScalarOp, gathered_operand_count};
 
 /// What buffer index `n` in `Kernel::bindings` is for, in dispatch order:
 /// index `0..operands.len()` are inputs, then one `Indices` buffer per
@@ -163,51 +161,48 @@ pub fn dispatch_bindings(resolved: &BoundOp) -> Vec<Binding> {
     bindings
 }
 
-// both consumers are feature-gated emitters; a metal-only build has none
-#[cfg(any(feature = "cuda", feature = "wgpu-backend"))]
-/// Rejects an elementwise op that reads an operand whose dtype differs from the op's own.
-///
-/// The Metal emitter converts such a read from a per-plan operand-dtype table
-/// (`EmitKnobs::operand_dtypes`); the WGSL and CUDA emitters declare every elementwise input in
-/// the op's dtype and have no table, so a mixed read there would reinterpret the buffer's bits
-/// silently. A packed operand is read through its codec and is exempt. `program` is the node
-/// list `resolved` was bound from: it names the dtype each producing node wrote.
-/// Dtypes are read from `narrow_accumulations(program, numeric_policy)`, the program the bind ran on.
-///
-/// # Errors
-/// [`EmitError::MixedDTypeOperand`] naming the op, the operand, and both dtypes.
-pub fn reject_mixed_dtype_elementwise(
+/// The dtype each plain operand's buffer holds, keyed by the node that wrote it: the one table
+/// every emitter reads to convert an elementwise operand whose dtype differs from the op's own.
+/// An absent node reads in the op's own dtype ([`operand_dtype`]). Build it with
+/// [`operand_dtypes`]; the backend supplies only how it names a node's dtype.
+pub type OperandDtypes = BTreeMap<NodeId, DType>;
+
+/// The table for `resolved`: every operand that is not packed (a packed operand is read through
+/// its codec), mapped to `dtype_of(node)` when that names one. Backend-neutral; Metal, CUDA and
+/// WGSL differ only in the closure they pass.
+pub fn operand_dtypes(
+    resolved: &[BoundOp],
+    packed_operands: &PackedOperands,
+    mut dtype_of: impl FnMut(NodeId) -> Option<DType>,
+) -> OperandDtypes {
+    resolved
+        .iter()
+        .flat_map(|bound| bound.operands().iter().map(|(node, _, _)| *node))
+        .filter(|node| !packed_operands.contains_key(node))
+        .filter_map(|node| dtype_of(node).map(|dtype| (node, dtype)))
+        .collect()
+}
+
+/// The dtype `node` is read in, or `fallback` for a node `table` never recorded.
+#[must_use]
+pub fn operand_dtype(table: &OperandDtypes, node: NodeId, fallback: DType) -> DType {
+    table.get(&node).copied().unwrap_or(fallback)
+}
+
+/// [`operand_dtypes`] for a bound `program`: each node's dtype as `narrow_accumulations` left it,
+/// the program the bind ran on. A node past the program (a bind-level duplicate) is absent, so it
+/// reads in the op's own dtype.
+#[cfg(feature = "cuda")]
+pub fn program_operand_dtypes(
     program: &[Op],
     resolved: &[BoundOp],
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
-) -> Result<(), EmitError> {
+) -> OperandDtypes {
     let program = narrow_accumulations(program, numeric_policy);
-    for bound in resolved {
-        if !matches!(
-            bound.kind,
-            BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. }
-        ) {
-            continue;
-        }
-        for (operand, _, _) in bound.operands() {
-            if packed_operands.contains_key(operand) {
-                continue;
-            }
-            let Some(operand_dtype) = program.get(operand.0 as usize).map(Op::dtype) else {
-                continue;
-            };
-            if operand_dtype != bound.dtype {
-                return Err(EmitError::MixedDTypeOperand {
-                    node: bound.node,
-                    operand: *operand,
-                    own: bound.dtype,
-                    operand_dtype,
-                });
-            }
-        }
-    }
-    Ok(())
+    operand_dtypes(resolved, packed_operands, |node| {
+        program.get(node.0 as usize).map(Op::dtype)
+    })
 }
 
 #[cfg(test)]
