@@ -278,7 +278,7 @@ impl Element for f32 {
     /// (ggml flushes above 88.38), NaN in gives NaN out.
     #[inline(always)]
     fn exp_approximation(self) -> Self {
-        let rounded = (self * 1.442_695_04).round();
+        let rounded = (self + self * 0.442_695).round();
         let reduced = (self - rounded * 0.693_145_75) - rounded * 1.428_606_8e-6;
         let square = reduced * reduced;
         let polynomial = 0.999_999_4 * reduced

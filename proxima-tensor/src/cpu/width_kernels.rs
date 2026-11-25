@@ -709,6 +709,8 @@ pub(super) const GENERIC_WIDTH_TILE: usize = 512;
 /// the only thing blocking changes. Every output position is computed by
 /// the same steps in the same order against the same inputs it would have
 /// been at full width, so output is bit-identical.
+// the tile is the one place the per-call row, operand views and the policy-chosen exp meet; splitting them would only relocate the same eight values
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 pub(super) fn elementwise_width_generic_tile(
     body: &ComposedBody,

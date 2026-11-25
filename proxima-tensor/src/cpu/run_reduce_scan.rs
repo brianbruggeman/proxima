@@ -1220,6 +1220,8 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
 /// `sweep_gemm --release`) precisely because a caller that never binds a
 /// quantized weight never reaches this function at all, not even through a
 /// branch it doesn't take.
+// mirrors run_reduce_quantized's own allow at its definition: the seven shared call arguments plus the plan's policy for the unquantized fall-through
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run_reduce_with_quantized_weights<B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
