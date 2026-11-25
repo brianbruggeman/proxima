@@ -57,14 +57,31 @@ fn attention_program(rows: u32, keys: u32, heads: u32, head_dim: u32) -> (Vec<Op
     (program, root)
 }
 
-fn assert_metal_binds_one_whole_attention(program: &[Op], root: NodeId) {
+/// The two policies the metal side runs under: the oracle's bit-exact one keeps the per-row
+/// kernel (no reassociation granted), and the serving one grants the split-merge and tree reduce
+/// the row-tiled form needs, so the same op runs the simdgroup-matrix kernel.
+fn metal_policies() -> [(&'static str, NumericPolicy); 2] {
+    [
+        ("per-row", gpu_oracle_numeric_policy()),
+        (
+            "row-tiled",
+            NumericPolicy::llama_relaxed().with_flash_narrowing(true),
+        ),
+    ]
+}
+
+fn assert_metal_binds_one_whole_attention(
+    program: &[Op],
+    root: NodeId,
+    policy: NumericPolicy,
+) {
     let shapes = infer(program, &[]).expect("the attention infers");
     let resolved = bind_with_fusion_for(
         program,
         &shapes,
         &[root],
         true,
-        gpu_oracle_numeric_policy(),
+        policy,
         &omega::metal::executes(),
     )
     .expect("the attention binds under metal's grants");
@@ -87,8 +104,18 @@ fn assert_metal_binds_one_whole_attention(program: &[Op], root: NodeId) {
 }
 
 fn assert_whole_attention_parity(rows: u32, keys: u32, heads: u32, head_dim: u32) {
+    for (kernel, policy) in metal_policies() {
+        assert_whole_attention_parity_under(kernel, policy, (rows, keys, heads, head_dim));
+    }
+}
+
+fn assert_whole_attention_parity_under(
+    kernel: &str,
+    policy: NumericPolicy,
+    (rows, keys, heads, head_dim): (u32, u32, u32, u32),
+) {
     let (program, root) = attention_program(rows, keys, heads, head_dim);
-    assert_metal_binds_one_whole_attention(&program, root);
+    assert_metal_binds_one_whole_attention(&program, root, policy);
 
     let mut lcg = Lcg(0x5eed_0683);
     let mut draw = |count: u32| (0..count).map(|_| lcg.next_unit()).collect::<Vec<_>>();
@@ -116,8 +143,16 @@ fn assert_whole_attention_parity(rows: u32, keys: u32, heads: u32, head_dim: u32
     .expect("the cpu evaluates the unfused chain");
     let expected = reference.root();
 
-    let plan = omega::plan_named(&program, &[], &named, &[root], gpu_oracle_numeric_policy())
+    let plan = omega::plan_named(&program, &[], &named, &[root], policy)
         .expect("metal plans the whole-plane attention");
+    let kernel_names = plan.kernel_keys().expect("the pipeline identities resolve");
+    let row_tiled = kernel_names.iter().any(|name| name.contains("_cbrt"));
+    // the row-tiled form needs whole 16-wide head-dim fragments, so the 4-wide cell stays per-row
+    let admits_row_tiled = kernel == "row-tiled" && head_dim.is_multiple_of(16);
+    assert_eq!(
+        row_tiled, admits_row_tiled,
+        "{kernel}: the whole attention picked the wrong kernel form: {kernel_names:?}"
+    );
     let metal = omega::execute_plan_named(&plan, &named)
         .expect("metal runs the whole-plane attention on a real device");
     let actual = metal.root();
@@ -142,7 +177,7 @@ fn assert_whole_attention_parity(rows: u32, keys: u32, heads: u32, head_dim: u32
     assert!(max_magnitude > 0.0, "the reference output is not all zero");
     let relative = max_diff / max_magnitude;
     eprintln!(
-        "whole-plane parity: {rows}x{keys}x{heads}x{head_dim} max_diff={max_diff} \
+        "whole-plane parity ({kernel}): {rows}x{keys}x{heads}x{head_dim} max_diff={max_diff} \
          max_magnitude={max_magnitude} relative={relative}"
     );
     // measured 3.1e-6 at the encoder shape and 1.5e-7 at the small one; 1e-5 is the partial-rotary
@@ -150,7 +185,7 @@ fn assert_whole_attention_parity(rows: u32, keys: u32, heads: u32, head_dim: u32
     let tolerance = 1e-5;
     assert!(
         relative < tolerance,
-        "{rows}x{keys}x{heads}x{head_dim}: metal disagrees with the unfused cpu chain: \
+        "{kernel} {rows}x{keys}x{heads}x{head_dim}: metal disagrees with the unfused cpu chain: \
          relative={relative} max_diff={max_diff}"
     );
 }

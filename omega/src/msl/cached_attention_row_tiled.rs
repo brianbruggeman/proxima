@@ -743,7 +743,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
         long columns = mode == 0L ? min(block, slice_end - key0) : (mode == 1L ? min(block, mma_end - key0) : total_rows - total_aligned);
         if (mode != 2L) {
             device const float* key_even = mode == 0L ? (device const float*)in2 : in4;
-            device const float* key_odd = mode == 0L ? (device const float*)in3 : in5;
+            @ODD_GUARD@device const float* key_odd = mode == 0L ? (device const float*)in3 : in5;
             int fragments = (int)((columns + 7L) / 8L);
             simdgroup_float8x8 scores[score_key_tiles][score_vectors_per_simdgroup];
             FOR_UNROLL for (int key_slot = 0; key_slot < (int)score_key_tiles; key_slot++) { FOR_UNROLL for (int vector_slot = 0; vector_slot < (int)score_vectors_per_simdgroup; vector_slot++) { scores[key_slot][vector_slot] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f); } }
@@ -753,7 +753,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                     int key_tile = (!shared_k && query_parallel_rows) ? group : ((int)simdgroup_slot + group * (int)simdgroups);
                     if (key_tile < fragments) {
                         device const float* key_even_ptr = key_even + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
-                        device const float* key_odd_ptr = key_odd + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
+                        @ODD_GUARD@device const float* key_odd_ptr = key_odd + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
                         long key_rows_left = (mode == 0L ? slice_end : mma_end) - (key0 + (long)key_tile * 8L);
                         FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
                             if (prefetch_next_block && mode == 0L && step > 0L) {
@@ -905,9 +905,9 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                     long query_index = query_row * (kv_heads * query_groups) + kv_head * query_groups + (long)vector_head[vector];
                     long key_offset = (key0 + column) * (kv_heads * half_dim) + kv_head * half_dim;
                     device const float4* query_even4 = (device const float4*)(in0 + query_index * half_dim);
-                    device const float4* query_odd4 = (device const float4*)(in1 + query_index * half_dim);
+                    @ODD_GUARD@device const float4* query_odd4 = (device const float4*)(in1 + query_index * half_dim);
                     device const float4* key_even4 = (device const float4*)(in4 + key_offset);
-                    device const float4* key_odd4 = (device const float4*)(in5 + key_offset);
+                    @ODD_GUARD@device const float4* key_odd4 = (device const float4*)(in5 + key_offset);
                     for (short index = tx; index < (short)(half_dim / 4L); index += 8) {
                         partial_score += dot(key_even4[index], query_even4[index]);
                         @ODD_GUARD@partial_score += dot(key_odd4[index], query_odd4[index]);

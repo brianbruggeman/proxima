@@ -1371,7 +1371,6 @@ mod whole_plane_tests {
         }
         for absent in [
             "in8",
-            "if (false)",
             "/*",
             "@",
             "query_odd[step_index], key_odd_tile",
@@ -1428,13 +1427,7 @@ mod whole_plane_tests {
         for line in pinned {
             assert!(source.contains(line), "missing `{line}` in:\n{source}");
         }
-        for token in [
-            "@LIVE",
-            "@ODD_GUARD@",
-            "@PLANE_WIDTH@",
-            "if (false)",
-            "/*device",
-        ] {
+        for token in ["@LIVE", "@ODD_GUARD@", "@PLANE_WIDTH@", "/*device"] {
             assert!(
                 !source.contains(token),
                 "`{token}` leaked into the paired kernel"

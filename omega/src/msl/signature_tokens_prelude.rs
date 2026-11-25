@@ -2804,10 +2804,10 @@ pub(crate) fn cached_attention_form_with_schedule(
     let _ = schedule;
     // a whole-plane op is one range of eight operands with no ninth; above the per-row threshold it is the row-tiled form over an empty cached range
     #[cfg(feature = "metal-attn-split-rows")]
-    if *planes == ScorePlanes::Whole {
-        if let Some(tiled) = row_tiled_form(kind, policy, schedule) {
-            return Some(tiled);
-        }
+    if *planes == ScorePlanes::Whole
+        && let Some(tiled) = row_tiled_form(kind, policy, schedule)
+    {
+        return Some(tiled);
     }
     #[cfg(not(feature = "metal-attn-split-rows"))]
     let _ = planes;
