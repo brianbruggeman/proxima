@@ -61,7 +61,6 @@ const BOUNDARY_CODES: &[u32] = &[
 ];
 
 struct Spelling {
-    wide: String,
     word: String,
 }
 
@@ -71,10 +70,6 @@ fn wide_row() -> HardwareScalar {
 
 fn spelling(row: HardwareScalar) -> Spelling {
     Spelling {
-        wide: Wgsl
-            .scalar(row)
-            .expect("the widest row has a wgsl spelling")
-            .into_owned(),
         word: Wgsl
             .unsigned(row.bytes())
             .expect("the widest row's width has a wgsl unsigned integer")
@@ -268,7 +263,10 @@ fn pack(codes: &[u32], width: u32) -> Vec<u32> {
         }
     }
     let (chunks, _) = bytes.as_chunks::<4>();
-    chunks.iter().map(|chunk| u32::from_le_bytes(*chunk)).collect()
+    chunks
+        .iter()
+        .map(|chunk| u32::from_le_bytes(*chunk))
+        .collect()
 }
 
 #[test]
@@ -286,7 +284,8 @@ fn wgsl_load_equals_the_host_decode_bit_for_bit_for_every_code() {
         let codes = codes_for(layout);
         let body = format!(
             "data[id.x] = {};",
-            Wgsl.bitcast(&spelling.word, "probe_load(data[id.x])")
+            Wgsl.to_bits(wide, "probe_load(data[id.x])")
+                .expect("wgsl spells its wide row's unsigned word")
         );
         let source = module_source(
             &spelling,
@@ -324,7 +323,8 @@ fn wgsl_store_equals_the_host_encode_bit_for_bit_on_boundaries_and_ties() {
         let inputs = store_inputs(layout, &codes_for(layout));
         let body = format!(
             "data[id.x] = probe_store({});",
-            Wgsl.bitcast(&spelling.wide, "data[id.x]")
+            Wgsl.to_scalar(wide, "data[id.x]")
+                .expect("wgsl spells its wide row")
         );
         let source = module_source(
             &spelling,
@@ -373,7 +373,8 @@ fn wgsl_unpack_equals_the_host_decode_for_every_packed_element() {
         );
         let body = format!(
             "data[id.x] = {};",
-            Wgsl.bitcast(&spelling.word, "probe_unpack(id.x)")
+            Wgsl.to_bits(wide, "probe_unpack(id.x)")
+                .expect("wgsl spells its wide row's unsigned word")
         );
         let source = module_source(&spelling, &declarations, &function, &body);
 

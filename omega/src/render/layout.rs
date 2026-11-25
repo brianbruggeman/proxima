@@ -122,6 +122,18 @@ impl<'dialect, D: Dialect> Tokens<'dialect, D> {
             .ok_or(Refusal::NoIntegerOfWidth { bytes })
     }
 
+    fn to_bits(&self, row: HardwareScalar, value: &str) -> Result<String, Refusal> {
+        self.dialect
+            .to_bits(row, value)
+            .ok_or(Refusal::NoIntegerOfWidth { bytes: row.bytes() })
+    }
+
+    fn to_scalar(&self, row: HardwareScalar, code: &str) -> Result<String, Refusal> {
+        self.dialect
+            .to_scalar(row, code)
+            .ok_or(Refusal::NoWideScalar)
+    }
+
     fn literal(&self, digits: &str) -> String {
         self.dialect.literal(self.wide, digits)
     }
@@ -244,7 +256,7 @@ fn integer_store<D: Dialect>(
     // a bit test, not `scaled != scaled`: the metal compiler's fast math assumes no nan and folds the self-compare away
     let is_nan = format!(
         "({} & {:#010x}{suffix}) > {:#010x}{suffix}",
-        dialect.bitcast(word, "value"),
+        tokens.to_bits(tokens.wide, "value")?,
         tokens.abs_mask(),
         infinity_code(&tokens.layout)
     );
@@ -286,7 +298,7 @@ fn integer_store<D: Dialect>(
                 &dialect.cast(word, &minimum),
             );
             let magnitude = dialect.declare(word, "magnitude", &code);
-            let sign_bit = dialect.bitcast(word, "scaled");
+            let sign_bit = tokens.to_bits(tokens.wide, "scaled")?;
             let sign_position = tokens.top_bit();
             let sign = format!(
                 "({})",
@@ -298,9 +310,7 @@ fn integer_store<D: Dialect>(
                     ),
                 )
             );
-            format!(
-                "    {rounded}\n    {extent}\n    {magnitude}\n    return magnitude | {sign};"
-            )
+            format!("    {rounded}\n    {extent}\n    {magnitude}\n    return magnitude | {sign};")
         }
         SignEncoding::TwosComplement => {
             let negative = tokens.literal(&format!("-{}.0", 1u64 << mantissa_bits));
@@ -314,7 +324,10 @@ fn integer_store<D: Dialect>(
             let code = dialect.select(
                 &format!("rounded > {limit}"),
                 &saturated,
-                &format!("({} & {full_mask:#x}{suffix})", dialect.cast(word, "clamped")),
+                &format!(
+                    "({} & {full_mask:#x}{suffix})",
+                    dialect.cast(word, "clamped")
+                ),
             );
             format!("    {rounded}\n    {declaration}\n    return {code};")
         }
@@ -350,13 +363,10 @@ pub fn load<D: Dialect>(
         return integer_load(&tokens, &layout, name);
     }
     let value = match HardwareScalar::of(dialect, &layout) {
-        Some(row) if row == wide => dialect.bitcast(&tokens.ty, "code"),
+        Some(row) if row == wide => tokens.to_scalar(wide, "code")?,
         Some(row) => {
             let storage = dialect.cast(&unsigned_of(dialect, row.bytes())?, "code");
-            dialect.cast(
-                &tokens.ty,
-                &dialect.bitcast(&scalar_of(dialect, row)?, &storage),
-            )
+            dialect.cast(&tokens.ty, &tokens.to_scalar(row, &storage)?)
         }
         None => return field_load(&tokens, &layout, name),
     };
@@ -380,7 +390,7 @@ fn field_load<D: Dialect>(
     let fraction = tokens.fraction_bits();
     let fraction_shift = fraction - u32::from(mantissa_bits);
     let implicit = 1u64 << mantissa_bits;
-    let reserved = field_load_reserved(tokens, layout, field_ones, fraction_shift);
+    let reserved = field_load_reserved(tokens, layout, field_ones, fraction_shift)?;
     // no mantissa field means no subnormal range: field 0 is itself the lowest power of two
     // (`FloatLayout::lowest_exponent`, OCP MX v1.0 Table 7), never zero
     let (zero_exponent_significand, zero_exponent_scale) = if mantissa_bits == 0 {
@@ -455,10 +465,10 @@ fn field_load<D: Dialect>(
         &format!("0{suffix}"),
         &format!("significand >> {negative_shift_word}"),
     );
-    let result = dialect.bitcast(
-        &tokens.ty,
+    let result = tokens.to_scalar(
+        tokens.wide,
         &format!("sign | {name}_scaled_bits(significand, scale)"),
-    );
+    )?;
     Ok(format!(
         "
 {scaled_head} {{
@@ -497,7 +507,7 @@ fn field_load_reserved<D: Dialect>(
     layout: &FloatLayout,
     field_ones: u32,
     fraction_shift: u32,
-) -> String {
+) -> Result<String, Refusal> {
     let suffix = tokens.suffix;
     let infinity = infinity_code(&tokens.layout);
     let quiet = quiet_bit(&tokens.layout);
@@ -506,28 +516,30 @@ fn field_load_reserved<D: Dialect>(
         NanWiden::Canonical => String::new(),
     };
     if layout.specials == Specials::NanOnly {
-        let value = tokens.dialect.bitcast(
-            &tokens.ty,
+        let value = tokens.to_scalar(
+            tokens.wide,
             &format!("sign | {infinity:#010x}{suffix} | {quiet:#x}{suffix}{payload}"),
-        );
-        return format!(
+        )?;
+        return Ok(format!(
             "    if (exponent == {field_ones:#x}{suffix} && mantissa == {:#x}{suffix}) {{\n        return {value};\n    }}\n",
             mantissa_mask(layout)
-        );
+        ));
     }
     if !reserves_all_ones(layout) {
-        return String::new();
+        return Ok(String::new());
     }
     let nan_bits = tokens.dialect.select(
         &format!("mantissa == 0{suffix}"),
         &format!("0{suffix}"),
         &format!("({quiet:#x}{suffix}{payload})"),
     );
-    let value = tokens.dialect.bitcast(
-        &tokens.ty,
+    let value = tokens.to_scalar(
+        tokens.wide,
         &format!("sign | {infinity:#010x}{suffix} | ({nan_bits})"),
-    );
-    format!("    if (exponent == {field_ones:#x}{suffix}) {{\n        return {value};\n    }}\n")
+    )?;
+    Ok(format!(
+        "    if (exponent == {field_ones:#x}{suffix}) {{\n        return {value};\n    }}\n"
+    ))
 }
 
 /// Renders the function `name` that takes a `wide` value and returns the `layout.width()`-bit code
@@ -548,13 +560,10 @@ pub fn store<D: Dialect>(
         return integer_store(&tokens, &layout, name);
     }
     let value = match HardwareScalar::of(dialect, &layout) {
-        Some(row) if row == wide => dialect.bitcast(&tokens.word, "value"),
+        Some(row) if row == wide => tokens.to_bits(wide, "value")?,
         Some(row) => {
             let narrow = dialect.cast(&scalar_of(dialect, row)?, "value");
-            dialect.cast(
-                &tokens.word,
-                &dialect.bitcast(&unsigned_of(dialect, row.bytes())?, &narrow),
-            )
+            dialect.cast(&tokens.word, &tokens.to_bits(row, &narrow)?)
         }
         None => return field_store(&tokens, &layout, name),
     };
@@ -599,11 +608,7 @@ pub fn store_nan_branch<D: Dialect>(
     let tokens = Tokens::new(dialect, wide)?;
     let suffix = tokens.suffix;
     let nan = field_store_nan(&tokens, layout);
-    let bits = dialect.declare(
-        &tokens.word,
-        "bits",
-        &dialect.bitcast(&tokens.word, "value"),
-    );
+    let bits = dialect.declare(&tokens.word, "bits", &tokens.to_bits(tokens.wide, "value")?);
     let sign = dialect.declare(
         &tokens.word,
         "sign",
@@ -660,12 +665,8 @@ fn field_store<D: Dialect>(
         "halfway",
         &format!("1{suffix} << (shift - 1{suffix})"),
     );
-    let bits = dialect.declare(word, "bits", &dialect.bitcast(word, "value"));
-    let sign = dialect.declare(
-        word,
-        "sign",
-        &stored_sign(layout, top, suffix),
-    );
+    let bits = dialect.declare(word, "bits", &tokens.to_bits(tokens.wide, "value")?);
+    let sign = dialect.declare(word, "sign", &stored_sign(layout, top, suffix));
     let abs_bits = dialect.declare(word, "abs_bits", &format!("bits & {abs_mask:#x}{suffix}"));
     let nan_branch = dialect.branch(&format!("abs_bits > {wide_infinity:#010x}{suffix}"));
     let all_ones_branch = dialect.branch(&format!(

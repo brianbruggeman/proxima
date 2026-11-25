@@ -53,8 +53,14 @@ impl Dialect for Wgsl {
         format!("{ty}({value})")
     }
 
-    fn bitcast(&self, ty: &str, value: &str) -> String {
-        format!("bitcast<{ty}>({value})")
+    fn to_bits(&self, row: HardwareScalar, value: &str) -> Option<String> {
+        let word = self.unsigned(row.bytes())?;
+        Some(format!("bitcast<{word}>({value})"))
+    }
+
+    fn to_scalar(&self, row: HardwareScalar, code: &str) -> Option<String> {
+        let scalar = self.scalar(row)?;
+        Some(format!("bitcast<{scalar}>({code})"))
     }
 
     fn intrinsic(&self, op: Intrinsic, args: &[&str]) -> String {

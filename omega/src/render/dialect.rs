@@ -34,8 +34,12 @@ pub trait Dialect {
     fn unsigned_suffix(&self) -> &'static str;
     /// Convert `value` to `ty`.
     fn cast(&self, ty: &str, value: &str) -> String;
-    /// Reinterpret the bits of `value` as `ty`.
-    fn bitcast(&self, ty: &str, value: &str) -> String;
+    /// Reinterpret `value` of the hardware row `row` as the unsigned integer of the same width, or
+    /// `None` when the dialect has no such integer.
+    fn to_bits(&self, row: HardwareScalar, value: &str) -> Option<String>;
+    /// Reinterpret `code`, the unsigned integer of `row`'s width, as the hardware row `row`, or
+    /// `None` when the dialect does not spell that row.
+    fn to_scalar(&self, row: HardwareScalar, code: &str) -> Option<String>;
     /// Call `op` on `args`.
     fn intrinsic(&self, op: Intrinsic, args: &[&str]) -> String;
     /// The head of a device function, without its body.
