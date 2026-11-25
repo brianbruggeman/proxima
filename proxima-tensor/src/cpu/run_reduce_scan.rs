@@ -1659,7 +1659,8 @@ pub(super) fn run_reduce_planned<B: Deref<Target = [f32]>>(
         // straight into the existing `try_run_width_tile` call unchanged,
         // same "try, then fall back" shape as the dot/conv routes.
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        if ACCELERATE_GEMM_ENABLED.load(EpilogueFuseOrdering::Relaxed)
+        if numeric_policy.reassociation
+            && ACCELERATE_GEMM_ENABLED.load(EpilogueFuseOrdering::Relaxed)
             && let Some(plan) = width_tile_plan(&width_path_context)
         {
             if try_run_accelerate_width_gemm(&plan, &raw, output) {
@@ -1693,7 +1694,8 @@ pub(super) fn run_reduce_planned<B: Deref<Target = [f32]>>(
         let disable_width_tile_for_debug = std::env::var_os("PROXIMA_DISABLE_WIDTH_TILE").is_some()
             && resolved.extents.len() == 4
             && resolved.extents.first().copied().unwrap_or(0) > 1;
-        if !disable_width_tile_for_debug
+        if numeric_policy.reassociation
+            && !disable_width_tile_for_debug
             && try_run_width_tile(&width_path_context, &raw, packed_width, output)
         {
             // the tile's own early return skips the rest of this function
@@ -1761,7 +1763,8 @@ pub(super) fn run_reduce_planned<B: Deref<Target = [f32]>>(
     // dot tile serves it once that operand's reduction slice is packed into a
     // contiguous panel (`PackedDotLayout`); decided from strides alone.
     #[cfg(target_arch = "aarch64")]
-    if !fast_path
+    if numeric_policy.reassociation
+        && !fast_path
         && !reduction_fast_path
         && !reduction_dims.is_empty()
         && let Some(plan) = packed_dot_tile_plan(
@@ -1947,7 +1950,7 @@ pub(super) fn run_reduce_planned<B: Deref<Target = [f32]>>(
             last_output_dim,
             out_layout,
         };
-        if let Some(plan) = conv_gemm_tile_plan(&conv_context) {
+        if let Some(plan) = conv_gemm_tile_plan(&conv_context).filter(|_| numeric_policy.reassociation) {
             // ROW 189: Accelerate/AMX route for `Conv`'s own two-level-blocked
             // GEMM, behind the SAME `ACCELERATE_GEMM_ENABLED` toggle ROW 188
             // gated the flat route with -- see `try_run_accelerate_conv_gemm`'s
