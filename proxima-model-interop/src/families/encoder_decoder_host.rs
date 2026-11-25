@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -28,6 +29,12 @@ use crate::profiles::BindingProfile;
 use crate::serving::apply_serving_config;
 use crate::serving_settings::ServingSettings;
 use crate::source::CheckpointMapping;
+use crate::weight_store::{
+    device_alignment, emit_weight_store_hit, emit_weight_store_publish, header_prefix, lookup,
+    modified_nanos, publish, store_key,
+};
+
+const CHECKPOINT_FILE: &str = "model.safetensors";
 
 /// The dimensions a checkpoint states, read from its `config.json`.
 #[derive(Debug, Clone)]
@@ -583,6 +590,12 @@ pub struct Model {
     settings: ServingSettings,
     /// owned weight buffers, materialized once and offered identically on every call
     weights: ModelWeights,
+    /// the source checkpoint's header bytes, length and modification time: what a store key is made of
+    source_identity: (Vec<u8>, u64, u128),
+    /// where the first call publishes its weights, and under which key; `None` when the store is off or this load hit it
+    store_miss: Option<(PathBuf, u128)>,
+    /// set by the first publish attempt that succeeds, so later calls skip it
+    store_published: AtomicBool,
 }
 
 impl Model {
@@ -595,7 +608,7 @@ impl Model {
                 .context("generation_config.json")?,
         )?;
         let shape = Shape::from_config(&config)?;
-        let checkpoint = read_checkpoint(&dir.join("model.safetensors"))?;
+        let checkpoint = read_checkpoint(&dir.join(CHECKPOINT_FILE))?;
         Ok(Self::from_parts(checkpoint, shape, generation, config, dir))
     }
 
@@ -606,6 +619,11 @@ impl Model {
         config: Value,
         dir: &Path,
     ) -> Self {
+        let source_identity = (
+            header_prefix(mapping.bytes()).unwrap_or_default().to_vec(),
+            mapping.bytes().len() as u64,
+            modified_nanos(&dir.join(CHECKPOINT_FILE)),
+        );
         Self {
             mapping,
             manifest,
@@ -616,14 +634,75 @@ impl Model {
             dir: dir.to_path_buf(),
             settings: ServingSettings::default(),
             weights: ModelWeights::new(),
+            source_identity,
+            store_miss: None,
+            store_published: AtomicBool::new(false),
         }
     }
 
-    /// Replaces the serving settings every stage lowers into its runtime.
+    /// Replaces the serving settings every stage lowers into its runtime. With
+    /// `weight_store` set this is also where the store is consulted, because
+    /// the key needs the `weight_precision` rules and `load` has none: a hit
+    /// swaps the mapped checkpoint for the stored one and emits
+    /// `weight_store_hit`; a miss changes nothing and arms the publish after
+    /// the first transcription.
     #[must_use]
     pub fn with_settings(mut self, settings: ServingSettings) -> Self {
         self.settings = settings;
+        self.resolve_store();
         self
+    }
+
+    fn resolve_store(&mut self) {
+        self.store_miss = None;
+        let Some(store_dir) = self.settings.weight_store.as_deref().map(PathBuf::from) else {
+            return;
+        };
+        let Ok(rules) = self.settings.weight_precision_rules() else {
+            return;
+        };
+        let (header, len, modified) = &self.source_identity;
+        let key = store_key(header, *len, *modified, &rules, device_alignment());
+        match lookup(&store_dir, key).and_then(|path| read_checkpoint(&path).ok()) {
+            Some((mapping, manifest, data_start)) => {
+                emit_weight_store_hit(key, mapping.bytes().len());
+                self.mapping = mapping;
+                self.manifest = manifest;
+                self.data_start = data_start;
+                self.weights = ModelWeights::new();
+            }
+            None => {
+                self.store_published.store(false, Ordering::Release);
+                self.store_miss = Some((store_dir, key));
+            }
+        }
+    }
+
+    /// Publishes the weights the first call materialized, once. A failed write
+    /// leaves the flag clear, so the next call retries, and is reported as a
+    /// `weight_store_publish` event with `ok = false`.
+    fn publish_store(&self) {
+        let Some((store_dir, key)) = &self.store_miss else {
+            return;
+        };
+        if self.store_published.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let mut stored = Vec::new();
+        let written = self
+            .weights
+            .persist_aligned(
+                &self.manifest,
+                self.mapping.bytes(),
+                self.data_start,
+                device_alignment(),
+                &mut stored,
+            )
+            .and_then(|_| publish(store_dir, *key, &stored));
+        if written.is_err() {
+            self.store_published.store(false, Ordering::Release);
+        }
+        emit_weight_store_publish(*key, stored.len(), written.is_ok());
     }
 
     /// The cached-range rows a step binds, decided exactly as the llm decides
@@ -667,10 +746,15 @@ impl Model {
     }
 
     /// Transcribes on the device the serving settings select: `gpu_layers` of `GPU_LAYERS_ALL` runs the stages on the device.
+    /// On the first call of a weight-store miss it then publishes the weights the call materialized: the bind leases are
+    /// back in the model by then, so `persist_aligned` sees every recoded leaf.
     pub fn transcribe(&self, wav: &[f32], language: &str) -> Result<Transcript> {
-        self.transcribe_with(wav, language)
+        let transcript = self.transcribe_with(wav, language)?;
+        self.publish_store();
+        Ok(transcript)
     }
 
+    /// One transcription with no weight-store publish; [`Self::transcribe`] is the call that publishes.
     pub fn transcribe_with(&self, wav: &[f32], language: &str) -> Result<Transcript> {
         let start = Instant::now();
         let policy = DecodePolicy::from_checkpoint(

@@ -30,7 +30,8 @@ use core::ops::Deref;
 use proxima_numeric::DType;
 use proxima_primitives::sync::blocking::Mutex;
 use proxima_safetensors::{
-    FORMAT_VERSION_KEY, Manifest, SafetensorsModel, TensorEntry, TensorPayload, write_complete,
+    FORMAT_VERSION_KEY, Manifest, SafetensorsModel, TensorEntry, TensorPayload, is_filler_name,
+    write_complete_aligned,
 };
 use proxima_tensor::op::Op;
 
@@ -228,13 +229,12 @@ impl ModelWeights {
     /// program's `[in, out]` order and so no longer has the stored shape. Both
     /// are carried from the source unchanged.
     ///
-    /// The write composes [`proxima_safetensors::write_complete`]: tensors are
-    /// laid out back to back, so tensor offsets are not page aligned.
+    /// The write is [`Self::persist_aligned`] at an alignment of one byte:
+    /// tensors are laid out back to back, so tensor offsets are not page aligned.
     ///
     /// # Errors
     ///
-    /// [`InteropError::UnknownTensor`] when a manifest range lies outside
-    /// `file_bytes`; [`InteropError::Safetensors`] from the writer.
+    /// As [`Self::persist_aligned`].
     pub fn persist(
         &self,
         manifest: &Manifest,
@@ -242,10 +242,35 @@ impl ModelWeights {
         data_start: u64,
         out: &mut Vec<u8>,
     ) -> Result<usize, InteropError> {
+        self.persist_aligned(manifest, file_bytes, data_start, 1, out)
+    }
+
+    /// As [`Self::persist`], composing
+    /// [`proxima_safetensors::write_complete_aligned`]: every tensor of at
+    /// least `alignment` bytes starts at an absolute file offset that is a
+    /// multiple of `alignment`, with filler tensors in the gaps. A caller gets
+    /// `alignment` from the backend (`omega::backend::no_copy_alignment`).
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::UnknownTensor`] when a manifest range lies outside
+    /// `file_bytes`; [`InteropError::Safetensors`] from the writer.
+    pub fn persist_aligned(
+        &self,
+        manifest: &Manifest,
+        file_bytes: &[u8],
+        data_start: u64,
+        alignment: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<usize, InteropError> {
         let held = self.held.lock();
         let mut substituted = 0;
         let mut tensors = Vec::with_capacity(manifest.tensors.len());
-        for entry in &manifest.tensors {
+        for entry in manifest
+            .tensors
+            .iter()
+            .filter(|entry| !is_filler_name(&entry.name))
+        {
             let source = tensor_bytes(file_bytes, data_start, entry)?;
             let (dtype, data) = match held.element_recode(entry) {
                 Some(recoded) => {
@@ -267,7 +292,10 @@ impl ModelWeights {
             .filter(|(key, _)| key.as_str() != FORMAT_VERSION_KEY)
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
-        out.extend(write_complete(&SafetensorsModel { tensors, metadata })?);
+        out.extend(write_complete_aligned(
+            &SafetensorsModel { tensors, metadata },
+            alignment,
+        )?);
         Ok(substituted)
     }
 }

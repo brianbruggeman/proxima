@@ -29,6 +29,8 @@ extern crate std;
 mod bind;
 #[cfg(feature = "std")]
 mod model_weights;
+#[cfg(feature = "std")]
+pub mod weight_store;
 #[cfg(all(test, feature = "std"))]
 mod gguf_numeric_parity;
 #[cfg(feature = "std")]

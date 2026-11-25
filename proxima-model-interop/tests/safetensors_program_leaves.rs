@@ -1034,6 +1034,56 @@ fn persisting_a_model_that_recoded_nothing_substitutes_nothing() {
 }
 
 #[test]
+fn persist_aligned_starts_every_large_tensor_on_the_alignment_and_keeps_every_byte() {
+    const ALIGNMENT: usize = 16;
+    let file_bytes = safetensors_fixture();
+    let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses fixture");
+    let source_start = header_data_start(&file_bytes) as usize;
+    let mut persisted = Vec::new();
+
+    ModelWeights::new()
+        .persist_aligned(
+            &manifest,
+            &file_bytes,
+            header_data_start(&file_bytes),
+            ALIGNMENT,
+            &mut persisted,
+        )
+        .expect("an empty model persists an aligned copy");
+
+    let stored = proxima_safetensors::parse_complete(&persisted).expect("parses persisted file");
+    let stored_start = header_data_start(&persisted) as usize;
+    assert_eq!(stored_start % ALIGNMENT, 0, "the data region is aligned");
+    let originals: Vec<_> = stored
+        .tensors
+        .iter()
+        .filter(|entry| !proxima_safetensors::is_filler_name(&entry.name))
+        .collect();
+    assert_eq!(originals.len(), manifest.tensors.len(), "every tensor survives");
+    for entry in originals {
+        let source = manifest.tensor(&entry.name).expect("the name is kept");
+        let from = |bytes: &[u8], start: usize, range: (u64, u64)| {
+            bytes[start + range.0 as usize..start + range.1 as usize].to_vec()
+        };
+        assert_eq!(
+            from(&persisted, stored_start, entry.data_offsets),
+            from(&file_bytes, source_start, source.data_offsets),
+            "tensor {} bytes",
+            entry.name
+        );
+        let length = entry.data_offsets.1 - entry.data_offsets.0;
+        if length >= ALIGNMENT as u64 {
+            assert_eq!(
+                (stored_start + entry.data_offsets.0 as usize) % ALIGNMENT,
+                0,
+                "tensor {} offset",
+                entry.name
+            );
+        }
+    }
+}
+
+#[test]
 fn a_norm_scale_named_weight_is_never_recoded() {
     let file_bytes = safetensors_fixture();
     let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses fixture");

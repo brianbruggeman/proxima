@@ -341,6 +341,8 @@ pub struct ServingSettings {
     #[setting(resolve_with = "from_json", default_str = "[]")]
     #[builder(default)]
     pub weight_precision: Vec<WeightPrecisionRuleSettings>,
+    /// Directory of recoded, page-aligned checkpoints a host keeps between processes, e.g. `/var/cache/proxima/weights`; unset keeps the store off.
+    pub weight_store: Option<String>,
     /// `ServingConfig::gdn_prefill_backend`: where the gated delta net prefill runs.
     #[setting(resolve_with = "from_name", default_str = "cpu")]
     #[builder(default = GdnPrefillBackend::Cpu)]
@@ -1347,6 +1349,25 @@ target = "q8_0"
             missing_pattern.is_err(),
             "an exact rule without a pattern is refused"
         );
+    }
+
+    #[test]
+    fn weight_store_directory_agrees_across_toml_env_and_builder_and_defaults_to_off() {
+        const STORE: &str = "/var/cache/proxima/weights";
+
+        let from_toml: ServingSettings =
+            conflaguration::from_toml_str(&format!("weight_store = \"{STORE}\""))
+                .expect("the weight store toml parses");
+        let built = ServingSettings::builder()
+            .weight_store(STORE.to_owned())
+            .build();
+        let from_env = temp_env::with_vars([("PROXIMA_SERVING_WEIGHT_STORE", Some(STORE))], || {
+            ServingSettings::from_env().expect("the weight store env parses")
+        });
+
+        assert_eq!(from_toml, built, "toml and builder agree");
+        assert_eq!(from_env, built, "env and builder agree");
+        assert_eq!(ServingSettings::default().weight_store, None);
     }
 
     #[test]
