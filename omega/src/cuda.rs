@@ -5172,6 +5172,70 @@ mod tests {
         assert!(kernel.prologue.is_empty(), "a whole bind has no split or merge dispatch");
     }
 
+    const SPLIT_DEVICE: EmitDevice = EmitDevice { multiprocessors: 36 };
+
+    fn whole_attention_over_keys(rows: u64, keys: u64, heads: u64, head_dim: u64) -> BoundOp {
+        let mut op = whole_attention_op(rows, heads, head_dim);
+        let BoundOpKind::CachedAttention { new_key_rows, new_upper_inclusive, .. } = &mut op.kind else {
+            unreachable!("whole_attention_op always builds a CachedAttention kind");
+        };
+        *new_key_rows = keys;
+        *new_upper_inclusive = keys as i64;
+        op
+    }
+
+    #[test]
+    fn whole_attention_below_the_tile_threshold_splits_its_keys_on_a_known_device() {
+        for (rows, keys, heads, head_dim) in [(1, 1500, 6, 64), (3, 211, 3, 40)] {
+            let op = whole_attention_over_keys(rows, keys, heads, head_dim);
+
+            let kernel = emit_cuda_on_device(&op, &no_packed(), NumericPolicy::default(), SPLIT_DEVICE).expect("whole attention emits");
+            let unsplit = emit_cuda(&op, &no_packed()).expect("whole attention emits for an unknown device");
+
+            assert_eq!(kernel.prologue.len(), 1, "{rows}x{keys}: a known device splits the key range");
+            assert!(kernel.entry.contains("_wp") && kernel.entry.contains("_sk"), "{}", kernel.entry);
+            assert!(unsplit.prologue.is_empty(), "an unknown device keeps one block per vector");
+            let partial = &kernel.prologue[0];
+            assert!(partial.entry.contains("_wp") && partial.entry.ends_with("_split"), "{}", partial.entry);
+            for absent in ["in1[", "in5[", "in8", "pass_query", "@"] {
+                assert!(!partial.source.contains(absent), "`{absent}` is dead text in a whole partial pass");
+            }
+            assert!(partial.source.contains("partial += in0[qbase + pair] * (cached ? cached_key_at(in2, kbase + pair) : in4[kbase + pair]);"));
+            assert!(partial.source.contains("constexpr long long min_chunk_keys = 16LL;"));
+            assert!(kernel.source.contains("* __restrict__ partials"));
+        }
+    }
+
+    #[test]
+    fn whole_attention_split_chunks_follow_keys_rows_heads_and_the_device_width() {
+        let one_chunk = whole_attention_over_keys(1, 16, 6, 64);
+        let encoder = whole_attention_over_keys(1, 1500, 6, 64);
+        let tiled = whole_attention_over_keys(ATTENTION_TILE_MIN_ROWS, 1500, 6, 64);
+
+        assert_eq!(split_chunks(&one_chunk.kind, SPLIT_DEVICE), None, "one chunk of keys needs no split");
+        assert_eq!(split_chunks(&encoder.kind, SPLIT_DEVICE), Some(24), "36 multiprocessors x 4 waves over 6 vectors");
+        assert_eq!(split_chunks(&encoder.kind, EmitDevice::default()), None, "an unknown device keeps one block per vector");
+        assert_eq!(split_chunks(&tiled.kind, SPLIT_DEVICE), None, "the tiled body owns every row from the tile threshold up");
+    }
+
+    #[test]
+    fn paired_decode_split_pass_keeps_the_odd_plane_and_the_pass_triple_reads() {
+        let kind = attention_kind(9, 512, 128, 128);
+        let op = BoundOp { extents: vec![1, 1, 8, 128], ..attention_op_with(kind) };
+
+        let kernel = emit_cuda_on_device(&op, &no_packed(), NumericPolicy::default(), SPLIT_DEVICE).expect("paired decode emits");
+
+        let partial = &kernel.prologue[0];
+        for present in [
+            "constexpr long long min_chunk_keys = 16LL;",
+            "partial += in1[qbase + pair] * (cached ? cached_key_at(in3, kbase + pair) : in5[kbase + pair]);",
+            "partial += pass_query[qpass + column] * (cached ? pass_cached_key[kpass + column] : pass_new_key[kpass + column]);",
+        ] {
+            assert!(partial.source.contains(present), "missing `{present}`");
+        }
+        assert!(!partial.source.contains('@'), "a template marker leaked into the paired partial pass");
+    }
+
     #[test]
     fn whole_attention_above_the_tile_threshold_stages_k_and_v_tiles_once_per_row_tile() {
         let rows = 1500;

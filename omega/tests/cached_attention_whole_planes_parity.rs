@@ -105,7 +105,15 @@ fn assert_metal_binds_one_whole_attention(
 
 fn assert_whole_attention_parity(rows: u32, keys: u32, heads: u32, head_dim: u32) {
     for (kernel, policy) in metal_policies() {
-        assert_whole_attention_parity_under(kernel, policy, (rows, keys, heads, head_dim));
+        assert_whole_attention_parity_under(kernel, policy, (rows, keys, heads, head_dim), false);
+    }
+}
+
+/// Few query rows over many keys: the serving policy picks the split-KV decode form over one
+/// head_dim plane, and the oracle policy keeps the per-row kernel.
+fn assert_whole_attention_split_parity(rows: u32, keys: u32, heads: u32, head_dim: u32) {
+    for (kernel, policy) in metal_policies() {
+        assert_whole_attention_parity_under(kernel, policy, (rows, keys, heads, head_dim), true);
     }
 }
 
@@ -113,6 +121,7 @@ fn assert_whole_attention_parity_under(
     kernel: &str,
     policy: NumericPolicy,
     (rows, keys, heads, head_dim): (u32, u32, u32, u32),
+    decode_split_expected: bool,
 ) {
     let (program, root) = attention_program(rows, keys, heads, head_dim);
     assert_metal_binds_one_whole_attention(&program, root, policy);
@@ -148,10 +157,17 @@ fn assert_whole_attention_parity_under(
     let kernel_names = plan.kernel_keys().expect("the pipeline identities resolve");
     let row_tiled = kernel_names.iter().any(|name| name.contains("_cbrt"));
     // the row-tiled form needs whole 16-wide head-dim fragments, so the 4-wide cell stays per-row
-    let admits_row_tiled = kernel == "row-tiled" && head_dim.is_multiple_of(16);
+    let admits_row_tiled =
+        kernel == "row-tiled" && head_dim.is_multiple_of(16) && !decode_split_expected;
     assert_eq!(
         row_tiled, admits_row_tiled,
         "{kernel}: the whole attention picked the wrong kernel form: {kernel_names:?}"
+    );
+    let decode_split = kernel_names.iter().any(|name| name.contains("_cbds"));
+    assert_eq!(
+        decode_split,
+        kernel == "row-tiled" && decode_split_expected,
+        "{kernel}: the whole attention picked the wrong decode form: {kernel_names:?}"
     );
     let metal = omega::execute_plan_named(&plan, &named)
         .expect("metal runs the whole-plane attention on a real device");
@@ -208,4 +224,14 @@ fn whole_attention_with_rows_that_are_not_a_tile_multiple_matches_the_unfused_cp
 #[test]
 fn whole_attention_with_a_short_ragged_row_tile_matches_the_unfused_cpu_chain() {
     assert_whole_attention_parity(77, 77, 2, 64);
+}
+
+#[test]
+fn whole_attention_one_row_over_the_encoder_keys_takes_the_decode_split_and_matches_the_unfused_cpu_chain() {
+    assert_whole_attention_split_parity(1, 1500, 6, 64);
+}
+
+#[test]
+fn whole_attention_three_ragged_rows_over_a_short_key_run_takes_the_decode_split_and_matches_the_unfused_cpu_chain() {
+    assert_whole_attention_split_parity(3, 211, 3, 40);
 }

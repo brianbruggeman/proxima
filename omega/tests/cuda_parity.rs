@@ -6482,6 +6482,24 @@ fn non_causal_attention_program(rows: u32, keys: u32, heads: u32, head_dim: u32)
 }
 
 fn assert_whole_attention_parity(rows: u32, keys: u32, heads: u32, head_dim: u32) {
+    let identities = whole_attention_parity(rows, keys, heads, head_dim);
+    assert!(
+        identities.iter().any(|identity| identity.contains("omega_cuda_cached_attention_static") && identity.contains("_wp") && identity.contains("_tq32")),
+        "{rows} query rows is past the tile threshold, so the whole-plane attention must take the tiled entry, not the per-row one: {identities:?}"
+    );
+}
+
+fn assert_whole_attention_split_parity(rows: u32, keys: u32, heads: u32, head_dim: u32) {
+    let identities = whole_attention_parity(rows, keys, heads, head_dim);
+    assert!(
+        identities.iter().any(|identity| {
+            identity.contains("omega_cuda_cached_attention_static") && identity.contains("_wp") && identity.contains("_sk") && !identity.contains("_tq")
+        }),
+        "{rows} query rows over {keys} keys is below the tile threshold, so the whole-plane attention must take the split entry: {identities:?}"
+    );
+}
+
+fn whole_attention_parity(rows: u32, keys: u32, heads: u32, head_dim: u32) -> Vec<String> {
     let program = non_causal_attention_program(rows, keys, heads, head_dim);
     let owned = vec![
         ("q".to_string(), random_vec(11, (rows * heads * head_dim) as usize)),
@@ -6512,16 +6530,23 @@ fn assert_whole_attention_parity(rows: u32, keys: u32, heads: u32, head_dim: u32
         identities.iter().any(|identity| identity.contains("omega_cuda_cached_attention_static") && identity.contains("_wp")),
         "the whole-plane attention kernel is absent from the cuda plan, the chain ran unfused: {identities:?}"
     );
-    assert!(
-        identities.iter().any(|identity| identity.contains("omega_cuda_cached_attention_static") && identity.contains("_wp") && identity.contains("_tq32")),
-        "{rows} query rows is past the tile threshold, so the whole-plane attention must take the tiled entry, not the per-row one: {identities:?}"
-    );
     assert!(relative < 1e-4, "cuda whole attention vs the cpu chain: relative={relative}, tolerance 1e-4");
+    identities
 }
 
 #[test]
 fn whisper_shaped_whole_attention_runs_on_cuda_at_cpu_parity() {
     assert_whole_attention_parity(1500, 1500, 6, 64);
+}
+
+#[test]
+fn one_row_whole_attention_over_the_encoder_keys_takes_the_split_entry_at_cpu_parity() {
+    assert_whole_attention_split_parity(1, 1500, 6, 64);
+}
+
+#[test]
+fn ragged_few_row_whole_attention_takes_the_split_entry_at_cpu_parity() {
+    assert_whole_attention_split_parity(3, 211, 3, 40);
 }
 
 #[test]
