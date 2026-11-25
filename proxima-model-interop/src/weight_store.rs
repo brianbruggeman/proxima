@@ -137,6 +137,22 @@ pub fn lookup(dir: &Path, key: u128) -> Option<PathBuf> {
     Some(store_path(dir, key)).filter(|path| path.is_file())
 }
 
+/// Creates `dir` and proves a file can be made in it, so a model-sized buffer is
+/// never built for a directory that cannot take it. The probe carries the temp
+/// extension, so a crash that leaves it behind is swept like any torn write.
+///
+/// # Errors
+///
+/// [`InteropError::SidecarIo`] when the directory or the probe file cannot be made.
+pub fn ensure_writable(dir: &Path) -> Result<(), InteropError> {
+    fs::create_dir_all(dir)?;
+    let sequence = NEXT_TORN.fetch_add(1, Ordering::Relaxed);
+    let probe = dir.join(format!(".probe.{}.{sequence}.{TORN_EXTENSION}", process::id()));
+    File::create(&probe)?;
+    fs::remove_file(&probe)?;
+    Ok(())
+}
+
 /// Writes `bytes` as the entry for `key`: a temp file in `dir` is written and
 /// synced, then renamed over the final name, so a reader sees the whole entry
 /// or none of it. The temp name carries the process id, so two processes

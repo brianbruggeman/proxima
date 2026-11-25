@@ -324,6 +324,46 @@ impl ModelWeights {
         out: &mut Vec<u8>,
     ) -> Result<usize, InteropError> {
         let held = self.held.lock();
+        Self::persist_locked(&held, manifest, file_bytes, data_start, alignment, out)
+    }
+
+    /// [`Self::persist_aligned`] when at least one tensor of `manifest` was recoded, and `Ok(None)` (nothing built,
+    /// `prepare` not run) when none was. The decision and the write run under one lock acquisition, so a bind
+    /// cannot change what was recoded between them; `prepare` runs after the decision and before the output is built.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::persist_aligned`], and whatever `prepare` returns.
+    pub fn persist_aligned_if_recoded(
+        &self,
+        manifest: &Manifest,
+        file_bytes: &[u8],
+        data_start: u64,
+        alignment: usize,
+        prepare: impl FnOnce() -> Result<(), InteropError>,
+        out: &mut Vec<u8>,
+    ) -> Result<Option<usize>, InteropError> {
+        let held = self.held.lock();
+        let recoded = manifest
+            .tensors
+            .iter()
+            .filter(|entry| !is_filler_name(&entry.name))
+            .any(|entry| held.element_recode(entry).is_some());
+        if !recoded {
+            return Ok(None);
+        }
+        prepare()?;
+        Self::persist_locked(&held, manifest, file_bytes, data_start, alignment, out).map(Some)
+    }
+
+    fn persist_locked(
+        held: &Materialized,
+        manifest: &Manifest,
+        file_bytes: &[u8],
+        data_start: u64,
+        alignment: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<usize, InteropError> {
         let mut substituted = 0;
         let mut tensors = Vec::with_capacity(manifest.tensors.len());
         for entry in manifest

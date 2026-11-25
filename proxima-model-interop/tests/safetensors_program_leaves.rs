@@ -1114,6 +1114,66 @@ fn the_recoded_bytes_of_each_element_target_are_pinned_to_the_store_layout_versi
 }
 
 #[test]
+fn persisting_only_when_recoded_builds_nothing_and_skips_the_preparation_for_a_model_that_recoded_nothing() {
+    let file_bytes = safetensors_fixture();
+    let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses fixture");
+    let data_start = header_data_start(&file_bytes);
+    let mut out = Vec::new();
+
+    let none = ModelWeights::new()
+        .persist_aligned_if_recoded(
+            &manifest,
+            &file_bytes,
+            data_start,
+            1,
+            || panic!("nothing was recoded, so the destination is never prepared"),
+            &mut out,
+        )
+        .expect("an unrecoded model is not an error");
+
+    assert_eq!(none, None);
+    assert!(out.is_empty(), "no buffer was built");
+}
+
+#[test]
+fn persisting_only_when_recoded_writes_after_preparing_for_a_model_that_recoded_a_leaf() {
+    let file_bytes = safetensors_fixture();
+    let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses fixture");
+    let data_start = header_data_start(&file_bytes);
+    let target = fixture_two_byte_target(&manifest);
+    let model = ModelWeights::new();
+    drop(bind_stored_order(
+        &model,
+        (&manifest, &file_bytes, data_start),
+        (
+            wide_fixture_tensor(&manifest, &[2, 3]),
+            wide_fixture_tensor(&manifest, &[2]),
+            target,
+        ),
+    ));
+    let mut prepared = 0;
+    let mut out = Vec::new();
+
+    let substituted = model
+        .persist_aligned_if_recoded(
+            &manifest,
+            &file_bytes,
+            data_start,
+            1,
+            || {
+                prepared += 1;
+                Ok(())
+            },
+            &mut out,
+        )
+        .expect("a recoded model persists");
+
+    assert_eq!(substituted, Some(1));
+    assert_eq!(prepared, 1, "the destination is prepared exactly once");
+    assert!(!out.is_empty());
+}
+
+#[test]
 fn persisting_a_model_that_recoded_nothing_substitutes_nothing() {
     let file_bytes = safetensors_fixture();
     let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses fixture");

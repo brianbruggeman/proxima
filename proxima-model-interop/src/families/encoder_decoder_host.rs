@@ -34,8 +34,8 @@ use crate::serving::apply_serving_config;
 use crate::serving_settings::ServingSettings;
 use crate::source::CheckpointMapping;
 use crate::weight_store::{
-    FileIdentity, device_alignment, emit_weight_store_hit, emit_weight_store_publish, header_prefix,
-    lookup, publish, register_mapping, store_key, unregister_mapping,
+    FileIdentity, device_alignment, emit_weight_store_hit, emit_weight_store_publish, ensure_writable,
+    header_prefix, lookup, publish, register_mapping, store_key, unregister_mapping,
 };
 
 const CHECKPOINT_FILE: &str = "model.safetensors";
@@ -772,7 +772,9 @@ pub struct Model {
     source_identity: Option<(Vec<u8>, FileIdentity)>,
     /// where the first call publishes its weights, and under which key; `None` when the store is off or this load hit it
     store_miss: Option<(PathBuf, u128)>,
-    /// set by the first publish attempt that succeeds, so later calls skip it
+    /// set by the first publish attempt, whatever its outcome, so a failing store is tried once per model
+    store_attempted: AtomicBool,
+    /// set only when an attempt wrote the entry
     store_published: AtomicBool,
     /// the runtime and its segment plans, kept so a repeat call reuses them; taken for the span of a call
     session: Mutex<Option<Session>>,
@@ -840,6 +842,7 @@ impl Model {
             weights: ModelWeights::new(),
             source_identity,
             store_miss: None,
+            store_attempted: AtomicBool::new(false),
             store_published: AtomicBool::new(false),
             session: Mutex::new(None),
             #[cfg(feature = "instrument")]
@@ -961,46 +964,67 @@ impl Model {
                 self.weights = ModelWeights::new();
             }
             None => {
+                self.store_attempted.store(false, Ordering::Release);
                 self.store_published.store(false, Ordering::Release);
                 self.store_miss = Some((store_dir, key));
             }
         }
     }
 
-    /// Publishes the weights the first call materialized, once. A failed write
-    /// leaves the flag clear, so the next call retries, and is reported as a
-    /// `weight_store_publish` event with `ok = false`.
+    /// Publishes the weights the first call materialized, at most once per model: the attempt is taken
+    /// before anything is built, so a store that cannot be written is tried once, warned once and
+    /// reported as a `weight_store_publish` event with `ok = false`, never retried on later calls.
+    /// `store_published` is set only when the entry was written.
     fn publish_store(&self) {
-        if self.store_miss.is_none() || self.store_published.swap(true, Ordering::AcqRel) {
+        if self.store_miss.is_none() || self.store_attempted.swap(true, Ordering::AcqRel) {
             return;
         }
         // with no recoded tensor the entry would be a full copy of the checkpoint, so nothing is written
-        if !self.weights.has_recoded(&self.manifest) {
-            return;
-        }
-        self.write_store();
+        self.write_store(true);
     }
 
-    /// Writes the entry for this load's miss unconditionally; [`Self::publish_store`] decides whether to.
-    fn write_store(&self) {
+    /// Writes the entry for this load's miss. With `only_recoded` the write happens only when a tensor
+    /// was recoded, decided under the same lock as the write; the store directory is proven writable
+    /// before the model-sized buffer is built.
+    fn write_store(&self, only_recoded: bool) {
         let Some((store_dir, key)) = &self.store_miss else {
             return;
         };
         let mut stored = Vec::new();
-        let written = self
-            .weights
-            .persist_aligned(
-                &self.manifest,
-                self.mapping.bytes(),
-                self.data_start,
+        let (manifest, bytes, data_start) = (&self.manifest, self.mapping.bytes(), self.data_start);
+        let prepare = || ensure_writable(store_dir);
+        let built = if only_recoded {
+            self.weights.persist_aligned_if_recoded(
+                manifest,
+                bytes,
+                data_start,
                 device_alignment(),
+                prepare,
                 &mut stored,
             )
-            .and_then(|_| publish(store_dir, *key, &stored));
-        if written.is_err() {
-            self.store_published.store(false, Ordering::Release);
+        } else {
+            prepare()
+                .and_then(|()| {
+                    self.weights
+                        .persist_aligned(manifest, bytes, data_start, device_alignment(), &mut stored)
+                })
+                .map(Some)
+        };
+        match built.and_then(|recoded| recoded.map(|_| publish(store_dir, *key, &stored)).transpose()) {
+            Ok(Some(_)) => {
+                self.store_published.store(true, Ordering::Release);
+                emit_weight_store_publish(*key, stored.len(), true);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                proxima_telemetry::warn!(
+                    ?error,
+                    directory = ?store_dir,
+                    "weight_store_publish: the store could not be written, this model will not retry"
+                );
+                emit_weight_store_publish(*key, 0, false);
+            }
         }
-        emit_weight_store_publish(*key, stored.len(), written.is_ok());
     }
 
     /// The cached-range rows a step binds, decided exactly as the llm decides
@@ -1761,7 +1785,8 @@ mod tests {
 
         let first = model_with(scratch.path(), stored_settings(&store));
         assert!(first.store_miss.is_some(), "an empty store is a miss");
-        first.write_store();
+        first.write_store(false);
+        assert!(first.store_published.load(Ordering::Acquire), "a written entry is marked published");
         let second = model_with(scratch.path(), stored_settings(&store));
 
         assert!(second.store_miss.is_none(), "the published entry is a hit");
@@ -1806,10 +1831,39 @@ mod tests {
     }
 
     #[test]
+    fn an_unwritable_store_fails_before_any_buffer_is_built_and_is_not_marked_published() {
+        let scratch = source_directory();
+        let blocker = scratch.path().join("store");
+        std::fs::write(&blocker, b"a file where the store directory should be").expect("writes the blocker");
+        let model = model_with(scratch.path(), stored_settings(&blocker));
+        assert!(model.store_miss.is_some(), "an unreadable store is a miss");
+
+        model.write_store(false);
+
+        assert!(!model.store_published.load(Ordering::Acquire), "a failed write is not published");
+        assert!(blocker.is_file(), "nothing replaced the blocker");
+    }
+
+    #[test]
+    fn a_store_is_attempted_once_per_model_whatever_the_outcome() {
+        let scratch = source_directory();
+        let store = scratch.path().join("store");
+        let model = model_with(scratch.path(), stored_settings(&store));
+        assert!(!model.store_attempted.load(Ordering::Acquire));
+
+        model.publish_store();
+        let after_first = model.store_attempted.load(Ordering::Acquire);
+        model.publish_store();
+
+        assert!(after_first, "the first publish takes the attempt");
+        assert!(!store.exists(), "with nothing recoded neither call writes");
+    }
+
+    #[test]
     fn a_changed_rule_list_is_a_miss_against_an_existing_store() {
         let scratch = source_directory();
         let store = scratch.path().join("store");
-        model_with(scratch.path(), stored_settings(&store)).write_store();
+        model_with(scratch.path(), stored_settings(&store)).write_store(false);
         let mut reruled: ServingSettings = conflaguration::from_toml_str(
             "[[weight_precision]]\npattern_kind = \"suffix\"\npattern = \"fc1.weight\"\ntarget = \"q8_0\"",
         )
