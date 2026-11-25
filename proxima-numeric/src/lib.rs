@@ -71,6 +71,7 @@ pub mod packed_rows;
 pub mod range_fit;
 pub mod rng;
 pub mod row_block;
+pub mod sized;
 pub mod tables;
 mod two_level;
 pub mod value;

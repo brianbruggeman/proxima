@@ -4859,6 +4859,7 @@ dependencies = [
  "criterion",
  "half",
  "libm",
+ "proxima-build",
  "proxima-gguf",
  "serde",
  "serde_json",

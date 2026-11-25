@@ -39,3 +39,6 @@ toml.workspace = true
 [[bench]]
 name = "bench_kv_cache_codec"
 harness = false
+
+[build-dependencies]
+proxima-build.workspace = true

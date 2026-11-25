@@ -10,10 +10,21 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use crate::convert::{Overflow, Rounding};
 use crate::decode::decode_blocks;
 use crate::error::NumericError;
 use crate::format::NumericFormat;
 use crate::format_codec::FormatCodec;
+use crate::sized::CONVERT_WINDOW_ELEMENTS;
+use crate::value::Numeric;
+
+const fn lcm(left: usize, right: usize) -> usize {
+    let (mut high, mut low) = (left, right);
+    while low != 0 {
+        (high, low) = (low, high % low);
+    }
+    left / high * right
+}
 
 /// Values stored as the packed bytes of one format.
 #[derive(Clone)]
@@ -326,9 +337,79 @@ impl PackedRows {
     /// # Errors
     /// Whatever [`Self::decode_all`] or the encode reports.
     pub fn to_host_element(&self) -> Result<Self, NumericError> {
-        let mut values = Vec::new();
-        self.decode_all(&mut values)?;
-        Self::from_values(&NumericFormat::host_element(), &values)
+        self.convert(
+            &NumericFormat::host_element(),
+            Rounding::NearestTiesEven,
+            Overflow::Format,
+        )
+    }
+
+    /// This run re-encoded in `target`, streamed through a window of
+    /// [`CONVERT_WINDOW_ELEMENTS`] wide values (rounded down to a whole number of the source's and
+    /// the target's blocks, never below one of each): each window is [`decode_blocks`]-decoded,
+    /// then narrowed once by [`Numeric::to`] under `rounding` and `overflow`, so no whole-run wide
+    /// buffer exists. A `target` that is the source format, or a scalar identity of it
+    /// ([`NumericFormat::is_identity_of`]), returns the bytes unchanged. A target that is the host
+    /// element takes the codec's own encode, which stores a decoded value exactly (a `NaN` too).
+    ///
+    /// # Errors
+    /// [`NumericError::UnsupportedEncode`] when `target` has no slice codec that encodes;
+    /// [`NumericError::InputNotElementMultiple`] when the run is not whole blocks of `target`; the
+    /// decode's or [`Numeric::to`]'s own error otherwise (a `NaN` into a format that cannot store one).
+    pub fn convert(
+        &self,
+        target: &NumericFormat,
+        rounding: Rounding,
+        overflow: Overflow,
+    ) -> Result<Self, NumericError> {
+        let target_codec = Self::resolve(target)?;
+        if *self.format == *target || self.format.is_identity_of(target) {
+            return Ok(Self {
+                format: Arc::new(*target),
+                bytes: self.bytes.clone(),
+                elements: self.elements,
+            });
+        }
+        let source_codec = self.codec()?;
+        let total_bytes = target_codec
+            .packed_len(self.elements)
+            .ok_or_else(|| Self::not_whole_blocks(&target_codec, self.elements))?;
+        let window =
+            Self::window(source_codec.elements(), target_codec.elements()).min(self.elements);
+        let mut wide = Vec::new();
+        wide.resize_with(window, Default::default);
+        let mut bytes = alloc::vec![0u8; total_bytes];
+        let mut written = 0;
+        for start in (0..self.elements).step_by(window.max(1)) {
+            let len = window.min(self.elements - start);
+            let values = &mut wide[..len];
+            decode_blocks(
+                &self.format,
+                &self.bytes[self.range_bytes(start, len)?],
+                values,
+            )?;
+            let packed = target_codec
+                .packed_len(len)
+                .ok_or_else(|| Self::not_whole_blocks(&target_codec, len))?;
+            let out = &mut bytes[written..written + packed];
+            written += packed;
+            if target.is_host_element() {
+                target_codec.encode(values, out)?;
+            } else {
+                Numeric::new(&self.format, values)?.to(target, rounding, overflow, out)?;
+            }
+        }
+        Ok(Self {
+            format: Arc::new(*target),
+            bytes,
+            elements: self.elements,
+        })
+    }
+
+    // the largest whole number of both formats' blocks within the configured window, at least one
+    fn window(source_elements: usize, target_elements: usize) -> usize {
+        let block = lcm(source_elements.max(1), target_elements.max(1));
+        (CONVERT_WINDOW_ELEMENTS / block).max(1) * block
     }
 }
 
@@ -499,5 +580,183 @@ mod tests {
 
         assert!(!kept.as_bytes().is_empty());
         assert_eq!(kept.as_bytes(), native.as_bytes());
+    }
+
+    fn convert_nearest(
+        rows: &PackedRows,
+        target: &NumericFormat,
+    ) -> Result<PackedRows, NumericError> {
+        rows.convert(target, Rounding::NearestTiesEven, Overflow::Format)
+    }
+
+    // block formats the slice codec encodes, in the order the format table lists them
+    fn encodable_blocks() -> Vec<NumericFormat> {
+        NumericFormat::ALL
+            .into_iter()
+            .filter(|format| {
+                matches!(format, NumericFormat::Block(_)) && PackedRows::new(format).is_ok()
+            })
+            .collect()
+    }
+
+    fn host_rows(count: usize) -> PackedRows {
+        PackedRows::from_values(&NumericFormat::host_element(), &activations(count))
+            .expect("host encodes")
+    }
+
+    #[test]
+    fn convert_host_to_every_scalar_layout_and_back_matches_the_layout_codecs_narrowing() {
+        let values = activations(257);
+        let host = host_rows(257);
+        let mut compared = 0;
+        for (layout, _) in NAMED_LAYOUTS
+            .iter()
+            .filter(|(layout, _)| FormatCodec::scalar(layout).is_some())
+        {
+            let narrow = NumericFormat::Scalar(*layout);
+            let back = convert_nearest(
+                &convert_nearest(&host, &narrow).expect("narrows"),
+                &NumericFormat::host_element(),
+            )
+            .expect("widens");
+            let mut got = Vec::new();
+            back.decode_all(&mut got).expect("decodes");
+
+            let expected: Vec<_> = values
+                .iter()
+                .map(|value| {
+                    crate::convert::narrow_to_layout(
+                        *value,
+                        *layout,
+                        Rounding::NearestTiesEven,
+                        Overflow::Format,
+                    )
+                })
+                .collect::<Result<_, _>>()
+                .expect("layout narrows");
+            assert_eq!(
+                got.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "{layout:?} differs from narrow_to_layout"
+            );
+            compared += 1;
+        }
+        assert!(compared > 0, "no scalar layout was compared");
+    }
+
+    #[test]
+    fn convert_host_to_a_block_and_back_matches_encode_blocks_then_decode_blocks() {
+        let block = encodable_blocks().remove(0);
+        let count = usize::from(block.elements_per_block()) * 3;
+        let values = activations(count);
+        let host = host_rows(count);
+
+        let quantized = convert_nearest(&host, &block).expect("block converts");
+        let back =
+            convert_nearest(&quantized, &NumericFormat::host_element()).expect("host converts");
+
+        let mut packed = alloc::vec![0u8; 3 * usize::from(block.bytes_per_block())];
+        crate::encode::encode_blocks(&block, &values, &mut packed).expect("encodes");
+        let mut expected = Vec::new();
+        expected.resize_with(count, Default::default);
+        decode_blocks(&block, &packed, &mut expected).expect("decodes");
+        let mut got = Vec::new();
+        back.decode_all(&mut got).expect("decodes");
+        assert_eq!(quantized.as_bytes(), packed.as_slice());
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn convert_between_two_block_formats_lands_in_the_target_geometry() {
+        let blocks = encodable_blocks();
+        let (first, second) = blocks
+            .iter()
+            .zip(blocks.iter().skip(1))
+            .next()
+            .expect("two block formats");
+        let count = usize::from(first.elements_per_block())
+            .max(usize::from(second.elements_per_block()))
+            * 8;
+        let source = convert_nearest(&host_rows(count), first).expect("scalar to block");
+
+        let target = convert_nearest(&source, second).expect("block to block");
+
+        let blocks_held = count / usize::from(second.elements_per_block());
+        assert_eq!(target.elements(), count);
+        assert_eq!(
+            target.as_bytes().len(),
+            blocks_held * usize::from(second.bytes_per_block())
+        );
+    }
+
+    #[test]
+    fn convert_to_the_same_format_returns_identical_bytes() {
+        let block = encodable_blocks().remove(0);
+        let narrow = NumericFormat::ALL
+            .into_iter()
+            .find(|format| {
+                !format.is_host_element()
+                    && matches!(format, NumericFormat::Scalar(_))
+                    && PackedRows::new(format).is_ok()
+            })
+            .expect("a narrow scalar format");
+        for format in [NumericFormat::host_element(), narrow, block] {
+            let count = usize::from(format.elements_per_block()) * 4;
+            let rows = PackedRows::from_values(&format, &activations(count)).expect("encodes");
+
+            let same = convert_nearest(&rows, &format).expect("identity converts");
+
+            assert_eq!(same, rows);
+        }
+    }
+
+    #[test]
+    fn convert_to_a_format_no_codec_encodes_is_a_typed_error() {
+        let unsupported = NumericFormat::ALL
+            .into_iter()
+            .find(|format| PackedRows::new(format).is_err())
+            .expect("some format has no encoding codec");
+
+        let refused = convert_nearest(&host_rows(256), &unsupported);
+
+        assert!(matches!(
+            refused,
+            Err(NumericError::UnsupportedEncode { .. })
+        ));
+    }
+
+    #[test]
+    fn convert_streams_a_run_larger_than_the_window_as_that_window_repeated() {
+        let target = encodable_blocks().remove(0);
+        let block = usize::from(target.elements_per_block());
+        let window = PackedRows::window(1, block);
+        let rows = host_rows(window * 2 + block);
+
+        let whole = convert_nearest(&rows, &target).expect("converts");
+
+        let mut stitched = PackedRows::new(&target).expect("new");
+        let mut start = 0;
+        while start < rows.elements() {
+            let len = window.min(rows.elements() - start);
+            let mut piece = PackedRows::new(rows.format()).expect("new");
+            piece.extend_from(&rows, start, len).expect("slice");
+            let converted = convert_nearest(&piece, &target).expect("converts");
+            stitched.extend_from(&converted, 0, len).expect("append");
+            start += len;
+        }
+        assert!(rows.elements() > window);
+        assert_eq!(whole, stitched);
+    }
+
+    #[test]
+    fn the_window_is_a_whole_number_of_both_formats_blocks() {
+        let window = PackedRows::window(3, 256);
+
+        assert_eq!(window % 3, 0);
+        assert_eq!(window % 256, 0);
+        assert!(window >= 768);
     }
 }

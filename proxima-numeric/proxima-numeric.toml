@@ -1,0 +1,10 @@
+# build-time sizing for proxima-numeric, read by build.rs and emitted as consts into
+# OUT_DIR/proxima_numeric_sized.rs (guiding principle 12). Per-system override at build time:
+#
+#   PROXIMA_NUMERIC_CONVERT_WINDOW_ELEMENTS=65536 cargo build -p proxima-numeric
+
+[convert]
+# Wide (f32) values `PackedRows::convert` holds at once. The window is rounded down to a whole
+# number of the source's and the target's blocks (never below one of each). Raising it trades
+# scratch memory (4 bytes a value) for fewer decode/encode calls; lowering it does the reverse.
+window_elements = 8192
