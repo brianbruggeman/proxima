@@ -144,8 +144,11 @@ use omega::backend::set_dispatch_type;
 use omega::backend::set_attention_variant;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::backend::set_command_buffer_chunks;
-#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-use omega::metal::OpGpuTiming;
+#[cfg(all(
+    feature = "instrument",
+    any(feature = "cuda", all(feature = "metal", target_os = "macos"))
+))]
+use omega::OpGpuTiming;
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use omega::metal::metal_stage_totals;
 // Persistent device-resident KV: `PlacedBuffer`/`allocate_placed_buffer`/

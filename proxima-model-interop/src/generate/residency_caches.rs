@@ -3489,6 +3489,12 @@ pub struct BackendRuntime {
     kv_carry_pairs: Vec<(NodeId, NodeId, NumericFormat)>,
     kv_carry_cached_rows: u64,
     kv_carry_accepted: bool,
+    /// set by the CUDA `evaluate_segment_op_timed` for the one evaluation it wraps: the execute
+    /// then brackets each launch with events and leaves the records in `op_timings_taken`
+    #[cfg(all(feature = "instrument", feature = "cuda"))]
+    op_timing_armed: bool,
+    #[cfg(all(feature = "instrument", feature = "cuda"))]
+    op_timings_taken: Vec<OpGpuTiming>,
     /// Per `new_count`, whether the first CUDA plan built for that width reads its
     /// `kv_cache.*` inputs only through fused `CachedAttention` ops, so the range may be
     /// bound padded to its bucket. Decided once per width, at that plan's first build.
@@ -3697,6 +3703,10 @@ impl BackendRuntime {
             kv_carry_pairs: Vec::new(),
             kv_carry_cached_rows: 0,
             kv_carry_accepted: false,
+            #[cfg(all(feature = "instrument", feature = "cuda"))]
+            op_timing_armed: false,
+            #[cfg(all(feature = "instrument", feature = "cuda"))]
+            op_timings_taken: Vec::new(),
             #[cfg(feature = "gpu")]
             kv_pad: alloc::collections::BTreeMap::new(),
             #[cfg(feature = "gpu")]
@@ -4757,6 +4767,19 @@ impl BackendRuntime {
             0
         };
         let execute_started = std::time::Instant::now();
+        #[cfg(all(feature = "instrument", feature = "cuda"))]
+        let result = if self.op_timing_armed {
+            omega::backend::execute_plan_named_cuda_op_timed(plan, named, None)
+                .map(|(evaluated, timings)| {
+                    self.op_timings_taken = timings;
+                    evaluated
+                })
+                .map_err(InteropError::from)
+        } else {
+            execute_plan_named_with_expert_sources(plan, named, expert_sources)
+                .map_err(InteropError::from)
+        };
+        #[cfg(not(all(feature = "instrument", feature = "cuda")))]
         let result = execute_plan_named_with_expert_sources(plan, named, expert_sources)
             .map_err(InteropError::from);
         if host_timing {
@@ -4799,6 +4822,36 @@ impl BackendRuntime {
             }
         }
         result
+    }
+
+    /// CUDA entry of the one per-op timing contract: [`Self::evaluate_segment`] through the same
+    /// cached plan, with each launch bracketed by CUDA events so the records come back in the
+    /// [`OpGpuTiming`] shape Metal's twin returns. `expert_sources` must be empty: CUDA rejects them.
+    #[cfg(all(feature = "instrument", feature = "cuda", not(target_os = "macos")))]
+    pub(crate) fn evaluate_segment_op_timed(
+        &mut self,
+        program: &[Op],
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
+        expert_sources: &alloc::collections::BTreeMap<
+            NodeId,
+            proxima_tensor::cpu::ExpertSource<'_>,
+        >,
+    ) -> Result<(Evaluated, Vec<OpGpuTiming>), InteropError> {
+        self.op_timing_armed = true;
+        self.op_timings_taken.clear();
+        let evaluated = self.evaluate_segment(
+            program,
+            symbols,
+            named,
+            outputs,
+            resident_names,
+            Some(expert_sources),
+        );
+        self.op_timing_armed = false;
+        Ok((evaluated?, core::mem::take(&mut self.op_timings_taken)))
     }
 
     /// Diagnostic twin of [`Self::evaluate_segment`] for a routed gather.

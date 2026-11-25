@@ -1,13 +1,17 @@
-//! Per-op time of the real whisper encoder, through the serving path.
+//! Per-op time of the real whisper stages, through the serving path.
 //!
 //! Loads the checkpoint with `Model::load` and the serving settings from the environment, exactly as
 //! the `whisper` example does, so `PROXIMA_SERVING_WEIGHT_PRECISION` applies and the projections are
-//! the recoded weights the serving encoder binds (`Bound::bind`, which reads `weight_precision_rules`
+//! the recoded weights the serving programs bind (`Bound::bind`, which reads `weight_precision_rules`
 //! and calls `ModelWeights::bind`).
 //!
-//! On Metal (`metal` feature, macos, `PROXIMA_SERVING_GPU_LAYERS` not 0) `Model::with_encode_op_timings`
-//! runs the encode program one command buffer per op through `BackendRuntime::evaluate_segment_op_timed`,
-//! the wrapper of `omega::metal::execute_plan_named_op_timed`, and the table prints `gpu_ns` per op.
+//! On a GPU build (`metal` on macos, or `cuda`; `PROXIMA_SERVING_GPU_LAYERS` not 0) `Model::with_op_timings`
+//! times the mel front end, the encoder and every decode step through
+//! `BackendRuntime::evaluate_segment_op_timed`: Metal runs one command buffer per op
+//! (`omega::metal::execute_plan_named_op_timed`), CUDA brackets each launch with an event pair
+//! (`omega::backend::execute_plan_named_cuda_op_timed`). Both return `omega::OpGpuTiming`. Per stage the
+//! table prints a per-kind total and the top-10 ops by `gpu_ns`; mel and encode are reduced over
+//! `--passes`, decode is one steady step (the middle step of the last transcription), unreduced.
 //!
 //! On the CPU (`PROXIMA_SERVING_GPU_LAYERS=0`, or a build with no GPU feature) the serving encode runs
 //! `CpuStepPlan::execute` -> `run_prepared_step`, which records every node into the
@@ -16,8 +20,8 @@
 //! dot-tile outcome recorded for it. The process must run with `PROXIMA_ARENA_PER_NODE=1`.
 //!
 //! `--wav <file>` and `--model <dir>` are the same inputs the `whisper` example takes. `--passes <n>`
-//! (alias `--repeat`, default 5) runs the timed encode n times in this process and reports each op's
-//! min and median over them, the first pass included.
+//! (alias `--repeat`, default 5) runs the timed transcription n times in this process and reports each
+//! op's min and median over them, the first pass included.
 
 #[cfg(feature = "instrument")]
 mod run {
@@ -30,6 +34,8 @@ mod run {
     use proxima_model_interop::audio::wav;
     use proxima_model_interop::families::encoder_decoder_host::Model;
     use proxima_tensor::instrument::ticks_to_nanos;
+
+    const GPU_TIMED: bool = cfg!(any(feature = "cuda", all(feature = "metal", target_os = "macos")));
 
     fn median(sorted: &[u64]) -> u64 {
         let middle = sorted.len() / 2;
@@ -65,25 +71,29 @@ mod run {
         let audio = wav::read(&wav_path.context("--wav is required")?)?;
         let settings =
             <ServingSettings as Settings>::from_env().context("serving settings from env")?;
-        let on_gpu = settings.gpu_layers != 0;
+        let on_gpu = settings.gpu_layers != 0 && GPU_TIMED;
         let model =
             Model::load(&model_path.context("--model is required")?)?.with_settings(settings);
+        #[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
+        let model = if on_gpu { model.with_op_timings() } else { model };
         let mut transcript = None;
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        let model = if on_gpu {
-            model.with_encode_op_timings()
-        } else {
-            model
-        };
+        #[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
+        let mut last_run_steps = 0;
         for _ in 0..passes {
+            #[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
+            let before = model.op_timing_passes("decode").len();
             transcript = Some(model.transcribe(&audio.samples, "en")?);
+            #[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
+            {
+                last_run_steps = model.op_timing_passes("decode").len() - before;
+            }
         }
         println!("passes={passes} engine={}", engine_name(on_gpu));
-        #[cfg(all(feature = "metal", target_os = "macos"))]
+        #[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
         if on_gpu {
-            gpu_table(&model, passes)?;
+            gpu_tables(&model, last_run_steps)?;
         }
-        if !on_gpu || !cfg!(all(feature = "metal", target_os = "macos")) {
+        if !on_gpu {
             cpu_table(&model, passes)?;
         }
         let ids: Vec<String> = transcript
@@ -97,10 +107,10 @@ mod run {
     }
 
     fn engine_name(on_gpu: bool) -> &'static str {
-        if on_gpu && cfg!(all(feature = "metal", target_os = "macos")) {
-            "metal"
-        } else {
-            "cpu"
+        match (on_gpu, cfg!(feature = "cuda")) {
+            (true, true) => "cuda",
+            (true, false) => "metal",
+            (false, _) => "cpu",
         }
     }
 
@@ -161,42 +171,68 @@ mod run {
         Ok(())
     }
 
-    #[cfg(all(feature = "metal", target_os = "macos"))]
-    fn gpu_table(model: &Model, passes: usize) -> Result<()> {
-        use proxima_model_interop::families::encoder_decoder_host::{
-            OpSample, kind_totals, reduce_op_passes,
-        };
+    #[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
+    const TOP_OPS: usize = 10;
 
-        let raw = model.encode_op_timing_passes();
-        let first_pass = raw
-            .first()
-            .context("the transcription ran no profiled encode")?;
-        if first_pass.is_empty() {
-            bail!("the timed run returned no per-op timings");
-        }
+    #[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
+    fn reduce(
+        raw: &[Vec<omega::OpGpuTiming>],
+    ) -> Result<Vec<proxima_model_interop::families::encoder_decoder_host::OpPassStats>> {
+        use proxima_model_interop::families::encoder_decoder_host::{OpSample, reduce_op_passes};
+
         let sampled: Vec<Vec<OpSample>> = raw
             .iter()
             .map(|pass| pass.iter().map(OpSample::from).collect())
             .collect();
-        let stats = reduce_op_passes(&sampled)?;
-        let first_total: u64 = first_pass.iter().map(|timing| timing.gpu_ns).sum();
-        println!("first_pass_gpu_ns_total={first_total}");
-        for stat in &stats {
-            println!(
-                "op node={} kind={} extents={:?} passes={} gpu_ns_min={} gpu_ns_median={}",
-                stat.node.0, stat.kind, stat.extents, stat.passes, stat.min_ns, stat.median_ns
-            );
-        }
-        for (kind, (count, min_total, median_total)) in kind_totals(&stats) {
-            println!(
-                "kind={kind} ops={count} passes={passes} gpu_ns_min_total={min_total} gpu_ns_median_total={median_total}"
-            );
-        }
+        reduce_op_passes(&sampled)
+    }
+
+    #[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
+    fn report(
+        stage: &str,
+        passes: usize,
+        stats: &[proxima_model_interop::families::encoder_decoder_host::OpPassStats],
+    ) {
+        use proxima_model_interop::families::encoder_decoder_host::kind_totals;
+
         let min_total: u64 = stats.iter().map(|stat| stat.min_ns).sum();
         println!(
-            "ops={} passes={passes} gpu_ns_min_total={min_total}",
+            "stage={stage} ops={} passes={passes} gpu_ns_min_total={min_total}",
             stats.len()
         );
+        let mut kinds: Vec<_> = kind_totals(stats).into_iter().collect();
+        kinds.sort_by_key(|(_, (_, min_ns, _))| std::cmp::Reverse(*min_ns));
+        for (kind, (count, min_ns, median_ns)) in kinds {
+            println!(
+                "stage={stage} kind={kind} ops={count} gpu_ns_min_total={min_ns} gpu_ns_median_total={median_ns}"
+            );
+        }
+        let mut ranked: Vec<_> = stats.iter().collect();
+        ranked.sort_by_key(|stat| std::cmp::Reverse(stat.min_ns));
+        for stat in ranked.into_iter().take(TOP_OPS) {
+            println!(
+                "stage={stage} top node={} kind={} extents={:?} gpu_ns_min={} gpu_ns_median={}",
+                stat.node.0, stat.kind, stat.extents, stat.min_ns, stat.median_ns
+            );
+        }
+    }
+
+    #[cfg(any(feature = "cuda", all(feature = "metal", target_os = "macos")))]
+    fn gpu_tables(model: &Model, last_run_steps: usize) -> Result<()> {
+        for stage in ["mel", "encode"] {
+            let raw = model.op_timing_passes(stage);
+            if raw.first().is_none_or(Vec::is_empty) {
+                bail!("the {stage} stage returned no per-op timings");
+            }
+            report(stage, raw.len(), &reduce(&raw)?);
+        }
+        let decode = model.op_timing_passes("decode");
+        let last_run = &decode[decode.len() - last_run_steps.min(decode.len())..];
+        let steady = last_run
+            .get(last_run.len() / 2)
+            .filter(|step| !step.is_empty())
+            .context("the transcription ran no timed decode step")?;
+        report("decode", 1, &reduce(std::slice::from_ref(steady))?);
         Ok(())
     }
 }

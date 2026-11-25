@@ -164,14 +164,14 @@ struct Bound<'a> {
     /// the plan-cache key of `program`, hashed on first run once the program is complete
     key: std::cell::OnceCell<usize>,
     /// `Some` asks the next run for per-op GPU time; the run fills the cell
-    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-    op_timings: Option<std::sync::OnceLock<Vec<omega::metal::OpGpuTiming>>>,
+    #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+    op_timings: Option<std::sync::OnceLock<Vec<omega::OpGpuTiming>>>,
 }
 
 impl<'a> Bound<'a> {
     fn new(shape: Shape) -> Self {
         Self {
-            #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+            #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
             op_timings: None,
             program: Vec::new(),
             named: BTreeMap::new(),
@@ -581,7 +581,7 @@ impl<'a> Bound<'a> {
         resident.extend(self.call_resident.iter().map(String::as_str));
         #[cfg(feature = "instrument")]
         let prep = run_started.elapsed();
-        #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+        #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
         if let Some(cell) = &self.op_timings {
             let timed_outputs: Vec<NodeId> = outputs
                 .iter()
@@ -599,7 +599,12 @@ impl<'a> Bound<'a> {
                 )
                 .map_err(|error| anyhow::anyhow!("{stage} segment does not evaluate: {error:?}"))?;
             let _ = cell.set(timings);
-            return collect_outputs(&evaluated, outputs, &self.handoff_out, false);
+            return collect_outputs(
+                &evaluated,
+                outputs,
+                &self.handoff_out,
+                runtime.kv_carry_accepted(),
+            );
         }
         #[cfg(feature = "instrument")]
         let evaluate_started = Instant::now();
@@ -768,15 +773,18 @@ pub struct Model {
     store_published: AtomicBool,
     /// the runtime and its segment plans, kept so a repeat call reuses them; taken for the span of a call
     session: Mutex<Option<Session>>,
-    /// set by [`Model::with_encode_op_timings`]: the encode program then runs one command buffer per op
-    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-    profile_encode: bool,
-    /// the per-op GPU time of the encode program, one entry per profiled transcription (one pass each)
-    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-    encode_timings: Mutex<Vec<Vec<omega::metal::OpGpuTiming>>>,
     /// the CPU evaluator's per-node record of each encode, one entry per transcription; empty rows unless `PROXIMA_ARENA_PER_NODE=1`
     #[cfg(feature = "instrument")]
     encode_cpu_nodes: Mutex<Vec<CpuNodePass>>,
+    /// set by [`Model::with_encode_op_timings`] / [`Model::with_op_timings`]: the named stages ("mel",
+    /// "encode", "decode") then run with per-op GPU timing (Metal: one command buffer per op; CUDA:
+    /// an event pair per launch)
+    #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+    profile_stages: &'static [&'static str],
+    /// the per-op GPU time of every profiled run, tagged with its stage, in run order (a decode
+    /// stage contributes one entry per step)
+    #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+    stage_timings: Mutex<Vec<(&'static str, Vec<omega::OpGpuTiming>)>>,
 }
 
 /// One encode's CPU per-node table (`instrument::arena_per_node_snapshot`) and the dot-tile
@@ -830,12 +838,12 @@ impl Model {
             store_miss: None,
             store_published: AtomicBool::new(false),
             session: Mutex::new(None),
-            #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-            profile_encode: false,
-            #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-            encode_timings: Mutex::new(Vec::new()),
             #[cfg(feature = "instrument")]
             encode_cpu_nodes: Mutex::new(Vec::new()),
+            #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+            profile_stages: &[],
+            #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+            stage_timings: Mutex::new(Vec::new()),
         }
     }
 
@@ -854,19 +862,59 @@ impl Model {
 
     /// Runs the encode program of the next transcription one command buffer per op, so
     /// [`Self::encode_op_timings`] can report each op's GPU time. A diagnostic: the serving loop never sets it.
-    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
     #[must_use]
     pub fn with_encode_op_timings(mut self) -> Self {
-        self.profile_encode = true;
+        self.profile_stages = &["encode"];
         self
+    }
+
+    /// [`Self::with_encode_op_timings`] for every stage: the mel front end, the encoder and each
+    /// decode step. Read back with [`Self::op_timing_passes`]. A diagnostic: the serving loop never sets it.
+    #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+    #[must_use]
+    pub fn with_op_timings(mut self) -> Self {
+        self.profile_stages = &["mel", "encode", "decode"];
+        self
+    }
+
+    /// The per-op GPU time of `stage` ("mel", "encode" or "decode"), one `Vec` per profiled run in
+    /// run order: one per transcription for mel and encode, one per step for decode.
+    #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+    pub fn op_timing_passes(&self, stage: &str) -> Vec<Vec<omega::OpGpuTiming>> {
+        self.stage_timings
+            .lock()
+            .iter()
+            .filter(|(tag, _)| *tag == stage)
+            .map(|(_, timings)| timings.clone())
+            .collect()
+    }
+
+    #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+    fn arm_op_timings(&self, bound: &mut Bound<'_>, stage: &'static str) {
+        bound.op_timings = self
+            .profile_stages
+            .contains(&stage)
+            .then(std::sync::OnceLock::new);
+    }
+
+    #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+    fn take_op_timings(&self, bound: &mut Bound<'_>, stage: &'static str) {
+        if let Some(timings) = bound
+            .op_timings
+            .take()
+            .and_then(std::sync::OnceLock::into_inner)
+        {
+            self.stage_timings.lock().push((stage, timings));
+        }
     }
 
     /// The per-op GPU time of the encode program, one `Vec` per profiled transcription in run order
     /// (empty before the first). A single pass is not a usable measurement: reduce the passes with
     /// [`reduce_op_passes`]. Bound through the same weights and `weight_precision` rules as the serving encoder.
-    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-    pub fn encode_op_timing_passes(&self) -> Vec<Vec<omega::metal::OpGpuTiming>> {
-        self.encode_timings.lock().clone()
+    #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+    pub fn encode_op_timing_passes(&self) -> Vec<Vec<omega::OpGpuTiming>> {
+        self.op_timing_passes("encode")
     }
 
     /// The CPU evaluator's per-node time of each encode, one [`CpuNodePass`] per transcription in run
@@ -1074,9 +1122,13 @@ impl Model {
         mel_bound
             .named
             .insert(STFT_SIN_INPUT.into(), decode(&tables.sin));
+        #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+        self.arm_op_timings(&mut mel_bound, "mel");
         let mel_start = std::time::Instant::now();
         let mel_values = mel_bound.run("mel", &[mel], &[], runtime)?.remove(0);
         let mel = mel_start.elapsed();
+        #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+        self.take_op_timings(&mut mel_bound, "mel");
         sample_peak(&mut gpu_peak, runtime);
         // The encoder consumes the first 2*source_positions frames.
         let needed = (self.shape.source_positions * 2) as usize;
@@ -1136,10 +1188,8 @@ impl Model {
             bind_us = bind_started.elapsed().as_micros() as u64,
             "encoder graph built and weights bound, outside encode_us"
         );
-        #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-        {
-            bound.op_timings = self.profile_encode.then(std::sync::OnceLock::new);
-        }
+        #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+        self.arm_op_timings(&mut bound, "encode");
         #[cfg(feature = "instrument")]
         {
             proxima_tensor::instrument::reset_arena_per_node();
@@ -1153,14 +1203,8 @@ impl Model {
             proxima_tensor::instrument::arena_per_node_snapshot(),
             proxima_tensor::instrument::dot_tile_decline_snapshot(),
         ));
-        #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-        if let Some(timings) = bound
-            .op_timings
-            .take()
-            .and_then(std::sync::OnceLock::into_inner)
-        {
-            self.encode_timings.lock().push(timings);
-        }
+        #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+        self.take_op_timings(&mut bound, "encode");
         sample_peak(&mut gpu_peak, runtime);
 
         let mut decoder = Bound::new(self.shape.clone());
@@ -1200,7 +1244,11 @@ impl Model {
                 decoder.fit_cache(extent);
                 let symbols = [fresh.len() as u64, extent as u64];
                 runtime.set_kv_cached_rows(cached as u64);
+                #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+                self.arm_op_timings(&mut decoder, "decode");
                 let mut rows = decoder.run("decode", &step_outputs, &symbols, runtime)?;
+                #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+                self.take_op_timings(&mut decoder, "decode");
                 let on_device = runtime.kv_carry_accepted();
                 if kv_live && !on_device {
                     bail!(
@@ -1335,9 +1383,9 @@ fn pad(wav: &[f32]) -> Result<Vec<f32>> {
     Ok(out)
 }
 
-/// The identity and GPU time of one timed op, the part of `omega::metal::OpGpuTiming` the pass
+/// The identity and GPU time of one timed op, the part of `omega::OpGpuTiming` the pass
 /// reduction reads.
-#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+#[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpSample {
     pub node: NodeId,
@@ -1346,9 +1394,9 @@ pub struct OpSample {
     pub gpu_ns: u64,
 }
 
-#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-impl From<&omega::metal::OpGpuTiming> for OpSample {
-    fn from(timing: &omega::metal::OpGpuTiming) -> Self {
+#[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
+impl From<&omega::OpGpuTiming> for OpSample {
+    fn from(timing: &omega::OpGpuTiming) -> Self {
         Self {
             node: timing.node,
             kind: timing.kind,
@@ -1360,7 +1408,7 @@ impl From<&omega::metal::OpGpuTiming> for OpSample {
 
 /// One op's GPU time over every timed pass: `min_ns` and `median_ns` (the mean of the two middle
 /// values for an even pass count, integer division), with `passes` naming how many went in.
-#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+#[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpPassStats {
     pub node: NodeId,
@@ -1374,7 +1422,7 @@ pub struct OpPassStats {
 /// Reduces `passes` (each the encode program's ops in program order) to per-op min and median
 /// `gpu_ns`. Every pass is included, the first too. Errors when there are no passes or the passes
 /// disagree on the op count or on an op's node or kind.
-#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+#[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
 pub fn reduce_op_passes(passes: &[Vec<OpSample>]) -> Result<Vec<OpPassStats>> {
     let first = passes.first().context("no timed passes to reduce")?;
     for (index, pass) in passes.iter().enumerate() {
@@ -1424,7 +1472,7 @@ pub fn reduce_op_passes(passes: &[Vec<OpSample>]) -> Result<Vec<OpPassStats>> {
 }
 
 /// Per-kind `(ops, sum of per-op mins, sum of per-op medians)` over the reduced ops.
-#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+#[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
 pub fn kind_totals(stats: &[OpPassStats]) -> BTreeMap<&'static str, (usize, u64, u64)> {
     let mut totals: BTreeMap<&'static str, (usize, u64, u64)> = BTreeMap::new();
     for stat in stats {
@@ -1761,7 +1809,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
     fn sample(node: u32, kind: &'static str, gpu_ns: u64) -> OpSample {
         OpSample {
             node: NodeId(node),
@@ -1771,7 +1819,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
     #[test]
     fn pass_reduction_takes_min_and_median_per_op_with_a_slow_first_pass() {
         // the attention op is slow on the first pass, as the measured node 170 was
@@ -1798,7 +1846,7 @@ mod tests {
         assert_eq!((stats[1].min_ns, stats[1].median_ns), (700, 800));
     }
 
-    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
     #[test]
     fn pass_reduction_median_of_an_even_count_is_the_mean_of_the_middle_two() {
         let passes = vec![
@@ -1813,7 +1861,7 @@ mod tests {
         assert_eq!((stats[0].min_ns, stats[0].median_ns), (10, 30));
     }
 
-    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
     #[test]
     fn pass_reduction_rejects_misaligned_or_empty_passes() {
         assert!(reduce_op_passes(&[]).is_err());
@@ -1823,7 +1871,7 @@ mod tests {
         assert!(reduce_op_passes(&moved).is_err());
     }
 
-    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
     #[test]
     fn kind_totals_sum_per_op_mins_and_medians_by_kind() {
         let passes = vec![
