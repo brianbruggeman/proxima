@@ -8398,8 +8398,9 @@ fn a_strided_conv_reduce_with_a_non_flat_window_fires_the_packed_neon_tile() {
 /// left[head, row, step] * right[head, column, step]`, the iteration space
 /// `(head, row, column, step)`. `right` carries a per-head operand (row
 /// invariant), or, with `right_by_row`, a per-row one that the tile cannot
-/// share across rows. `scale` multiplies `left` through its own elementwise
-/// node, so the reduce body fuses to `Multiply(Multiply(left, scale), right)`.
+/// share across rows. `scale` multiplies the product through its own
+/// elementwise node, so the reduce body fuses to
+/// `Multiply(Multiply(left, right), scale)`.
 fn two_leading_axis_program(
     sizes: [u32; 4],
     scale: Option<crate::op::ConstantLiteral>,
@@ -8424,7 +8425,24 @@ fn two_leading_axis_program(
     };
     let right_shape: Vec<Extent> = right_sizes.iter().map(|&size| Extent::Static(size)).collect();
     let right = block(&mut program, element, &right_shape);
-    let left_source = match scale {
+    let right_axes: &[u16] = if right_by_row {
+        &[0, 1, 2, 3]
+    } else {
+        &[0, 2, 3]
+    };
+    let unscaled = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: element,
+            body: ScalarOp::Multiply,
+            operands: alloc::vec![
+                (left, IndexMap::Affine(map::projection(4, &[0, 1, 3]))),
+                (right, IndexMap::Affine(map::projection(4, right_axes))),
+            ],
+            name: None,
+        },
+    );
+    let product = match scale {
         Some(value) => {
             let factor = append(
                 &mut program,
@@ -8440,32 +8458,15 @@ fn two_leading_axis_program(
                     dtype: element,
                     body: ScalarOp::Multiply,
                     operands: alloc::vec![
-                        (left, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
-                        (factor, IndexMap::Affine(map::projection(3, &[]))),
+                        (unscaled, IndexMap::Affine(map::projection(4, &[0, 1, 2, 3]))),
+                        (factor, IndexMap::Affine(map::projection(4, &[]))),
                     ],
                     name: None,
                 },
             )
         }
-        None => left,
+        None => unscaled,
     };
-    let right_axes: &[u16] = if right_by_row {
-        &[0, 1, 2, 3]
-    } else {
-        &[0, 2, 3]
-    };
-    let product = append(
-        &mut program,
-        Op::Elementwise {
-            dtype: element,
-            body: ScalarOp::Multiply,
-            operands: alloc::vec![
-                (left_source, IndexMap::Affine(map::projection(4, &[0, 1, 3]))),
-                (right, IndexMap::Affine(map::projection(4, right_axes))),
-            ],
-            name: None,
-        },
-    );
     append(
         &mut program,
         Op::Reduce(Reduce {
@@ -8542,6 +8543,27 @@ fn a_scaled_score_reduce_over_heads_and_rows_matches_the_loop() {
     assert_two_leading_axis_matches_loop([3, 37, 53, 40], Some(0.125), false);
 }
 
+/// The scaled-score fixture binds to the two-step body the peel rewrites:
+/// `Multiply(Multiply(left, right), scale)`, so the tile tests below exercise
+/// the peel and not a body that was already a single multiply.
+#[test]
+fn a_scaled_score_reduce_binds_a_two_step_multiply_body() {
+    let program = two_leading_axis_program([3, 37, 53, 40], Some(0.125), false);
+    let reduce_node = terminal(&program);
+    let shapes = shape::infer(&program, &[]).expect("scaled score program infers");
+    let resolved = bind::bind(&program, &shapes, &[reduce_node], NumericPolicy::bit_exact())
+        .expect("scaled score program binds");
+    let reduce = resolved
+        .iter()
+        .find(|op| op.node == reduce_node)
+        .expect("the reduce node is present in the bound program");
+
+    let body = reduce.element_body();
+    eprintln!("bound body: {body:?}");
+    let ops: Vec<ScalarOp> = body.steps.iter().map(|step| step.op).collect();
+    assert_eq!(ops, [ScalarOp::Multiply, ScalarOp::Multiply]);
+}
+
 #[test]
 fn a_value_mix_reduce_over_heads_and_rows_matches_the_loop() {
     assert_two_leading_axis_matches_loop([3, 37, 40, 53], None, false);
@@ -8587,9 +8609,12 @@ fn a_right_operand_that_varies_by_row_still_declines_the_neon_tile() {
     let program = assert_two_leading_axis_matches_loop([3, 37, 53, 40], None, true);
 
     let outcomes = tile_outcomes_of(&program);
-    assert!(
-        !outcomes.contains(&"taken") && outcomes.contains(&"leading_axes"),
-        "a per-row right operand cannot share a tile across rows, got {outcomes:?}"
+    // head and row coalesce into one leading axis here (the per-row operand
+    // is dense over both), so the gate refuses on the operand's row stride.
+    assert_eq!(
+        outcomes,
+        ["row_stride_b"],
+        "a per-row right operand cannot share a tile across rows"
     );
 }
 
