@@ -6542,6 +6542,10 @@ pub mod rocm {
         }
     }
 
+    /// Options every kernel compiles with: ROCm 6.2 hides the `__shfl_*_sync` builtins the emitted text
+    /// calls unless this is defined; it is harmless on 6.3 and later.
+    const HIPRTC_OPTIONS: &[&str] = &["-DHIP_ENABLE_WARP_SYNC_BUILTINS"];
+
     /// The shared executor's runtime on a ROCm device: the [`GpuRuntime`] a `DevicePlan` runs on when
     /// the lowering is CUDA's and the kernels render as HIP C++ at `wave`.
     ///
@@ -6756,7 +6760,7 @@ pub mod rocm {
             if let Some(found) = self.functions.lock().get(&kernel.entry) {
                 return Ok(found.clone());
             }
-            let module = Arc::new(self.device.compile(&kernel.source, &[])?);
+            let module = Arc::new(self.device.compile(&kernel.source, HIPRTC_OPTIONS)?);
             let function = HipFunction { handle: module.function(&kernel.entry)?, _module: module };
             self.compile_counters.compilations.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             self.functions.lock().insert(kernel.entry.clone(), function.clone());
@@ -6768,7 +6772,7 @@ pub mod rocm {
         }
 
         fn load_module(&self, image: HipImage) -> Result<Arc<HipModule>, HipDriverError> {
-            Ok(Arc::new(self.device.compile(&image.0, &[])?))
+            Ok(Arc::new(self.device.compile(&image.0, HIPRTC_OPTIONS)?))
         }
 
         fn load_function(&self, module: &Arc<HipModule>, entry: &str) -> Result<HipFunction, HipDriverError> {
@@ -6891,7 +6895,14 @@ pub mod rocm {
 
     #[cfg(test)]
     mod runtime_tests {
-        use super::element_window;
+        use super::{HIPRTC_OPTIONS, compile_options, element_window};
+
+        #[test]
+        fn every_kernel_compiles_with_the_warp_sync_builtins_enabled() {
+            let options = compile_options(Some("gfx1100"), HIPRTC_OPTIONS);
+
+            assert_eq!(options, vec![String::from("--offload-arch=gfx1100"), String::from("-DHIP_ENABLE_WARP_SYNC_BUILTINS")]);
+        }
 
         #[test]
         fn a_window_inside_the_buffer_is_scaled_to_bytes() {
