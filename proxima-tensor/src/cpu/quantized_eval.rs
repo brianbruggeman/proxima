@@ -1066,6 +1066,8 @@ pub(super) fn run_prepared_step(
             let mut gdn_state = Vec::new();
             let mut moe_topk_extra = Vec::new();
             let mut round_extra: Vec<Vec<f32>> = Vec::new();
+            #[cfg(feature = "instrument")]
+            let node_profile_started = instrument::read_ticks();
             let int8_activation_handled = super::run_int8_activation_dot::run_if_int8_activation(
                 computed,
                 &buffers,
@@ -1106,6 +1108,13 @@ pub(super) fn run_prepared_step(
                 }
                 ran?;
             }
+            #[cfg(feature = "instrument")]
+            instrument::record_arena_node_ticks(
+                computed.node,
+                arena_node_kind_label(&computed.kind),
+                &computed.extents,
+                instrument::elapsed_ticks(node_profile_started),
+            );
             #[cfg(feature = "epilogue-profile-probe")]
             epilogue_profile_record(
                 computed,
