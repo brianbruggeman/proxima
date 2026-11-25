@@ -207,42 +207,53 @@ if [ "$all" = 0 ] && ! git rev-parse --verify --quiet "$base^{commit}" >/dev/nul
     exit 3
 fi
 
+# every changed top-level directory that holds a crate, gated or not: an ungated crate's edit
+# still reaches the gated crates that depend on it
 directly_changed_crates() {
     local dir
     changed_files \
         | cut -d/ -f1 \
         | sort -u \
-        | while IFS= read -r dir; do package_name "$dir"; done \
-        | grep -Fx -f <(gated_crates) || true
+        | while IFS= read -r dir; do
+            if [ -f "$dir/Cargo.toml" ]; then
+                package_name "$dir"
+            fi
+        done
 }
 
-# "<crate>\t<reason>" per selected crate: `changed`, or `depends on X` for the first selected X
-# it depends on; repeats until no gated crate is newly pulled in (transitive closure)
+# "<crate>\t<reason>" per gated crate the change reaches: `changed`, or `depends on X` for the first
+# selected X it depends on; "<crate>\tungated" per changed crate with no matrix row. The walk covers
+# every workspace crate, so a gated crate behind an ungated intermediate is still pulled in.
 select_crates() {
-    local selected="" crate dep reason grew=1 edges gated
+    local selected="" crate dep reason grew=1 edges gated found direct
     if [ "$all" = 1 ]; then
         gated_crates | while IFS= read -r crate; do printf '%s\tall\n' "$crate"; done
         return
     fi
     edges="$(dependency_edges)" || return 3
     gated="$(gated_crates)"
-    for crate in $(directly_changed_crates); do
+    direct="$(directly_changed_crates)"
+    for crate in $direct; do
         selected="$selected $crate"
-        printf '%s\tchanged\n' "$crate"
+        if printf '%s\n' "$gated" | grep -Fxq "$crate"; then
+            printf '%s\tchanged\n' "$crate"
+        else
+            printf '%s\tungated\n' "$crate"
+        fi
     done
     while [ "$grew" = 1 ]; do
         grew=0
-        for crate in $gated; do
-            case " $selected " in *" $crate "*) continue ;; esac
-            dep="$(printf '%s\n' "$edges" | awk -v crate="$crate" -v sel="$selected" '
-                BEGIN { n = split(sel, chosen, " "); for (i = 1; i <= n; i++) want[chosen[i]] = 1 }
-                $1 == crate && ($2 in want) { print $2; exit }')"
-            if [ -n "$dep" ]; then
-                selected="$selected $crate"
-                grew=1
+        found="$(printf '%s\n' "$edges" | awk -v sel="$selected" '
+            BEGIN { n = split(sel, chosen, " "); for (i = 1; i <= n; i++) want[chosen[i]] = 1 }
+            !($1 in want) && ($2 in want) && !($1 in seen) { seen[$1] = 1; print $1, $2 }')"
+        while read -r crate dep; do
+            [ -n "$crate" ] || continue
+            selected="$selected $crate"
+            grew=1
+            if printf '%s\n' "$gated" | grep -Fxq "$crate"; then
                 printf '%s\tdepends on %s\n' "$crate" "$dep"
             fi
-        done
+        done <<< "$found"
     done
 }
 
@@ -260,10 +271,26 @@ if [ "$all" = 0 ] && changed_files | grep -Fx 'scripts/feature-target-gate.sh' >
     all=1
 fi
 
+# workspace-wide inputs change what every crate compiles to, and no directory names them
+workspace_input="$(changed_files | grep -E '^(Cargo\.(toml|lock)|rust-toolchain.*|\.cargo/config.*)$' | head -n 1 || true)"
+if [ "$all" = 0 ] && [ -n "$workspace_input" ]; then
+    printf 'feature-target-gate: workspace input %s changed; selecting every crate\n' "$workspace_input"
+    all=1
+fi
+
 selection="$(select_crates)" || exit 3
+ungated="$(printf '%s\n' "$selection" | grep -F "$(printf '\tungated')" | cut -f1 | tr '\n' ' ' || true)"
+selection="$(printf '%s\n' "$selection" | grep -vF "$(printf '\tungated')" || true)"
+if [ -n "${ungated// /}" ]; then
+    printf 'feature-target-gate: changed crates with no matrix row: %s\n' "$ungated"
+fi
 crates="$(printf '%s\n' "$selection" | cut -f1 | tr '\n' ' ')"
 if [ -z "${crates// /}" ]; then
-    echo "feature-target-gate: no test-bearing crate changed against $base"
+    if [ -z "$(changed_files)" ]; then
+        echo "feature-target-gate: nothing changed against $base"
+    else
+        echo "feature-target-gate: no test-bearing crate changed against $base (no gated crate depends on the changed crates)"
+    fi
     exit 0
 fi
 printf '%s\n' "$selection" | while IFS=$'\t' read -r crate reason; do
