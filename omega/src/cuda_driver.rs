@@ -5479,6 +5479,7 @@ pub mod rocm {
     use alloc::format;
     use alloc::string::String;
     use alloc::vec::Vec;
+    use core::cell::Cell;
     use core::ffi::{c_char, c_int, c_void};
 
     use std::ffi::{CStr, CString};
@@ -6118,11 +6119,7 @@ pub mod rocm {
             if ordinal < 0 || ordinal >= count {
                 return Err(HipDriverError::DeviceOutOfRange { ordinal, count });
             }
-            // SAFETY: the ordinal was bounds-checked against the device count.
-            let status = unsafe { (api.hip_set_device)(ordinal) };
-            if status != HIP_SUCCESS {
-                return Err(api.runtime_error("hipSetDevice", status));
-            }
+            bind_ordinal(ordinal, |ordinal| api.set_device(ordinal))?;
             let name = api.device_name(ordinal)?;
             let arch = api.device_arch(ordinal);
             Ok(Self {
@@ -6156,6 +6153,16 @@ pub mod rocm {
             &self.api
         }
 
+        /// Makes this device the calling thread's current HIP device; a no-op when the thread already
+        /// bound it. Every entry that allocates, copies, sets memory, compiles, loads, launches,
+        /// synchronizes or queries memory starts here, whichever thread calls it.
+        ///
+        /// # Errors
+        /// [`HipDriverError::Runtime`] when `hipSetDevice` fails.
+        pub fn bind(&self) -> Result<(), HipDriverError> {
+            bind_ordinal(self.ordinal, |ordinal| self.api.set_device(ordinal))
+        }
+
         /// Compiles HIP C++ to a loadable code object.
         ///
         /// # Errors
@@ -6173,6 +6180,7 @@ pub mod rocm {
         /// [`HipDriverError::CompileLog`] with the compiler's own log when the source is rejected, and
         /// [`HipDriverError::Rtc`] when hipRTC itself fails.
         pub fn compile_code_object(&self, source: &str, options: &[&str]) -> Result<Vec<u8>, HipDriverError> {
+            self.bind()?;
             let Ok(source_c) = CString::new(source) else {
                 return Err(HipDriverError::BindingContract);
             };
@@ -6242,6 +6250,7 @@ pub mod rocm {
         /// # Errors
         /// [`HipDriverError::Runtime`] when the object cannot be loaded.
         pub fn load_code_object(&self, code: &[u8]) -> Result<HipModule, HipDriverError> {
+            self.bind()?;
             let mut handle = ptr::null_mut();
             // SAFETY: `code` holds a complete code object; HIP copies it.
             let status =
@@ -6279,6 +6288,7 @@ pub mod rocm {
         /// # Errors
         /// [`HipDriverError::Runtime`] when the allocation or copy fails.
         pub fn upload_bytes(&self, bytes: &[u8]) -> Result<HipBuffer, HipDriverError> {
+            self.bind()?;
             let buffer = self.allocate_bytes(bytes.len())?;
             let pointer = buffer.pointer;
             if !bytes.is_empty() {
@@ -6304,6 +6314,7 @@ pub mod rocm {
         /// # Errors
         /// [`HipDriverError::Runtime`] when the allocation fails.
         pub fn allocate_bytes(&self, bytes: usize) -> Result<HipBuffer, HipDriverError> {
+            self.bind()?;
             let requested = bytes.max(1);
             let mut pointer = ptr::null_mut();
             // SAFETY: `pointer` is a valid out-parameter.
@@ -6324,6 +6335,7 @@ pub mod rocm {
         /// # Errors
         /// [`HipDriverError::Runtime`] when the allocation or the memset fails.
         pub fn allocate_zeroed_bytes(&self, bytes: usize) -> Result<HipBuffer, HipDriverError> {
+            self.bind()?;
             let buffer = self.allocate_bytes(bytes)?;
             // SAFETY: `buffer.pointer` owns `buffer.bytes` bytes of device memory.
             let status = unsafe { (self.api.hip_memset)(buffer.pointer, 0, buffer.bytes) };
@@ -6349,6 +6361,7 @@ pub mod rocm {
             if source.is_empty() {
                 return Ok(());
             }
+            self.bind()?;
             // SAFETY: both views were bounds-checked against live allocations
             // they borrow, and `source.len <= destination.len` by the check above.
             let status = unsafe {
@@ -6370,7 +6383,8 @@ pub mod rocm {
         /// # Errors
         /// [`HipDriverError::Runtime`] when synchronization fails.
         pub fn synchronize(&self) -> Result<(), HipDriverError> {
-            // SAFETY: no arguments beyond the implicit current device.
+            self.bind()?;
+            // SAFETY: no arguments beyond the implicit current device, bound just above.
             let status = unsafe { (self.api.hip_device_synchronize)() };
             if status != HIP_SUCCESS {
                 return Err(self.api.runtime_error("hipDeviceSynchronize", status));
@@ -6470,6 +6484,9 @@ pub mod rocm {
     // SAFETY (the four impls below): a HIP allocation, code object and function handle are process-wide
     // runtime state addressed by pointer; the host never dereferences them, so moving or sharing the
     // owning handle across threads cannot alias host memory, and the device serializes on its queue.
+    // HIP's current device is per host thread, so the handle alone does not pin its device: every
+    // `HipDevice`/`HipRuntime` entry calls `bind` first, which makes the device it was opened for the
+    // calling thread's current device, so a thread other than the opener still acts on that device.
     unsafe impl Send for HipBuffer {}
     unsafe impl Sync for HipBuffer {}
     unsafe impl Send for HipModule {}
@@ -6542,7 +6559,8 @@ pub mod rocm {
         handle: *mut c_void,
     }
 
-    // SAFETY: see the impls above; the handle is only passed to the launch call.
+    // SAFETY: see the impls above; the handle is only passed to the launch call, which binds the
+    // runtime's device on the launching thread first.
     unsafe impl Send for HipFunction {}
     unsafe impl Sync for HipFunction {}
 
@@ -6580,7 +6598,32 @@ pub mod rocm {
         }
     }
 
+    thread_local! {
+        static BOUND_ORDINAL: Cell<Option<c_int>> = const { Cell::new(None) };
+    }
+
+    /// Makes `ordinal` this host thread's current HIP device through `set_device`, skipping the call
+    /// when the thread already bound it. HIP's current device is per host thread, so every entry that
+    /// touches the device binds first. A failed bind clears the memo: the thread's device is unknown.
+    fn bind_ordinal<Failure>(ordinal: c_int, set_device: impl FnOnce(c_int) -> Result<(), Failure>) -> Result<(), Failure> {
+        if BOUND_ORDINAL.with(Cell::get) == Some(ordinal) {
+            return Ok(());
+        }
+        let result = set_device(ordinal);
+        BOUND_ORDINAL.with(|bound| bound.set(result.is_ok().then_some(ordinal)));
+        result
+    }
+
     impl HipApi {
+        fn set_device(&self, ordinal: c_int) -> Result<(), HipDriverError> {
+            // SAFETY: callers pass an ordinal bounds-checked against the device count at open.
+            let status = unsafe { (self.hip_set_device)(ordinal) };
+            if status != HIP_SUCCESS {
+                return Err(self.runtime_error("hipSetDevice", status));
+            }
+            Ok(())
+        }
+
         fn copy(
             &self,
             call: &'static str,
@@ -6806,6 +6849,7 @@ pub mod rocm {
         fn upload_at<Element: DeviceElement>(&self, values: &[Element], buffer: &mut HipSlice<Element>, offset: usize) -> Result<(), HipDriverError> {
             let range = offset..offset + values.len();
             Self::check_range(buffer, &range)?;
+            self.device.bind()?;
             let size = core::mem::size_of::<Element>();
             let destination = offset_pointer(buffer.buffer.pointer, offset * size);
             self.device.api.copy("hipMemcpy", destination, values.as_ptr().cast::<c_void>(), core::mem::size_of_val(values), MEMCPY_HOST_TO_DEVICE)
@@ -6817,6 +6861,7 @@ pub mod rocm {
 
         fn download_range<Element: DeviceElement>(&self, buffer: &HipSlice<Element>, range: core::ops::Range<usize>) -> Result<Vec<Element>, HipDriverError> {
             Self::check_range(buffer, &range)?;
+            self.device.bind()?;
             let size = core::mem::size_of::<Element>();
             let mut values = Vec::<Element>::with_capacity(range.len());
             let source = offset_pointer(buffer.buffer.pointer, range.start * size).cast_const();
@@ -6835,6 +6880,7 @@ pub mod rocm {
         ) -> Result<(), HipDriverError> {
             Self::check_range(source, &range)?;
             Self::check_range(destination, &(offset..offset + range.len()))?;
+            self.device.bind()?;
             let size = core::mem::size_of::<Element>();
             let from = offset_pointer(source.buffer.pointer, range.start * size).cast_const();
             let to = offset_pointer(destination.buffer.pointer, offset * size);
@@ -6857,6 +6903,7 @@ pub mod rocm {
         }
 
         fn load_function(&self, module: &Arc<HipModule>, entry: &str) -> Result<HipFunction, HipDriverError> {
+            self.device.bind()?;
             Ok(HipFunction { handle: module.function(entry)?, _module: Arc::clone(module) })
         }
 
@@ -6865,6 +6912,7 @@ pub mod rocm {
         }
 
         unsafe fn launch(&self, mut arguments: HipLaunch<'_>, shape: LaunchShape) -> Result<(), HipDriverError> {
+            self.device.bind()?;
             let api = &self.device.api;
             // SAFETY: the caller matched the arguments to the kernel's parameter list; the params borrow
             // every argument until this call returns, and the launch is on the default stream.
@@ -6954,6 +7002,7 @@ pub mod rocm {
         }
 
         fn memory_info(&self) -> Result<(usize, usize), HipDriverError> {
+            self.device.bind()?;
             let api = &self.device.api;
             let query = api.hip_mem_get_info.ok_or(HipDriverError::MemoryInfoUnavailable)?;
             let (mut free, mut total) = (0usize, 0usize);
@@ -7219,6 +7268,53 @@ pub mod rocm {
                 vec![String::from("hiprtc0602.dll"), String::from("hiprtc.dll")]
             );
             assert_eq!(hiprtc_windows_candidates(0), vec![String::from("hiprtc.dll")]);
+        }
+
+        fn count_binds(ordinals: &[c_int]) -> Vec<c_int> {
+            let ordinals = ordinals.to_vec();
+            std::thread::spawn(move || {
+                let mut calls = Vec::new();
+                for ordinal in ordinals {
+                    bind_ordinal(ordinal, |bound| {
+                        calls.push(bound);
+                        Ok::<(), HipDriverError>(())
+                    })
+                    .expect("the stand-in bind succeeds");
+                }
+                calls
+            })
+            .join()
+            .expect("the bind thread runs")
+        }
+
+        #[test]
+        fn a_thread_binds_its_device_once_and_skips_the_repeat() {
+            assert_eq!(count_binds(&[1, 1, 1]), vec![1]);
+        }
+
+        #[test]
+        fn a_different_ordinal_binds_again_and_a_return_rebinds() {
+            assert_eq!(count_binds(&[0, 0, 1, 1, 0]), vec![0, 1, 0]);
+        }
+
+        #[test]
+        fn a_failed_bind_is_not_remembered() {
+            let calls = std::thread::spawn(|| {
+                let mut calls = 0;
+                let mut attempt = |ok: bool| {
+                    bind_ordinal(2, |_| {
+                        calls += 1;
+                        if ok { Ok(()) } else { Err(HipDriverError::BindingContract) }
+                    })
+                };
+                assert!(attempt(false).is_err());
+                assert!(attempt(true).is_ok());
+                assert!(attempt(true).is_ok());
+                calls
+            })
+            .join()
+            .expect("the bind thread runs");
+            assert_eq!(calls, 2);
         }
 
         #[test]
