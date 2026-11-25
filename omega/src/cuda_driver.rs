@@ -2220,6 +2220,12 @@ fn emit_and_pack(
     Ok((kernels, uniforms))
 }
 
+/// A runtime that cannot record events refuses with an error; the executor then skips timing
+/// rather than failing the execute ([`GpuRuntime::record_event`]).
+fn try_record_event<R: GpuRuntime>(runtime: &R) -> Option<R::Event> {
+    runtime.record_event().ok()
+}
+
 fn report_event_timing<R: GpuRuntime>(
     origin: &R::Event,
     rows: &[(NodeId, String, usize, R::Event)],
@@ -4082,11 +4088,10 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         let fault_array = (fault_total > 0)
             .then(|| self.driver.runtime.alloc_zeros::<u32>(fault_total))
             .transpose()?;
-        let event_timing = std::env::var_os("PROXIMA_CUDA_EVENT_TIMING").is_some();
         let mut event_rows: Vec<(NodeId, String, usize, R::Event)> = Vec::new();
-        let event_origin = event_timing
-            .then(|| self.driver.runtime.record_event())
-            .transpose()?;
+        let event_origin = std::env::var_os("PROXIMA_CUDA_EVENT_TIMING")
+            .and_then(|_| try_record_event(&self.driver.runtime));
+        let event_timing = event_origin.is_some();
         self.arena.launch_profile = LaunchProfile {
             enabled: host_timing,
             ..LaunchProfile::default()
@@ -4179,8 +4184,7 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
                 };
                 let start_event = op_events
                     .as_ref()
-                    .map(|_| self.driver.runtime.record_event())
-                    .transpose()?;
+                    .and_then(|_| try_record_event(&self.driver.runtime));
                 let launch = if timing {
                     self.driver.launch_f32_persistent_sized(
                         &mut self.arena,
@@ -4210,8 +4214,9 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
                         error: other.to_string(),
                     },
                 })?;
-                if let (Some(events), Some(start)) = (op_events.as_deref_mut(), start_event) {
-                    let end = self.driver.runtime.record_event()?;
+                if let (Some(events), Some(start)) = (op_events.as_deref_mut(), start_event)
+                    && let Some(end) = try_record_event(&self.driver.runtime)
+                {
                     events.push(LaunchEvents {
                         position,
                         start,
@@ -4227,8 +4232,7 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
                         kernel.entry.clone(),
                     ));
                 }
-                if event_timing {
-                    let event = self.driver.runtime.record_event()?;
+                if event_timing && let Some(event) = try_record_event(&self.driver.runtime) {
                     event_rows.push((bound.node, format!("{}:{}", bound.kind.name(), kernel.entry), output_len, event));
                 }
             }
@@ -8309,6 +8313,28 @@ mod recording_runtime {
             "the execute after a replacement launches a function built from the new source"
         );
         assert!(!plan.replace_kernel_source(usize::MAX, String::new()), "an absent position replaces nothing");
+    }
+
+    #[test]
+    fn a_runtime_that_refuses_events_skips_timing_instead_of_failing_the_execute() {
+        let (program, out) = two_layer_program();
+        let weight_first = weight_values((HIDDEN * INPUT) as usize, 1.0);
+        let weight_second = weight_values((OUTPUT * HIDDEN) as usize, 7.0);
+        let activation = weight_values(INPUT as usize, 3.0);
+        let named = named_blocks(&weight_first, &weight_second, &activation);
+        let driver = CudaDriver::<RecordingRuntime>::recording();
+        let mut plan = driver
+            .plan_with_config(&program, &[], &[out], &named, &RuntimeConfig::default())
+            .expect("the recording driver plans the two-layer program");
+        let mut launches: Vec<LaunchEvents<RecordingRuntime>> = Vec::new();
+
+        let evaluated = temp_env::with_var("PROXIMA_CUDA_EVENT_TIMING", Some("1"), || {
+            plan.execute_named_launch_events(&named, None, Some(&mut launches))
+        });
+
+        assert!(evaluated.is_ok(), "event timing on a runtime without events must not fail the execute: {:?}", evaluated.err());
+        assert!(launches.is_empty(), "a runtime that records no events returns no timings");
+        assert!(!launches_of(&driver.events()).is_empty(), "the execute still launched its kernels");
     }
 
     #[test]
