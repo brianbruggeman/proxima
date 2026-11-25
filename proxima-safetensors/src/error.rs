@@ -78,6 +78,16 @@ pub enum SafetensorsError {
     #[error("tensor name {name:?} is reserved for the __metadata__ map")]
     ReservedTensorName { name: String },
 
+    /// The writer was given a tensor whose name starts with
+    /// [`crate::FILLER_NAME_PREFIX`]; that prefix names the filler tensors
+    /// the aligned layout inserts, and readers skip them by name.
+    #[error("tensor name {name:?} uses the reserved filler prefix")]
+    ReservedFillerName { name: String },
+
+    /// The aligned writer was asked for an alignment of zero bytes.
+    #[error("alignment must be at least one byte")]
+    ZeroAlignment,
+
     /// A tensor's byte range doesn't match what its `shape` and `dtype`
     /// imply: `shape.iter().product() * dtype.size_bytes()`. The writer
     /// checks this against the caller's `data` slice before ever emitting a

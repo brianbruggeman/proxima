@@ -1927,6 +1927,23 @@ pub fn register_checkpoint_mapping(bytes: &[u8]) {
 #[cfg(not(all(feature = "metal", target_os = "macos")))]
 pub fn register_checkpoint_mapping(_bytes: &[u8]) {}
 
+/// The byte alignment a weight tensor must start on, in a mapping whose base
+/// is aligned the same way, for the backend to bind it without a copy: the
+/// page size Metal's no-copy gate (`is_page_aligned`) tests. Backends with no
+/// no-copy path report `1`, which asks a writer for no padding. Feed it to
+/// `proxima_safetensors::write_complete_aligned`.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[must_use]
+pub fn no_copy_alignment() -> usize {
+    metal::page_size()
+}
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+#[must_use]
+pub fn no_copy_alignment() -> usize {
+    1
+}
+
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub fn register_expert_mapping(bytes: &[u8]) {
     metal::register_expert_mapping(bytes);

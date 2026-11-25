@@ -46,7 +46,10 @@ pub use sized::{
     FORMAT_VERSION_KEY, FORMAT_VERSION_MAJOR, FORMAT_VERSION_MINOR, HEADER_LEN_BYTES,
     MAX_HEADER_BYTES,
 };
-pub use writer::{SafetensorsModel, TensorHeader, TensorPayload, encode_header, write_complete};
+pub use writer::{
+    FILLER_NAME_PREFIX, SafetensorsModel, TensorHeader, TensorPayload, encode_header,
+    is_filler_name, write_complete, write_complete_aligned,
+};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

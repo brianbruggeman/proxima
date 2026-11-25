@@ -7,6 +7,8 @@
 //! len][header JSON][raw tensor bytes]`. Unlike GGUF, safetensors has no
 //! alignment padding between tensors — `data_offsets` are simply the
 //! running byte count as each tensor's bytes are appended in order.
+//! [`write_complete_aligned`] gets alignment inside that rule: the format
+//! allows no holes, so a gap is a filler tensor (see [`FILLER_NAME_PREFIX`]).
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -112,6 +114,111 @@ pub fn encode_header(
     tensors: &[TensorHeader],
     metadata: &BTreeMap<String, String>,
 ) -> Result<Vec<u8>, SafetensorsError> {
+    let slots = plan_slots(tensors, 1);
+    encode_header_slots(tensors, metadata, &slots, DATA_ALIGNMENT_BYTES as u64)
+}
+
+/// The prefix of every filler tensor the aligned layout inserts. A filler is
+/// named `{FILLER_NAME_PREFIX}{ordinal}` (ordinal counts fillers from zero in
+/// file order), is a `U8` vector, and holds zeros. A reader skips a tensor for
+/// which [`is_filler_name`] is true; the writer refuses a caller tensor that
+/// uses the prefix.
+pub const FILLER_NAME_PREFIX: &str = "__pad.";
+
+/// Whether `name` is a filler tensor the aligned layout inserted.
+#[must_use]
+pub fn is_filler_name(name: &str) -> bool {
+    name.starts_with(FILLER_NAME_PREFIX)
+}
+
+/// One position in the data region: a caller tensor (by index) or a run of
+/// filler bytes. The layout is a function of tensor lengths and `alignment`
+/// only, because `data_start` is itself a multiple of `alignment`: an absolute
+/// offset is a multiple of `alignment` exactly when the data offset is.
+#[derive(Debug, Clone, Copy)]
+enum Slot {
+    Tensor(usize),
+    Filler(u64),
+}
+
+/// Orders `tensors` into slots, inserting a filler before every tensor of at
+/// least `alignment` bytes that would not otherwise start on `alignment`.
+fn plan_slots(tensors: &[TensorHeader], alignment: u64) -> Vec<Slot> {
+    let mut slots = Vec::with_capacity(tensors.len());
+    let mut end = 0u64;
+    for (index, tensor) in tensors.iter().enumerate() {
+        let len = tensor.byte_len();
+        if alignment > 1 && len >= alignment {
+            let gap = (alignment - end % alignment) % alignment;
+            if gap > 0 {
+                slots.push(Slot::Filler(gap));
+                end += gap;
+            }
+        }
+        slots.push(Slot::Tensor(index));
+        end += len;
+    }
+    slots
+}
+
+/// Serializes `model` like [`write_complete`], laid out so every tensor of at
+/// least `alignment` bytes starts at an absolute file offset (`8 +` header
+/// length `+` its data offset) that is a multiple of `alignment`, and the data
+/// region itself starts on `alignment`. Gaps between tensors are filler
+/// tensors (see [`FILLER_NAME_PREFIX`]); the header is padded with spaces.
+/// A mapping whose base is aligned to `alignment` then holds every large
+/// tensor at an aligned address.
+///
+/// # Errors
+///
+/// As [`write_complete`], plus [`SafetensorsError::ZeroAlignment`] and
+/// [`SafetensorsError::ReservedFillerName`].
+pub fn write_complete_aligned(
+    model: &SafetensorsModel<'_>,
+    alignment: usize,
+) -> Result<Vec<u8>, SafetensorsError> {
+    if alignment == 0 {
+        return Err(SafetensorsError::ZeroAlignment);
+    }
+    let headers: Vec<TensorHeader> = model
+        .tensors
+        .iter()
+        .map(|tensor| TensorHeader {
+            name: tensor.name.clone(),
+            dtype: tensor.dtype,
+            shape: tensor.shape.clone(),
+        })
+        .collect();
+    let slots = plan_slots(&headers, alignment as u64);
+    let data_alignment = (alignment as u64).max(DATA_ALIGNMENT_BYTES as u64);
+    let mut wire = encode_header_slots(&headers, &model.metadata, &slots, data_alignment)?;
+    wire.reserve(model.tensors.iter().map(|tensor| tensor.data.len()).sum());
+    for slot in &slots {
+        match *slot {
+            Slot::Filler(gap) => wire.resize(wire.len() + gap as usize, 0),
+            Slot::Tensor(index) => {
+                let (tensor, header) = (&model.tensors[index], &headers[index]);
+                let expected = header.byte_len();
+                if expected != tensor.data.len() as u64 {
+                    return Err(SafetensorsError::TensorDataLengthMismatch {
+                        tensor: tensor.name.clone(),
+                        expected,
+                        found: tensor.data.len() as u64,
+                    });
+                }
+                wire.extend_from_slice(tensor.data);
+            }
+        }
+    }
+    Ok(wire)
+}
+
+fn encode_header_slots(
+    tensors: &[TensorHeader],
+    metadata: &BTreeMap<String, String>,
+    slots: &[Slot],
+    data_alignment: u64,
+) -> Result<Vec<u8>, SafetensorsError> {
     let mut seen_names: Vec<&str> = Vec::with_capacity(tensors.len());
     let mut header = serde_json::Map::new();
 
@@ -132,27 +239,48 @@ pub fn encode_header(
     );
 
     let mut end = 0u64;
-    for tensor in tensors {
-        if tensor.name == "__metadata__" {
-            return Err(SafetensorsError::ReservedTensorName {
-                name: tensor.name.clone(),
-            });
-        }
-        if seen_names.contains(&tensor.name.as_str()) {
-            return Err(SafetensorsError::DuplicateTensorName {
-                name: tensor.name.clone(),
-            });
-        }
-        seen_names.push(tensor.name.as_str());
-
-        let dtype_wire =
-            dtype_to_wire(tensor.dtype).ok_or_else(|| SafetensorsError::UnsupportedDtype {
-                tensor: tensor.name.clone(),
-                dtype: alloc::format!("{:?}", tensor.dtype),
-            })?;
-
+    let mut fillers = 0usize;
+    for slot in slots {
+        let (name, dtype_wire, shape, len) = match *slot {
+            Slot::Filler(gap) => {
+                let name = alloc::format!("{FILLER_NAME_PREFIX}{fillers}");
+                fillers += 1;
+                (name, "U8", alloc::vec![gap], gap)
+            }
+            Slot::Tensor(index) => {
+                let tensor = &tensors[index];
+                if tensor.name == "__metadata__" {
+                    return Err(SafetensorsError::ReservedTensorName {
+                        name: tensor.name.clone(),
+                    });
+                }
+                if is_filler_name(&tensor.name) {
+                    return Err(SafetensorsError::ReservedFillerName {
+                        name: tensor.name.clone(),
+                    });
+                }
+                if seen_names.contains(&tensor.name.as_str()) {
+                    return Err(SafetensorsError::DuplicateTensorName {
+                        name: tensor.name.clone(),
+                    });
+                }
+                seen_names.push(tensor.name.as_str());
+                let dtype_wire = dtype_to_wire(tensor.dtype).ok_or_else(|| {
+                    SafetensorsError::UnsupportedDtype {
+                        tensor: tensor.name.clone(),
+                        dtype: alloc::format!("{:?}", tensor.dtype),
+                    }
+                })?;
+                (
+                    tensor.name.clone(),
+                    dtype_wire,
+                    tensor.shape.clone(),
+                    tensor.byte_len(),
+                )
+            }
+        };
         let start = end;
-        end += tensor.byte_len();
+        end += len;
 
         let mut entry = serde_json::Map::new();
         entry.insert(
@@ -161,21 +289,23 @@ pub fn encode_header(
         );
         entry.insert(
             "shape".to_string(),
-            serde_json::Value::Array(tensor.shape.iter().map(|dim| (*dim).into()).collect()),
+            serde_json::Value::Array(shape.iter().map(|dim| (*dim).into()).collect()),
         );
         entry.insert(
             "data_offsets".to_string(),
             serde_json::Value::Array(alloc::vec![start.into(), end.into()]),
         );
-        header.insert(tensor.name.clone(), serde_json::Value::Object(entry));
+        header.insert(name, serde_json::Value::Object(entry));
     }
 
-    let mut header_bytes = serde_json::to_vec(&serde_json::Value::Object(header)).map_err(|error| {
-        SafetensorsError::MalformedJson {
-            reason: error.to_string(),
-        }
-    })?;
-    header_bytes.resize(header_bytes.len().next_multiple_of(DATA_ALIGNMENT_BYTES), b' ');
+    let mut header_bytes =
+        serde_json::to_vec(&serde_json::Value::Object(header)).map_err(|error| {
+            SafetensorsError::MalformedJson {
+                reason: error.to_string(),
+            }
+        })?;
+    let padded = (8 + header_bytes.len()).next_multiple_of(data_alignment as usize) - 8;
+    header_bytes.resize(padded, b' ');
 
     let mut prefix = Vec::with_capacity(8 + header_bytes.len());
     prefix.extend_from_slice(&(header_bytes.len() as u64).to_le_bytes());
@@ -299,6 +429,125 @@ mod tests {
             assert!(manifest.tensor(&"t".repeat(name_length)).is_some());
             assert_eq!(&written[8 + header_len..], data.as_slice());
         }
+    }
+
+    fn byte_tensor<'a>(name: &str, data: &'a [u8]) -> TensorPayload<'a> {
+        TensorPayload {
+            name: name.to_string(),
+            dtype: map_dtype(name, "U8").expect("U8 maps"),
+            shape: vec![data.len() as u64],
+            data,
+        }
+    }
+
+    #[test]
+    fn aligned_write_starts_every_large_tensor_on_the_alignment_and_reads_back_identical() {
+        const ALIGNMENT: usize = 64;
+        let payloads: Vec<(&str, Vec<u8>)> = vec![
+            ("small_head", pattern_bytes(3)),
+            ("large_a", pattern_bytes(100)),
+            ("small_mid", pattern_bytes(5)),
+            ("exact_alignment", pattern_bytes(ALIGNMENT)),
+            ("large_b", pattern_bytes(200)),
+            ("small_tail", pattern_bytes(7)),
+        ];
+        let model = SafetensorsModel {
+            tensors: payloads
+                .iter()
+                .map(|(name, data)| byte_tensor(name, data))
+                .collect(),
+            metadata: BTreeMap::new(),
+        };
+
+        let written = write_complete_aligned(&model, ALIGNMENT).expect("writes aligned");
+
+        let header_len = u64::from_le_bytes(written[..8].try_into().expect("8 bytes")) as usize;
+        let data_start = 8 + header_len;
+        assert_eq!(
+            data_start % ALIGNMENT,
+            0,
+            "data region starts on the alignment"
+        );
+        let manifest = parse_whole(&written).expect("aligned file parses");
+        let mut seen = 0;
+        for entry in &manifest.tensors {
+            let (start, end) = (entry.data_offsets.0 as usize, entry.data_offsets.1 as usize);
+            let bytes = &written[data_start + start..data_start + end];
+            if is_filler_name(&entry.name) {
+                assert!(
+                    bytes.iter().all(|byte| *byte == 0),
+                    "filler {} is zeros",
+                    entry.name
+                );
+                continue;
+            }
+            let expected = &payloads
+                .iter()
+                .find(|(name, _)| *name == entry.name)
+                .expect("a written tensor names a payload")
+                .1;
+            assert_eq!(bytes, expected.as_slice(), "tensor {} bytes", entry.name);
+            if expected.len() >= ALIGNMENT {
+                assert_eq!(
+                    (data_start + start) % ALIGNMENT,
+                    0,
+                    "tensor {} absolute offset",
+                    entry.name
+                );
+            }
+            seen += 1;
+        }
+        assert_eq!(
+            seen,
+            payloads.len(),
+            "every original tensor is present once"
+        );
+        assert!(
+            manifest
+                .tensors
+                .iter()
+                .any(|entry| is_filler_name(&entry.name)),
+            "this layout needs at least one filler"
+        );
+    }
+
+    #[test]
+    fn aligned_write_of_one_byte_alignment_matches_write_complete() {
+        let payloads = [pattern_bytes(3), pattern_bytes(100)];
+        let model = SafetensorsModel {
+            tensors: vec![
+                byte_tensor("first", &payloads[0]),
+                byte_tensor("second", &payloads[1]),
+            ],
+            metadata: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            write_complete_aligned(&model, 1).expect("aligned"),
+            write_complete(&model).expect("plain")
+        );
+    }
+
+    #[test]
+    fn aligned_write_refuses_zero_alignment_and_a_caller_filler_name() {
+        let data = pattern_bytes(4);
+        let plain = SafetensorsModel {
+            tensors: vec![byte_tensor("w", &data)],
+            metadata: BTreeMap::new(),
+        };
+        let reserved = SafetensorsModel {
+            tensors: vec![byte_tensor(&alloc::format!("{FILLER_NAME_PREFIX}0"), &data)],
+            metadata: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            write_complete_aligned(&plain, 0),
+            Err(SafetensorsError::ZeroAlignment)
+        );
+        assert!(matches!(
+            write_complete_aligned(&reserved, 16),
+            Err(SafetensorsError::ReservedFillerName { .. })
+        ));
     }
 
     #[test]
