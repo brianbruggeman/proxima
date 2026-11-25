@@ -3051,8 +3051,10 @@ pub(crate) fn validate_decomposition_selection(
 ///
 /// A [`ScorePlanes::Whole`] op (eight operands, no cache, no sink, `head_dim` a
 /// whole number of 8-wide merge lanes) is admitted over its empty cached range
-/// at any row count [`decode_split_serves_rows`] admits, once its keys span more
-/// than one split or one simdgroup's share; the split count is
+/// at any row count, once its keys span more than one split or one simdgroup's
+/// share; the caller reaches this only after [`row_tiled_form`] declined the op
+/// (rows below the threshold, or a head the MMA fragments do not tile), so
+/// every row stays its own set of threadgroups. The split count is
 /// [`decode_splits_for`] of its key count.
 #[cfg(feature = "metal-attn-split-decode")]
 #[must_use]
@@ -3081,7 +3083,6 @@ fn decode_split_form(kind: &BoundOpKind, policy: NumericPolicy) -> Option<Cached
             && operands.len() == 8
             && rotary_dim == head_dim
             && head_dim.is_multiple_of(8)
-            && decode_split_serves_rows(*query_rows)
             && (decode_splits_for(capacity) > 1 || decode_chunks_for(capacity, *head_dim) > 1)
     } else {
         proxima_tensor::decode_split_shape_fits(*query_rows, *new_key_rows, *rotary_dim, *head_dim)
