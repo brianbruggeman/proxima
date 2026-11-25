@@ -615,7 +615,7 @@ mod tests {
 
     /// Runs the sum of exponentials at `extents` under an exact and a fast policy and
     /// checks each against the naive k-order libm sum: bit for bit, then within the
-    /// documented 5e-6 relative tolerance (6e-7 per exp, plus the shifted accumulation).
+    /// documented 5e-6 relative tolerance (ggml's 1.95 ulp per exp, plus the shifted accumulation).
     fn assert_sum_of_exp(extents: [usize; 3]) {
         let [heads, queries, keys] = extents;
         let total = heads * queries * keys;

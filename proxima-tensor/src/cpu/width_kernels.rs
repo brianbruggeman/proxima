@@ -661,7 +661,7 @@ pub(super) fn elementwise_width_fused_adam_update(
 /// exactly: output is bit-identical (`proxima-tensor/docs/discipline.md`
 /// ROW 5).
 ///
-/// `approximate_exp` swaps libm's exponential for `exp_approximation!` on
+/// `approximate_exp` swaps libm's exponential for [`Element::exp_approximation`] on
 /// every `Exponential` step; callers pass the plan's
 /// `NumericPolicy::approx_functions`, and `false` is the bit-identical path.
 #[inline(always)]
@@ -753,7 +753,7 @@ pub(super) fn elementwise_width_generic_tile(
             };
         }
         if approximate_exp && step.op == ScalarOp::Exponential {
-            elementwise_width_unary_monomorphic(|value| exp_approximation!(value), spans[0], row);
+            elementwise_width_unary_monomorphic(Element::exp_approximation, spans[0], row);
         } else {
             elementwise_width_generic_step(step.op, &spans, row);
         }

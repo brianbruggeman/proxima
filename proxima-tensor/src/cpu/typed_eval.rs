@@ -81,6 +81,13 @@ pub(super) trait Element: Copy + Default + 'static {
     /// element truncates toward zero, the same `as` conversion
     /// [`Element::from_index`] uses in the other direction.
     fn from_literal(value: f32) -> Self;
+
+    /// `exp(self)` to a bounded relative error, for a caller whose plan grants
+    /// `NumericPolicy::approx_functions`. An element with no cheaper formulation
+    /// keeps its exact [`Element::apply`] exponential.
+    fn exp_approximation(self) -> Self {
+        Self::apply(NodeId(0), ScalarOp::Exponential, &[self]).unwrap_or_default()
+    }
 }
 
 macro_rules! impl_element_signed_integer {
@@ -260,6 +267,34 @@ impl Element for f32 {
 
     fn from_literal(value: f32) -> Self {
         value as Self
+    }
+
+    /// The incumbent's polynomial: ggml's `ggml_v_expf` (ARM optimized-routines
+    /// `expf`, `ggml-cpu/vec.h:1148-1150`, "maximum error is 1.45358 plus 0.5
+    /// ulps") with the same range reduction and coefficients. `exp(x) = k + k*j`
+    /// where `k = 2^n`, `n = round(x * log2(e))`, `j` the degree-5 polynomial in
+    /// `b = x - n * ln 2`. Only multiplies, adds, a round, a convert and selects,
+    /// so a loop over a contiguous row vectorizes. 0 below -87.33, inf above 88.37
+    /// (ggml flushes above 88.38), NaN in gives NaN out.
+    #[inline(always)]
+    fn exp_approximation(self) -> Self {
+        let rounded = (self * 1.442_695_04).round();
+        let reduced = (self - rounded * 0.693_145_75) - rounded * 1.428_606_8e-6;
+        let square = reduced * reduced;
+        let polynomial = 0.999_999_4 * reduced
+            + (0.499_991_27
+                + 0.166_683_96 * reduced
+                + (0.041_899_77 + 0.008_247_39 * reduced) * square)
+                * square;
+        let exponent = (rounded as i32).clamp(-126, 127) + 127;
+        let power_of_two = Self::from_bits((exponent as u32) << 23);
+        if self < -87.336_55 {
+            0.0
+        } else if self > 88.37 {
+            Self::INFINITY
+        } else {
+            power_of_two + power_of_two * polynomial
+        }
     }
 }
 
@@ -1465,7 +1500,13 @@ pub(super) fn run_reduce_typed<T: Element>(
             .collect();
         // SAFETY: the `TypeId` check above proves `T == f32`.
         let output_f32 = unsafe { reinterpret_slice_mut(output) };
-        return run_reduce(resolved, &buffers_f32, output_f32, None, UNPLANNED_KERNEL_POLICY);
+        return run_reduce(
+            resolved,
+            &buffers_f32,
+            output_f32,
+            None,
+            UNPLANNED_KERNEL_POLICY,
+        );
     }
     run_reduce_generic(resolved, buffers, index_buffers, output)
 }

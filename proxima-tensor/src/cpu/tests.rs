@@ -1664,6 +1664,39 @@ fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     (0..count).map(|_| lcg.next_unit()).collect()
 }
 
+#[test]
+fn exp_approximation_stays_within_the_incumbent_relative_error_over_the_normal_range() {
+    let values: Vec<_> = random_vec(0xe7b0_0001, 200_000)
+        .into_iter()
+        .map(|value| value * 87.0)
+        .collect();
+
+    let worst = values
+        .iter()
+        .map(|&value| {
+            let want = value.exp();
+            ((Element::exp_approximation(value) - want) / want).abs()
+        })
+        .fold(0.0, |worst, error| if error > worst { error } else { worst });
+
+    assert!(
+        worst <= 4.0e-7,
+        "worst relative error {worst} exceeds ggml_v_expf's 1.95 ulp"
+    );
+}
+
+#[test]
+fn exp_approximation_saturates_outside_the_normal_range_and_propagates_nan() {
+    let origin = random_vec(0xe7b0_0002, 1)[0] * 0.0;
+    let below = Element::exp_approximation(origin - 200.0);
+    let above = Element::exp_approximation(origin + 200.0);
+    let nan = Element::exp_approximation(below / below);
+
+    assert_eq!(below, 0.0);
+    assert!(above.is_infinite() && above > 0.0, "overflow gives +inf, got {above}");
+    assert!(nan.is_nan(), "NaN in gives NaN out, got {nan}");
+}
+
 /// The scalar reference [`run_elementwise`]'s own `Generic` arm takes:
 /// per position, read each operand via its own running offset (advancing
 /// by `strides` each step, mirroring [`fill_running_offsets`] plus the
