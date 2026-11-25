@@ -5456,6 +5456,8 @@ pub mod rocm {
     const MEMCPY_HOST_TO_DEVICE: c_int = 1;
     /// `hipMemcpyDeviceToHost`.
     const MEMCPY_DEVICE_TO_HOST: c_int = 2;
+    /// `hipMemcpyDeviceToDevice`.
+    const MEMCPY_DEVICE_TO_DEVICE: c_int = 3;
     const HIP_SUCCESS: c_int = 0;
     const RTC_SUCCESS: c_int = 0;
 
@@ -5513,6 +5515,8 @@ pub mod rocm {
         Emit { node: NodeId, error: String },
         #[error("hip graph buffer for node {0:?} is missing")]
         MissingBuffer(NodeId),
+        #[error("a {len}-byte view at offset {offset} passes the end of a {bytes}-byte allocation")]
+        ViewOutOfRange { offset: usize, len: usize, bytes: usize },
     }
 
     type HipInit = unsafe extern "C" fn(u32) -> c_int;
@@ -5524,6 +5528,7 @@ pub mod rocm {
     type HipMalloc = unsafe extern "C" fn(*mut *mut c_void, usize) -> c_int;
     type HipFree = unsafe extern "C" fn(*mut c_void) -> c_int;
     type HipMemcpy = unsafe extern "C" fn(*mut c_void, *const c_void, usize, c_int) -> c_int;
+    type HipMemset = unsafe extern "C" fn(*mut c_void, c_int, usize) -> c_int;
     type HipGetErrorString = unsafe extern "C" fn(c_int) -> *const c_char;
     type HipModuleLoadData = unsafe extern "C" fn(*mut *mut c_void, *const c_void) -> c_int;
     type HipModuleGetFunction =
@@ -5636,6 +5641,7 @@ pub mod rocm {
         hip_malloc: HipMalloc,
         hip_free: HipFree,
         hip_memcpy: HipMemcpy,
+        hip_memset: HipMemset,
         hip_get_error_string: HipGetErrorString,
         hip_module_load_data: HipModuleLoadData,
         hip_module_get_function: HipModuleGetFunction,
@@ -5685,6 +5691,7 @@ pub mod rocm {
                 hip_malloc: resolve(&runtime, runtime_name, "hipMalloc")?,
                 hip_free: resolve(&runtime, runtime_name, "hipFree")?,
                 hip_memcpy: resolve(&runtime, runtime_name, "hipMemcpy")?,
+                hip_memset: resolve(&runtime, runtime_name, "hipMemset")?,
                 hip_get_error_string: resolve(&runtime, runtime_name, "hipGetErrorString")?,
                 hip_module_load_data: resolve(&runtime, runtime_name, "hipModuleLoadData")?,
                 hip_module_get_function: resolve(&runtime, runtime_name, "hipModuleGetFunction")?,
@@ -5820,6 +5827,57 @@ pub mod rocm {
         #[must_use]
         pub fn bytes(&self) -> usize {
             self.bytes
+        }
+
+        /// A borrowed window of `len` bytes starting `offset` bytes into this
+        /// allocation. The view cannot outlive the buffer, and the window is
+        /// checked against the allocation here, so no later copy has to trust it.
+        ///
+        /// # Errors
+        /// [`HipDriverError::ViewOutOfRange`] when `offset + len` passes the allocation.
+        pub fn view(&self, offset: usize, len: usize) -> Result<HipView<'_>, HipDriverError> {
+            window_end(self.bytes, offset, len).ok_or(HipDriverError::ViewOutOfRange {
+                offset,
+                len,
+                bytes: self.bytes,
+            })?;
+            Ok(HipView {
+                pointer: offset_pointer(self.pointer, offset),
+                len,
+                owner: core::marker::PhantomData,
+            })
+        }
+    }
+
+    /// The end offset of a `len`-byte window at `offset` inside `total` bytes,
+    /// or `None` when it overflows or passes the end.
+    fn window_end(total: usize, offset: usize, len: usize) -> Option<usize> {
+        offset.checked_add(len).filter(|end| *end <= total)
+    }
+
+    /// `base` advanced `offset` bytes. The result is only dereferenced by the
+    /// device, and only after [`window_end`] proved it stays inside the allocation.
+    fn offset_pointer(base: *mut c_void, offset: usize) -> *mut c_void {
+        base.cast::<u8>().wrapping_add(offset).cast::<c_void>()
+    }
+
+    /// A bounds-checked window into a [`HipBuffer`], borrowed from it.
+    #[derive(Debug, Clone, Copy)]
+    pub struct HipView<'buffer> {
+        pointer: *mut c_void,
+        len: usize,
+        owner: core::marker::PhantomData<&'buffer HipBuffer>,
+    }
+
+    impl HipView<'_> {
+        #[must_use]
+        pub fn len(&self) -> usize {
+            self.len
+        }
+
+        #[must_use]
+        pub fn is_empty(&self) -> bool {
+            self.len == 0
         }
     }
 
@@ -6141,20 +6199,10 @@ pub mod rocm {
         /// # Errors
         /// [`HipDriverError::Runtime`] when the allocation or copy fails.
         pub fn upload_bytes(&self, bytes: &[u8]) -> Result<HipBuffer, HipDriverError> {
-            let requested = bytes.len().max(1);
-            let mut pointer = ptr::null_mut();
-            // SAFETY: `pointer` is a valid out-parameter.
-            let status = unsafe { (self.api.hip_malloc)(&mut pointer, requested) };
-            if status != HIP_SUCCESS {
-                return Err(self.api.runtime_error("hipMalloc", status));
-            }
-            let buffer = HipBuffer {
-                api: Arc::clone(&self.api),
-                pointer,
-                bytes: requested,
-            };
+            let buffer = self.allocate_bytes(bytes.len())?;
+            let pointer = buffer.pointer;
             if !bytes.is_empty() {
-                // SAFETY: `pointer` holds `requested >= bytes.len()` bytes.
+                // SAFETY: `pointer` holds `buffer.bytes >= bytes.len()` bytes.
                 let status = unsafe {
                     (self.api.hip_memcpy)(
                         pointer,
@@ -6170,6 +6218,73 @@ pub mod rocm {
             Ok(buffer)
         }
 
+        /// Allocates `bytes` of uninitialized device memory (at least one byte,
+        /// so an empty request still owns a valid pointer).
+        ///
+        /// # Errors
+        /// [`HipDriverError::Runtime`] when the allocation fails.
+        pub fn allocate_bytes(&self, bytes: usize) -> Result<HipBuffer, HipDriverError> {
+            let requested = bytes.max(1);
+            let mut pointer = ptr::null_mut();
+            // SAFETY: `pointer` is a valid out-parameter.
+            let status = unsafe { (self.api.hip_malloc)(&mut pointer, requested) };
+            if status != HIP_SUCCESS {
+                return Err(self.api.runtime_error("hipMalloc", status));
+            }
+            Ok(HipBuffer {
+                api: Arc::clone(&self.api),
+                pointer,
+                bytes: requested,
+            })
+        }
+
+        /// Allocates `bytes` of device memory and zeroes all of it on the device,
+        /// with no host-side zero buffer: the device twin of `alloc_zeros`.
+        ///
+        /// # Errors
+        /// [`HipDriverError::Runtime`] when the allocation or the memset fails.
+        pub fn allocate_zeroed_bytes(&self, bytes: usize) -> Result<HipBuffer, HipDriverError> {
+            let buffer = self.allocate_bytes(bytes)?;
+            // SAFETY: `buffer.pointer` owns `buffer.bytes` bytes of device memory.
+            let status = unsafe { (self.api.hip_memset)(buffer.pointer, 0, buffer.bytes) };
+            if status != HIP_SUCCESS {
+                return Err(self.api.runtime_error("hipMemset", status));
+            }
+            Ok(buffer)
+        }
+
+        /// Copies `source`'s bytes into the start of `destination` on the device.
+        ///
+        /// # Errors
+        /// [`HipDriverError::ViewOutOfRange`] when `source` is longer than `destination`,
+        /// [`HipDriverError::Runtime`] when the copy fails.
+        pub fn copy_device(&self, destination: &HipView<'_>, source: &HipView<'_>) -> Result<(), HipDriverError> {
+            if source.len > destination.len {
+                return Err(HipDriverError::ViewOutOfRange {
+                    offset: 0,
+                    len: source.len,
+                    bytes: destination.len,
+                });
+            }
+            if source.is_empty() {
+                return Ok(());
+            }
+            // SAFETY: both views were bounds-checked against live allocations
+            // they borrow, and `source.len <= destination.len` by the check above.
+            let status = unsafe {
+                (self.api.hip_memcpy)(
+                    destination.pointer,
+                    source.pointer.cast_const(),
+                    source.len,
+                    MEMCPY_DEVICE_TO_DEVICE,
+                )
+            };
+            if status != HIP_SUCCESS {
+                return Err(self.api.runtime_error("hipMemcpy", status));
+            }
+            Ok(())
+        }
+
         /// Allocates a zeroed `f32` buffer of `elements`.
         ///
         /// # Errors
@@ -6178,7 +6293,7 @@ pub mod rocm {
             let bytes = elements
                 .checked_mul(core::mem::size_of::<f32>())
                 .ok_or(HipDriverError::InputTooLarge(elements))?;
-            self.upload_bytes(&vec![0u8; bytes])
+            self.allocate_zeroed_bytes(bytes)
         }
 
         /// Reads `elements` `f32` values back from `buffer`.
@@ -6751,6 +6866,36 @@ pub mod rocm {
                 open_ordinal(u32::MAX),
                 Err(HipDriverError::DeviceOrdinalTooLarge(u32::MAX))
             ));
+        }
+
+        #[test]
+        fn a_view_window_ends_inside_the_allocation_or_is_refused() {
+            assert_eq!(window_end(64, 0, 64), Some(64), "the whole allocation is a window");
+            assert_eq!(window_end(64, 16, 48), Some(64), "a tail window ends on the last byte");
+            assert_eq!(window_end(64, 64, 0), Some(64), "an empty window at the end is legal");
+            assert_eq!(window_end(64, 16, 49), None, "one byte past the end is refused");
+            assert_eq!(window_end(64, 65, 0), None, "an offset past the end is refused");
+            assert_eq!(window_end(64, usize::MAX, 2), None, "an overflowing window is refused, not wrapped");
+        }
+
+        #[test]
+        fn a_view_pointer_advances_by_bytes_not_elements() {
+            let base = 0x1000 as *mut c_void;
+
+            assert_eq!(offset_pointer(base, 0), base);
+            assert_eq!(offset_pointer(base, 12) as usize, 0x100c);
+            assert_eq!(offset_pointer(base, 4096) as usize, 0x2000);
+        }
+
+        #[test]
+        fn availability_is_whether_the_runtime_loads() {
+            assert_eq!(HipApi::is_available(), HipApi::load().is_ok());
+            if !HipApi::is_available() {
+                assert!(matches!(
+                    HipApi::load(),
+                    Err(HipDriverError::RuntimeNotInstalled { .. } | HipDriverError::RtcNotInstalled { .. })
+                ));
+            }
         }
 
         #[test]
