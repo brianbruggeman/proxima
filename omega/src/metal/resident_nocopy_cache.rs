@@ -1022,7 +1022,7 @@ pub(super) mod cross_plan_resident_reuse_tests {
 
     use super::{
         PLAN_HANDOFF_REUSES, cross_plan_resident_reuse, device_and_queue,
-        register_checkpoint_mapping, reset_nocopy_cache_for_test, upload_packed_bytes,
+        register_checkpoint_mapping, reset_nocopy_cache_for_test, upload_packed_bytes_in,
     };
 
     #[test]
@@ -1039,7 +1039,8 @@ pub(super) mod cross_plan_resident_reuse_tests {
         // would have already left behind by the time a reshape builds a new
         // one.
         let tensor_bytes = &checkpoint[64..128];
-        upload_packed_bytes(&device, tensor_bytes, None).expect("first checkpoint-backed upload");
+        upload_packed_bytes_in(None, &device, tensor_bytes, None)
+            .expect("first checkpoint-backed upload");
 
         let pointer = tensor_bytes.as_ptr().cast();
         let byte_length = tensor_bytes.len();
@@ -1131,7 +1132,7 @@ pub(super) mod strided_expert_half_tests {
 
     use super::{
         Codec, cross_plan_block_reuse, device_and_queue, register_checkpoint_mapping,
-        reset_nocopy_cache_for_test, reset_resident_cache_for_test, upload_packed_bytes,
+        reset_nocopy_cache_for_test, reset_resident_cache_for_test, upload_packed_bytes_in,
         upload_strided_runs,
     };
 
@@ -1264,7 +1265,7 @@ pub(super) mod strided_expert_half_tests {
         checkpoint[page..page + fused.len()].copy_from_slice(&fused);
         register_checkpoint_mapping(&checkpoint);
         let slab = &checkpoint[page..page + fused.len()];
-        upload_packed_bytes(&device, &slab[..HALF_BYTES], None)
+        upload_packed_bytes_in(None, &device, &slab[..HALF_BYTES], None)
             .expect("a contiguous block registers the mapping buffer");
 
         let contiguous = QuantizedBlock::Packed {

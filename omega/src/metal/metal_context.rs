@@ -13,14 +13,14 @@ use super::arena_encode_dispatch_finish::{
 };
 use super::device_buffers_arena_plan::{ACTIVE_QUEUE, EXPERT_SOURCE_CACHE, StagedExpertSource};
 use super::metal_device::{ACTIVE_DEVICE, MetalDevice};
-use super::pipeline_buffers_upload::{CHECKPOINT_MAPPING, NOCOPY_BUFFERS};
+use super::pipeline_buffers_upload::{CHECKPOINT_MAPPING, NOCOPY_BUFFERS, expert_mapping_identity};
 use super::resident_nocopy_cache::{
     FAULT_BUFFER_POOL, RESIDENT_BUFFERS, UNIFORM_BUFFERS, UNIFORM_CACHE_CLOCK,
 };
 use super::shared_transient::{ARENA_TRANSIENT, ATTENTION_SCRATCH_TRANSIENT};
 use super::warm_resident_buffers::{
     MAPPING_RESIDENCY, WARM_RESIDENCY_SET, release_all_mapping_residency, release_warm_residency,
-    warm_active_context,
+    warm_active_context_in,
 };
 use super::{MetalBuffer, NodeId};
 
@@ -100,8 +100,17 @@ impl MetalContext {
     /// the same body as [`super::warm_resident_buffers`], which stays the
     /// no-context entry on the thread's queue.
     pub fn warm(&mut self) -> Result<usize, super::MetalError> {
+        self.warm_in(expert_mapping_identity())
+    }
+
+    /// [`Self::warm`] over an explicit expert-mapping identity instead of the
+    /// process-global one.
+    pub(super) fn warm_in(
+        &mut self,
+        expert_mapping: Option<(usize, usize)>,
+    ) -> Result<usize, super::MetalError> {
         let _guard = self.activate();
-        warm_active_context()
+        warm_active_context_in(expert_mapping)
     }
 
     /// restores the enclosing context when the guard drops, including unwind.

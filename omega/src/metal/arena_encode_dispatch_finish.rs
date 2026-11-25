@@ -5059,7 +5059,7 @@ pub(super) mod operand_tensor_bytes_tests {
 
     use super::{
         BTreeSet, Codec, NodeId, PackedOperands, device_and_queue, element_count,
-        operand_tensor_bytes, page_size, register_checkpoint_mapping, upload_packed_bytes,
+        operand_tensor_bytes, page_size, register_checkpoint_mapping, upload_packed_bytes_in,
     };
     use crate::msl::{Q4K_BLOCK_BYTES, Q5K_BLOCK_BYTES};
 
@@ -5225,7 +5225,8 @@ pub(super) mod operand_tensor_bytes_tests {
         let tensor_bytes = &mapping_bytes[tensor_offset..tensor_offset + Q4K_BLOCK_BYTES];
 
         let (buffer, bound_offset) =
-            upload_packed_bytes(&device, tensor_bytes, None).expect("checkpoint-mapping upload");
+            upload_packed_bytes_in(None, &device, tensor_bytes, None)
+                .expect("checkpoint-mapping upload");
 
         assert_eq!(
             bound_offset, tensor_offset,

@@ -1485,6 +1485,17 @@ pub(super) fn upload_packed_bytes(
     bytes: &[u8],
     resident_name: Option<&str>,
 ) -> Result<(MetalBuffer, usize), MetalError> {
+    upload_packed_bytes_in(expert_mapping_identity(), device, bytes, resident_name)
+}
+
+/// [`upload_packed_bytes`] over an explicit expert-mapping identity; the
+/// production entry point passes the process-global one.
+pub(super) fn upload_packed_bytes_in(
+    expert_mapping: Option<(usize, usize)>,
+    device: &ProtocolObject<dyn MTLDevice>,
+    bytes: &[u8],
+    resident_name: Option<&str>,
+) -> Result<(MetalBuffer, usize), MetalError> {
     if bytes.len() > 100 * 1024 * 1024 {
         debug!(
             bytes = bytes.len() as u64,
@@ -1497,11 +1508,13 @@ pub(super) fn upload_packed_bytes(
     }
     let byte_length = bytes.len();
     let pointer = bytes.as_ptr().cast::<c_void>();
-    let mapping_published = expert_mapping_identity().is_some();
+    let mapping_published = expert_mapping.is_some();
     if mapping_published {
         counter!(EXPERT_MAPPING_CANDIDATE_UPLOADS, 1);
     }
-    if let Some(result) = expert_mapping_offset(device, pointer, byte_length, resident_name) {
+    if let Some(result) =
+        expert_mapping_offset_in(expert_mapping, device, pointer, byte_length, resident_name)
+    {
         return result;
     }
     if mapping_published {
@@ -1891,7 +1904,25 @@ pub(super) fn expert_mapping_offset(
     byte_length: usize,
     tensor_name: Option<&str>,
 ) -> Option<Result<(MetalBuffer, usize), MetalError>> {
-    let (base, mapping_length) = expert_mapping_identity()?;
+    expert_mapping_offset_in(
+        expert_mapping_identity(),
+        device,
+        pointer,
+        byte_length,
+        tensor_name,
+    )
+}
+
+/// [`expert_mapping_offset`] over an explicit `(base, length)` identity
+/// instead of the process-global one, so a caller owns the mapping it asks about.
+pub(super) fn expert_mapping_offset_in(
+    identity: Option<(usize, usize)>,
+    device: &ProtocolObject<dyn MTLDevice>,
+    pointer: *const c_void,
+    byte_length: usize,
+    tensor_name: Option<&str>,
+) -> Option<Result<(MetalBuffer, usize), MetalError>> {
+    let (base, mapping_length) = identity?;
     let address = pointer as usize;
     let end = address.checked_add(byte_length)?;
     let mapping_end = base.checked_add(mapping_length)?;
@@ -1934,11 +1965,11 @@ pub(super) const EXPERT_MAPPING_NOCOPY_NAME: &str = "__expert_mapping__";
 /// tests in the same binary (see [`reset_nocopy_cache_for_test`]'s own
 /// doc), and [`CHECKPOINT_MAPPING`] is thread-local, so a prior test's
 /// registration would otherwise leak into a later test on the same thread.
+/// It leaves the process-global expert mapping alone: resetting it from any
+/// test would clobber the one test that registers it.
 #[cfg(test)]
 pub(super) fn reset_checkpoint_mapping_for_test() {
     CHECKPOINT_MAPPING.with(|mapping| *mapping.borrow_mut() = None);
-    EXPERT_MAPPING_LENGTH.store(0, Ordering::Release);
-    EXPERT_MAPPING_BASE.store(0, Ordering::Relaxed);
     release_all_mapping_residency();
     NOCOPY_BUFFERS.with(|cache| {
         cache.borrow_mut().remove(CHECKPOINT_MAPPING_NOCOPY_NAME);
@@ -1950,15 +1981,14 @@ pub(super) fn reset_checkpoint_mapping_for_test() {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 pub(super) mod checkpoint_mapping_release_tests {
     use proxima_tensor::AlignedBuffer;
-    use std::sync::Mutex;
 
     use super::{
-        CHECKPOINT_MAPPING_NOCOPY_NAME, MISALIGNED_MAPPING_OFFSET_COPIES,
-        checkpoint_mapping_offset, clear_expert_source_cache, device_and_queue,
-        expert_mapping_offset, mapping_buffer_allocated_bytes, mapping_offset_is_aligned,
-        page_size, register_checkpoint_mapping, register_expert_mapping,
-        reset_checkpoint_mapping_for_test, unregister_checkpoint_mapping,
-        unregister_expert_mapping, upload_packed_bytes,
+        CHECKPOINT_MAPPING_NOCOPY_NAME, EXPERT_MAPPING_NOCOPY_NAME,
+        MISALIGNED_MAPPING_OFFSET_COPIES, checkpoint_mapping_offset, clear_expert_source_cache,
+        device_and_queue, evict_mapping_buffer, expert_mapping_offset,
+        mapping_buffer_allocated_bytes, mapping_offset_is_aligned, page_size,
+        register_checkpoint_mapping, register_expert_mapping, reset_checkpoint_mapping_for_test,
+        unregister_checkpoint_mapping, unregister_expert_mapping, upload_packed_bytes_in,
     };
     use crate::metal::warm_resident_buffers::{
         WARM_RESIDENCY_SET, held_mapping_residency_allocations, held_residency_allocations,
@@ -1972,8 +2002,6 @@ pub(super) mod checkpoint_mapping_release_tests {
     use std::io::Write;
     use std::os::fd::AsRawFd;
 
-    static MAPPING_TEST_LOCK: Mutex<()> = Mutex::new(());
-
     /// The exact drop-ordering hazard `LoadedModel::drop` is written
     /// against: model A loads (registers its mapping), model B loads
     /// afterward (its own `register_checkpoint_mapping` call supersedes
@@ -1984,9 +2012,6 @@ pub(super) mod checkpoint_mapping_release_tests {
     /// identity actually clears it.
     #[test]
     fn unregister_only_clears_the_currently_registered_identity() {
-        let _guard = MAPPING_TEST_LOCK
-            .lock()
-            .expect("mapping test lock is healthy");
         let Ok((device, _queue)) = device_and_queue() else {
             return;
         };
@@ -2036,11 +2061,9 @@ pub(super) mod checkpoint_mapping_release_tests {
         );
     }
 
+    // the only test that touches the process-global expert mapping
     #[test]
     fn expert_mapping_resolves_a_misaligned_arena_slice_and_unregisters() {
-        let _guard = MAPPING_TEST_LOCK
-            .lock()
-            .expect("mapping test lock is healthy");
         let Ok((device, _queue)) = device_and_queue() else {
             return;
         };
@@ -2100,9 +2123,6 @@ pub(super) mod checkpoint_mapping_release_tests {
 
     #[test]
     fn packed_upload_at_an_odd_checkpoint_offset_takes_the_copy_path() {
-        let _guard = MAPPING_TEST_LOCK
-            .lock()
-            .expect("mapping test lock is healthy");
         let Ok((device, _queue)) = device_and_queue() else {
             return;
         };
@@ -2117,7 +2137,7 @@ pub(super) mod checkpoint_mapping_release_tests {
 
         let copies_before = MISALIGNED_MAPPING_OFFSET_COPIES.get();
         let (_view, aligned_offset) =
-            upload_packed_bytes(&device, &mapping_bytes[8..72], Some("aligned.weight"))
+            upload_packed_bytes_in(None, &device, &mapping_bytes[8..72], Some("aligned.weight"))
                 .expect("aligned tensor uploads");
         assert_eq!(
             aligned_offset, 8,
@@ -2126,7 +2146,7 @@ pub(super) mod checkpoint_mapping_release_tests {
         assert_eq!(MISALIGNED_MAPPING_OFFSET_COPIES.get(), copies_before);
 
         let (_copy, odd_offset) =
-            upload_packed_bytes(&device, &mapping_bytes[3..67], Some("odd.weight"))
+            upload_packed_bytes_in(None, &device, &mapping_bytes[3..67], Some("odd.weight"))
                 .expect("misaligned tensor still uploads");
         assert_eq!(
             odd_offset, 0,
@@ -2141,9 +2161,6 @@ pub(super) mod checkpoint_mapping_release_tests {
     /// first receives it, once, and leaves it when the mapping is unregistered.
     #[test]
     fn mapping_buffer_joins_the_residency_set_once_and_leaves_on_unregister() {
-        let _guard = MAPPING_TEST_LOCK
-            .lock()
-            .expect("mapping test lock is healthy");
         let Ok((device, _queue)) = device_and_queue() else {
             return;
         };
@@ -2160,9 +2177,9 @@ pub(super) mod checkpoint_mapping_release_tests {
             unsafe { core::slice::from_raw_parts(mapping.as_ptr().cast::<u8>(), page) };
         register_checkpoint_mapping(mapping_bytes);
 
-        upload_packed_bytes(&device, &mapping_bytes[8..72], Some("first.weight"))
+        upload_packed_bytes_in(None, &device, &mapping_bytes[8..72], Some("first.weight"))
             .expect("first tensor uploads as a view");
-        upload_packed_bytes(&device, &mapping_bytes[72..136], Some("second.weight"))
+        upload_packed_bytes_in(None, &device, &mapping_bytes[72..136], Some("second.weight"))
             .expect("second tensor uploads as a view");
         assert_eq!(
             held_mapping_residency_allocations(),
@@ -2266,9 +2283,6 @@ pub(super) mod checkpoint_mapping_release_tests {
     /// no-copy view over pages the kernel never loaded reads the file's bytes.
     #[test]
     fn a_gpu_read_through_a_cold_checkpoint_mapping_returns_the_file_bytes() {
-        let _guard = MAPPING_TEST_LOCK
-            .lock()
-            .expect("mapping test lock is healthy");
         let Ok((device, queue)) = device_and_queue() else {
             return;
         };
@@ -2308,9 +2322,6 @@ pub(super) mod checkpoint_mapping_release_tests {
 
     #[test]
     fn packed_upload_prefers_the_registered_expert_mapping() {
-        let _guard = MAPPING_TEST_LOCK
-            .lock()
-            .expect("mapping test lock is healthy");
         let Ok((device, _queue)) = device_and_queue() else {
             return;
         };
@@ -2324,11 +2335,13 @@ pub(super) mod checkpoint_mapping_release_tests {
         let first_page = &mapping_bytes[..page];
         let second_page = &mapping_bytes[page..];
 
-        register_expert_mapping(mapping_bytes);
-        let (first_buffer, first_offset) = upload_packed_bytes(&device, first_page, None)
-            .expect("first page uses the registered expert mapping");
-        let (second_buffer, second_offset) = upload_packed_bytes(&device, second_page, None)
-            .expect("second page uses the registered expert mapping");
+        let identity = Some((mapping_bytes.as_ptr() as usize, mapping_bytes.len()));
+        let (first_buffer, first_offset) =
+            upload_packed_bytes_in(identity, &device, first_page, None)
+                .expect("first page uses the owned expert mapping");
+        let (second_buffer, second_offset) =
+            upload_packed_bytes_in(identity, &device, second_page, None)
+                .expect("second page uses the owned expert mapping");
 
         assert_eq!(first_offset, 0);
         assert_eq!(second_offset, page);
@@ -2338,7 +2351,7 @@ pub(super) mod checkpoint_mapping_release_tests {
         );
         assert_eq!(mapping_buffer_allocated_bytes(), (0, (2 * page) as u64));
 
-        unregister_expert_mapping(mapping_bytes);
+        evict_mapping_buffer(EXPERT_MAPPING_NOCOPY_NAME);
         assert_eq!(mapping_buffer_allocated_bytes(), (0, 0));
     }
 }

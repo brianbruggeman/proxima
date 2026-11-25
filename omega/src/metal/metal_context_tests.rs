@@ -11,10 +11,10 @@ use super::super::arena_encode_dispatch_finish::read_back_as_device_f32;
 use super::super::device_buffers_arena_plan::device_and_queue;
 use super::super::pipeline_buffers_upload::{
     CHECKPOINT_MAPPING, checkpoint_mapping_offset, page_size, register_checkpoint_mapping,
-    reset_checkpoint_mapping_for_test, upload_packed_bytes,
+    reset_checkpoint_mapping_for_test, upload_packed_bytes_in,
 };
 use super::super::warm_resident_buffers::{
-    held_mapping_residency_allocations, held_residency_allocations, warm_active_context,
+    held_mapping_residency_allocations, held_residency_allocations, warm_active_context_in,
 };
 use super::super::resident_nocopy_cache::{
     release_resident_names, reset_nocopy_cache_for_test, reset_resident_cache_for_test,
@@ -455,10 +455,11 @@ fn clear_detaches_the_mapping_and_warm_residency_sets() {
     let mut context = MetalContext::default();
     let mut active = context.activate();
     register_checkpoint_mapping(mapping_bytes);
-    upload_packed_bytes(&device, &mapping_bytes[8..72], Some("view.weight"))
+    upload_packed_bytes_in(None, &device, &mapping_bytes[8..72], Some("view.weight"))
         .expect("an aligned tensor uploads as a view of the mapping");
     assert_eq!(held_mapping_residency_allocations().len(), 1, "the mapping holds one set");
-    warm_active_context().expect("warming builds the context's warm set the way a model load does");
+    warm_active_context_in(None)
+        .expect("warming builds the context's warm set the way a model load does");
     assert!(
         held_residency_allocations().is_some_and(|count| count >= 1),
         "the warm set covers the cached mapping buffer before clear"

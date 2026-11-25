@@ -168,19 +168,22 @@ pub(super) fn resident_buffers() -> Vec<MetalBuffer> {
     nocopy.into_iter().chain(copies).collect()
 }
 
-fn materialize_mapping_buffers(device: &ProtocolObject<dyn MTLDevice>) -> Result<(), MetalError> {
+fn materialize_mapping_buffers(
+    device: &ProtocolObject<dyn MTLDevice>,
+    expert_mapping: Option<(usize, usize)>,
+) -> Result<(), MetalError> {
     if let Some((base, length)) = CHECKPOINT_MAPPING.with(|mapping| *mapping.borrow()) {
         mapping_buffer(device, CHECKPOINT_MAPPING_NOCOPY_NAME, base, length)?;
     }
-    if let Some((base, length)) = expert_mapping_identity() {
+    if let Some((base, length)) = expert_mapping {
         mapping_buffer(device, EXPERT_MAPPING_NOCOPY_NAME, base, length)?;
     }
     Ok(())
 }
 
-fn nothing_to_warm() -> bool {
+fn nothing_to_warm(expert_mapping: Option<(usize, usize)>) -> bool {
     CHECKPOINT_MAPPING.with(|mapping| mapping.borrow().is_none())
-        && expert_mapping_identity().is_none()
+        && expert_mapping.is_none()
         && resident_buffers().is_empty()
 }
 
@@ -188,18 +191,22 @@ fn nothing_to_warm() -> bool {
 /// buffer and returns how many it declared. Returns `Ok(0)` without touching
 /// the device when nothing is registered or resident.
 pub fn warm_resident_buffers() -> Result<usize, MetalError> {
-    warm_body()
+    warm_body(expert_mapping_identity())
 }
 
 /// Warm for the active [`MetalContext`]: idempotent while its residency set is
 /// held, and the set attaches to the context's queue, created here if absent.
-pub(super) fn warm_active_context() -> Result<usize, MetalError> {
+/// `expert_mapping` is the expert identity to warm; production passes the
+/// process-global one.
+pub(super) fn warm_active_context_in(
+    expert_mapping: Option<(usize, usize)>,
+) -> Result<usize, MetalError> {
     let held =
         WARM_RESIDENCY_SET.with(|slot| slot.borrow().as_ref().map(|set| set.allocationCount()));
     if let Some(count) = held {
         return Ok(count);
     }
-    if nothing_to_warm() {
+    if nothing_to_warm(expert_mapping) {
         return Ok(0);
     }
     let (device, queue) = device_and_queue()?;
@@ -219,15 +226,15 @@ pub(super) fn warm_active_context() -> Result<usize, MetalError> {
         Ok::<(), MetalError>(())
     })?;
     drop(queue);
-    warm_body()
+    warm_body(expert_mapping)
 }
 
-fn warm_body() -> Result<usize, MetalError> {
-    if nothing_to_warm() {
+fn warm_body(expert_mapping: Option<(usize, usize)>) -> Result<usize, MetalError> {
+    if nothing_to_warm(expert_mapping) {
         return Ok(0);
     }
     let (device, queue) = device_and_queue()?;
-    materialize_mapping_buffers(&device)?;
+    materialize_mapping_buffers(&device, expert_mapping)?;
     let buffers = resident_buffers();
     let residency_started = Instant::now();
     let residency_requested = request_residency(&device, &queue, &buffers)?;
@@ -284,7 +291,7 @@ mod tests {
         reset_resident_cache_for_test();
         reset_checkpoint_mapping_for_test();
         assert!(
-            matches!(warm_resident_buffers(), Ok(0)),
+            matches!(warm_body(None), Ok(0)),
             "an empty set needs no device"
         );
     }
@@ -309,7 +316,7 @@ mod tests {
                 .expect("a resident weight uploads");
         }
 
-        let warmed = warm_resident_buffers().expect("warming two real buffers succeeds");
+        let warmed = warm_body(None).expect("warming two real buffers succeeds");
 
         assert_eq!(warmed, 2, "both resident weights are declared");
         if device.respondsToSelector(sel!(newResidencySetWithDescriptor:error:)) {
@@ -357,11 +364,15 @@ mod context_tests {
             }
         }
         assert_eq!(
-            context.warm().expect("warming two real buffers succeeds"),
+            context
+                .warm_in(None)
+                .expect("warming two real buffers succeeds"),
             2
         );
         assert_eq!(
-            context.warm().expect("a second warm returns the held set"),
+            context
+                .warm_in(None)
+                .expect("a second warm returns the held set"),
             2
         );
         Some(context)
