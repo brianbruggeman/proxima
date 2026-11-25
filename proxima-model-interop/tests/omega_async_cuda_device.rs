@@ -6,6 +6,7 @@ use core::task::Poll;
 use std::string::String;
 
 use omega::CudaDriver;
+use omega::owner_config::OwnerConfig;
 use proxima_model_interop::cuda_async::{CudaGpuService, CudaPlanOptions, OwnedInputError};
 use proxima_primitives::pipe::CreditAcquireError;
 use proxima_tensor::map::{self, IndexMap};
@@ -42,7 +43,7 @@ async fn cuda_device_name_and_literal_sync_async_output_match() {
     assert_eq!(synchronous_device.ordinal, 0);
     assert!(!synchronous_device.name.is_empty());
 
-    let service = CudaGpuService::start().expect("CUDA owner should start");
+    let service = CudaGpuService::start(&OwnerConfig::default()).expect("CUDA owner should start");
     let owner_device = service
         .device_snapshot()
         .await
@@ -115,7 +116,7 @@ async fn cuda_device_name_and_literal_sync_async_output_match() {
 #[proxima::test]
 async fn cuda_device_completions_follow_submission_order() {
     let driver = required_driver();
-    let service = CudaGpuService::start().expect("CUDA owner should start");
+    let service = CudaGpuService::start(&OwnerConfig::default()).expect("CUDA owner should start");
     let device = service
         .device_snapshot()
         .await
@@ -228,7 +229,11 @@ async fn cuda_device_completions_follow_submission_order() {
 #[proxima::test]
 async fn cuda_device_over_budget_refuses_before_upload_or_launch() {
     let driver = required_driver();
-    let service = CudaGpuService::start_with_limits(1, 4).expect("bounded owner should start");
+    let bounded = OwnerConfig::builder()
+        .queue_depth(1)
+        .owned_host_bytes(4)
+        .build();
+    let service = CudaGpuService::start(&bounded).expect("bounded owner should start");
     let before = service
         .device_snapshot()
         .await

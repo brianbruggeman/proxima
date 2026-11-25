@@ -14,6 +14,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use conflaguration::Validate;
 use omega::config::{RuntimeConfig, SelectionMode};
+use omega::owner_config::OwnerConfig;
 use omega::device_owner::{
     OwnerCommand as DeviceOwnerCommand, OwnerFlow, PlanLease, PlanRegistry, PlanRegistryError,
     execute_registered_plan, run_owner,
@@ -35,8 +36,6 @@ use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::{NodeId, Op};
 use proxima_numeric::{NumericPolicy};
 
-const MAX_CUDA_PLANS: usize = 32;
-const DEFAULT_OWNED_HOST_BYTES: usize = 256 * 1024 * 1024;
 
 #[cfg(test)]
 mod owner_failure_tests;
@@ -626,22 +625,15 @@ pub(crate) struct FakeOwnerControl {
 }
 
 impl CudaGpuService<()> {
-    /// Starts one dedicated owner worker and retains its typed completion.
-    pub fn start()
-    -> Result<CudaGpuService<impl Future<Output = Result<(), ProximaError>> + Send>, ProximaError>
-    {
-        Self::start_with_limits(MAX_CUDA_PLANS, DEFAULT_OWNED_HOST_BYTES)
-    }
-
-    /// Starts the owner with explicit job and copied-host-byte ceilings.
-    pub fn start_with_limits(
-        max_jobs: usize,
-        max_owned_host_bytes: usize,
-    ) -> Result<CudaGpuService<impl Future<Output = Result<(), ProximaError>> + Send>, ProximaError>
-    {
+    /// Starts one dedicated owner worker sized by [`OwnerConfig`] and retains its typed completion.
+    pub fn start(
+        config: &OwnerConfig,
+    ) -> Result<
+        CudaGpuService<impl Future<Output = Result<(), ProximaError>> + Send + use<>>,
+        ProximaError,
+    > {
         Self::start_inner(
-            max_jobs,
-            max_owned_host_bytes,
+            config,
             #[cfg(test)]
             false,
             #[cfg(test)]
@@ -653,7 +645,7 @@ impl CudaGpuService<()> {
     pub(crate) fn start_fake()
     -> Result<CudaGpuService<impl Future<Output = Result<(), ProximaError>> + Send>, ProximaError>
     {
-        Self::start_inner(MAX_CUDA_PLANS, DEFAULT_OWNED_HOST_BYTES, true, None)
+        Self::start_inner(&OwnerConfig::default(), true, None)
     }
 
     #[cfg(test)]
@@ -667,8 +659,7 @@ impl CudaGpuService<()> {
         let (accepted_sender, accepted) = channel();
         let (release, release_receiver) = channel();
         let service = Self::start_inner(
-            MAX_CUDA_PLANS,
-            DEFAULT_OWNED_HOST_BYTES,
+            &OwnerConfig::default(),
             true,
             Some((accepted_sender, release_receiver)),
         )?;
@@ -676,22 +667,24 @@ impl CudaGpuService<()> {
     }
 
     fn start_inner(
-        max_jobs: usize,
-        max_owned_host_bytes: usize,
+        config: &OwnerConfig,
         #[cfg(test)] fake: bool,
         #[cfg(test)] fake_owner_hold: Option<(Sender<()>, Receiver<()>)>,
-    ) -> Result<CudaGpuService<impl Future<Output = Result<(), ProximaError>> + Send>, ProximaError>
-    {
+    ) -> Result<
+        CudaGpuService<impl Future<Output = Result<(), ProximaError>> + Send + use<>>,
+        ProximaError,
+    > {
         let job_gate = Arc::new(
-            CreditGate::new(ReservationSink, max_jobs)
+            CreditGate::new(ReservationSink, config.queue_depth)
                 .map_err(|_| ProximaError::Config(String::from("invalid cuda job capacity")))?,
         );
         let byte_budget =
-            Arc::new(OwnedByteBudget::new(max_owned_host_bytes).map_err(|_| {
+            Arc::new(OwnedByteBudget::new(config.owned_host_bytes).map_err(|_| {
                 ProximaError::Config(String::from("invalid cuda owned byte capacity"))
             })?);
         let pool = ProximaBackgroundPool::with_threads(1)?;
-        let (commands, owner_commands) = command_channel(max_jobs);
+        let (commands, owner_commands) = command_channel(config.queue_depth);
+        let plan_capacity = config.plan_capacity;
         let commands = Arc::new(commands);
         let owner_job_gate = Arc::clone(&job_gate);
         let owner_byte_budget = Arc::clone(&byte_budget);
@@ -711,7 +704,7 @@ impl CudaGpuService<()> {
         let owner_fake_execute_count = Arc::clone(&fake_execute_count);
         let owner = pool.spawn_async(async move {
             let state = OwnerState {
-                plans: PlanRegistry::new(owner_identity, MAX_CUDA_PLANS),
+                plans: PlanRegistry::new(owner_identity, plan_capacity),
                 driver: None,
                 completed_jobs: 0,
                 #[cfg(test)]
@@ -931,42 +924,6 @@ where
         self.byte_budget.available_bytes()
     }
 
-    /// Transfer a CUDA plan to the owner and return its service-scoped lease.
-    ///
-    /// The command enters the bounded FIFO before the response future is
-    /// returned, so dropping interest cannot drop an accepted device plan on
-    /// the caller's thread.
-    pub fn register_cuda_plan(
-        &self,
-        plan: omega::CudaPlan,
-    ) -> Result<
-        impl Future<Output = Result<PlanLease, PlanRegistryError>>,
-        Box<omega::CudaPlan>,
-    > {
-        let (reply, response) = oneshot::channel();
-        let command = OwnerCommand::RegisterPlan {
-            plan: Box::new(plan),
-            reply,
-        };
-        match self.commands.try_send(command) {
-            Ok(()) => Ok(async move {
-                response
-                    .await
-                    .unwrap_or(Err(PlanRegistryError::OwnerStopped))
-            }),
-            Err(error) => match error.into_inner() {
-                OwnerCommand::RegisterPlan { plan, .. } => Err(plan),
-                OwnerCommand::DeviceSnapshot { .. }
-                | OwnerCommand::RegisterGraph { .. }
-                | OwnerCommand::RetirePlan { .. }
-                | OwnerCommand::InvalidateResidents { .. }
-                | OwnerCommand::ExecutePlan { .. } => {
-                    unreachable!("register send returns its register command")
-                }
-            },
-        }
-    }
-
     /// Build and register a graph wholly on the service owner.
     pub async fn register_graph(
         &self,
@@ -1046,37 +1003,22 @@ where
     }
 
     /// Retire a plan generation after previously queued owner work reaches it.
-    pub fn retire_cuda_plan(
-        &self,
-        lease: &PlanLease,
-    ) -> Result<impl Future<Output = Result<(), PlanRegistryError>>, PlanRegistryError>
-    {
+    ///
+    /// Cancelling before the command is queued leaves the plan resident; after
+    /// it is queued the owner retires it regardless, and a repeat call reports
+    /// `Stale`.
+    pub async fn retire_cuda_plan(&self, lease: &PlanLease) -> Result<(), PlanRegistryError> {
         let (reply, response) = oneshot::channel();
-        let command = OwnerCommand::RetirePlan {
-            lease: lease.clone(),
-            reply,
-        };
-        match self.commands.try_send(command) {
-            Ok(()) => Ok(async move {
-                response
-                    .await
-                    .unwrap_or(Err(PlanRegistryError::OwnerStopped))
-            }),
-            Err(error) => match error.into_inner() {
-                OwnerCommand::RetirePlan { .. } => Err(if self.commands.is_closed() {
-                    PlanRegistryError::OwnerStopped
-                } else {
-                    PlanRegistryError::QueueFull
-                }),
-                OwnerCommand::DeviceSnapshot { .. }
-                | OwnerCommand::RegisterGraph { .. }
-                | OwnerCommand::RegisterPlan { .. }
-                | OwnerCommand::InvalidateResidents { .. }
-                | OwnerCommand::ExecutePlan { .. } => {
-                    unreachable!("retire send returns its retire command")
-                }
-            },
-        }
+        self.commands
+            .send(OwnerCommand::RetirePlan {
+                lease: lease.clone(),
+                reply,
+            })
+            .await
+            .map_err(|_| PlanRegistryError::OwnerStopped)?;
+        response
+            .await
+            .unwrap_or(Err(PlanRegistryError::OwnerStopped))
     }
 
     /// Await bounded owner execution through the composed admission and execution Pipes.
@@ -1143,6 +1085,7 @@ mod tests {
         OwnedByteBudget, OwnedGpuJob, ReservationSink, command_channel,
     };
     use omega::device_owner::{PlanRegistry, execute_registered_plan};
+    use omega::owner_config::OwnerConfig;
     use core::future::{Future, poll_fn};
     use core::pin::pin;
     use core::task::Poll;
@@ -1600,7 +1543,8 @@ mod tests {
 
     #[proxima::test]
     async fn test_omega_async_owner_lifecycle_starts_one_worker() {
-        let service = CudaGpuService::start().expect("service should start");
+        let service =
+            CudaGpuService::start(&OwnerConfig::default()).expect("service should start");
         assert_eq!(service.pool.as_ref().map(|pool| pool.workers()), Some(1));
         service
             .shutdown()
@@ -1610,7 +1554,8 @@ mod tests {
 
     #[proxima::test]
     async fn test_omega_async_owner_lifecycle_closes_and_joins() {
-        let service = CudaGpuService::start().expect("service should start");
+        let service =
+            CudaGpuService::start(&OwnerConfig::default()).expect("service should start");
         service
             .shutdown()
             .await

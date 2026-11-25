@@ -3,6 +3,7 @@ use core::pin::pin;
 use core::task::Poll;
 use std::time::Duration;
 
+use omega::owner_config::OwnerConfig;
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::CreditAcquireError;
 use proxima_tensor::cpu::QuantizedBlock;
@@ -11,8 +12,7 @@ use proxima_numeric::{DType, NumericPolicy};
 use std::sync::Arc;
 
 use super::{
-    CudaExecutionError, CudaGpuService, CudaPlanOptions, DEFAULT_OWNED_HOST_BYTES,
-    GpuAdmissionError, GpuPipeError, OwnedBlock, OwnedGpuInputs, OwnedInputError, PlanLease,
+    CudaExecutionError, CudaGpuService, CudaPlanOptions, GpuAdmissionError, GpuPipeError, OwnedBlock, OwnedGpuInputs, OwnedInputError, PlanLease,
 };
 
 async fn failing_inputs<Owner>(service: &CudaGpuService<Owner>) -> OwnedGpuInputs
@@ -158,7 +158,7 @@ async fn test_omega_async_owner_failure_returns_later_input_and_closes_copy_admi
     ));
     assert_eq!(executed, 1);
     assert_eq!(remaining_jobs, initial_jobs);
-    assert_eq!(remaining_bytes, DEFAULT_OWNED_HOST_BYTES);
+    assert_eq!(remaining_bytes, OwnerConfig::default().owned_host_bytes);
     shutdown.expect("failed owner should still join");
 }
 
@@ -248,7 +248,7 @@ async fn test_omega_async_owner_failure_drains_every_accepted_job_and_restores_c
 async fn test_omega_async_register_graph_returns_registration_input_credit_before_reply() {
     let service = CudaGpuService::start_fake().expect("fake owner should start");
     let full_bytes = service.available_owned_host_bytes();
-    assert_eq!(full_bytes, DEFAULT_OWNED_HOST_BYTES);
+    assert_eq!(full_bytes, OwnerConfig::default().owned_host_bytes);
 
     let _lease = failing_fake_plan(&service).await;
 

@@ -15,7 +15,7 @@ use crate::cuda_async::{
     CudaGpuService, CudaPlanOptions, OwnedBlock, OwnedGpuInputs, validate_cuda_plan_options,
 };
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
-use omega::device_owner::PlanLease;
+use omega::device_owner::{PlanLease, PlanRegistryError};
 use crate::rope_scaling::rope_cos_sin;
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 use proxima_core::ProximaError;
@@ -4388,16 +4388,7 @@ impl BackendRuntime {
             self.cuda_resident_inputs = None;
             self.cuda_resident_owner = None;
         }
-        while let Some(lease) = self.pending_cuda_retire.pop() {
-            let retirement = match service.retire_cuda_plan(&lease) {
-                Ok(retirement) => retirement,
-                Err(error) => {
-                    self.pending_cuda_retire.push(lease.clone());
-                    return Err(error.into());
-                }
-            };
-            retirement.await?;
-        }
+        retire_pending_cuda_plans(service, &mut self.pending_cuda_retire).await?;
 
         if resident_changed {
             let invalidated_names = self
@@ -6562,6 +6553,26 @@ impl BackendRuntime {
     }
 }
 
+/// Pops a pending lease only after its retire resolves, so a cancelled await
+/// leaves the lease queued; `Stale` means an earlier attempt already retired it.
+#[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+async fn retire_pending_cuda_plans<Owner>(
+    service: &CudaGpuService<Owner>,
+    pending: &mut Vec<PlanLease>,
+) -> Result<(), PlanRegistryError>
+where
+    Owner: Future<Output = Result<(), ProximaError>> + Send,
+{
+    while let Some(lease) = pending.last() {
+        match service.retire_cuda_plan(lease).await {
+            Ok(()) | Err(PlanRegistryError::Stale) => {}
+            Err(error) => return Err(error),
+        }
+        pending.pop();
+    }
+    Ok(())
+}
+
 #[cfg(all(test, feature = "cuda", feature = "interop-bgpool"))]
 mod resident_strided_identity_tests {
     use super::*;
@@ -6673,7 +6684,7 @@ mod omega_async_serving_tests {
     use proxima_primitives::pipe::CreditAcquireError;
     use proxima_tensor::map::{self, IndexMap};
     use proxima_tensor::{ScalarOp};
-    use proxima_numeric::{DType};
+    use proxima_numeric::{DType, NumericPolicy};
     use std::boxed::Box;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -6699,6 +6710,39 @@ mod omega_async_serving_tests {
             gpu_layers: GPU_LAYERS_ALL,
             ..ServingConfig::default()
         })
+    }
+
+    #[proxima::test]
+    async fn test_omega_async_serving_pending_retire_clears_after_the_owner_retires() {
+        let service = CudaGpuService::start_fake().expect("fake owner should start");
+        let inputs = service
+            .copy_named_blocks(&[])
+            .await
+            .expect("an empty input set should fit the byte budget");
+        let lease = service
+            .register_graph(
+                &program(),
+                &[2, 1],
+                &[NodeId(1)],
+                CudaPlanOptions {
+                    numeric_policy: NumericPolicy::bit_exact(),
+                    exact_activations: false,
+                    omega_runtime: None,
+                },
+                &inputs,
+            )
+            .await
+            .expect("fake owner should register the graph");
+        let mut pending = vec![lease.clone()];
+
+        retire_pending_cuda_plans(&service, &mut pending)
+            .await
+            .expect("owner should retire the pending lease");
+        let repeat = service.retire_cuda_plan(&lease).await;
+        service.shutdown().await.expect("fake owner should drain");
+
+        assert!(pending.is_empty());
+        assert!(matches!(repeat, Err(PlanRegistryError::Stale)));
     }
 
     #[proxima::test]
