@@ -55,6 +55,7 @@ use crate::bind::{
 };
 use crate::bind_leaves::{Role, consumers_of, role_of};
 use crate::error::InteropError;
+use crate::model_weights::Materialized;
 use crate::profiles::{BindingProfile, TensorAlias};
 
 fn find_entry<'manifest>(
@@ -276,6 +277,31 @@ pub fn bind_safetensors_program_leaves<'file>(
     runtime_inputs: &[String],
     weight_precision: &[crate::serving::WeightPrecisionRule<'_>],
 ) -> Result<BoundWeights<'file>, InteropError> {
+    bind_program_leaves_reusing(
+        manifest,
+        file_bytes,
+        data_start,
+        program,
+        binding,
+        runtime_inputs,
+        weight_precision,
+        &mut Materialized::new(),
+    )
+}
+
+/// [`bind_safetensors_program_leaves`] that adopts a leaf `reuse` already
+/// materialized instead of building it again; see [`crate::ModelWeights`].
+#[allow(clippy::too_many_arguments)] // the public binder's seven plus the reuse store
+pub(crate) fn bind_program_leaves_reusing<'file>(
+    manifest: &Manifest,
+    file_bytes: &'file [u8],
+    data_start: u64,
+    program: &[Op],
+    binding: &BindingProfile,
+    runtime_inputs: &[String],
+    weight_precision: &[crate::serving::WeightPrecisionRule<'_>],
+    reuse: &mut Materialized,
+) -> Result<BoundWeights<'file>, InteropError> {
     let mut weights = BoundWeights::new(weight_precision);
     weights.resident_bytes = file_bytes.len();
     let (views, stacks) = collect_program_views(
@@ -286,28 +312,44 @@ pub fn bind_safetensors_program_leaves<'file>(
         binding,
         runtime_inputs,
     )?;
-    for view in &views {
-        bind_safetensors_leaf(
-            manifest,
-            file_bytes,
-            data_start,
-            binding,
-            view,
-            &mut weights,
-        )?;
+    let filled = (|| {
+        for view in &views {
+            if reuse.adopt_into(view.leaf.as_str(), &mut weights) {
+                continue;
+            }
+            bind_safetensors_leaf(
+                manifest,
+                file_bytes,
+                data_start,
+                binding,
+                view,
+                &mut weights,
+            )?;
+        }
+        for (leaf, shape) in &stacks {
+            if reuse.adopt_into(leaf, &mut weights) {
+                continue;
+            }
+            bind_safetensors_expert_stack(
+                manifest,
+                file_bytes,
+                data_start,
+                binding,
+                leaf,
+                shape,
+                &mut weights,
+            )?;
+        }
+        Ok(())
+    })();
+    match filled {
+        Ok(()) => Ok(weights),
+        Err(error) => {
+            // a failed pass hands back what it adopted so the next pass offers the same buffers
+            reuse.keep(&mut weights);
+            Err(error)
+        }
     }
-    for (leaf, shape) in &stacks {
-        bind_safetensors_expert_stack(
-            manifest,
-            file_bytes,
-            data_start,
-            binding,
-            leaf,
-            shape,
-            &mut weights,
-        )?;
-    }
-    Ok(weights)
 }
 
 /// The routed-MoE arm. A routed leaf is a stacked expert projection

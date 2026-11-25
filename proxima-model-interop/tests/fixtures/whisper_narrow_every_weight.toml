@@ -1,0 +1,6 @@
+gpu_layers = -1
+
+[[weight_precision]]
+pattern_kind = "prefix"
+pattern = ""
+target = "f16"

@@ -1248,6 +1248,7 @@ mod transcript {
     use super::golden::*;
     use proxima_model_interop::audio::wav;
     use proxima_model_interop::families::encoder_decoder_host::Model;
+    use proxima_model_interop::ServingSettings;
 
     #[test]
     fn ids_and_text_match_the_reference() -> anyhow::Result<()> {
@@ -1267,6 +1268,52 @@ mod transcript {
             transcript.tokens.len(),
             transcript.ended_on_eot,
             transcript.text
+        );
+        Ok(())
+    }
+
+    fn settings_from(text: &str) -> anyhow::Result<ServingSettings> {
+        Ok(toml::from_str(text)?)
+    }
+
+    fn transcribe_repeatedly(
+        settings: ServingSettings,
+        calls: usize,
+    ) -> anyhow::Result<Vec<Vec<u32>>> {
+        let model = Model::load(&super::fixture_dir()?)?.with_settings(settings);
+        let audio = wav::read(&wav_path())?;
+        (0..calls)
+            .map(|_| Ok(model.transcribe(&audio.samples, "en")?.tokens))
+            .collect()
+    }
+
+    #[test]
+    fn a_second_transcription_in_one_process_returns_the_same_ids() -> anyhow::Result<()> {
+        let ids = transcribe_repeatedly(
+            settings_from(include_str!("fixtures/whisper_offloaded.toml"))?,
+            3,
+        )?;
+        let expected: Vec<u32> = read_i32("tokens.i32")?
+            .into_iter()
+            .map(|id| id as u32)
+            .collect();
+        assert_eq!(ids.len(), 3);
+        for (call, tokens) in ids.iter().enumerate() {
+            assert_eq!(*tokens, expected, "call {call} ids differ from the reference");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_second_transcription_under_a_precision_rule_returns_the_same_ids() -> anyhow::Result<()> {
+        let ids = transcribe_repeatedly(
+            settings_from(include_str!("fixtures/whisper_narrow_every_weight.toml"))?,
+            3,
+        )?;
+        assert_eq!(ids.len(), 3);
+        assert!(
+            ids.iter().all(|tokens| *tokens == ids[0]),
+            "repeat calls diverged: {ids:?}"
         );
         Ok(())
     }

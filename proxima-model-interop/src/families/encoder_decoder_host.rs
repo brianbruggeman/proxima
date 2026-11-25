@@ -17,13 +17,13 @@ use proxima_tensor::spec::{
 };
 use serde_json::Value;
 
-use crate::bind::{BoundWeights, retarget_recoded_leaves};
+use crate::bind::retarget_recoded_leaves;
+use crate::model_weights::{LeasedWeights, ModelWeights};
 use crate::decode_policy::{DecodeConfig, DecodePolicy};
 use crate::families::encoder_decoder::{
     DecoderLayer, DecoderStem, EncoderLayer, EncoderStem, Linear, encoder,
 };
 use crate::generate::{BackendRuntime, cached_kv_extent, program_hash};
-use crate::hf_bind::bind_safetensors_program_leaves;
 use crate::profiles::BindingProfile;
 use crate::serving::apply_serving_config;
 use crate::serving_settings::ServingSettings;
@@ -136,7 +136,7 @@ fn parse_checkpoint(bytes: &[u8]) -> Result<(Manifest, u64)> {
 struct Bound<'a> {
     program: Vec<Op>,
     named: BTreeMap<String, Vec<f32>>,
-    weights: BoundWeights<'a>,
+    weights: LeasedWeights<'a, 'a>,
     /// leaves the host feeds each run; every other named leaf is a checkpoint tensor
     runtime_inputs: Vec<String>,
     shape: Shape,
@@ -147,7 +147,7 @@ impl<'a> Bound<'a> {
         Self {
             program: Vec::new(),
             named: BTreeMap::new(),
-            weights: BoundWeights::new(&[]),
+            weights: LeasedWeights::detached(),
             runtime_inputs: Vec::new(),
             shape,
         }
@@ -166,7 +166,7 @@ impl<'a> Bound<'a> {
     /// safetensors binder, then retargets the leaves a precision rule recoded.
     fn bind(&mut self, model: &'a Model) -> Result<()> {
         let rules = model.settings.weight_precision_rules()?;
-        self.weights = bind_safetensors_program_leaves(
+        self.weights = model.weights.bind(
             &model.manifest,
             model.mapping.bytes(),
             model.data_start,
@@ -556,6 +556,8 @@ pub struct Model {
     config: Value,
     dir: PathBuf,
     settings: ServingSettings,
+    /// owned weight buffers, materialized once and offered identically on every call
+    weights: ModelWeights,
 }
 
 impl Model {
@@ -588,6 +590,7 @@ impl Model {
             config,
             dir: dir.to_path_buf(),
             settings: ServingSettings::default(),
+            weights: ModelWeights::new(),
         }
     }
 

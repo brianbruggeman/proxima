@@ -27,6 +27,8 @@ extern crate alloc;
 extern crate std;
 
 mod bind;
+#[cfg(feature = "std")]
+mod model_weights;
 #[cfg(all(test, feature = "std"))]
 mod gguf_numeric_parity;
 #[cfg(feature = "std")]
@@ -163,6 +165,8 @@ pub use bind::{
 pub use bind::{ModelHparams, SlidingRope, architecture_from_metadata, gguf_tensor_as_f32};
 #[cfg(feature = "std")]
 pub use bind_leaves::bind_program_leaves;
+#[cfg(feature = "std")]
+pub use model_weights::{LeasedWeights, ModelWeights};
 #[cfg(feature = "std")]
 pub use codec_policy_settings::{CodecPolicySettings, CodecPolicyWeights};
 #[cfg(feature = "std")]
