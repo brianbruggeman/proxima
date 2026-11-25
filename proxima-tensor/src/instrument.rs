@@ -13,11 +13,11 @@ use std::collections::{BTreeMap, HashSet};
 #[cfg(windows)]
 use std::io;
 use std::sync::OnceLock;
-use std::sync::{Mutex, PoisonError};
 use std::thread::ThreadId;
 
 use proxima_clock::ticks::Ticks;
 use proxima_primitives::pipe::Pipe;
+use proxima_primitives::sync::blocking::Mutex;
 use proxima_telemetry::counter;
 use proxima_telemetry::metric::Counter;
 #[cfg(windows)]
@@ -452,7 +452,7 @@ pub fn record_arena_node_ticks(
         return;
     }
     let table = ARENA_PER_NODE_TICKS.get_or_init(|| Mutex::new(BTreeMap::new()));
-    let mut guard = table.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut guard = table.lock();
     let entry = guard.entry(node.0).or_insert_with(|| ArenaNodeStat {
         count: 0,
         ticks: 0,
@@ -469,7 +469,7 @@ pub fn record_arena_node_ticks(
 /// (matches `cpu.rs`'s own `epilogue_profile_reset` precedent).
 pub fn reset_arena_per_node() {
     if let Some(table) = ARENA_PER_NODE_TICKS.get() {
-        table.lock().unwrap_or_else(PoisonError::into_inner).clear();
+        table.lock().clear();
     }
 }
 
@@ -486,7 +486,6 @@ pub fn arena_per_node_snapshot() -> Vec<(u32, ArenaNodeStat)> {
         .map(|table| {
             table
                 .lock()
-                .unwrap_or_else(PoisonError::into_inner)
                 .iter()
                 .map(|(node, stat)| (*node, stat.clone()))
                 .collect()
@@ -649,9 +648,7 @@ static WORKER_BUSY_TICKS: Mutex<Vec<(ThreadId, u64)>> = Mutex::new(Vec::new());
 /// instead of by chunk.
 pub fn record_worker_busy_ticks(ticks: u64) {
     let thread_id = std::thread::current().id();
-    let mut totals = WORKER_BUSY_TICKS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut totals = WORKER_BUSY_TICKS.lock();
     match totals
         .iter_mut()
         .find(|(existing, _)| *existing == thread_id)
@@ -666,16 +663,12 @@ pub fn record_worker_busy_ticks(ticks: u64) {
 /// thread that claimed at least one chunk. Order is not meaningful.
 #[must_use]
 pub fn worker_busy_snapshot() -> Vec<u64> {
-    let totals = WORKER_BUSY_TICKS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let totals = WORKER_BUSY_TICKS.lock();
     totals.iter().map(|(_, ticks)| *ticks).collect()
 }
 
 pub fn reset_worker_busy() {
-    let mut totals = WORKER_BUSY_TICKS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut totals = WORKER_BUSY_TICKS.lock();
     totals.clear();
 }
 
@@ -752,9 +745,7 @@ pub fn thread_cpu_nanos() -> u64 {
 /// for `workload`, the deschedule-immune peer of [`record_worker_busy_ticks`].
 pub fn record_worker_cpu_nanos(workload: CpuWorkload, nanos: u64) {
     let thread_id = std::thread::current().id();
-    let mut totals = WORKER_CPU_NANOS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut totals = WORKER_CPU_NANOS.lock();
     match totals
         .iter_mut()
         .find(|(existing_thread, existing_workload, _)| {
@@ -772,9 +763,7 @@ pub fn record_worker_cpu_nanos(workload: CpuWorkload, nanos: u64) {
 /// together itself.
 #[must_use]
 pub fn worker_cpu_snapshot() -> Vec<u64> {
-    let totals = WORKER_CPU_NANOS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let totals = WORKER_CPU_NANOS.lock();
     totals.iter().map(|(_, _, nanos)| *nanos).collect()
 }
 
@@ -783,9 +772,7 @@ pub fn worker_cpu_snapshot() -> Vec<u64> {
 /// macs) without elementwise CPU time inflating the numerator.
 #[must_use]
 pub fn worker_cpu_snapshot_for(workload: CpuWorkload) -> Vec<u64> {
-    let totals = WORKER_CPU_NANOS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let totals = WORKER_CPU_NANOS.lock();
     totals
         .iter()
         .filter(|(_, existing_workload, _)| *existing_workload == workload)
@@ -794,9 +781,7 @@ pub fn worker_cpu_snapshot_for(workload: CpuWorkload) -> Vec<u64> {
 }
 
 pub fn reset_worker_cpu() {
-    let mut totals = WORKER_CPU_NANOS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut totals = WORKER_CPU_NANOS.lock();
     totals.clear();
 }
 
@@ -923,9 +908,7 @@ static Q4K_SHAPE_TICKS: Mutex<BTreeMap<ShapeKey, ShapeTotals>> = Mutex::new(BTre
 /// Adds one `(rows, k)`-shaped call's macs and elapsed ticks to that
 /// shape's running `(calls, macs, ticks)` triple.
 pub fn record_q4k_shape_call(rows: u64, k: u64, macs: u64, ticks: u64) {
-    let mut buckets = Q4K_SHAPE_TICKS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut buckets = Q4K_SHAPE_TICKS.lock();
     let entry = buckets.entry((rows, k)).or_insert((0, 0, 0));
     entry.0 += 1;
     entry.1 += macs;
@@ -937,9 +920,7 @@ pub fn record_q4k_shape_call(rows: u64, k: u64, macs: u64, ticks: u64) {
 /// by key (`BTreeMap` iteration order), not by any measured field.
 #[must_use]
 pub fn q4k_shape_snapshot() -> Vec<(u64, u64, u64, u64, u64)> {
-    let buckets = Q4K_SHAPE_TICKS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let buckets = Q4K_SHAPE_TICKS.lock();
     buckets
         .iter()
         .map(|(&(rows, k), &(calls, macs, ticks))| (rows, k, calls, macs, ticks))
@@ -947,9 +928,7 @@ pub fn q4k_shape_snapshot() -> Vec<(u64, u64, u64, u64, u64)> {
 }
 
 pub fn reset_q4k_shape_buckets() {
-    let mut buckets = Q4K_SHAPE_TICKS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut buckets = Q4K_SHAPE_TICKS.lock();
     buckets.clear();
 }
 
@@ -1013,9 +992,7 @@ pub fn record_width_tile_decline(
     stride_a: i64,
     stride_b: i64,
 ) {
-    let mut buckets = WIDTH_TILE_DECLINE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut buckets = WIDTH_TILE_DECLINE.lock();
     let entry = buckets
         .entry((node.0, reason))
         .or_insert((0, m, k, n, stride_a, stride_b));
@@ -1027,9 +1004,7 @@ pub fn record_width_tile_decline(
 /// stride_a, stride_b)` — sorted by key (`BTreeMap` iteration order).
 #[must_use]
 pub fn width_tile_decline_snapshot() -> Vec<WidthDeclineRow> {
-    let buckets = WIDTH_TILE_DECLINE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let buckets = WIDTH_TILE_DECLINE.lock();
     buckets
         .iter()
         .map(|(&(node, reason), &(calls, m, k, n, stride_a, stride_b))| {
@@ -1039,9 +1014,7 @@ pub fn width_tile_decline_snapshot() -> Vec<WidthDeclineRow> {
 }
 
 pub fn reset_width_tile_decline() {
-    let mut buckets = WIDTH_TILE_DECLINE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut buckets = WIDTH_TILE_DECLINE.lock();
     buckets.clear();
 }
 
@@ -1050,9 +1023,7 @@ static DOT_TILE_DECLINE: Mutex<BTreeMap<(u32, &'static str), u64>> = Mutex::new(
 /// Records one `neon_tile_plan` decline for `node`, `reason` naming the first
 /// gate check that returned `None`.
 pub fn record_dot_tile_decline(node: NodeId, reason: &'static str) {
-    let mut buckets = DOT_TILE_DECLINE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut buckets = DOT_TILE_DECLINE.lock();
     *buckets.entry((node.0, reason)).or_insert(0) += 1;
 }
 
@@ -1060,9 +1031,7 @@ pub fn record_dot_tile_decline(node: NodeId, reason: &'static str) {
 /// [`reset_dot_tile_decline`], sorted by key.
 #[must_use]
 pub fn dot_tile_decline_snapshot() -> Vec<(u32, &'static str, u64)> {
-    let buckets = DOT_TILE_DECLINE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let buckets = DOT_TILE_DECLINE.lock();
     buckets
         .iter()
         .map(|(&(node, reason), &calls)| (node, reason, calls))
@@ -1070,9 +1039,7 @@ pub fn dot_tile_decline_snapshot() -> Vec<(u32, &'static str, u64)> {
 }
 
 pub fn reset_dot_tile_decline() {
-    let mut buckets = DOT_TILE_DECLINE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut buckets = DOT_TILE_DECLINE.lock();
     buckets.clear();
 }
 
@@ -1103,7 +1070,7 @@ static REDUCE_ROUTE: Mutex<BTreeMap<u32, ReduceRouteRow>> = Mutex::new(BTreeMap:
 /// Records one reduce node's route inputs; only the first sighting stores the
 /// row, later sightings bump `calls`.
 pub fn record_reduce_route(row: ReduceRouteRow) {
-    let mut rows = REDUCE_ROUTE.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut rows = REDUCE_ROUTE.lock();
     rows.entry(row.node)
         .and_modify(|seen| seen.calls += 1)
         .or_insert(ReduceRouteRow { calls: 1, ..row });
@@ -1112,12 +1079,12 @@ pub fn record_reduce_route(row: ReduceRouteRow) {
 /// Every recorded reduce node, sorted by node id.
 #[must_use]
 pub fn reduce_route_snapshot() -> Vec<ReduceRouteRow> {
-    let rows = REDUCE_ROUTE.lock().unwrap_or_else(PoisonError::into_inner);
+    let rows = REDUCE_ROUTE.lock();
     rows.values().cloned().collect()
 }
 
 pub fn reset_reduce_route() {
-    let mut rows = REDUCE_ROUTE.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut rows = REDUCE_ROUTE.lock();
     rows.clear();
 }
 
@@ -1192,7 +1159,7 @@ pub fn record_fuse_attempt(node: NodeId, site: FuseSite, outcome: Result<(), Fus
             FuseSite::QuarantineBroadcast => counter!(FUSE_QUARANTINE_BROADCAST_FIRED, 1),
         },
         Err(reason) => {
-            let mut buckets = FUSE_DECLINE.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut buckets = FUSE_DECLINE.lock();
             *buckets.entry((node.0, site, reason)).or_insert(0) += 1;
         }
     }
@@ -1202,7 +1169,7 @@ pub fn record_fuse_attempt(node: NodeId, site: FuseSite, outcome: Result<(), Fus
 /// [`reset_fuse_decline`], as `(node, site, reason, calls)` — sorted by key.
 #[must_use]
 pub fn fuse_decline_snapshot() -> Vec<(u32, FuseSite, FuseDeclineReason, u64)> {
-    let buckets = FUSE_DECLINE.lock().unwrap_or_else(PoisonError::into_inner);
+    let buckets = FUSE_DECLINE.lock();
     buckets
         .iter()
         .map(|(&(node, site, reason), &calls)| (node, site, reason, calls))
@@ -1212,7 +1179,7 @@ pub fn fuse_decline_snapshot() -> Vec<(u32, FuseSite, FuseDeclineReason, u64)> {
 /// `(elementwise_operand_fired, reduce_operand_fired, distinct_declines)`.
 #[must_use]
 pub fn fuse_totals() -> (u64, u64, usize) {
-    let buckets = FUSE_DECLINE.lock().unwrap_or_else(PoisonError::into_inner);
+    let buckets = FUSE_DECLINE.lock();
     (
         FUSE_ELEMENTWISE_OPERAND_FIRED.get(),
         FUSE_REDUCE_OPERAND_FIRED.get(),
@@ -1221,7 +1188,7 @@ pub fn fuse_totals() -> (u64, u64, usize) {
 }
 
 pub fn reset_fuse_decline() {
-    let mut buckets = FUSE_DECLINE.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut buckets = FUSE_DECLINE.lock();
     buckets.clear();
     let _ = FUSE_ELEMENTWISE_OPERAND_FIRED.snapshot_and_reset();
     let _ = FUSE_REDUCE_OPERAND_FIRED.snapshot_and_reset();
@@ -1275,9 +1242,7 @@ static ONLINE_SOFTMAX_BLOCK_RANGE: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new(
 /// `NodeId`s the block's own first and last emitted nodes already are --
 /// never re-derived from `program.len()` after the fact.
 pub fn record_online_softmax_block_range(first_node: NodeId, last_node: NodeId) {
-    let mut ranges = ONLINE_SOFTMAX_BLOCK_RANGE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut ranges = ONLINE_SOFTMAX_BLOCK_RANGE.lock();
     ranges.push((first_node.0, last_node.0));
 }
 
@@ -1286,16 +1251,12 @@ pub fn record_online_softmax_block_range(first_node: NodeId, last_node: NodeId) 
 /// order IS layer order, so no separate layer index need be carried.
 #[must_use]
 pub fn online_softmax_block_ranges() -> Vec<(u32, u32)> {
-    let ranges = ONLINE_SOFTMAX_BLOCK_RANGE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let ranges = ONLINE_SOFTMAX_BLOCK_RANGE.lock();
     ranges.clone()
 }
 
 pub fn reset_online_softmax_block_range() {
-    let mut ranges = ONLINE_SOFTMAX_BLOCK_RANGE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut ranges = ONLINE_SOFTMAX_BLOCK_RANGE.lock();
     ranges.clear();
 }
 
@@ -1995,9 +1956,7 @@ pub fn record_operand_access(
     total_elements: u64,
 ) {
     let bytes = reads * size_of::<f32>() as u64;
-    let mut table = OPERAND_ACCESS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut table = OPERAND_ACCESS.lock();
     let entry = table.entry(node).or_default();
     entry.reads += reads;
     entry.bytes += bytes;
@@ -2034,9 +1993,7 @@ pub struct OperandAccessRow {
 /// still wants to read again.
 #[must_use]
 pub fn operand_access_totals() -> Vec<OperandAccessRow> {
-    let table = OPERAND_ACCESS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let table = OPERAND_ACCESS.lock();
     table
         .iter()
         .map(|(&node, &access)| OperandAccessRow { node, access })
@@ -2051,20 +2008,14 @@ pub fn operand_access_totals() -> Vec<OperandAccessRow> {
 /// bare `0` would erase it.
 #[must_use]
 pub fn operand_access_of(node: NodeId) -> Option<OperandAccess> {
-    let table = OPERAND_ACCESS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let table = OPERAND_ACCESS.lock();
     table.get(&node).copied()
 }
 
 pub fn reset_operand_access() {
-    let mut table = OPERAND_ACCESS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut table = OPERAND_ACCESS.lock();
     table.clear();
-    let mut rows = GATHER_ROWS_TOUCHED
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut rows = GATHER_ROWS_TOUCHED.lock();
     rows.clear();
 }
 
@@ -2083,9 +2034,7 @@ static GATHER_ROWS_TOUCHED: Mutex<BTreeMap<NodeId, HashSet<u64>>> = Mutex::new(B
 /// per row-level index fetch, from `cpu::fill_gather_cursors` — see the
 /// static above for why that call frequency is cheap.
 pub fn record_gather_row(node: NodeId, row_index: u64) {
-    let mut rows = GATHER_ROWS_TOUCHED
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut rows = GATHER_ROWS_TOUCHED.lock();
     rows.entry(node).or_default().insert(row_index);
 }
 
@@ -2097,9 +2046,7 @@ pub fn record_gather_row(node: NodeId, row_index: u64) {
 /// its bound op finishes.
 #[must_use]
 pub fn gather_distinct_rows(node: NodeId) -> u64 {
-    let rows = GATHER_ROWS_TOUCHED
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let rows = GATHER_ROWS_TOUCHED.lock();
     rows.get(&node).map_or(0, HashSet::len) as u64
 }
 
@@ -2188,9 +2135,7 @@ static QUANTIZE_ACTIVATION_CALLS_BY_NODE: Mutex<Vec<u64>> = Mutex::new(Vec::new(
 /// counter existed had no way to tell "quantized once, reused three times"
 /// apart from "quantized three times, once per consumer".
 pub fn record_quantize_activation_call(activation_node: NodeId) {
-    let mut calls = QUANTIZE_ACTIVATION_CALLS_BY_NODE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut calls = QUANTIZE_ACTIVATION_CALLS_BY_NODE.lock();
     let index = activation_node.0 as usize;
     if index >= calls.len() {
         calls.resize(index + 1, 0);
@@ -2205,18 +2150,14 @@ pub fn record_quantize_activation_call(activation_node: NodeId) {
 /// fan-out and states its own size.
 #[must_use]
 pub fn quantize_activation_call_stats() -> (u64, u64) {
-    let calls = QUANTIZE_ACTIVATION_CALLS_BY_NODE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let calls = QUANTIZE_ACTIVATION_CALLS_BY_NODE.lock();
     let total_calls: u64 = calls.iter().sum();
     let distinct_nodes = calls.iter().filter(|&&count| count > 0).count() as u64;
     (total_calls, distinct_nodes)
 }
 
 fn reset_quantize_activation_calls() {
-    let mut calls = QUANTIZE_ACTIVATION_CALLS_BY_NODE
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut calls = QUANTIZE_ACTIVATION_CALLS_BY_NODE.lock();
     calls.iter_mut().for_each(|count| *count = 0);
     let _ = QUANTIZE_ACTIVATION_CACHE_HITS.snapshot_and_reset();
 }
@@ -2494,9 +2435,7 @@ static ELEMENTWISE_CALL_SIZES: Mutex<BTreeMap<u64, u64>> = Mutex::new(BTreeMap::
 /// (`counters.output_writes`, already the exact per-call count the caller
 /// computed for its own commit -- never re-derived from extents here).
 pub fn record_elementwise_call_size(elements: u64) {
-    let mut table = ELEMENTWISE_CALL_SIZES
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut table = ELEMENTWISE_CALL_SIZES.lock();
     *table.entry(elements).or_insert(0) += 1;
 }
 
@@ -2506,9 +2445,7 @@ pub fn record_elementwise_call_size(elements: u64) {
 /// `snapshot_and_reset` in this module.
 #[must_use]
 pub fn elementwise_call_size_snapshot_and_reset() -> Vec<(u64, u64)> {
-    let mut table = ELEMENTWISE_CALL_SIZES
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let mut table = ELEMENTWISE_CALL_SIZES.lock();
     let sizes: Vec<(u64, u64)> = table.iter().map(|(size, count)| (*size, *count)).collect();
     table.clear();
     sizes
