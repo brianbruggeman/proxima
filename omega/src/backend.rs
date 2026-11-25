@@ -68,6 +68,8 @@
 
 #[cfg(feature = "cuda-driver")]
 pub mod hip;
+#[cfg(feature = "wgpu-backend")]
+pub mod wgpu;
 mod stage_totals;
 pub use stage_totals::{
     StagePhases, StageTotals, record_block_copied, record_pipeline_compile, record_stage_phases,
