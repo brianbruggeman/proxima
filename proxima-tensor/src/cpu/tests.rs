@@ -832,6 +832,412 @@ fn a_second_plain_epilogue_keeps_the_first_epilogues_per_column_operand() {
     assert_eq!(actual, &expected);
 }
 
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn epilogue_parity_input(program: &mut Vec<Op>, dtype: DType, name: &str, shape: &[u32]) -> NodeId {
+    let shape = shape.iter().map(|&extent| Extent::Static(extent)).collect();
+    append(
+        program,
+        Op::Input {
+            dtype,
+            shape,
+            name: Some(name.to_string()),
+        },
+    )
+}
+
+/// `out = reduce(x * w) + bias + residual` over ragged `[3, 5, 11]` rows
+/// with a 7-deep fold: the plain epilogue, a per-column bias and a full
+/// residual operand.
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn bias_residual_program(dtype: DType, dims: [u32; 4]) -> (Vec<Op>, Vec<NodeId>, NodeId) {
+    let [batch, rows, depth, width] = dims;
+    let mut program = Vec::new();
+    let x = epilogue_parity_input(&mut program, dtype, "x", &[batch, rows, depth]);
+    let w = epilogue_parity_input(&mut program, dtype, "w", &[depth, width]);
+    let bias = epilogue_parity_input(&mut program, dtype, "bias", &[width]);
+    let residual = epilogue_parity_input(&mut program, dtype, "residual", &[batch, rows, width]);
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (x, IndexMap::Affine(map::projection(4, &[0, 1, 2]))),
+                (w, IndexMap::Affine(map::projection(4, &[2, 3]))),
+            ],
+            name: None,
+        },
+    );
+    let folded = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
+            out_map: IndexMap::Affine(map::projection(4, &[0, 1, 3])),
+            keep: Keep::Reduce,
+            name: None,
+        }),
+    );
+    let biased = append(
+        &mut program,
+        Op::Elementwise {
+            dtype,
+            body: ScalarOp::Add,
+            operands: vec![
+                (folded, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+                (bias, IndexMap::Affine(map::projection(3, &[2]))),
+            ],
+            name: None,
+        },
+    );
+    let out = append(
+        &mut program,
+        Op::Elementwise {
+            dtype,
+            body: ScalarOp::Add,
+            operands: vec![
+                (biased, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+                (residual, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+            ],
+            name: None,
+        },
+    );
+    (program, vec![x, w, bias, residual], out)
+}
+
+/// A softmax denominator over ragged `[3, 5, 13]` scores: `exp(x)` is
+/// folded to a per-row sum and then divides itself, so the divide fuses as a
+/// broadcast epilogue over the fold's own `[3, 5]` space.
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn softmax_sum_program(dtype: DType) -> (Vec<Op>, Vec<NodeId>, NodeId) {
+    let mut program = Vec::new();
+    let x = epilogue_parity_input(&mut program, dtype, "x", &[3, 5, 13]);
+    let exponent = append(
+        &mut program,
+        Op::Elementwise {
+            dtype,
+            body: ScalarOp::Exponential,
+            operands: vec![(x, IndexMap::Affine(map::projection(3, &[0, 1, 2])))],
+            name: None,
+        },
+    );
+    let total = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: exponent,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: None,
+        }),
+    );
+    let out = append(
+        &mut program,
+        Op::Elementwise {
+            dtype,
+            body: ScalarOp::Divide,
+            operands: vec![
+                (exponent, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+                (total, IndexMap::Affine(map::projection(3, &[0, 1]))),
+            ],
+            name: None,
+        },
+    );
+    (program, vec![x], out)
+}
+
+/// The dtype the run buffers hold, read off the element type the buffers are
+/// inferred to carry (pinned by the executor's slice bound) rather than spelled.
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn buffer_dtype<Value: Element>(_buffers: &[Option<Vec<Value>>]) -> DType {
+    Value::DTYPE
+}
+
+/// What one fused-vs-unfused comparison expects of the program it binds.
+#[cfg(feature = "reduce-epilogue-fusion")]
+struct EpilogueParity {
+    label: &'static str,
+    build: fn(DType) -> (Vec<Op>, Vec<NodeId>, NodeId),
+    policy: NumericPolicy,
+    /// Whether the fused reduce must carry `epilogue_broadcast_axes`.
+    broadcast: bool,
+    /// The extent of the output's last axis, the unit a "rows differ" check compares.
+    row_len: usize,
+    /// Whether every output must be non-zero (a sum of integers may legitimately hit zero).
+    all_nonzero: bool,
+}
+
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn assert_fused_epilogue_matches_unfused(case: &EpilogueParity) {
+    let EpilogueParity {
+        label,
+        build,
+        policy,
+        broadcast,
+        row_len,
+        all_nonzero,
+    } = *case;
+    let mut buffers = Vec::new();
+    let (program, inputs, out) = build(buffer_dtype(&buffers));
+    let shapes = shape::infer(&program, &[]).expect("the program infers");
+    let fused_bound = bind(&program, &shapes, &[out], policy).expect("the fused program binds");
+    let unfused_bound =
+        bind_without_reduce_epilogue_fusion(&program, &shapes, &[out], false, policy)
+            .expect("the unfused program binds");
+    let has_epilogue = |bound: &[BoundOp]| {
+        bound.iter().any(|op| {
+            matches!(&op.kind, BoundOpKind::Reduce { epilogue_body, epilogue_operands, .. }
+                if !reduce_epilogue_is_identity(epilogue_body, epilogue_operands))
+        })
+    };
+    let has_broadcast_epilogue = fused_bound.iter().any(|op| {
+        matches!(&op.kind, BoundOpKind::Reduce { epilogue_broadcast_axes, .. }
+            if !epilogue_broadcast_axes.is_empty())
+    });
+    assert!(has_epilogue(&fused_bound), "{label}: fusion must fold an epilogue onto the reduce");
+    assert!(!has_epilogue(&unfused_bound), "{label}: the unfused bind keeps the chain separate");
+    assert_eq!(
+        has_broadcast_epilogue, broadcast,
+        "{label}: the fused reduce must take the expected epilogue path"
+    );
+
+    buffers = alloc::vec![None; program.len()];
+    for (position, input) in inputs.iter().enumerate() {
+        let len: usize = match &program[input.0 as usize] {
+            Op::Input { shape, .. } => shape
+                .iter()
+                .map(|extent| match extent {
+                    Extent::Static(size) => *size as usize,
+                    _ => 0,
+                })
+                .product(),
+            _ => 0,
+        };
+        assert!(len > 0, "{label}: input {position} must have a static, non-empty shape");
+        // small integers in [-4, 4] that shift per row, so `exp` stays finite
+        // and a wrong fold offset reads a different value
+        let data: Vec<_> = (0..len)
+            .map(|index| (((index * 37 + position * 11) % 9) as i32 - 4) as _)
+            .collect();
+        buffers[input.0 as usize] = Some(data);
+    }
+    // the interpreter pins the unplanned policy, so each node runs through the
+    // same entry point a plan uses, under the policy this case grants
+    let mut results = Vec::new();
+    for bound in [fused_bound, unfused_bound] {
+        let mut run_buffers = buffers.clone();
+        for op in &bound {
+            let mut output = vec![Default::default(); op.output_len()];
+            run_node_into_with_round_sink(
+                op,
+                &run_buffers,
+                None,
+                None,
+                None,
+                false,
+                &mut output,
+                None,
+                None,
+                None,
+                policy,
+            )
+            .expect("the node runs");
+            run_buffers[op.node.0 as usize] = Some(output);
+        }
+        results.push(run_buffers[out.0 as usize].take().expect("the output is in the table"));
+    }
+    let (fused, unfused) = (&results[0], &results[1]);
+    assert!(fused.len() > row_len, "{label}: the output spans more than one row");
+    assert!(fused.iter().all(|value| value.is_finite()), "{label}: every output is finite");
+    assert!(
+        fused.iter().any(|value| *value != 0.0),
+        "{label}: the output is not all zero"
+    );
+    if all_nonzero {
+        assert!(fused.iter().all(|value| *value != 0.0), "{label}: every output is non-zero");
+    }
+    assert!(
+        fused.chunks_exact(row_len).any(|row| row != &fused[..row_len]),
+        "{label}: rows must differ, or a wrong row offset goes unseen"
+    );
+    let fused_bits: Vec<_> = fused.iter().map(|value| value.to_bits()).collect();
+    let unfused_bits: Vec<_> = unfused.iter().map(|value| value.to_bits()).collect();
+    assert_eq!(fused_bits, unfused_bits, "{label}: fused and unfused outputs must be bit-identical");
+}
+
+/// `exp(reduce(x over its last axis) + bias)` where `bias` varies over the
+/// leading axis only: the fold reduces the LAST full axis, and the bias has
+/// stride `0` along the epilogue's own last axis.
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn row_sum_exp_program(dtype: DType) -> (Vec<Op>, Vec<NodeId>, NodeId) {
+    let mut program = Vec::new();
+    let x = epilogue_parity_input(&mut program, dtype, "x", &[3, 5, 7]);
+    let bias = epilogue_parity_input(&mut program, dtype, "bias", &[3]);
+    let folded = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: x,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: None,
+        }),
+    );
+    let biased = append(
+        &mut program,
+        Op::Elementwise {
+            dtype,
+            body: ScalarOp::Add,
+            operands: vec![
+                (folded, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                (bias, IndexMap::Affine(map::projection(2, &[0]))),
+            ],
+            name: None,
+        },
+    );
+    let out = append(
+        &mut program,
+        Op::Elementwise {
+            dtype,
+            body: ScalarOp::Exponential,
+            operands: vec![(biased, IndexMap::Affine(map::projection(2, &[0, 1])))],
+            name: None,
+        },
+    );
+    (program, vec![x, bias], out)
+}
+
+/// A fold over the MIDDLE axis whose `out_map` swaps the kept axes, so the
+/// output is `[7, 3]` and the epilogue's own axes are not in source order:
+/// `reduce(x) + bias[7] + residual[7, 3]`.
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn permuted_out_map_program(dtype: DType) -> (Vec<Op>, Vec<NodeId>, NodeId) {
+    let mut program = Vec::new();
+    let x = epilogue_parity_input(&mut program, dtype, "x", &[3, 5, 7]);
+    let bias = epilogue_parity_input(&mut program, dtype, "bias", &[7]);
+    let residual = epilogue_parity_input(&mut program, dtype, "residual", &[7, 3]);
+    let folded = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: x,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[2, 0])),
+            keep: Keep::Reduce,
+            name: None,
+        }),
+    );
+    let biased = append(
+        &mut program,
+        Op::Elementwise {
+            dtype,
+            body: ScalarOp::Add,
+            operands: vec![
+                (folded, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                (bias, IndexMap::Affine(map::projection(2, &[0]))),
+            ],
+            name: None,
+        },
+    );
+    let out = append(
+        &mut program,
+        Op::Elementwise {
+            dtype,
+            body: ScalarOp::Add,
+            operands: vec![
+                (biased, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                (residual, IndexMap::Affine(map::projection(2, &[0, 1]))),
+            ],
+            name: None,
+        },
+    );
+    (program, vec![x, bias, residual], out)
+}
+
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn epilogue_parity_cases() -> Vec<EpilogueParity> {
+    let exact = NumericPolicy::bit_exact();
+    vec![
+        EpilogueParity {
+            label: "bias_residual_plain",
+            build: |dtype| bias_residual_program(dtype, [3, 5, 7, 11]),
+            policy: exact,
+            broadcast: false,
+            row_len: 11,
+            all_nonzero: false,
+        },
+        EpilogueParity {
+            label: "row_wider_than_one_tile_ragged",
+            build: |dtype| bias_residual_program(dtype, [2, 3, 4, 517]),
+            policy: exact,
+            broadcast: false,
+            row_len: 517,
+            all_nonzero: false,
+        },
+        EpilogueParity {
+            label: "last_axis_fold_with_stride_zero_bias",
+            build: row_sum_exp_program,
+            policy: exact,
+            broadcast: false,
+            row_len: 5,
+            all_nonzero: true,
+        },
+        EpilogueParity {
+            label: "last_axis_fold_with_stride_zero_bias_fast_policy",
+            build: row_sum_exp_program,
+            policy: NumericPolicy::fast(),
+            broadcast: false,
+            row_len: 5,
+            all_nonzero: true,
+        },
+        EpilogueParity {
+            label: "permuted_out_map",
+            build: permuted_out_map_program,
+            policy: exact,
+            broadcast: false,
+            row_len: 3,
+            all_nonzero: false,
+        },
+        EpilogueParity {
+            label: "softmax_sum_broadcast",
+            build: softmax_sum_program,
+            policy: exact,
+            broadcast: true,
+            row_len: 13,
+            all_nonzero: true,
+        },
+        EpilogueParity {
+            label: "softmax_sum_broadcast_fast_policy",
+            build: softmax_sum_program,
+            policy: NumericPolicy::fast(),
+            broadcast: true,
+            row_len: 13,
+            all_nonzero: true,
+        },
+    ]
+}
+
+#[test]
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn a_fused_reduce_epilogue_is_bit_identical_to_the_unfused_chain_for_every_addressing_shape() {
+    let cases = epilogue_parity_cases();
+    assert!(cases.len() >= 7, "every addressing shape is exercised");
+    for case in &cases {
+        assert_fused_epilogue_matches_unfused(case);
+    }
+}
+
 /// A placed output (`caller_owned` in `omega::metal::finish`) reports
 /// `is_placed() == true` and `get() == None` -- distinct from a node
 /// that was simply never requested, which reports `is_placed() ==
