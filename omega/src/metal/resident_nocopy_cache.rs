@@ -1,4 +1,5 @@
 use super::*;
+use crate::resident_identity::{ResidentIdentity, check_resident_identity};
 
 /// Shared identity check both the no-copy and resident-copy caches enforce:
 /// a `name` hit is served only when the OFFERED host pointer and byte length
@@ -14,18 +15,19 @@ pub(super) fn resident_name_lookup(
     pointer: *const c_void,
     byte_length: usize,
 ) -> Result<Option<MetalBuffer>, MetalError> {
-    let offered_address = pointer as usize;
+    let offered = ResidentIdentity::new(pointer as usize, byte_length);
     let Some((cached_address, cached_length, buffer)) = cache.borrow().get(name).cloned() else {
         return Ok(None);
     };
-    if cached_address == offered_address && cached_length == byte_length {
-        return Ok(Some(buffer));
-    }
-    Err(MetalError::ResidentNameRebound {
-        name: name.to_string(),
-        cached_len: cached_length,
-        offered_len: byte_length,
-    })
+    let cached = ResidentIdentity::new(cached_address, cached_length);
+    check_resident_identity(name, cached, offered).map_err(|refusal| {
+        MetalError::ResidentNameRebound {
+            name: refusal.name,
+            cached_len: refusal.cached.byte_length,
+            offered_len: refusal.offered.byte_length,
+        }
+    })?;
+    Ok(Some(buffer))
 }
 
 /// Counts a fresh [`Plan`]'s per-node fast path resolving a resident block

@@ -40,6 +40,7 @@ use crate::cuda_kernel_cache::{
     CacheKey, decode_binary_entry, decode_entry, encode_binary_entry, encode_entry, header_digest,
 };
 use crate::kernel_cache_config::KernelCacheConfig;
+use crate::resident_identity::{ResidentIdentity, ResidentLedger, ResidentRefusal, owner_generation};
 use crate::cuda_ptx_store::PtxStore;
 use crate::bind_plan::{BindConfig, bind_plan, finish_bound};
 use crate::derived_quantize::{ActivationRefusal, validate_storage};
@@ -92,6 +93,8 @@ pub enum CudaDriverError {
     BindingContract,
     #[error("CUDA graph buffer for node {0:?} is missing")]
     MissingBuffer(NodeId),
+    #[error("CUDA resident cache: {0}")]
+    ResidentRefused(#[from] ResidentRefusal),
     #[error("CUDA gather index out of range in node {node:?}, slot {slot}: index={index}")]
     GatherIndexOutOfRange {
         node: NodeId,
@@ -155,8 +158,8 @@ impl From<DriverError> for CudaDriverError {
     }
 }
 
-// keyed by the caller's (address, length) so a fresh plan or arena finds the weight another plan uploaded; the name only drives eviction.
-type ResidentBuffers = BTreeMap<(usize, usize), (String, CudaGraphBuffer)>;
+// the shared name-keyed identity rule (`crate::resident_identity`) so a fresh plan or arena finds the weight another plan uploaded and a recycled host address is refused.
+type ResidentBuffers = ResidentLedger<CudaGraphBuffer>;
 
 fn buffer_elements(buffer: &CudaGraphBuffer) -> u64 {
     match buffer {
@@ -301,7 +304,7 @@ pub struct CudaF32Arena {
     route_compaction: BTreeMap<NodeId, CudaSlice<u32>>,
     uniforms: BTreeMap<NodeId, CudaSlice<u8>>,
     uniform_host: BTreeMap<NodeId, Vec<u8>>,
-    resident_sources: BTreeMap<NodeId, (usize, usize)>,
+    resident_sources: BTreeMap<NodeId, ResidentIdentity>,
     pool: BTreeMap<usize, Vec<CudaSlice<f32>>>,
     allocations: u64,
     launch_profile: LaunchProfile,
@@ -655,7 +658,7 @@ impl CudaDriver {
             stream,
             device,
             modules: Arc::new(Mutex::new(BTreeMap::new())),
-            resident_buffers: Arc::new(Mutex::new(BTreeMap::new())),
+            resident_buffers: Arc::new(Mutex::new(ResidentLedger::default())),
             compile_counters: Arc::new(CompileCounters::new(kernel_disk_store())),
             packed_upload_bytes: Arc::new(AtomicU64::new(0)),
             graph_uploads: Arc::new(AtomicU64::new(0)),
@@ -726,30 +729,17 @@ impl CudaDriver {
     /// dropped model frees its device memory and its address range cannot
     /// alias a later mapping.
     pub fn release_resident_names<'name>(&self, names: impl IntoIterator<Item = &'name str>) {
-        let released: BTreeSet<&str> = names.into_iter().collect();
-        self.resident_buffers
-            .lock()
-            .retain(|_, (name, _)| !released.contains(name.as_str()));
+        self.resident_buffers.lock().release_names(names);
     }
 
-    /// Evicts every device buffer cached for a host block inside one of these
-    /// host address ranges. The cache keys a weight by its host `(address,
-    /// length)`, which is sound only while that host allocation lives: the
-    /// owner of the host bytes calls this as it drops them, so a later
-    /// allocation at the same address can never resolve to a stale buffer.
+    /// Evicts every device buffer cached for a host block starting inside one
+    /// of these host address ranges: the same eviction as
+    /// [`Self::release_resident_names`], addressed by host range for an owner
+    /// that frees bytes without knowing names. The shared identity rule
+    /// ([`ResidentLedger`]) already refuses a recycled address, so this is
+    /// the reclaim of device memory, not the only guard.
     pub fn release_resident_ranges(&self, ranges: &[Range<usize>]) {
-        let mut buffers = self.resident_buffers.lock();
-        let doomed: Vec<(usize, usize)> = ranges
-            .iter()
-            .flat_map(|range| {
-                buffers
-                    .range((range.start, 0)..(range.end, 0))
-                    .map(|(key, _)| *key)
-            })
-            .collect();
-        for key in doomed {
-            buffers.remove(&key);
-        }
+        self.resident_buffers.lock().release_ranges(ranges);
     }
 
     /// Number of host blocks currently holding a cached resident device buffer.
@@ -3692,29 +3682,37 @@ impl CudaPlan {
                 }) => name.as_str(),
                 _ => "",
             };
-            let source = (block_address(block), block_length(block));
             let resident = self.resident_nodes.binary_search(&node).is_ok()
                 || resident_names.is_some_and(|names| names.contains(name));
             if self.carry.state.is_live(&node) || self.carry.rows.is_live(&node) {
                 continue;
             }
-            if resident && self.arena.resident_sources.get(&node) == Some(&source) {
+            let identity = ResidentIdentity::new(block_address(block), block_length(block))
+                .with_generation(if resident { owner_generation(name) } else { 0 });
+            if resident && self.arena.resident_sources.get(&node) == Some(&identity) {
                 resident_hits += 1;
                 continue;
             }
-            if resident {
+            let cacheable = resident && !name.is_empty();
+            if cacheable {
                 let packed =
                     !matches!(block, QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_));
-                let cached = self
-                    .driver
-                    .resident_buffers
-                    .lock()
-                    .get(&source)
-                    .filter(|(_, buffer)| matches!(buffer, CudaGraphBuffer::Bytes(_)) == packed)
-                    .map(|(_, buffer)| buffer.clone());
+                let cached = {
+                    let mut ledger = self.driver.resident_buffers.lock();
+                    let found = ledger.lookup(name, identity)?;
+                    if found
+                        .as_ref()
+                        .is_some_and(|buffer| matches!(buffer, CudaGraphBuffer::Bytes(_)) != packed)
+                    {
+                        ledger.release_names([name]);
+                        None
+                    } else {
+                        found
+                    }
+                };
                 if let Some(buffer) = cached {
                     self.arena.buffers.insert(node, buffer);
-                    self.arena.resident_sources.insert(node, source);
+                    self.arena.resident_sources.insert(node, identity);
                     resident_hits += 1;
                     continue;
                 }
@@ -3772,12 +3770,12 @@ impl CudaPlan {
                 continue;
             }
             if resident {
-                self.arena.resident_sources.insert(node, source);
-                if let Some(buffer) = self.arena.buffers.get(&node).cloned() {
+                self.arena.resident_sources.insert(node, identity);
+                if let (true, Some(buffer)) = (cacheable, self.arena.buffers.get(&node).cloned()) {
                     self.driver
                         .resident_buffers
                         .lock()
-                        .insert(source, (name.to_owned(), buffer));
+                        .insert(name, identity, buffer)?;
                 }
             } else {
                 self.arena.resident_sources.remove(&node);

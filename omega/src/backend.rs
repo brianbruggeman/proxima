@@ -1949,8 +1949,20 @@ pub fn clear_expert_source_cache() {}
 /// clearing every cached entry. A no-op unless the Metal backend is
 /// compiled in, matching every other Metal-only knob in this module
 /// ([`mark_resident`], [`register_checkpoint_mapping`]).
-#[cfg(all(feature = "metal", target_os = "macos"))]
+///
+/// This is the one release every owner of host bytes calls: it advances each
+/// name's owner generation ([`crate::resident_identity::owner_generation`]),
+/// which the CUDA identity check reads, and then evicts the backend's cached
+/// buffers, so a name rebound to new bytes can never be served from the old
+/// upload.
 pub fn release_resident_names<'name>(names: impl IntoIterator<Item = &'name str>) {
+    let names: Vec<&str> = names.into_iter().collect();
+    crate::resident_identity::advance_owner_generation(names.iter().copied());
+    evict_resident_names(names);
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn evict_resident_names<'name>(names: impl IntoIterator<Item = &'name str>) {
     metal::release_resident_names(names);
 }
 
@@ -1962,7 +1974,7 @@ pub fn release_resident_names<'name>(names: impl IntoIterator<Item = &'name str>
         reason = "only the cuda arm below reads this in this build"
     )
 )]
-pub fn release_resident_names<'name>(names: impl IntoIterator<Item = &'name str>) {
+fn evict_resident_names<'name>(names: impl IntoIterator<Item = &'name str>) {
     #[cfg(feature = "cuda-driver")]
     if let Some(Ok(driver)) = CUDA_DRIVER.get() {
         driver.release_resident_names(names);

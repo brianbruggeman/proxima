@@ -19,7 +19,7 @@ name = "omega"
 # nextest's "0 skipped" reads exactly like "everything passed". They sat
 # broken and uncompiled behind that flag.
 default = ["std", "metal", "cpu"]
-std = ["alloc", "thiserror/std", "proxima-tensor/std", "proxima-tensor/config", "dep:conflaguration", "dep:serde", "dep:proxima-telemetry", "proxima-telemetry/std", "proxima-telemetry/emit"]
+std = ["alloc", "thiserror/std", "proxima-tensor/std", "proxima-tensor/config", "dep:conflaguration", "dep:serde", "dep:proxima-telemetry", "proxima-telemetry/std", "proxima-telemetry/emit", "proxima-primitives/std"]
 mlx-gdn = ["std"]
 alloc = []
 cached-attention-streaming = ["proxima-tensor/cached-attention-streaming"]

@@ -2980,27 +2980,52 @@ mod resident_weights {
     }
 
     #[test]
-    fn a_changed_weight_source_is_reuploaded_and_never_served_stale() {
+    fn a_changed_weight_source_under_a_cached_name_is_refused_until_released() {
         let driver = CudaDriver::new(0).expect("a real cuda device");
         let original = q4_0_weight(37);
         let changed = q4_0_weight(41);
         let activation = random_vec(31, K);
 
-        let (original_output, _) = run_call(&driver, &original, &activation);
-        let (changed_output, changed_upload) = run_call(&driver, &changed, &activation);
-        let (original_again, original_upload) = run_call(&driver, &original, &activation);
+        let (original_output, original_upload) = run_call(&driver, &original, &activation);
+        assert_eq!(
+            original_upload,
+            original.len() as u64,
+            "the original uploads in full"
+        );
 
+        let attempt = |weight: &[u8]| {
+            let mut plan = fresh_resident_plan(&driver, weight, &activation);
+            plan.execute_named(&named_inputs(weight, &activation), None)
+                .map(|evaluated| evaluated.root().to_vec())
+        };
+
+        let refused = attempt(&changed);
+        assert!(
+            matches!(refused, Err(omega::CudaDriverError::ResidentRefused(_))),
+            "a changed source under a cached name must refuse, never serve stale: {refused:?}"
+        );
+
+        omega::resident_identity::advance_owner_generation(["weight"]);
+        driver.release_resident_names(["weight"]);
+        let (changed_output, changed_upload) = run_call(&driver, &changed, &activation);
         assert_eq!(
             changed_upload,
             changed.len() as u64,
-            "a new source must upload"
+            "after the release the changed source uploads in full"
         );
         assert_ne!(
             original_output, changed_output,
             "degenerate gate: the two weights must differ"
         );
-        assert_eq!(original_upload, 0, "the original source is still cached");
-        assert_eq!(original_output, original_again);
+
+        let original_again = attempt(&original);
+        assert!(
+            matches!(
+                original_again,
+                Err(omega::CudaDriverError::ResidentRefused(_))
+            ),
+            "the original re-offered while the changed source is cached must refuse"
+        );
     }
 
     #[test]
@@ -3014,6 +3039,38 @@ mod resident_weights {
         let (_, upload_after_release) = run_call(&driver, &weight, &activation);
 
         assert_eq!(upload_after_release, weight.len() as u64);
+    }
+
+    #[test]
+    fn a_name_rebound_at_the_same_address_inside_one_live_arena_is_never_served_stale() {
+        let driver = CudaDriver::new(0).expect("a real cuda device");
+        let mut weight = q4_0_weight(37);
+        let replacement = q4_0_weight(41);
+        let activation = random_vec(31, K);
+        let mut plan = fresh_resident_plan(&driver, &weight, &activation);
+        let first = plan
+            .execute_named(&named_inputs(&weight, &activation), None)
+            .expect("cuda runs the packed matmul")
+            .root()
+            .to_vec();
+
+        assert_eq!(replacement.len(), weight.len(), "same length, same address");
+        weight.copy_from_slice(&replacement);
+        omega::resident_identity::advance_owner_generation(["weight"]);
+        driver.release_resident_names(["weight"]);
+        let second = plan
+            .execute_named(&named_inputs(&weight, &activation), None)
+            .expect("cuda reruns the packed matmul on the same plan")
+            .root()
+            .to_vec();
+
+        let reference_driver = CudaDriver::new(0).expect("a real cuda device");
+        let expected = run_call(&reference_driver, &replacement, &activation).0;
+        assert_ne!(
+            first, second,
+            "degenerate gate: the two weights must differ"
+        );
+        assert_eq!(second, expected, "the live arena must serve the new bytes");
     }
 }
 

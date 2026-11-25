@@ -55,7 +55,7 @@ use crate::bind::{
 };
 use crate::bind_leaves::{Role, consumers_of, role_of};
 use crate::error::InteropError;
-use crate::model_weights::Materialized;
+use crate::model_weights::{Materialized, begin_owner_generation};
 use crate::profiles::{BindingProfile, TensorAlias};
 
 fn find_entry<'manifest>(
@@ -277,7 +277,7 @@ pub fn bind_safetensors_program_leaves<'file>(
     runtime_inputs: &[String],
     weight_precision: &[crate::serving::WeightPrecisionRule<'_>],
 ) -> Result<BoundWeights<'file>, InteropError> {
-    bind_program_leaves_reusing(
+    let bound = bind_program_leaves_reusing(
         manifest,
         file_bytes,
         data_start,
@@ -286,7 +286,16 @@ pub fn bind_safetensors_program_leaves<'file>(
         runtime_inputs,
         weight_precision,
         &mut Materialized::new(),
-    )
+    )?;
+    let materialized = bound
+        .owned
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .chain(bound.packed_owned.iter().map(|(name, _, _)| name.as_str()));
+    for name in materialized {
+        begin_owner_generation(name);
+    }
+    Ok(bound)
 }
 
 /// [`bind_safetensors_program_leaves`] that adopts a leaf `reuse` already

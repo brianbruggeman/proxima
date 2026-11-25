@@ -22,7 +22,8 @@
 //! cross-attention K/V) is released by its owner when the call ends
 //! (`BackendRuntime::release_call_residents`).
 
-use alloc::string::String;
+use alloc::collections::BTreeMap;
+use alloc::string::{String, ToString};
 use core::ops::Deref;
 
 use proxima_primitives::sync::blocking::Mutex;
@@ -42,16 +43,38 @@ fn stored_for(name: &str, leaf: &str) -> bool {
             && name.starts_with(leaf))
 }
 
+/// A buffer the model has never held under `name` is about to be kept: bytes a
+/// backend may have cached under that name at a recycled address are not these
+/// bytes, so the shared release advances the name's owner generation and
+/// evicts them. A leaf adopted back (same buffer) never reaches here.
+#[cfg(feature = "gpu")]
+pub(crate) fn begin_owner_generation(name: &str) {
+    omega::backend::release_resident_names([name]);
+}
+
+#[cfg(not(feature = "gpu"))]
+pub(crate) fn begin_owner_generation(_name: &str) {}
+
 /// The materialized stores of earlier passes, detached from any checkpoint
 /// borrow: only the owned stores are ever filled, so the lifetime is free.
 pub(crate) struct Materialized {
     stores: BoundWeights<'static>,
+    // name -> heap address last kept; a kept buffer at the same address is the same bytes.
+    seen: BTreeMap<String, usize>,
 }
 
 impl Materialized {
     pub(crate) fn new() -> Self {
         Self {
             stores: BoundWeights::new(&[]),
+            seen: BTreeMap::new(),
+        }
+    }
+
+    fn note_allocation(&mut self, name: &str, address: usize) {
+        if self.seen.get(name) != Some(&address) {
+            self.seen.insert(name.to_string(), address);
+            begin_owner_generation(name);
         }
     }
 
@@ -85,19 +108,21 @@ impl Materialized {
     /// Takes `weights`' materialized entries, keeping the first buffer held
     /// under a name so the address a backend cached under it never changes.
     pub(crate) fn keep(&mut self, weights: &mut BoundWeights<'_>) {
-        let stores = &mut self.stores;
         for entry in core::mem::take(&mut weights.owned) {
-            if !stores.owned.iter().any(|(name, _)| *name == entry.0) {
-                stores.owned.push(entry);
+            if !self.stores.owned.iter().any(|(name, _)| *name == entry.0) {
+                self.note_allocation(&entry.0, entry.1.as_ptr() as usize);
+                self.stores.owned.push(entry);
             }
         }
         for entry in core::mem::take(&mut weights.packed_owned) {
-            if !stores
+            if !self
+                .stores
                 .packed_owned
                 .iter()
                 .any(|(name, _, _)| *name == entry.0)
             {
-                stores.packed_owned.push(entry);
+                self.note_allocation(&entry.0, entry.1.as_ptr() as usize);
+                self.stores.packed_owned.push(entry);
             }
         }
     }
@@ -153,7 +178,11 @@ impl ModelWeights {
             weight_precision,
             &mut reuse,
         );
-        self.held.lock().keep(&mut reuse.stores);
+        {
+            let mut held = self.held.lock();
+            held.seen = core::mem::take(&mut reuse.seen);
+            held.keep(&mut reuse.stores);
+        }
         Ok(LeasedWeights {
             weights: bound?,
             home: Some(self),
