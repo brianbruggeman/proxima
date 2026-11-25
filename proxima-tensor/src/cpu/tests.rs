@@ -8393,6 +8393,206 @@ fn a_strided_conv_reduce_with_a_non_flat_window_fires_the_packed_neon_tile() {
     );
 }
 
+/// A reduce with two leading output axes, the shape score and value-mix
+/// reduces take: `out[head, row, column] = factor * sum_step
+/// left[head, row, step] * right[head, column, step]`, the iteration space
+/// `(head, row, column, step)`. `right` carries a per-head operand (row
+/// invariant), or, with `right_by_row`, a per-row one that the tile cannot
+/// share across rows. `scale` multiplies `left` through its own elementwise
+/// node, so the reduce body fuses to `Multiply(Multiply(left, scale), right)`.
+fn two_leading_axis_program(
+    sizes: [u32; 4],
+    scale: Option<crate::op::ConstantLiteral>,
+    right_by_row: bool,
+) -> Vec<Op> {
+    let [heads, rows, columns, steps] = sizes;
+    let (element, _) = conv_fixture_dtypes();
+    let mut program = Vec::new();
+    let left = block(
+        &mut program,
+        element,
+        &[
+            Extent::Static(heads),
+            Extent::Static(rows),
+            Extent::Static(steps),
+        ],
+    );
+    let right_sizes: &[u32] = if right_by_row {
+        &[heads, rows, columns, steps]
+    } else {
+        &[heads, columns, steps]
+    };
+    let right_shape: Vec<Extent> = right_sizes.iter().map(|&size| Extent::Static(size)).collect();
+    let right = block(&mut program, element, &right_shape);
+    let left_source = match scale {
+        Some(value) => {
+            let factor = append(
+                &mut program,
+                Op::Constant {
+                    dtype: element,
+                    shape: Vec::new(),
+                    value,
+                },
+            );
+            append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: element,
+                    body: ScalarOp::Multiply,
+                    operands: alloc::vec![
+                        (left, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+                        (factor, IndexMap::Affine(map::projection(3, &[]))),
+                    ],
+                    name: None,
+                },
+            )
+        }
+        None => left,
+    };
+    let right_axes: &[u16] = if right_by_row {
+        &[0, 1, 2, 3]
+    } else {
+        &[0, 2, 3]
+    };
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: element,
+            body: ScalarOp::Multiply,
+            operands: alloc::vec![
+                (left_source, IndexMap::Affine(map::projection(4, &[0, 1, 3]))),
+                (right, IndexMap::Affine(map::projection(4, right_axes))),
+            ],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: element,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
+            out_map: IndexMap::Affine(map::projection(4, &[0, 1, 2])),
+            keep: Keep::Reduce,
+            name: Some("two_leading_axis_reduce".into()),
+        }),
+    );
+    program
+}
+
+/// Evaluates [`two_leading_axis_program`] and asserts it matches the strict
+/// loop over the same operands within the tile tests' tolerance.
+fn assert_two_leading_axis_matches_loop(
+    sizes: [u32; 4],
+    scale: Option<crate::op::ConstantLiteral>,
+    right_by_row: bool,
+) -> Vec<Op> {
+    let program = two_leading_axis_program(sizes, scale, right_by_row);
+    let [heads, rows, columns, steps] = sizes.map(|size| size as usize);
+    let left = random_vec(0x5eed_0683_c0de_0011, heads * rows * steps);
+    let right_len = if right_by_row {
+        heads * rows * columns * steps
+    } else {
+        heads * columns * steps
+    };
+    let right = random_vec(0x5eed_0683_c0de_0012, right_len);
+    let factor = scale.unwrap_or(1.0);
+    let mut reference = Vec::with_capacity(heads * rows * columns);
+    for head in 0..heads {
+        for row in 0..rows {
+            for column in 0..columns {
+                let left_base = (head * rows + row) * steps;
+                let right_base = if right_by_row {
+                    ((head * rows + row) * columns + column) * steps
+                } else {
+                    (head * columns + column) * steps
+                };
+                let total = (0..steps).fold(left[0] * 0.0, |sum, step| {
+                    sum + left[left_base + step] * right[right_base + step]
+                });
+                reference.push(total * factor);
+            }
+        }
+    }
+    let evaluated = evaluate(&program, &[], &[&left, &right], &[])
+        .expect("two-leading-axis reduce evaluates");
+    assert_eq!(
+        evaluated.shape(),
+        &[sizes[0] as u64, sizes[1] as u64, sizes[2] as u64]
+    );
+    assert!(!reference.is_empty(), "the reduce fixture compared nothing");
+    assert_all_close(evaluated.root(), &reference, 1e-4);
+    program
+}
+
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+fn tile_outcomes_of(program: &[Op]) -> Vec<&'static str> {
+    let reduce_node = terminal(program).0;
+    crate::instrument::dot_tile_decline_snapshot()
+        .into_iter()
+        .filter(|(node, _, _)| *node == reduce_node)
+        .map(|(_, reason, _)| reason)
+        .collect()
+}
+
+#[test]
+fn a_scaled_score_reduce_over_heads_and_rows_matches_the_loop() {
+    assert_two_leading_axis_matches_loop([3, 37, 53, 40], Some(0.125), false);
+}
+
+#[test]
+fn a_value_mix_reduce_over_heads_and_rows_matches_the_loop() {
+    assert_two_leading_axis_matches_loop([3, 37, 40, 53], None, false);
+}
+
+#[test]
+fn a_reduce_whose_right_operand_varies_by_row_matches_the_loop() {
+    assert_two_leading_axis_matches_loop([3, 37, 53, 40], None, true);
+}
+
+#[test]
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+fn a_scaled_score_reduce_over_heads_and_rows_fires_the_neon_tile() {
+    crate::instrument::reset_dot_tile_decline();
+    let program = assert_two_leading_axis_matches_loop([3, 37, 53, 40], Some(0.125), false);
+
+    let outcomes = tile_outcomes_of(&program);
+    assert!(!outcomes.is_empty(), "the score reduce never asked the tile");
+    assert!(
+        outcomes.iter().all(|reason| *reason == "taken"),
+        "every head slice must take the tile, got {outcomes:?}"
+    );
+}
+
+#[test]
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+fn a_value_mix_reduce_over_heads_and_rows_fires_the_neon_tile() {
+    crate::instrument::reset_dot_tile_decline();
+    let program = assert_two_leading_axis_matches_loop([3, 37, 40, 53], None, false);
+
+    let outcomes = tile_outcomes_of(&program);
+    assert!(!outcomes.is_empty(), "the value mix never asked the tile");
+    assert!(
+        outcomes.iter().all(|reason| *reason == "taken"),
+        "every head slice must take the tile, got {outcomes:?}"
+    );
+}
+
+#[test]
+#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+fn a_right_operand_that_varies_by_row_still_declines_the_neon_tile() {
+    crate::instrument::reset_dot_tile_decline();
+    let program = assert_two_leading_axis_matches_loop([3, 37, 53, 40], None, true);
+
+    let outcomes = tile_outcomes_of(&program);
+    assert!(
+        !outcomes.contains(&"taken") && outcomes.contains(&"leading_axes"),
+        "a per-row right operand cannot share a tile across rows, got {outcomes:?}"
+    );
+}
+
 /// The conv reduce with its window read through a gather
 /// (`table[ids[ox], tap, ci]`): the gathered operand's reduction is also
 /// non-flat, so only the gather check keeps it off the packed tile.
