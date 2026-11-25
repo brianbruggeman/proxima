@@ -1650,20 +1650,60 @@ pub(crate) fn cuda_float_literal(value: f32) -> String {
     }
 }
 
-/// `__half` and `__nv_bfloat16` where the layout's fields equal binary16's and bfloat16's, `float`
-/// for every other layout (the kernel computes in binary32 and the host narrows through the
-/// layout codec at the buffer boundary, as on Metal).
-pub(crate) fn type_token(target: Target, node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
+/// Which scalar a kernel holds one element of a dtype in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeviceClass {
+    Half,
+    Bfloat,
+    /// A 4-byte word the kernel computes in; the host narrows through the layout codec.
+    Word,
+}
+
+/// The device scalar of a dtype: its [`DeviceClass`] and the bytes one element occupies in a
+/// device buffer. [`type_token`] and the executor's buffer sizing read this one decision, so the
+/// element type the kernel indexes and the bytes the buffer holds cannot disagree.
+///
+/// Teaching pointer: the class comes from `crate::msl::layout_render::hardware_stage_type` (the
+/// Metal hardware-type table, compared field by field) and the bytes from the same table's row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DeviceScalar {
+    pub(crate) class: DeviceClass,
+    pub(crate) bytes: usize,
+    /// The hardware-table scalar name of the row `bytes` came from; for `Word` it is the token.
+    pub(crate) scalar: &'static str,
+}
+
+/// `None` for a layout wider than 32 bits, which no device scalar holds.
+pub(crate) fn device_scalar(dtype: DType) -> Option<DeviceScalar> {
+    use crate::msl::layout_render::{hardware_stage_type, hardware_word};
+    let row = hardware_word()?;
+    let word = DeviceScalar { class: DeviceClass::Word, bytes: row.bytes as usize, scalar: row.scalar };
     match dtype {
         DType::Layout(layout) if layout.width() <= 32 => {
-            Ok(match crate::msl::layout_render::hardware_type(&layout) {
-                Some("half") => "__half",
-                Some("bfloat") => target.bfloat_type,
-                _ => "float",
+            let Some(stage) = hardware_stage_type(&layout) else {
+                return Some(word);
+            };
+            let (bytes, scalar) = (stage.bytes as usize, stage.scalar);
+            Some(match stage.scalar {
+                "half" => DeviceScalar { class: DeviceClass::Half, bytes, scalar },
+                "bfloat" => DeviceScalar { class: DeviceClass::Bfloat, bytes, scalar },
+                _ => word,
             })
         }
-        DType::Bool => Ok("float"),
-        DType::Layout(_) => Err(EmitError::UnsupportedDType {
+        DType::Bool => Some(word),
+        DType::Layout(_) => None,
+    }
+}
+
+/// `__half` and `__nv_bfloat16` where the layout's fields equal binary16's and bfloat16's, `float`
+/// for every other layout (the kernel computes in binary32 and the host narrows through the
+/// layout codec at the buffer boundary, as on Metal). A mapping over [`device_scalar`].
+pub(crate) fn type_token(target: Target, node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
+    match device_scalar(dtype) {
+        Some(DeviceScalar { class: DeviceClass::Half, .. }) => Ok("__half"),
+        Some(DeviceScalar { class: DeviceClass::Bfloat, .. }) => Ok(target.bfloat_type),
+        Some(DeviceScalar { class: DeviceClass::Word, scalar, .. }) => Ok(scalar),
+        None => Err(EmitError::UnsupportedDType {
             node,
             dtype,
             backend: target.language_name(),
@@ -4960,6 +5000,9 @@ pub(crate) fn emitted_mask_argument(source: &str) -> &str {
         .1;
     call.split_once(',').expect("the mask is the first argument").0.trim()
 }
+
+#[cfg(test)]
+mod device_scalar_tests;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

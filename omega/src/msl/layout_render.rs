@@ -88,6 +88,21 @@ pub fn hardware_stage_type(layout: &FloatLayout) -> Option<HardwareType> {
         .map(HardwareType::from_row)
 }
 
+/// The bytes one element of the hardware scalar named `scalar` (`float`, `half`, `bfloat`)
+/// occupies: the `bytes` of its [`HARDWARE_TYPES`] row, for a caller that holds a class by name.
+#[must_use]
+pub fn hardware_scalar_bytes(scalar: &str) -> Option<u64> {
+    HARDWARE_TYPES.iter().find(|row| row.4 == scalar).map(|row| row.5)
+}
+
+/// The word row of [`HARDWARE_TYPES`]: its name and bytes are the one decision for every layout
+/// the kernel computes in the widest hardware float, token and buffer width alike.
+#[must_use]
+pub fn hardware_word() -> Option<HardwareType> {
+    // why: the emitter computes every non-half/bfloat layout in the widest hardware float
+    HARDWARE_TYPES.iter().max_by_key(|row| row.5).map(HardwareType::from_row)
+}
+
 /// The Metal scalar type name of [`hardware_stage_type`].
 #[must_use]
 pub fn hardware_type(layout: &FloatLayout) -> Option<&'static str> {
