@@ -3975,18 +3975,18 @@ impl BackendRuntime {
     /// Selects the `(cache input, new-rows output)` pairs whose attention KV the following
     /// evaluations keep on the device, `cached_rows` being the valid host rows at the first
     /// upload; an empty set restores host round trips and requires a prior drain.
-    pub(super) fn set_kv_carry(&mut self, pairs: Vec<(NodeId, NodeId, NumericFormat)>, cached_rows: u64) {
+    pub(crate) fn set_kv_carry(&mut self, pairs: Vec<(NodeId, NodeId, NumericFormat)>, cached_rows: u64) {
         self.kv_carry_pairs = pairs;
         self.kv_carry_cached_rows = cached_rows;
         self.kv_carry_accepted = false;
     }
 
-    pub(super) fn set_kv_cached_rows(&mut self, cached_rows: u64) {
+    pub(crate) fn set_kv_cached_rows(&mut self, cached_rows: u64) {
         self.kv_carry_cached_rows = cached_rows;
     }
 
     /// Whether the last evaluation left the carried KV pairs on the device.
-    pub(super) fn kv_carry_accepted(&self) -> bool {
+    pub(crate) fn kv_carry_accepted(&self) -> bool {
         self.kv_carry_accepted
     }
 
@@ -4003,11 +4003,11 @@ impl BackendRuntime {
     }
 
     /// Reads the device-held attention KV back to the host, keyed by cache input node.
-    pub(super) fn drain_kv_carry(&mut self) -> Result<Vec<(NodeId, Vec<f32>)>, InteropError> {
+    pub(crate) fn drain_kv_carry(&mut self) -> Result<Vec<(NodeId, Vec<f32>)>, InteropError> {
         #[cfg(feature = "cuda")]
         {
             let mut drained = Vec::new();
-            for plan in self.plans.values_mut() {
+            for plan in self.plans.values_mut().chain(self.segment_plans.values_mut()) {
                 drained.extend(omega::backend::drain_cuda_appended_rows(plan)?);
             }
             Ok(drained)
@@ -4670,17 +4670,25 @@ impl BackendRuntime {
         let new_count = symbols.first().copied().unwrap_or_default() as usize;
         let kv_bound_extent = symbols.get(1).copied().unwrap_or_default() as usize;
         let exact_activations = self.exact_activations;
+        let shape = (
+            program_key,
+            new_count,
+            kv_bound_extent,
+            outputs.to_vec(),
+            self.numeric_policy.epilogue_sources,
+        );
+        #[cfg(feature = "cuda")]
+        if !self.kv_carry_pairs.is_empty() {
+            self.segment_plans
+                .iter_mut()
+                .filter(|(key, _)| **key != shape)
+                .for_each(|(_, plan)| omega::backend::park_cuda_carried(plan));
+        }
         let plan = Self::resolve_segment_plan(
             &mut self.segment_plans,
             &mut self.plan_hits,
             &mut self.plan_misses,
-            (
-                program_key,
-                new_count,
-                kv_bound_extent,
-                outputs.to_vec(),
-                self.numeric_policy.epilogue_sources,
-            ),
+            shape,
             || {
                 let mut plan = if let Some(config) = &self.omega_runtime {
                     plan_with_omega_config(config, program, symbols, named, outputs)?
@@ -4734,6 +4742,14 @@ impl BackendRuntime {
             },
         )?;
         let resolve_elapsed_us = resolve_started.elapsed().as_micros();
+        #[cfg(feature = "cuda")]
+        if !self.kv_carry_pairs.is_empty() {
+            self.kv_carry_accepted = omega::backend::carry_cuda_rows(
+                plan,
+                &self.kv_carry_pairs,
+                self.kv_carry_cached_rows,
+            );
+        }
         #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
         let device_before = if host_timing {
             omega::metal::current_allocated_size().unwrap_or_default()
@@ -6318,11 +6334,11 @@ impl BackendRuntime {
         Ok(Vec::new())
     }
 
-    pub(super) fn set_kv_carry(&mut self, _pairs: Vec<(NodeId, NodeId, NumericFormat)>, _cached_rows: u64) {}
+    pub(crate) fn set_kv_carry(&mut self, _pairs: Vec<(NodeId, NodeId, NumericFormat)>, _cached_rows: u64) {}
 
-    pub(super) fn set_kv_cached_rows(&mut self, _cached_rows: u64) {}
+    pub(crate) fn set_kv_cached_rows(&mut self, _cached_rows: u64) {}
 
-    pub(super) fn kv_carry_accepted(&self) -> bool {
+    pub(crate) fn kv_carry_accepted(&self) -> bool {
         false
     }
 
@@ -6330,7 +6346,7 @@ impl BackendRuntime {
         Ok(())
     }
 
-    pub(super) fn drain_kv_carry(&mut self) -> Result<Vec<(NodeId, Vec<f32>)>, InteropError> {
+    pub(crate) fn drain_kv_carry(&mut self) -> Result<Vec<(NodeId, Vec<f32>)>, InteropError> {
         Ok(Vec::new())
     }
 

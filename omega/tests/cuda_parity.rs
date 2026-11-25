@@ -3585,6 +3585,46 @@ async fn appended_rows_stay_on_device_and_drain_equal_to_the_host_append(
     );
 }
 
+#[proxima::test]
+async fn a_carried_kv_cache_is_copied_to_the_device_once_and_the_second_decode_step_copies_only_its_row() {
+    const EXTENT: usize = 16;
+    const VALID_ROWS: usize = 2;
+    let program = appended_rows_program();
+    let seed = appended_row_block(0, VALID_ROWS);
+    let cache_block = padded_cache(&seed, EXTENT);
+    let first_row = appended_row_values(0);
+    let mut plan = appended_rows_plan(&program, EXTENT, &cache_block, &first_row);
+    assert!(
+        omega::backend::carry_cuda_rows(&mut plan, &[(APPEND_CACHE, APPENDED_ROWS, proxima_numeric::NumericFormat::default())], VALID_ROWS as u64),
+        "the cache and row outputs share a row width"
+    );
+    let row_bytes = std::mem::size_of_val(first_row.as_slice()) as u64;
+    let cache_bytes = std::mem::size_of_val(cache_block.as_slice()) as u64;
+    let _ = omega::backend::stage_totals();
+
+    let first_named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("cache", QuantizedBlock::from(cache_block.as_slice())),
+        ("row", QuantizedBlock::from(first_row.as_slice())),
+    ];
+    execute_plan_named(&mut plan, &first_named).expect("first decode step executes");
+    let first = omega::backend::stage_totals();
+
+    let second_row = appended_row_values(1);
+    let second_named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("cache", QuantizedBlock::from(&cache_block[..0])),
+        ("row", QuantizedBlock::from(second_row.as_slice())),
+    ];
+    execute_plan_named(&mut plan, &second_named).expect("second decode step executes");
+    let second = omega::backend::stage_totals();
+
+    assert_eq!(first.block_copied_bytes, cache_bytes + row_bytes, "the first step uploads the cache once, plus its row");
+    assert_eq!(second.block_copied_bytes, row_bytes, "the second step copies its row and no kv bytes");
+    let timed = [first, second].iter().map(|totals| {
+        totals.block_upload_nanos + totals.encode_dispatch_nanos + totals.gpu_exec_nanos + totals.readback_nanos
+    }).sum::<u64>();
+    assert!(timed > 0, "cuda records its upload, submit, device-wait and readback phases in the shared stage totals");
+}
+
 fn appended_row_block(first_row: usize, count: usize) -> Vec<f32> {
     (first_row..first_row + count).flat_map(appended_row_values).collect()
 }

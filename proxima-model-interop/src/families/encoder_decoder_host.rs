@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use proxima_numeric::NumericFormat;
 use proxima_primitives::sync::blocking::Mutex;
 use proxima_safetensors::{Manifest, SafetensorsParser};
 use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
@@ -331,6 +332,31 @@ impl<'a> Bound<'a> {
         }
     }
 
+    /// The `(cache leaf, appended-rows output, format)` triples the shared
+    /// kv-carry contract keeps resident, in `cache_names` order: the decoder's
+    /// outputs after the logits are those appended rows, plane by plane.
+    fn kv_carry_pairs(&self, outputs: &[NodeId]) -> Vec<(NodeId, NodeId, NumericFormat)> {
+        let leaves: BTreeMap<&str, NodeId> = self
+            .program
+            .iter()
+            .enumerate()
+            .filter_map(|(index, op)| match op {
+                Op::Input {
+                    name: Some(name), ..
+                } => Some((name.as_str(), NodeId(index as u32))),
+                _ => None,
+            })
+            .collect();
+        cache_names(self.shape.decoder_layers)
+            .zip(outputs.iter().skip(1))
+            .filter_map(|(name, output)| {
+                leaves
+                    .get(name.as_str())
+                    .map(|leaf| (*leaf, *output, NumericFormat::default()))
+            })
+            .collect()
+    }
+
     fn stage_step(&mut self, ids: &[u32], cached: usize) {
         let tokens = ids.iter().map(|id| *id as _).collect();
         let positions = (cached..cached + ids.len()).map(|at| at as _).collect();
@@ -571,7 +597,7 @@ impl<'a> Bound<'a> {
                 )
                 .map_err(|error| anyhow::anyhow!("{stage} segment does not evaluate: {error:?}"))?;
             let _ = cell.set(timings);
-            return collect_outputs(&evaluated, outputs, &self.handoff_out);
+            return collect_outputs(&evaluated, outputs, &self.handoff_out, false);
         }
         #[cfg(feature = "instrument")]
         let evaluate_started = Instant::now();
@@ -604,7 +630,7 @@ impl<'a> Bound<'a> {
         } else {
             &self.handoff_out
         };
-        let collected = collect_outputs(&evaluated, outputs, returned);
+        let collected = collect_outputs(&evaluated, outputs, returned, runtime.kv_carry_accepted());
         #[cfg(feature = "instrument")]
         proxima_telemetry::debug!(
             stage = stage,
@@ -629,14 +655,14 @@ fn collect_outputs(
     evaluated: &Evaluated,
     outputs: &[NodeId],
     handed_off: &[(NodeId, String)],
+    appended_on_device: bool,
 ) -> Result<Vec<Vec<f32>>> {
     let mut collected = outputs
         .iter()
-        .map(|node| {
-            evaluated
-                .get(*node)
-                .map(|(values, _)| values.to_vec())
-                .with_context(|| format!("evaluated program has no output for node {node:?}"))
+        .map(|node| match evaluated.get(*node) {
+            Some((values, _)) => Ok(values.to_vec()),
+            None if appended_on_device => Ok(Vec::new()),
+            None => bail!("evaluated program has no output for node {node:?}"),
         })
         .collect::<Result<Vec<_>>>()?;
     // a handed-off output is here only when the backend did not keep it on the device
@@ -1120,9 +1146,11 @@ impl Model {
         }
         decoder.bind(self)?;
         let program_hash = program_hash(&decoder.program);
+        runtime.set_kv_carry(decoder.kv_carry_pairs(&step_outputs), 0);
 
         let mut tokens: Vec<u32> = policy.prompt().to_vec();
         let mut cached = 0;
+        let mut kv_live = false;
         let mut ended = false;
         let mut step_times = Vec::new();
         let mut first_token = Duration::ZERO;
@@ -1141,12 +1169,22 @@ impl Model {
                 );
                 decoder.fit_cache(extent);
                 let symbols = [fresh.len() as u64, extent as u64];
+                runtime.set_kv_cached_rows(cached as u64);
                 let mut rows = decoder.run("decode", &step_outputs, &symbols, runtime)?;
+                let on_device = runtime.kv_carry_accepted();
+                if kv_live && !on_device {
+                    bail!(
+                        "decode step {step} left the device-carried kv cache: it was not carried"
+                    );
+                }
+                kv_live = on_device;
                 let flat = rows.remove(0);
-                decoder.trim_cache(cached);
-                for (name, added) in cache_names(self.shape.decoder_layers).zip(rows) {
-                    if let Some(plane) = decoder.named.get_mut(&name) {
-                        plane.extend(added);
+                if !on_device {
+                    decoder.trim_cache(cached);
+                    for (name, added) in cache_names(self.shape.decoder_layers).zip(rows) {
+                        if let Some(plane) = decoder.named.get_mut(&name) {
+                            plane.extend(added);
+                        }
                     }
                 }
                 cached = tokens.len();
@@ -1168,12 +1206,15 @@ impl Model {
             Ok(())
         };
         let outcome = decode_steps();
+        let decode = decode_start.elapsed();
+        let flushed = runtime.drain_kv_carry();
+        runtime.set_kv_carry(Vec::new(), 0);
         let held: Vec<&str> = decoder.call_resident.iter().map(String::as_str).collect();
         if !held.is_empty() {
             runtime.release_call_residents_of(&held, decoder.program_key());
         }
         outcome?;
-        let decode = decode_start.elapsed();
+        flushed.map_err(|error| anyhow::anyhow!("decode kv cache does not drain: {error:?}"))?;
         let generated = &tokens[policy.prompt().len()..];
         let text = tokenizer_text(&self.dir, generated)?;
         let gpu_allocated_bytes = runtime.allocated_bytes();
@@ -1705,9 +1746,18 @@ mod tests {
     fn pass_reduction_takes_min_and_median_per_op_with_a_slow_first_pass() {
         // the attention op is slow on the first pass, as the measured node 170 was
         let passes = vec![
-            vec![sample(170, "cached_attention", 4_800_000), sample(171, "ffn", 900)],
-            vec![sample(170, "cached_attention", 1_650_000), sample(171, "ffn", 700)],
-            vec![sample(170, "cached_attention", 1_630_000), sample(171, "ffn", 800)],
+            vec![
+                sample(170, "cached_attention", 4_800_000),
+                sample(171, "ffn", 900),
+            ],
+            vec![
+                sample(170, "cached_attention", 1_650_000),
+                sample(171, "ffn", 700),
+            ],
+            vec![
+                sample(170, "cached_attention", 1_630_000),
+                sample(171, "ffn", 800),
+            ],
         ];
 
         let stats = reduce_op_passes(&passes).expect("three aligned passes reduce");
@@ -1747,8 +1797,16 @@ mod tests {
     #[test]
     fn kind_totals_sum_per_op_mins_and_medians_by_kind() {
         let passes = vec![
-            vec![sample(1, "ffn", 10), sample(2, "ffn", 50), sample(3, "norm", 7)],
-            vec![sample(1, "ffn", 30), sample(2, "ffn", 40), sample(3, "norm", 5)],
+            vec![
+                sample(1, "ffn", 10),
+                sample(2, "ffn", 50),
+                sample(3, "norm", 7),
+            ],
+            vec![
+                sample(1, "ffn", 30),
+                sample(2, "ffn", 40),
+                sample(3, "norm", 5),
+            ],
         ];
         let stats = reduce_op_passes(&passes).expect("two aligned passes reduce");
 
