@@ -41,11 +41,18 @@ impl CpuStepPlan {
         Self::with_numeric_policy(NumericPolicy::bit_exact())
     }
 
-    /// A plan whose steps bind under `numeric_policy`, so a caller that grants the f32 online
-    /// attention gets the arithmetic a gpu binds.
+    /// A plan whose kernels run under `numeric_policy`. Its steps BIND bit exact plus the
+    /// policy's `flash_narrowing` (so a caller that grants the f32 online attention gets the
+    /// arithmetic a gpu binds); `reassociation` and `approx_functions` reach the kernels only,
+    /// exactly as `evaluate_quantized_named_with_kernel_policy` splits them for a one-shot step.
     #[must_use]
     pub fn with_numeric_policy(numeric_policy: NumericPolicy) -> Self {
         Self { numeric_policy, state: None, binds: 0, refits: 0, refusals: 0 }
+    }
+
+    /// The policy the binder sees: a rewrite the kernel policy permits must not change which ops bind.
+    fn bind_policy(&self) -> NumericPolicy {
+        NumericPolicy::bit_exact().with_flash_narrowing(self.numeric_policy.flash_narrowing)
     }
 
     /// Full binds performed so far: the first call of a class, and every refused patch.
@@ -111,7 +118,7 @@ impl CpuStepPlan {
         let options = StepOptions {
             fuse_cached_attention: true,
             allow_fusion: true,
-            numeric_policy: self.numeric_policy,
+            numeric_policy: self.bind_policy(),
         };
         let same_class = |state: &PlanState| {
             state.program_key == program_key
@@ -137,6 +144,9 @@ impl CpuStepPlan {
                     prepared,
                 });
             }
+        }
+        if let Some(state) = self.state.as_mut() {
+            state.prepared.numeric_policy = self.numeric_policy;
         }
         Ok(())
     }
@@ -529,6 +539,31 @@ mod tests {
         planned(&mut plan, 8, &program, 3, &[sum]).expect("second program key");
 
         assert_eq!(plan.binds(), 2);
+    }
+
+    #[test]
+    fn a_relaxed_plan_binds_the_ops_a_bit_exact_plan_binds_and_hands_only_its_kernels_the_permissions() {
+        let (program, _, sum) = matmul();
+        let relaxed = NumericPolicy::fast().with_flash_narrowing(true);
+        let exact = NumericPolicy::bit_exact().with_flash_narrowing(true);
+        let mut relaxed_plan = CpuStepPlan::with_numeric_policy(relaxed);
+        let mut exact_plan = CpuStepPlan::with_numeric_policy(exact);
+
+        for rows in [3, 5] {
+            planned(&mut relaxed_plan, 7, &program, rows, &[sum]).expect("relaxed plan runs");
+            planned(&mut exact_plan, 7, &program, rows, &[sum]).expect("exact plan runs");
+            let relaxed_state = relaxed_plan.state.as_ref().expect("relaxed plan is bound");
+            let exact_state = exact_plan.state.as_ref().expect("exact plan is bound");
+
+            assert_eq!(relaxed_state.options.numeric_policy, exact,
+                "the bind policy of a relaxed plan is bit exact plus its flash narrowing at {rows} rows");
+            assert_eq!(relaxed_state.prepared.unadjusted, exact_state.prepared.unadjusted,
+                "the bound ops do not depend on the kernel permissions at {rows} rows");
+            assert_eq!(relaxed_state.prepared.numeric_policy, relaxed,
+                "the kernels of a relaxed plan keep its permissions at {rows} rows");
+            assert_eq!(exact_state.prepared.numeric_policy, exact);
+        }
+        assert_eq!((relaxed_plan.binds(), relaxed_plan.refits()), (1, 1), "the second width patches, not rebinds");
     }
 
     #[test]
