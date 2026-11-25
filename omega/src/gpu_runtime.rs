@@ -11,7 +11,8 @@
 
 use core::ops::Range;
 
-use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DeviceRepr, DriverError, LaunchArgs, LaunchConfig, ValidAsZeroBits};
+use cudarc::driver::sys::CUevent_flags;
+use cudarc::driver::{CudaContext, CudaEvent, CudaView, CudaViewMut, PushKernelArg, CudaFunction, CudaModule, CudaSlice, CudaStream, DeviceRepr, DriverError, LaunchArgs, LaunchConfig, ValidAsZeroBits};
 use cudarc::nvrtc::Ptx;
 use proxima_tensor::Executes;
 
@@ -37,12 +38,39 @@ pub struct LaunchShape {
     pub shared_mem_bytes: u32,
 }
 
+/// The argument list of one launch: every argument is pushed by reference, so each outlives the launch.
+///
+/// Teaching pointer: the cudarc impl wraps its typed `LaunchArgs::arg`; a runtime without typed
+/// arguments builds a [`crate::kernel_params::KernelParams`] instead.
+pub trait LaunchArguments<'a, Runtime: GpuRuntime + ?Sized> {
+    /// Pushes a buffer the kernel reads.
+    fn push<Element: DeviceElement>(&mut self, buffer: &'a Runtime::Buffer<Element>) -> &mut Self;
+    /// Pushes a buffer the kernel writes.
+    fn push_mut<Element: DeviceElement>(&mut self, buffer: &'a mut Runtime::Buffer<Element>) -> &mut Self;
+    /// Pushes a shared window.
+    fn push_view<Element: DeviceElement>(&mut self, view: &'a Runtime::View<'_, Element>) -> &mut Self;
+    /// Pushes a writable window.
+    fn push_view_mut<Element: DeviceElement>(&mut self, view: &'a mut Runtime::ViewMut<'_, Element>) -> &mut Self;
+    /// Pushes a scalar kernel parameter.
+    fn push_value<Element: DeviceElement>(&mut self, value: &'a Element) -> &mut Self;
+}
+
 /// The device operations one executor runs on.
 pub trait GpuRuntime: core::fmt::Debug {
     /// What a failed device call reports.
     type Error;
     /// A device allocation of `Element`s.
     type Buffer<Element: DeviceElement>: core::fmt::Debug + Clone;
+    /// A shared window onto part of a buffer.
+    type View<'a, Element: DeviceElement>
+    where
+        Self: 'a;
+    /// A writable window onto part of a buffer.
+    type ViewMut<'a, Element: DeviceElement>
+    where
+        Self: 'a;
+    /// A point in the device queue, for timing.
+    type Event;
     /// A compiled kernel entry point; cloning shares the loaded handle.
     type Function: core::fmt::Debug + Clone;
     /// A loaded module, from which functions are looked up.
@@ -50,7 +78,7 @@ pub trait GpuRuntime: core::fmt::Debug {
     /// Module bytes a runtime loads: the compile output.
     type Image;
     /// The borrowed argument list of one launch, built in the launching function so each argument outlives the launch.
-    type Launch<'a>
+    type Launch<'a>: LaunchArguments<'a, Self>
     where
         Self: 'a;
 
@@ -138,6 +166,27 @@ pub trait GpuRuntime: core::fmt::Debug {
     /// The device facts that shape emitted launch grids.
     fn emit_device(&self) -> EmitDevice;
 
+    /// Elements in `buffer`.
+    fn len<Element: DeviceElement>(buffer: &Self::Buffer<Element>) -> usize;
+
+    /// A shared window onto `range` of `buffer`.
+    fn view<Element: DeviceElement>(buffer: &Self::Buffer<Element>, range: Range<usize>) -> Self::View<'_, Element>;
+
+    /// A writable window onto `range` of `buffer`.
+    fn view_mut<Element: DeviceElement>(buffer: &mut Self::Buffer<Element>, range: Range<usize>) -> Self::ViewMut<'_, Element>;
+
+    /// Records an event at the current end of the device queue.
+    ///
+    /// # Errors
+    /// The runtime cannot record events; the caller then skips timing.
+    fn record_event(&self) -> Result<Self::Event, Self::Error>;
+
+    /// Milliseconds between two recorded events.
+    ///
+    /// # Errors
+    /// An event has not completed or the runtime cannot time it.
+    fn elapsed_ms(start: &Self::Event, end: &Self::Event) -> Result<f32, Self::Error>;
+
     /// Blocks until every queued device operation finished.
     ///
     /// # Errors
@@ -181,6 +230,9 @@ impl CudarcRuntime {
 impl GpuRuntime for CudarcRuntime {
     type Error = DriverError;
     type Buffer<Element: DeviceElement> = CudaSlice<Element>;
+    type View<'a, Element: DeviceElement> = CudaView<'a, Element>;
+    type ViewMut<'a, Element: DeviceElement> = CudaViewMut<'a, Element>;
+    type Event = CudaEvent;
     type Function = CudaFunction;
     type Module = CudaModule;
     type Image = Ptx;
@@ -255,8 +307,52 @@ impl GpuRuntime for CudarcRuntime {
         self.device
     }
 
+    fn len<Element: DeviceElement>(buffer: &CudaSlice<Element>) -> usize {
+        buffer.len()
+    }
+
+    fn view<Element: DeviceElement>(buffer: &CudaSlice<Element>, range: Range<usize>) -> CudaView<'_, Element> {
+        buffer.slice(range)
+    }
+
+    fn view_mut<Element: DeviceElement>(buffer: &mut CudaSlice<Element>, range: Range<usize>) -> CudaViewMut<'_, Element> {
+        buffer.slice_mut(range)
+    }
+
+    fn record_event(&self) -> Result<CudaEvent, DriverError> {
+        let event = self.context.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?;
+        event.record(&self.stream)?;
+        Ok(event)
+    }
+
+    fn elapsed_ms(start: &CudaEvent, end: &CudaEvent) -> Result<f32, DriverError> {
+        start.elapsed_ms(end)
+    }
+
     fn synchronize(&self) -> Result<(), DriverError> {
         self.stream.synchronize()
+    }
+}
+
+impl<'a> LaunchArguments<'a, CudarcRuntime> for LaunchArgs<'a> {
+    fn push<Element: DeviceElement>(&mut self, buffer: &'a CudaSlice<Element>) -> &mut Self {
+        self.arg(buffer)
+    }
+
+    fn push_mut<Element: DeviceElement>(&mut self, buffer: &'a mut CudaSlice<Element>) -> &mut Self {
+        self.arg(buffer)
+    }
+
+    fn push_view<Element: DeviceElement>(&mut self, view: &'a CudaView<'_, Element>) -> &mut Self {
+        self.arg(view)
+    }
+
+    fn push_view_mut<Element: DeviceElement>(&mut self, view: &'a mut CudaViewMut<'_, Element>) -> &mut Self {
+        self.arg(view)
+    }
+
+    fn push_value<Element: DeviceElement>(&mut self, value: &'a Element) -> &mut Self {
+        self.arg(value)
     }
 }
 

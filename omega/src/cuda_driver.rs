@@ -20,10 +20,9 @@ use std::time::Instant;
 use conflaguration::Settings;
 use cudarc::driver::sys as cuda_sys;
 use cudarc::driver::{
-    CudaContext, CudaEvent, CudaFunction, CudaModule, CudaSlice, CudaStream, CudaView, CudaViewMut, DriverError, LaunchArgs,
-    PushKernelArg,
+    CudaContext, CudaEvent, CudaFunction, CudaModule, CudaSlice, CudaView, CudaViewMut, DriverError,
 };
-use crate::gpu_runtime::{CudarcRuntime, GpuRuntime, LaunchShape};
+use crate::gpu_runtime::{CudarcRuntime, DeviceElement, GpuRuntime, LaunchArguments, LaunchShape};
 use crate::encode_render::{EncodeRows, RenderedEncode, row_bytes};
 use cudarc::nvrtc::sys as nvrtc_sys;
 use cudarc::nvrtc::result as nvrtc_result;
@@ -563,10 +562,10 @@ struct LaunchEvents {
     operand_bytes: u64,
 }
 
-fn push_buffer<'a, 'b>(args: &'b mut LaunchArgs<'a>, buffer: &'a CudaGraphBuffer) -> &'b mut LaunchArgs<'a> {
+fn push_buffer<'a, 'b, R: GpuRuntime + 'a>(args: &'b mut R::Launch<'a>, buffer: &'a CudaGraphBuffer<R>) -> &'b mut R::Launch<'a> {
     match buffer {
-        CudaGraphBuffer::F32(input) => args.arg(input),
-        CudaGraphBuffer::Bytes(input) => args.arg(input.as_ref()),
+        CudaGraphBuffer::F32(input) => args.push(input),
+        CudaGraphBuffer::Bytes(input) => args.push(input.as_ref()),
     }
 }
 
@@ -827,7 +826,7 @@ impl CudaDriver {
     /// # Errors
     /// [`CudaDriverError::BindingContract`] when the rows are not whole blocks of `format`, are not
     /// whole threads, do not fit `source` or `destination`, or `Row` is not one host row element.
-    pub fn encode_rows<Row: cudarc::driver::DeviceRepr>(
+    pub fn encode_rows<Row: DeviceElement>(
         &self,
         rendered: &RenderedEncode,
         format: &NumericFormat,
@@ -843,7 +842,7 @@ impl CudaDriver {
     ///
     /// # Errors
     /// As [`Self::encode_rows`].
-    pub fn encode_rows_into<Row: cudarc::driver::DeviceRepr>(
+    pub fn encode_rows_into<Row: DeviceElement>(
         &self,
         rendered: &RenderedEncode,
         format: &NumericFormat,
@@ -864,9 +863,9 @@ impl CudaDriver {
         let function = self.function_for(&kernel)?;
         let mut window = destination.slice_mut(range);
         let mut args = self.runtime.launch_arguments(&function);
-        args.arg(source);
-        args.arg(&mut window);
-        args.arg(&count);
+        args.push(source);
+        args.push_view_mut(&mut window);
+        args.push_value(&count);
         let config = LaunchShape {
             grid_dim: (launch_blocks(&kernel.grid)?, 1, 1),
             block_dim: (kernel.grid.block_width_or_default() as u32, 1, 1),
@@ -877,7 +876,7 @@ impl CudaDriver {
     }
 
     /// Encodes `count` host row values from `source` into `cache` at the packed position of element `offset`, the cache's storage read as bytes.
-    fn encode_into_cache<Row: cudarc::driver::DeviceRepr>(
+    fn encode_into_cache<Row: DeviceElement>(
         &self,
         encode: &KvEncode,
         source: &CudaSlice<Row>,
@@ -1562,9 +1561,9 @@ impl CudaDriver {
         let mut device_output = self.runtime.alloc_zeros::<f32>(input.len())?;
         let device_uniforms = self.runtime.upload::<u8>(&n.to_ne_bytes())?;
         let mut args = self.runtime.launch_arguments(&function);
-        args.arg(&device_input);
-        args.arg(&mut device_output);
-        args.arg(&device_uniforms);
+        args.push(&device_input);
+        args.push_mut(&mut device_output);
+        args.push(&device_uniforms);
         unsafe {
             self.runtime.launch(args, LaunchShape {
                 grid_dim: ((input.len() as u32).div_ceil(256), 1, 1),
@@ -1643,10 +1642,10 @@ impl CudaDriver {
         };
         let mut args = self.runtime.launch_arguments(&function);
         for input in &device_inputs {
-            args.arg(input);
+            args.push(input);
         }
-        args.arg(&mut device_output);
-        args.arg(&device_uniforms);
+        args.push_mut(&mut device_output);
+        args.push(&device_uniforms);
         unsafe { self.runtime.launch(args, config) }?;
         self.runtime.synchronize()?;
         Ok(self.runtime.download(&device_output)?)
@@ -1895,7 +1894,7 @@ impl CudaDriver {
         for binding in &kernel.bindings[..output_index] {
             match binding {
                 Binding::Input(node) | Binding::Indices(node) => match arena.buffers.get(node) {
-                    Some(buffer) => push_buffer(&mut args, buffer),
+                    Some(buffer) => push_buffer::<CudarcRuntime>(&mut args, buffer),
                     None => {
                         arena
                             .buffers
@@ -1906,23 +1905,23 @@ impl CudaDriver {
                 _ => return Err(CudaDriverError::BindingContract),
             };
         }
-        args.arg(&mut device_output);
+        args.push_mut(&mut device_output);
         for binding in &kernel.bindings[output_index + 1..] {
             match binding {
-                Binding::Uniforms => args.arg(device_uniforms),
+                Binding::Uniforms => args.push(device_uniforms),
                 Binding::Fault => match (&fault_window, &fault_buffer) {
-                    (Some(window), _) => args.arg(window),
-                    (None, Some(buffer)) => args.arg(buffer),
+                    (Some(window), _) => args.push_view(window),
+                    (None, Some(buffer)) => args.push(buffer),
                     (None, None) => return Err(CudaDriverError::BindingContract),
                 },
                 _ => return Err(CudaDriverError::BindingContract),
             };
         }
         for (_, buffer) in &mut extra_buffers {
-            args.arg(buffer);
+            args.push_mut(buffer);
         }
         if let Some(buffer) = route_buffer.as_mut() {
-            args.arg(buffer);
+            args.push_mut(buffer);
         }
         arena.launch_profile.mark(4, &mut lap);
         let launch_result = prepass_result.and_then(|()| unsafe { self.runtime.launch(args, config) }.map_err(CudaDriverError::from));
@@ -2005,15 +2004,15 @@ impl CudaDriver {
         for binding in &prepass.bindings {
             match binding {
                 Binding::Indices(node) => match buffers.get(node) {
-                    Some(buffer) => push_buffer(&mut args, buffer),
+                    Some(buffer) => push_buffer::<CudarcRuntime>(&mut args, buffer),
                     None => return Err(CudaDriverError::MissingBuffer(*node)),
                 },
-                Binding::Uniforms => args.arg(uniforms),
-                Binding::Fault => args.arg(fault.ok_or(CudaDriverError::BindingContract)?),
+                Binding::Uniforms => args.push(uniforms),
+                Binding::Fault => args.push_view(fault.ok_or(CudaDriverError::BindingContract)?),
                 _ => return Err(CudaDriverError::BindingContract),
             };
         }
-        args.arg(compaction);
+        args.push_mut(compaction);
         unsafe { self.runtime.launch(args, config) }?;
         self.graph_launches.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -2040,14 +2039,6 @@ impl CudaDriver {
         for (node, buffer) in buffers {
             arena.buffers.insert(node, CudaGraphBuffer::F32(buffer));
         }
-    }
-
-    fn record_event(&self, stream: &CudaStream) -> Result<CudaEvent, CudaDriverError> {
-        let event = stream
-            .context()
-            .new_event(Some(cuda_sys::CUevent_flags::CU_EVENT_DEFAULT))?;
-        event.record(stream)?;
-        Ok(event)
     }
 
     /// Copies one persistent node back to the host for an explicit oracle or
@@ -2206,7 +2197,7 @@ fn report_event_timing(
     let mut by_kernel: BTreeMap<&str, (f64, usize, usize)> = BTreeMap::new();
     let mut total_ms = 0.0f64;
     for (_, label, output_len, event) in rows {
-        let millis = f64::from(previous.elapsed_ms(event)?);
+        let millis = f64::from(CudarcRuntime::elapsed_ms(previous, event)?);
         let entry = by_kernel
             .entry(label.as_str())
             .or_insert((0.0, 0, *output_len));
@@ -4013,7 +4004,7 @@ impl DevicePlan {
         let event_timing = std::env::var_os("PROXIMA_CUDA_EVENT_TIMING").is_some();
         let mut event_rows: Vec<(NodeId, String, usize, CudaEvent)> = Vec::new();
         let event_origin = event_timing
-            .then(|| self.driver.record_event(self.driver.runtime.stream()))
+            .then(|| self.driver.runtime.record_event())
             .transpose()?;
         self.arena.launch_profile = LaunchProfile {
             enabled: host_timing,
@@ -4107,7 +4098,7 @@ impl DevicePlan {
                 };
                 let start_event = op_events
                     .as_ref()
-                    .map(|_| self.driver.record_event(self.driver.runtime.stream()))
+                    .map(|_| self.driver.runtime.record_event())
                     .transpose()?;
                 let launch = if timing {
                     self.driver.launch_f32_persistent_sized(
@@ -4139,7 +4130,7 @@ impl DevicePlan {
                     },
                 })?;
                 if let (Some(events), Some(start)) = (op_events.as_deref_mut(), start_event) {
-                    let end = self.driver.record_event(self.driver.runtime.stream())?;
+                    let end = self.driver.runtime.record_event()?;
                     events.push(LaunchEvents {
                         position,
                         start,
@@ -4156,7 +4147,7 @@ impl DevicePlan {
                     ));
                 }
                 if event_timing {
-                    let event = self.driver.record_event(self.driver.runtime.stream())?;
+                    let event = self.driver.runtime.record_event()?;
                     event_rows.push((bound.node, format!("{}:{}", bound.kind.name(), kernel.entry), output_len, event));
                 }
             }
@@ -4548,11 +4539,11 @@ fn launch_blocks(grid: &CudaGridSpec) -> Result<u32, CudaDriverError> {
 mod tests {
     use super::{
         CudaDriver, CudaDriverError, CudaFunction, PRECOMPILED_ADD_ONE_PTX,
-        PushKernelArg, add_one_kernel, cached_ptx, launch_blocks, packed_bytes, packed_codec,
+        add_one_kernel, cached_ptx, launch_blocks, packed_bytes, packed_codec,
         resolve_cuda_include_dir, store_ptx, validate_cuda_dtype,
     };
     use crate::cuda::CudaGridSpec;
-    use cudarc::driver::LaunchConfig;
+    use cudarc::driver::{LaunchConfig, PushKernelArg};
     use crate::gpu_runtime::GpuRuntime;
     use crate::cuda_kernel_cache::CacheKey;
     use crate::cuda_ptx_store::PtxStore;
