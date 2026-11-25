@@ -162,7 +162,17 @@ impl Engine {
     /// [`BackendError::UnknownName`] when `OMEGA_BACKEND` is set to a name
     /// this does not recognize.
     pub fn from_env() -> Result<Engine, BackendError> {
-        let raw = std::env::var("OMEGA_BACKEND").unwrap_or_default();
+        Engine::from_vars(|name| std::env::var(name).ok())
+    }
+
+    /// [`Engine::from_env`] over an injected variable lookup, so a caller (or
+    /// a test) supplies `OMEGA_BACKEND` without touching the process environment.
+    ///
+    /// # Errors
+    /// [`BackendError::UnknownName`] when the lookup yields a name this does
+    /// not recognize.
+    pub fn from_vars(lookup: impl Fn(&str) -> Option<String>) -> Result<Engine, BackendError> {
+        let raw = lookup("OMEGA_BACKEND").unwrap_or_default();
         if raw.is_empty() {
             return Ok(Engine::default_compiled());
         }
@@ -2558,7 +2568,6 @@ mod attention_sink_tests;
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::sync::Mutex;
 
     use proxima_tensor::NodeId;
     use proxima_tensor::cpu::ExpertSource;
@@ -2574,8 +2583,6 @@ mod tests {
     use crate::config::KvPaddingPolicy;
     #[cfg(all(feature = "cuda-driver", feature = "cached-attention-streaming"))]
     use crate::config::RuntimeConfig;
-
-    static ENVIRONMENT_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn metal_admits_exactly_what_the_msl_classifier_reads() {
@@ -2853,32 +2860,17 @@ mod tests {
         ));
     }
 
-    // Environment parsing is intentionally live so these tests remain
-    // deterministic under both nextest and plain cargo test.
     #[test]
     fn from_env_with_a_known_name_resolves_to_its_variant() {
-        let _guard = ENVIRONMENT_LOCK
-            .lock()
-            .expect("environment lock is not poisoned");
-        // SAFETY: this test owns `OMEGA_BACKEND` for its own process; nextest
-        // runs each test in a separate process, so no concurrent reader.
-        unsafe {
-            std::env::set_var("OMEGA_BACKEND", "cpu");
-        }
-        let engine = super::Engine::from_env().expect("cpu is a known engine name");
+        let engine = super::Engine::from_vars(|_| Some("cpu".to_owned()))
+            .expect("cpu is a known engine name");
         assert_eq!(engine, super::Engine::Cpu);
     }
 
     #[test]
     fn from_env_with_an_unknown_name_errors_without_falling_back() {
-        let _guard = ENVIRONMENT_LOCK
-            .lock()
-            .expect("environment lock is not poisoned");
-        // SAFETY: see `from_env_with_a_known_name_resolves_to_its_variant`.
-        unsafe {
-            std::env::set_var("OMEGA_BACKEND", "quantum");
-        }
-        let error = super::Engine::from_env().expect_err("quantum names no engine");
+        let error = super::Engine::from_vars(|_| Some("quantum".to_owned()))
+            .expect_err("quantum names no engine");
         assert!(matches!(
             error,
             BackendError::UnknownName { name } if name == "quantum"
@@ -2887,15 +2879,7 @@ mod tests {
 
     #[test]
     fn from_env_unset_falls_back_to_the_compiled_default() {
-        let _guard = ENVIRONMENT_LOCK
-            .lock()
-            .expect("environment lock is not poisoned");
-        // SAFETY: this test owns `OMEGA_BACKEND` for its own process; remove
-        // an inherited shell value so the fallback assertion is deterministic.
-        unsafe {
-            std::env::remove_var("OMEGA_BACKEND");
-        }
-        let engine = super::Engine::from_env().expect("unset falls back, never errors");
+        let engine = super::Engine::from_vars(|_| None).expect("unset falls back, never errors");
         assert_eq!(engine, super::Engine::default_compiled());
     }
 
