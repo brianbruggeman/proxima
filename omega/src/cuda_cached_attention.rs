@@ -2,7 +2,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use proxima_tensor::{BoundOp, BoundOpKind};
+use proxima_tensor::{BoundOp, BoundOpKind, ScorePlanes};
 use proxima_numeric::codec::Codec;
 use proxima_numeric::{DType, NumericPolicy};
 
@@ -57,6 +57,7 @@ pub(crate) fn cached_attention_entry_name(
     let tile_token = cached_attention_tile_rows(&resolved.kind, numeric_policy)
         .map_or_else(String::new, |tile_rows| format!("_tq{tile_rows}{mma_token}"));
     let split_token = split_chunks.map_or_else(String::new, |chunks| format!("_sk{chunks}"));
+    let plane_token = if planes_of(&resolved.kind) == ScorePlanes::Whole { "_wp" } else { "" };
     let bounds_token = if cached_attention_runtime_bounds(&resolved.kind) {
         String::from("_rtb")
     } else {
@@ -67,7 +68,7 @@ pub(crate) fn cached_attention_entry_name(
         )
     };
     Ok(format!(
-        "omega_cuda_cached_attention_{}_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}{kv_token}{tile_token}{split_token}_s{:08x}{bounds_token}",
+        "omega_cuda_cached_attention_{}_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}{plane_token}{kv_token}{tile_token}{split_token}_s{:08x}{bounds_token}",
         class_tag(class),
         scale.to_bits(),
     ))
@@ -91,7 +92,14 @@ fn unsplit_tail(resolved: &BoundOp, numeric_policy: NumericPolicy) -> String {
     let body = if cached_attention_uses_mma(&resolved.kind, numeric_policy) { MMA_ATTENTION_BODY } else { TILED_ATTENTION_BODY };
     match cached_attention_tile_rows(&resolved.kind, numeric_policy) {
         Some(tile_rows) => format!("    constexpr int tile_rows = {tile_rows};\n{body}"),
-        None => String::from(CACHED_ATTENTION_BODY),
+        None => per_row_body(planes_of(&resolved.kind)),
+    }
+}
+
+fn planes_of(kind: &BoundOpKind) -> ScorePlanes {
+    match kind {
+        BoundOpKind::CachedAttention { planes, .. } => *planes,
+        _ => ScorePlanes::Paired,
     }
 }
 
@@ -103,12 +111,20 @@ pub(crate) fn render_attention(
     helpers: &str,
     quantized: &[Option<Codec>],
 ) -> Result<String, EmitError> {
+    let planes = planes_of(&resolved.kind);
     let Some(class) = cuda_cached_attention_class(&resolved.kind) else {
         return Err(EmitError::CudaUnsupportedOpKind {
             node: resolved.node,
-            kind: "cached_attention",
+            kind: if planes == ScorePlanes::Whole { "cached_attention_whole_planes" } else { "cached_attention" },
         });
     };
+    if planes == ScorePlanes::Whole && quantized.iter().any(Option::is_some) {
+        return Err(EmitError::CudaUnsupportedOpKind {
+            node: resolved.node,
+            kind: "cached_attention_whole_planes_packed",
+        });
+    }
+    let pair_dim = if planes == ScorePlanes::Whole { "head_dim" } else { "rotary_dim / 2" };
     let BoundOpKind::CachedAttention {
         operands,
         cached_key_rows,
@@ -208,7 +224,7 @@ pub(crate) fn render_attention(
          \x20   constexpr long long query_groups = {query_groups};\n\
          \x20   constexpr long long head_dim = {head_dim};\n\
          \x20   constexpr long long rotary_dim = {rotary_dim};\n\
-         \x20   constexpr long long pair_dim = rotary_dim / 2;\n\
+         \x20   constexpr long long pair_dim = {pair_dim};\n\
          \x20   constexpr long long pass_dim = head_dim - rotary_dim;\n\
          \x20   {bounds_decl}\n\
          \x20   constexpr float scale = {scale};\n\
@@ -220,7 +236,15 @@ pub(crate) fn render_attention(
     Ok(source)
 }
 
-const CACHED_ATTENTION_BODY: &str = "\
+fn per_row_body(planes: ScorePlanes) -> String {
+    let score = match planes {
+        ScorePlanes::Whole => WHOLE_SCORE,
+        _ => PAIRED_SCORE,
+    };
+    format!("{PER_ROW_HEAD}{score}{PER_ROW_TAIL}")
+}
+
+const PER_ROW_HEAD: &str = "\
     const float negative_infinity = -__int_as_float(0x7f800000);
     constexpr int warps = 4;
     const unsigned int lane = threadIdx.x & 31u;
@@ -248,6 +272,9 @@ const CACHED_ATTENTION_BODY: &str = "\
         const long long kpass = key_row * (kv_heads * pass_dim) + kv_head * pass_dim;
         const long long vbase = key_row * (kv_heads * head_dim) + kv_head * head_dim;
         float partial = 0.0f;
+";
+
+const PAIRED_SCORE: &str = "\
         for (long long pair = (long long)lane; pair < pair_dim; pair += 32LL) {
             partial += in0[qbase + pair] * (cached ? cached_key_at(in2, kbase + pair) : in4[kbase + pair]);
             partial += in1[qbase + pair] * (cached ? cached_key_at(in3, kbase + pair) : in5[kbase + pair]);
@@ -255,6 +282,15 @@ const CACHED_ATTENTION_BODY: &str = "\
         for (long long column = (long long)lane; column < pass_dim; column += 32LL) {
             partial += pass_query[qpass + column] * (cached ? pass_cached_key[kpass + column] : pass_new_key[kpass + column]);
         }
+";
+
+const WHOLE_SCORE: &str = "\
+        for (long long pair = (long long)lane; pair < pair_dim; pair += 32LL) {
+            partial += in0[qbase + pair] * (cached ? cached_key_at(in2, kbase + pair) : in4[kbase + pair]);
+        }
+";
+
+const PER_ROW_TAIL: &str = "\
         for (int offset = 16; offset > 0; offset >>= 1) { partial += __shfl_xor_sync(PROXIMA_ALL_LANES, partial, offset); }
         const float score = partial * scale;
         const float next_max = fmaxf(maximum, score);

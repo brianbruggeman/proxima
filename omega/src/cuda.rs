@@ -63,7 +63,7 @@ use alloc::vec::Vec;
 
 use proxima_numeric::block_layout::BlockLayout;
 use proxima_tensor::{
-    ActivationLimits, BoundOp, BoundOpKind, ComposedBody, DeviceMemory, Executes, Form, Keep, Layout, Lookup, NodeId, Op, ReduceInit, Refusal, ScalarOp, StepArg,
+    ActivationLimits, BoundOp, BoundOpKind, ComposedBody, DeviceMemory, Executes, Form, Keep, Layout, Lookup, NodeId, Op, ReduceInit, Refusal, ScalarOp, ScorePlanes, StepArg,
 };
 use proxima_numeric::{DType, FloatLayout, NumericPolicy, NumericRewrite, ScaleArithmetic, admit};
 
@@ -4870,7 +4870,7 @@ pub fn executes(target: &Target) -> Executes {
         .with(Form::MoeTopK)
         .with(Form::ReduceEpilogue);
     let forms = if target.card_asm {
-        mma_contraction_grant(base.with(Form::CachedAttention).with_int8_dot(ActivationLimits {
+        mma_contraction_grant(base.with(Form::CachedAttention).with(Form::WholeAttention).with_int8_dot(ActivationLimits {
             max_reduction: staged_matvec::MAX_STAGED_REDUCTION,
             output_total_max: u64::from(u32::MAX),
         }))
@@ -4883,6 +4883,7 @@ pub fn executes(target: &Target) -> Executes {
 fn refusal_kind(refusal: Refusal) -> &'static str {
     match refusal {
         Refusal::Form(Form::CachedAttention) => "cached_attention_on_this_target",
+        Refusal::Form(Form::WholeAttention) => "whole_attention_on_this_target",
         Refusal::Form(Form::GatedDeltaNet) => "gated_delta_net",
         Refusal::Form(Form::TopFractionSelect) => "top_fraction_select",
         Refusal::Form(Form::RoundBatchedReduce) => "round_batched_reduce",
@@ -4908,6 +4909,7 @@ pub(crate) fn cuda_cached_attention_class(kind: &BoundOpKind) -> Option<CudaAtte
         head_dim,
         rotary_dim,
         attention_sink,
+        planes,
         ..
     } = kind
     else {
@@ -4915,6 +4917,10 @@ pub(crate) fn cuda_cached_attention_class(kind: &BoundOpKind) -> Option<CudaAtte
     };
     if *attention_sink {
         return None;
+    }
+    if *planes == ScorePlanes::Whole {
+        let fits = operands.len() == 8 && *cached_key_rows == 0 && rotary_dim == head_dim;
+        return fits.then_some(CudaAttentionClass::Static);
     }
     let (static_operands, bound_operands) = if rotary_dim < head_dim {
         (11, 12)
@@ -5070,6 +5076,123 @@ mod tests {
 
         assert_eq!(control.admit(&attention), Err(Refusal::Form(Form::CachedAttention)));
         assert_eq!(control.admit(&elementwise_tanh_op(4)), Ok(()));
+    }
+
+    fn whole_attention_op(rows: u64, heads: u64, head_dim: u64) -> BoundOp {
+        let mut kind = attention_kind(8, 0, head_dim, head_dim);
+        let BoundOpKind::CachedAttention {
+            query_rows,
+            new_key_rows,
+            kv_heads,
+            query_groups,
+            new_upper_inclusive,
+            planes,
+            ..
+        } = &mut kind
+        else {
+            unreachable!("attention_kind always builds a CachedAttention kind");
+        };
+        *query_rows = rows;
+        *new_key_rows = rows;
+        *kv_heads = heads;
+        *query_groups = 1;
+        *new_upper_inclusive = rows as i64;
+        *planes = ScorePlanes::Whole;
+        BoundOp { extents: vec![rows, heads, head_dim], ..attention_op_with(kind) }
+    }
+
+    #[test]
+    fn executes_grants_whole_attention_only_to_a_card_asm_target() {
+        let whole = whole_attention_op(1500, 6, 64);
+
+        assert!(executes(&Target::CUDA).forms.contains(Form::WholeAttention));
+        assert_eq!(executes(&Target::CUDA).admit(&whole), Ok(()));
+        assert_eq!(executes(&Target::HIP).admit(&whole), Err(Refusal::Form(Form::WholeAttention)));
+    }
+
+    #[test]
+    fn whole_attention_refusal_on_a_plain_target_names_the_cuda_emitter() {
+        let refusal = emit_hip(&whole_attention_op(1500, 6, 64), &no_packed()).expect_err("hip has no attention body");
+
+        assert!(matches!(
+            refusal,
+            EmitError::CudaUnsupportedOpKind { kind: "whole_attention_on_this_target", .. }
+        ));
+        assert!(refusal.to_string().contains("cuda emitter"), "{refusal}");
+    }
+
+    #[test]
+    fn whole_attention_kernel_scores_one_head_dim_plane_with_no_odd_reads_and_no_ninth_operand() {
+        let kernel = emit_cuda(&whole_attention_op(1500, 6, 64), &no_packed()).expect("whole attention emits");
+
+        assert!(kernel.source.contains("constexpr long long pair_dim = head_dim;"));
+        assert!(kernel.source.contains("partial += in0[qbase + pair] * (cached ? cached_key_at(in2, kbase + pair) : in4[kbase + pair]);"));
+        for absent in ["in1[", "in5[", "in8", "pass_query[qpass"] {
+            assert!(!kernel.source.contains(absent), "`{absent}` is dead text in a whole kernel");
+        }
+        assert!(kernel.source.contains("constexpr long long cached_key_rows = 0LL;"));
+        assert!(kernel.source.contains("expf(maximum - next_max)"));
+        assert!(kernel.source.contains("__shfl_xor_sync(PROXIMA_ALL_LANES, partial, offset)"));
+    }
+
+    #[test]
+    fn whole_attention_binds_eight_inputs_with_no_cached_len_slot() {
+        let kernel = emit_cuda(&whole_attention_op(1500, 6, 64), &no_packed()).expect("whole attention emits");
+
+        let mut expected: Vec<Binding> = (0..8).map(|index| Binding::Input(NodeId(index))).collect();
+        expected.extend([Binding::Output(NodeId(9)), Binding::Uniforms]);
+        assert_eq!(kernel.bindings, expected);
+    }
+
+    #[test]
+    fn whole_and_paired_attention_never_share_an_entry_or_a_source() {
+        let whole = emit_cuda(&whole_attention_op(8, 6, 64), &no_packed()).expect("whole emits");
+        let mut paired_op = whole_attention_op(8, 6, 64);
+        let BoundOpKind::CachedAttention { planes, .. } = &mut paired_op.kind else {
+            unreachable!("whole_attention_op always builds a CachedAttention kind");
+        };
+        *planes = ScorePlanes::Paired;
+        let paired = emit_cuda(&paired_op, &no_packed()).expect("paired emits");
+
+        assert!(whole.entry.contains("_wp"), "{}", whole.entry);
+        assert!(!paired.entry.contains("_wp"), "{}", paired.entry);
+        assert_ne!(whole.source, paired.source);
+        assert!(paired.source.contains("in1[qbase + pair]"));
+    }
+
+    #[test]
+    fn whole_attention_above_the_tile_threshold_stays_one_block_per_vector_never_the_paired_tiled_body() {
+        let rows = ATTENTION_TILE_MIN_ROWS * 94;
+        let kernel = emit_cuda(&whole_attention_op(rows, 8, 128), &no_packed()).expect("whole attention emits");
+
+        assert!(!kernel.entry.contains("_tq"), "{}", kernel.entry);
+        assert_eq!(kernel.grid.blocks(), rows * 8);
+        assert_eq!(kernel.grid.block_width(), Some(ATTENTION_WARPS * WARP_SIZE));
+        assert!(kernel.prologue.is_empty(), "a whole bind has no split or merge dispatch");
+    }
+
+    #[test]
+    fn whole_attention_over_a_cached_range_or_a_ninth_operand_is_refused_naming_the_cuda_emitter() {
+        let mut cached = whole_attention_op(16, 6, 64);
+        let BoundOpKind::CachedAttention { cached_key_rows, .. } = &mut cached.kind else {
+            unreachable!("whole_attention_op always builds a CachedAttention kind");
+        };
+        *cached_key_rows = 4;
+        let mut ninth = whole_attention_op(16, 6, 64);
+        let BoundOpKind::CachedAttention { operands, .. } = &mut ninth.kind else {
+            unreachable!("whole_attention_op always builds a CachedAttention kind");
+        };
+        operands.push(operands[0].clone());
+
+        for op in [cached, ninth] {
+            assert_eq!(cuda_cached_attention_class(&op.kind), None);
+            let refusal = emit_cuda(&op, &no_packed()).expect_err("the renderer reads no cached range");
+            assert!(matches!(
+                refusal,
+                EmitError::CudaUnsupportedOpKind { kind: "cached_attention_whole_planes", .. }
+            ));
+            assert!(refusal.to_string().contains("cuda emitter"), "{refusal}");
+        }
     }
 
     #[test]

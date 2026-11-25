@@ -1,4 +1,4 @@
-use proxima_tensor::{BoundOpKind};
+use proxima_tensor::{BoundOpKind, ScorePlanes};
 use proxima_numeric::{NumericPolicy};
 
 const ATTENTION_TILE_ITEMS: u64 = 32;
@@ -29,11 +29,15 @@ pub(crate) fn cached_attention_tile_rows(kind: &BoundOpKind, numeric_policy: Num
         query_groups,
         head_dim,
         rotary_dim,
+        planes,
         ..
     } = kind
     else {
         return None;
     };
+    if *planes == ScorePlanes::Whole {
+        return None;
+    }
     let vector_planes = rotary_dim % 8 == 0 && (head_dim - rotary_dim) % 4 == 0;
     let fits = (1..=ATTENTION_TILE_ITEMS).contains(query_groups)
         && head_dim_fits(*head_dim, numeric_policy)

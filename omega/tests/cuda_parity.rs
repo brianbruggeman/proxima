@@ -28,10 +28,10 @@ use proxima_numeric::block_layout::BlockLayout;
 use omega::backend::{
     BackendError, Engine, GpuDriver, Plan, cuda_kernel_identities, execute_plan_named, plan_named,
 };
-use proxima_numeric::{EncodeRule, FormatCodec, NumericPolicy, ScaleArithmetic};
+use proxima_numeric::{EncodeRule, FormatCodec, NumericFormat, NumericPolicy, ScaleArithmetic};
 use proxima_tensor::infer;
 use proxima_tensor::spec::{
-    input_leaf, qk_norm_cached_forward_program, rmsnorm, rmsnorm_per_head, count_constant, scalar_constant,
+    input_leaf, non_causal_attention_heads, qk_norm_cached_forward_program, rmsnorm, rmsnorm_per_head, count_constant, scalar_constant, scalar_constant_like,
 };
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, map, projection};
@@ -6339,4 +6339,67 @@ fn cuda_cached_attention_reads_every_narrow_scalar_cache_like_the_cpu_over_its_d
         }
     }
     assert!(compared > 0, "every readable narrow format was refused at upload, so nothing was compared");
+}
+
+/// A `non_causal_attention_heads` program (an encoder's self-attention, no mask and no rotation):
+/// queries `[rows, heads, head_dim]`, keys and values `[keys, heads, head_dim]`, scaled by 1/8
+/// (whisper's `1 / sqrt(64)`; the kernel reads the scale as data, so the ragged case keeps it).
+fn non_causal_attention_program(rows: u32, keys: u32, heads: u32, head_dim: u32) -> Vec<Op> {
+    let dtype = NumericFormat::host_element().to_dtype().expect("the host element is a scalar dtype");
+    let leaf = |program: &mut Vec<Op>, name: &str, count: u32| {
+        let shape = [count, heads, head_dim].iter().map(|&size| Extent::Static(size)).collect();
+        input_leaf(program, dtype, shape, name)
+    };
+    let mut program = Vec::new();
+    let query = leaf(&mut program, "q", rows);
+    let key = leaf(&mut program, "k", keys);
+    let value = leaf(&mut program, "v", keys);
+    let inverse = scalar_constant_like(&mut program, 0.125, query).expect("the attention scale builds");
+    non_causal_attention_heads(&mut program, &[(query, key)], value, inverse, "u", "i", "d")
+        .expect("the non-causal attention builds");
+    program
+}
+
+fn assert_whole_attention_parity(rows: u32, keys: u32, heads: u32, head_dim: u32) {
+    let program = non_causal_attention_program(rows, keys, heads, head_dim);
+    let owned = vec![
+        ("q".to_string(), random_vec(11, (rows * heads * head_dim) as usize)),
+        ("k".to_string(), random_vec(13, (keys * heads * head_dim) as usize)),
+        ("v".to_string(), random_vec(17, (keys * heads * head_dim) as usize)),
+    ];
+    let named = as_named_blocks(&owned);
+
+    let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[], NumericPolicy::bit_exact())
+        .expect("omega::backend plans the unfused attention chain on cpu");
+    let cpu = execute_plan_named(&mut cpu_plan, &named).expect("omega::backend runs the attention chain on cpu");
+
+    let fused = NumericPolicy::bit_exact().with_reassociation(true);
+    let mut cuda_plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), &program, &[], &named, &[], fused)
+        .expect("omega::backend plans the whole attention on cuda");
+    let identities = cuda_kernel_identities(&cuda_plan).expect("cuda plan exposes its kernels");
+    let cuda = execute_plan_named(&mut cuda_plan, &named)
+        .expect("omega::backend runs the whole attention on a real cuda device");
+
+    let max_diff = cpu.root().iter().zip(cuda.root()).map(|(want, got)| (want - got).abs())
+        .fold(0.0, |worst, gap| if gap > worst { gap } else { worst });
+    let magnitude = cpu.root().iter().map(|value| value.abs()).fold(0.0, |worst, size| if size > worst { size } else { worst });
+    assert!(magnitude > 0.0, "an all-zero reference compares nothing");
+    assert_eq!(cuda.root().len(), cpu.root().len());
+    let relative = max_diff / magnitude;
+    eprintln!("cuda whole attention rows={rows} keys={keys} heads={heads} head_dim={head_dim}: relative={relative}");
+    assert!(
+        identities.iter().any(|identity| identity.contains("omega_cuda_cached_attention_static") && identity.contains("_wp")),
+        "the whole-plane attention kernel is absent from the cuda plan, the chain ran unfused: {identities:?}"
+    );
+    assert!(relative < 1e-4, "cuda whole attention vs the cpu chain: relative={relative}, tolerance 1e-4");
+}
+
+#[test]
+fn whisper_shaped_whole_attention_runs_on_cuda_at_cpu_parity() {
+    assert_whole_attention_parity(1500, 1500, 6, 64);
+}
+
+#[test]
+fn ragged_whole_attention_with_unequal_rows_and_a_head_dim_off_the_warp_runs_on_cuda_at_cpu_parity() {
+    assert_whole_attention_parity(37, 53, 3, 40);
 }
