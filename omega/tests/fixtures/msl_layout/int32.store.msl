@@ -1,0 +1,6 @@
+
+static inline uint probe(float value) {
+    float scaled = value * 1e0f;
+    int clamped = (int)clamp(rint(scaled), -2147483648.0f, 2147483647.0f);
+    return (uint)clamped & 0xffffffffu;
+}

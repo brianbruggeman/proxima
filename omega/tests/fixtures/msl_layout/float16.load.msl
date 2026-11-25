@@ -1,0 +1,4 @@
+
+static inline float probe(uint code) {
+    return (float)as_type<half>((ushort)code);
+}

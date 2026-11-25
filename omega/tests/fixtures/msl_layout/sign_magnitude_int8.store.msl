@@ -1,0 +1,6 @@
+
+static inline uint probe(float value) {
+    float scaled = value * 1e0f;
+    uint magnitude = (uint)min(rint(fabs(scaled)), 127.0f);
+    return magnitude | ((as_type<uint>(scaled) >> 31u) << 7u);
+}

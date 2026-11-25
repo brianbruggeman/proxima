@@ -1,0 +1,36 @@
+
+static inline uint probe_round_shift(uint value, uint shift) {
+    if (shift == 0u) {
+        return value;
+    }
+    if (shift > 24u) {
+        return 0u;
+    }
+    uint quotient = value >> shift;
+    uint remainder = value & ((1u << shift) - 1u);
+    uint halfway = 1u << (shift - 1u);
+    return (remainder > halfway || (remainder == halfway && (quotient & 1u) == 1u)) ? quotient + 1u : quotient;
+}
+
+static inline uint probe(float value) {
+    uint bits = as_type<uint>(value);
+    uint sign = (bits >> 31u) << 5u;
+    uint abs_bits = bits & 0x7fffffffu;
+    if (abs_bits > 0x7f800000u) {
+        return 0x1fu;
+    }
+    if ((abs_bits >> 23u) == 0xffu) {
+        return sign | 0x1fu;
+    }
+    uint exponent_field = abs_bits >> 23u;
+    uint significand = exponent_field == 0u ? abs_bits : ((abs_bits & 0x7fffffu) | 0x800000u);
+    int source_exponent = exponent_field == 0u ? 1 : (int)exponent_field;
+    int target = source_exponent - 127 + (3);
+    if (target > 7) {
+        return sign | 0x1fu;
+    }
+    uint base_exponent = target < 1 ? 0u : (uint)(target - 1);
+    uint extra_shift = target < 1 ? (uint)(1 - target) : 0u;
+    uint code = (base_exponent << 2u) + probe_round_shift(significand, 21u + extra_shift);
+    return sign | min(code, 0x1fu);
+}

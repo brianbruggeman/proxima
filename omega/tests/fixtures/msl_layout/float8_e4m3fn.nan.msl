@@ -1,0 +1,5 @@
+    uint bits = as_type<uint>(value);
+    uint sign = (bits >> 31u) << 7u;
+    if ((bits & 0x7fffffffu) > 0x7f800000u) {
+        return sign | 0x78u | 0x7u;
+    }

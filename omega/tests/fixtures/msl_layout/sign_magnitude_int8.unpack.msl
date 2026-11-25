@@ -1,0 +1,11 @@
+
+static inline float probe_value(uint code) {
+    uint mantissa = code & 0x7fu;
+    return (((code >> 7u) & 1u) == 0u ? (float)mantissa : -(float)mantissa) * 1e0f;
+}
+
+static inline float probe(device const uchar *payload, uint index) {
+    uint offset = index * 1u;
+    uint code = ((uint)payload[offset + 0u] << 0u);
+    return probe_value(code);
+}

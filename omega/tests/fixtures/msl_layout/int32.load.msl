@@ -1,0 +1,5 @@
+
+static inline float probe(uint code) {
+    uint mantissa = code & 0x7fffffffu;
+    return ((float)((long)mantissa - (long)(((code >> 31u) & 1u) << 31u))) * 1e0f;
+}

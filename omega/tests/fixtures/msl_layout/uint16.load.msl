@@ -1,0 +1,5 @@
+
+static inline float probe(uint code) {
+    uint mantissa = code & 0xffffu;
+    return ((float)mantissa) * 1e0f;
+}

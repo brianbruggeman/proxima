@@ -1,0 +1,4 @@
+
+static inline uint probe(float value) {
+    return as_type<uint>(value);
+}

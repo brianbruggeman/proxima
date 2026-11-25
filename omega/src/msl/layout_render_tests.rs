@@ -9,23 +9,25 @@ use objc2_foundation::NSString;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLCompileOptions,
-    MTLComputeCommandEncoder, MTLCreateSystemDefaultDevice, MTLDevice, MTLLanguageVersion, MTLLibrary,
-    MTLResourceOptions, MTLSize,
+    MTLComputeCommandEncoder, MTLCreateSystemDefaultDevice, MTLDevice, MTLLanguageVersion,
+    MTLLibrary, MTLResourceOptions, MTLSize,
 };
-#[cfg(all(feature = "metal", target_os = "macos"))]
-use proxima_numeric::decode_scalar;
 use proxima_numeric::FormatCodec;
 use proxima_numeric::NumericFormat;
 use proxima_numeric::block_layout::BlockLayout;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use proxima_numeric::decode_scalar;
 use proxima_numeric::float_layout::{FloatLayout, NanPolicy, SignEncoding, Specials};
 
-use super::layout_render::{
-    block_k_refusal, block_super_element_msl, block_unpack_msl, hardware_type, layout_load_msl, layout_store_msl, readable_block_layout,
-};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use super::layout_render::layout_unpack_msl;
+use super::layout_render::{
+    block_k_refusal, block_super_element_msl, block_unpack_msl, hardware_type, layout_load_msl,
+    layout_store_msl, readable_block_layout,
+};
 
 const EMITTER_SOURCE: &str = include_str!("layout_render.rs");
+const RENDER_LAYOUT_SOURCE: &str = include_str!("../render/layout.rs");
 const LAYOUT_NAMES: [&str; 12] = [
     "bf16", "bf8", "bf4", "e5m2", "e4m3", "e3m2", "e2m3", "e2m1", "e2m2", "fp6", "f16", "binary32",
 ];
@@ -77,7 +79,7 @@ fn float_layout_msl_hardware_type_chosen_by_fields_not_names() {
         specials: Specials::InfinityOnOverflow,
         bias_override: Some(127),
         sign: SignEncoding::Magnitude,
-    nan: NanPolicy::IEEE,
+        nan: NanPolicy::IEEE,
     };
     let bfloat_without_infinity = FloatLayout {
         specials: Specials::None,
@@ -169,11 +171,11 @@ fn float_layout_msl_two_six_bit_layouts_differ_only_in_numeric_constants() {
 
 #[test]
 fn float_layout_msl_emitter_source_names_no_layout() {
-    let source = EMITTER_SOURCE.to_ascii_lowercase();
+    let sources = [EMITTER_SOURCE, RENDER_LAYOUT_SOURCE].map(str::to_ascii_lowercase);
 
     let hits: alloc::vec::Vec<&str> = LAYOUT_NAMES
         .into_iter()
-        .filter(|name| source.contains(name))
+        .filter(|name| sources.iter().any(|source| source.contains(name)))
         .collect();
 
     assert_eq!(hits, alloc::vec::Vec::<&str>::new());
@@ -194,14 +196,21 @@ fn identifiers_after<'text>(text: &'text str, prefix: &str) -> alloc::vec::Vec<&
 }
 
 fn function_body<'text>(source: &'text str, signature: &str) -> &'text str {
-    let start = source.find(signature).expect("the function is in the source");
+    let start = source
+        .find(signature)
+        .expect("the function is in the source");
     let rest = &source[start..];
-    &rest[..rest.find("\n}\n").expect("the function body closes at column 0")]
+    &rest[..rest
+        .find("\n}\n")
+        .expect("the function body closes at column 0")]
 }
 
 #[test]
 fn cached_attention_kv_codec_for_names_no_scalar_format_and_only_the_source_layout() {
-    let body = function_body(CACHED_ATTENTION_SOURCE, "pub fn cached_attention_kv_codec_for");
+    let body = function_body(
+        CACHED_ATTENTION_SOURCE,
+        "pub fn cached_attention_kv_codec_for",
+    );
     let format_names = ["Float32", "Float16", "BFloat16", "BFloat8"];
 
     let named: alloc::vec::Vec<&str> = ["NumericFormat::", "Codec::"]
@@ -220,7 +229,10 @@ fn cached_attention_kv_codec_for_names_no_scalar_format_and_only_the_source_layo
 
 #[test]
 fn cached_attention_kv_codecs_classifier_names_no_format() {
-    let body = function_body(CACHED_ATTENTION_SOURCE, "pub(super) fn cached_attention_kv_codecs(");
+    let body = function_body(
+        CACHED_ATTENTION_SOURCE,
+        "pub(super) fn cached_attention_kv_codecs(",
+    );
     let format_names = [
         "Float32", "Float16", "BFloat16", "BFloat8", "Q4_0", "Q8_0", "Bf8E5M2", "Q4K",
     ];
@@ -232,18 +244,29 @@ fn cached_attention_kv_codecs_classifier_names_no_format() {
         .collect();
 
     assert!(!body.is_empty(), "an empty body scans nothing");
-    assert_eq!(named, alloc::vec::Vec::<&str>::new(), "admission is decided by the layout's description");
+    assert_eq!(
+        named,
+        alloc::vec::Vec::<&str>::new(),
+        "admission is decided by the layout's description"
+    );
 }
 
 #[test]
-fn cached_attention_kv_codec_for_a_respelled_binary32_is_the_plain_buffer_and_a_narrow_layout_is_not() {
+fn cached_attention_kv_codec_for_a_respelled_binary32_is_the_plain_buffer_and_a_narrow_layout_is_not()
+ {
     let respelled_f32 = NumericFormat::Scalar(FloatLayout {
         bias_override: Some(FloatLayout::BF32.bias()),
         ..FloatLayout::BF32
     });
 
-    assert_eq!(super::cached_attention_kv_codec_for(&respelled_f32), Ok(None));
-    assert_eq!(super::cached_attention_kv_codec_for(&NumericFormat::Float32), Ok(None));
+    assert_eq!(
+        super::cached_attention_kv_codec_for(&respelled_f32),
+        Ok(None)
+    );
+    assert_eq!(
+        super::cached_attention_kv_codec_for(&NumericFormat::Float32),
+        Ok(None)
+    );
     assert_eq!(
         super::cached_attention_kv_codec_for(&NumericFormat::BFloat16),
         Ok(Some(NumericFormat::BFloat16))
@@ -257,8 +280,14 @@ fn the_row_tiled_kernel_reads_binary32_bf16_and_bf8_and_refuses_f16_and_quantize
         ..FloatLayout::BF32
     });
 
-    assert_eq!(super::cached_attention_row_tiled_kv_codec_for(&NumericFormat::Float32), Ok(None));
-    assert_eq!(super::cached_attention_row_tiled_kv_codec_for(&respelled_f32), Ok(None));
+    assert_eq!(
+        super::cached_attention_row_tiled_kv_codec_for(&NumericFormat::Float32),
+        Ok(None)
+    );
+    assert_eq!(
+        super::cached_attention_row_tiled_kv_codec_for(&respelled_f32),
+        Ok(None)
+    );
     assert_eq!(
         super::cached_attention_row_tiled_kv_codec_for(&NumericFormat::BFloat16),
         Ok(Some(NumericFormat::BFloat16))
@@ -337,7 +366,9 @@ fn random_values(seed: u64, count: usize) -> alloc::vec::Vec<f32> {
     let mut state = seed;
     (0..count)
         .map(|_| {
-            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             let unit = ((state >> 32) as u32 as f32 / u32::MAX as f32) * 2.0 - 1.0;
             let magnitude = [0.02f32, 0.3, 1.0, 7.5][(state >> 20) as usize % 4];
             unit * magnitude
@@ -346,7 +377,11 @@ fn random_values(seed: u64, count: usize) -> alloc::vec::Vec<f32> {
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
-fn run_block_unpack_kernel(layout: &BlockLayout, blocks: &[u8], elements: usize) -> alloc::vec::Vec<f32> {
+fn run_block_unpack_kernel(
+    layout: &BlockLayout,
+    blocks: &[u8],
+    elements: usize,
+) -> alloc::vec::Vec<f32> {
     let name = "probe_block";
     let source = format!(
         "#include <metal_stdlib>\nusing namespace metal;\n{}\nkernel void probe(device const uchar *blocks [[buffer(0)]], device float *values [[buffer(1)]], uint gid [[thread_position_in_grid]]) {{\n    uint block = gid / {}u;\n    values[gid] = {name}(blocks + block * {}u, gid % {}u);\n}}\n",
@@ -377,7 +412,8 @@ fn run_probe_source(source: &str, blocks: &[u8], elements: usize) -> alloc::vec:
     // SAFETY: `blocks` outlives the call and the length passed is its own byte length.
     let input = unsafe {
         device.newBufferWithBytes_length_options(
-            NonNull::new(blocks.as_ptr().cast_mut().cast::<c_void>()).expect("a slice pointer is never null"),
+            NonNull::new(blocks.as_ptr().cast_mut().cast::<c_void>())
+                .expect("a slice pointer is never null"),
             blocks.len(),
             MTLResourceOptions::StorageModeShared,
         )
@@ -386,9 +422,15 @@ fn run_probe_source(source: &str, blocks: &[u8], elements: usize) -> alloc::vec:
     let output = device
         .newBufferWithLength_options(elements * 4, MTLResourceOptions::StorageModeShared)
         .expect("the device allocates the value buffer");
-    let queue = device.newCommandQueue().expect("the device makes a command queue");
-    let command_buffer = queue.commandBuffer().expect("the queue makes a command buffer");
-    let encoder = command_buffer.computeCommandEncoder().expect("the command buffer makes an encoder");
+    let queue = device
+        .newCommandQueue()
+        .expect("the device makes a command queue");
+    let command_buffer = queue
+        .commandBuffer()
+        .expect("the queue makes a command buffer");
+    let encoder = command_buffer
+        .computeCommandEncoder()
+        .expect("the command buffer makes an encoder");
     encoder.setComputePipelineState(&pipeline);
     // SAFETY: both buffers are live for the whole encode and index 0 and 1 are the kernel's two buffer slots.
     unsafe {
@@ -396,14 +438,23 @@ fn run_probe_source(source: &str, blocks: &[u8], elements: usize) -> alloc::vec:
         encoder.setBuffer_offset_atIndex(Some(&output), 0, 1);
     }
     encoder.dispatchThreads_threadsPerThreadgroup(
-        MTLSize { width: elements, height: 1, depth: 1 },
-        MTLSize { width: 32, height: 1, depth: 1 },
+        MTLSize {
+            width: elements,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
     );
     encoder.endEncoding();
     command_buffer.commit();
     command_buffer.waitUntilCompleted();
     // SAFETY: the command buffer completed, so the kernel's writes are visible, and the buffer holds `elements` f32s.
-    unsafe { core::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), elements) }.to_vec()
+    unsafe { core::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), elements) }
+        .to_vec()
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -422,20 +473,38 @@ async fn a_rendered_block_unpack_equals_the_host_codec_decode_bit_for_bit_over_4
     let elements = blocks * usize::from(layout.elements);
     let values = random_values(0x5eed_0004, elements);
     let mut packed = alloc::vec![0u8; codec.packed_len(elements).expect("whole blocks")];
-    codec.encode(&values, &mut packed).expect("host encodes the block format");
+    codec
+        .encode(&values, &mut packed)
+        .expect("host encodes the block format");
     let mut slots = alloc::vec![core::mem::MaybeUninit::<f32>::uninit(); elements];
-    codec.decode(&packed, &mut slots).expect("host decodes the block format");
+    codec
+        .decode(&packed, &mut slots)
+        .expect("host decodes the block format");
     // decode returned Ok, which initialises every slot of its output
-    let expected: alloc::vec::Vec<u32> = slots.iter().map(|slot| unsafe { slot.assume_init() }.to_bits()).collect();
+    let expected: alloc::vec::Vec<u32> = slots
+        .iter()
+        .map(|slot| unsafe { slot.assume_init() }.to_bits())
+        .collect();
 
     let observed: alloc::vec::Vec<u32> = run_block_unpack_kernel(&layout, &packed, elements)
         .iter()
         .map(|value| value.to_bits())
         .collect();
 
-    assert_eq!(observed.len(), elements, "every element of 4096 blocks was compared");
-    let mismatches = expected.iter().zip(&observed).filter(|(want, got)| want != got).count();
-    assert_eq!(mismatches, 0, "rendered MSL decode must equal the host codec decode on every element");
+    assert_eq!(
+        observed.len(),
+        elements,
+        "every element of 4096 blocks was compared"
+    );
+    let mismatches = expected
+        .iter()
+        .zip(&observed)
+        .filter(|(want, got)| want != got)
+        .count();
+    assert_eq!(
+        mismatches, 0,
+        "rendered MSL decode must equal the host codec decode on every element"
+    );
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -448,31 +517,69 @@ fn control_a_corrupted_q4_0_scale_byte_changes_the_rendered_decode() {
     let codec = FormatCodec::for_format(&format).expect("Q4_0 resolves a host codec");
     let values = random_values(7, 32 * 8);
     let mut packed = alloc::vec![0u8; codec.packed_len(values.len()).expect("whole blocks")];
-    codec.encode(&values, &mut packed).expect("host encodes Q4_0");
+    codec
+        .encode(&values, &mut packed)
+        .expect("host encodes Q4_0");
     let clean = run_block_unpack_kernel(&layout, &packed, values.len());
     packed[1] ^= 0x20;
 
     let corrupted = run_block_unpack_kernel(&layout, &packed, values.len());
 
-    assert_ne!(clean[..32], corrupted[..32], "the first block's scale feeds its 32 elements");
-    assert_eq!(clean[32..], corrupted[32..], "the other blocks are untouched");
+    assert_ne!(
+        clean[..32],
+        corrupted[..32],
+        "the first block's scale feeds its 32 elements"
+    );
+    assert_eq!(
+        clean[32..],
+        corrupted[32..],
+        "the other blocks are untouched"
+    );
 }
 
 #[test]
-fn a_block_k_beside_a_scalar_or_block_v_is_read_and_every_other_pairing_is_refused_naming_the_kernel_capability() {
+fn a_block_k_beside_a_scalar_or_block_v_is_read_and_every_other_pairing_is_refused_naming_the_kernel_capability()
+ {
     let q4_0 = NumericFormat::Q4_0;
     let q8_0 = NumericFormat::Q8_0;
     let f16 = NumericFormat::Float16;
 
-    assert_eq!(super::cached_attention_kv_codecs_for(&q4_0, &f16), Ok((Some(q4_0), Some(f16))));
+    assert_eq!(
+        super::cached_attention_kv_codecs_for(&q4_0, &f16),
+        Ok((Some(q4_0), Some(f16)))
+    );
     assert_eq!(super::cached_attention_key_codec_for(&q4_0), Ok(Some(q4_0)));
-    assert_eq!(super::cached_attention_kv_codecs_for(&q4_0, &q4_0), Ok((Some(q4_0), Some(q4_0))), "a block V reads through its layout");
-    assert_eq!(super::cached_attention_kv_codecs_for(&q8_0, &q4_0), Ok((Some(q8_0), Some(q4_0))), "K and V may be different block layouts");
-    assert!(super::cached_attention_kv_codecs_for(&q8_0, &f16).is_ok(), "Q8_0 is a readable block layout too");
-    assert!(super::cached_attention_kv_codecs_for(&NumericFormat::Float32, &f16).is_err(), "a plain K beside a narrow V is a mixed pair");
-    assert!(super::cached_attention_kv_codecs_for(&q4_0, &NumericFormat::Float32).is_err(), "a block K beside a plain V is a mixed pair");
-    assert!(super::cached_attention_kv_codecs_for(&f16, &q4_0).is_err(), "a scalar K beside a block V is not read");
-    assert_eq!(super::cached_attention_row_tiled_kv_codec_for(&q4_0), Ok(Some(q4_0)), "row-tiled reads a block cache through its layout");
+    assert_eq!(
+        super::cached_attention_kv_codecs_for(&q4_0, &q4_0),
+        Ok((Some(q4_0), Some(q4_0))),
+        "a block V reads through its layout"
+    );
+    assert_eq!(
+        super::cached_attention_kv_codecs_for(&q8_0, &q4_0),
+        Ok((Some(q8_0), Some(q4_0))),
+        "K and V may be different block layouts"
+    );
+    assert!(
+        super::cached_attention_kv_codecs_for(&q8_0, &f16).is_ok(),
+        "Q8_0 is a readable block layout too"
+    );
+    assert!(
+        super::cached_attention_kv_codecs_for(&NumericFormat::Float32, &f16).is_err(),
+        "a plain K beside a narrow V is a mixed pair"
+    );
+    assert!(
+        super::cached_attention_kv_codecs_for(&q4_0, &NumericFormat::Float32).is_err(),
+        "a block K beside a plain V is a mixed pair"
+    );
+    assert!(
+        super::cached_attention_kv_codecs_for(&f16, &q4_0).is_err(),
+        "a scalar K beside a block V is not read"
+    );
+    assert_eq!(
+        super::cached_attention_row_tiled_kv_codec_for(&q4_0),
+        Ok(Some(q4_0)),
+        "row-tiled reads a block cache through its layout"
+    );
 }
 
 #[test]
@@ -482,7 +589,10 @@ fn a_cache_layout_equal_to_the_graph_output_is_the_plain_buffer_whatever_its_spe
         ..FloatLayout::BF32
     });
 
-    assert_eq!(super::cached_attention_kv_codec_for(&NumericFormat::Float32), Ok(None));
+    assert_eq!(
+        super::cached_attention_kv_codec_for(&NumericFormat::Float32),
+        Ok(None)
+    );
     assert_eq!(super::cached_attention_kv_codec_for(&respelled), Ok(None));
     assert_eq!(
         super::cached_attention_kv_codec_for(&NumericFormat::Float16),
@@ -499,11 +609,32 @@ async fn a_rendered_wide_integer_load_equals_the_host_decode_bit_for_bit_on_boun
     #[case] layout: FloatLayout,
 ) {
     let width = u32::from(layout.width());
-    let top = if width == 32 { u32::MAX } else { (1u32 << width) - 1 };
+    let top = if width == 32 {
+        u32::MAX
+    } else {
+        (1u32 << width) - 1
+    };
     let sign_bit = 1u32 << (width - 1);
     let mut codes: alloc::vec::Vec<u32> = [
-        0, 1, 2, top, top - 1, sign_bit, sign_bit - 1, sign_bit + 1, 1 << 15, (1 << 15) - 1, (1 << 15) + 1,
-        1 << 30, (1 << 30) - 1, (1 << 30) + 1, 0x7fff_ffff, 0x8000_0000, 0x8000_0001, 0xffff_fffe, 0x1234_5678,
+        0,
+        1,
+        2,
+        top,
+        top - 1,
+        sign_bit,
+        sign_bit - 1,
+        sign_bit + 1,
+        1 << 15,
+        (1 << 15) - 1,
+        (1 << 15) + 1,
+        1 << 30,
+        (1 << 30) - 1,
+        (1 << 30) + 1,
+        0x7fff_ffff,
+        0x8000_0000,
+        0x8000_0001,
+        0xffff_fffe,
+        0x1234_5678,
         0xdead_beef,
     ]
     .into_iter()
@@ -515,7 +646,9 @@ async fn a_rendered_wide_integer_load_equals_the_host_decode_bit_for_bit_on_boun
     let expected: alloc::vec::Vec<u32> = codes
         .iter()
         .map(|code| {
-            decode_scalar(&format, &code.to_le_bytes()).expect("the host decodes the integer code").to_bits()
+            decode_scalar(&format, &code.to_le_bytes())
+                .expect("the host decodes the integer code")
+                .to_bits()
         })
         .collect();
     let source = format!(
@@ -524,13 +657,22 @@ async fn a_rendered_wide_integer_load_equals_the_host_decode_bit_for_bit_on_boun
     );
     let input: alloc::vec::Vec<u8> = codes.iter().flat_map(|code| code.to_le_bytes()).collect();
 
-    let observed: alloc::vec::Vec<u32> =
-        run_probe_source(&source, &input, codes.len()).iter().map(|value| value.to_bits()).collect();
+    let observed: alloc::vec::Vec<u32> = run_probe_source(&source, &input, codes.len())
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
 
-    assert!(codes.len() >= 10, "boundary codes survive the mask and dedup: {codes:?}");
+    assert!(
+        codes.len() >= 10,
+        "boundary codes survive the mask and dedup: {codes:?}"
+    );
     assert_eq!(observed, expected, "{layout:?} codes {codes:x?}");
     let wide_arm = layout.sign == SignEncoding::TwosComplement && layout.mantissa_bits > 30;
-    assert_eq!(source.contains("(long)"), wide_arm, "only a signed layout past 30 mantissa bits takes the long arm");
+    assert_eq!(
+        source.contains("(long)"),
+        wide_arm,
+        "only a signed layout past 30 mantissa bits takes the long arm"
+    );
 }
 
 /// the block formats `block_k_refusal` admits: whole four-wide loads in every scale run, and a host
@@ -551,9 +693,16 @@ const ADMITTED_BLOCK_K: [BlockLayout; 9] = [
 
 fn assert_admitted_block_k_set(admitted: &[NumericFormat]) {
     for layout in ADMITTED_BLOCK_K {
-        assert!(admitted.contains(&NumericFormat::Block(layout)), "{layout:?} is missing from the admitted set {admitted:?}");
+        assert!(
+            admitted.contains(&NumericFormat::Block(layout)),
+            "{layout:?} is missing from the admitted set {admitted:?}"
+        );
     }
-    assert_eq!(admitted.len(), ADMITTED_BLOCK_K.len(), "an unexpected format is admitted: {admitted:?}");
+    assert_eq!(
+        admitted.len(),
+        ADMITTED_BLOCK_K.len(),
+        "an unexpected format is admitted: {admitted:?}"
+    );
 }
 
 fn admitted_block_k_formats() -> alloc::vec::Vec<NumericFormat> {
@@ -568,8 +717,12 @@ fn every_admitted_block_k_resolves_and_encodes_on_the_host_and_the_admitted_set_
     let admitted = admitted_block_k_formats();
 
     for format in &admitted {
-        let codec = FormatCodec::for_format(format).expect("an admitted block K resolves a host codec");
-        assert!(codec.can_encode(), "{format:?} is admitted so the cache fill can encode it");
+        let codec =
+            FormatCodec::for_format(format).expect("an admitted block K resolves a host codec");
+        assert!(
+            codec.can_encode(),
+            "{format:?} is admitted so the cache fill can encode it"
+        );
     }
     assert_admitted_block_k_set(&admitted);
 }
@@ -582,16 +735,30 @@ fn a_block_format_with_no_host_encode_is_refused_naming_the_missing_encode() {
         .filter(|format| FormatCodec::for_format(format).is_some_and(|codec| !codec.can_encode()))
         .collect();
 
-    assert!(!decode_only.is_empty(), "the block table holds formats that decode but cannot encode");
+    assert!(
+        !decode_only.is_empty(),
+        "the block table holds formats that decode but cannot encode"
+    );
     for format in &decode_only {
-        let reason = block_k_refusal(format).expect_err("a decode-only block format is not a block K");
-        assert!(reason.contains("no encode"), "{format:?} refused with: {reason}");
-        assert!(readable_block_layout(format).is_none(), "{format:?} must not be admitted");
+        let reason =
+            block_k_refusal(format).expect_err("a decode-only block format is not a block K");
+        assert!(
+            reason.contains("no encode"),
+            "{format:?} refused with: {reason}"
+        );
+        assert!(
+            readable_block_layout(format).is_none(),
+            "{format:?} must not be admitted"
+        );
     }
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
-fn run_block_run_kernel(layout: &BlockLayout, blocks: &[u8], elements: usize) -> alloc::vec::Vec<f32> {
+fn run_block_run_kernel(
+    layout: &BlockLayout,
+    blocks: &[u8],
+    elements: usize,
+) -> alloc::vec::Vec<f32> {
     let name = "probe_block";
     let source = format!(
         "#include <metal_stdlib>\nusing namespace metal;\n{}\nkernel void probe(device const uchar *blocks [[buffer(0)]], device float *values [[buffer(1)]], uint gid [[thread_position_in_grid]]) {{\n    uint block = gid / {}u;\n    uint within = gid % {}u;\n    values[gid] = {name}_run(blocks + block * {}u, within & ~3u)[within & 3u];\n}}\n",
@@ -605,7 +772,8 @@ fn run_block_run_kernel(layout: &BlockLayout, blocks: &[u8], elements: usize) ->
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 #[test]
-fn a_rendered_four_element_run_equals_the_host_decode_bit_for_bit_for_every_admitted_block_k_format() {
+fn a_rendered_four_element_run_equals_the_host_decode_bit_for_bit_for_every_admitted_block_k_format()
+ {
     let admitted = admitted_block_k_formats();
     assert_admitted_block_k_set(&admitted);
 
@@ -613,25 +781,43 @@ fn a_rendered_four_element_run_equals_the_host_decode_bit_for_bit_for_every_admi
         let NumericFormat::Block(layout) = format else {
             panic!("{format:?} is a block format");
         };
-        let codec = FormatCodec::for_format(format).expect("an admitted block K resolves a host codec");
+        let codec =
+            FormatCodec::for_format(format).expect("an admitted block K resolves a host codec");
         let elements = 4096usize * usize::from(layout.elements);
         let values = random_values(0x5eed_0008, elements);
         let mut packed = alloc::vec![0u8; codec.packed_len(elements).expect("whole blocks")];
-        codec.encode(&values, &mut packed).expect("host encodes an admitted block K");
+        codec
+            .encode(&values, &mut packed)
+            .expect("host encodes an admitted block K");
         let mut slots = alloc::vec![core::mem::MaybeUninit::<f32>::uninit(); elements];
-        codec.decode(&packed, &mut slots).expect("host decodes an admitted block K");
+        codec
+            .decode(&packed, &mut slots)
+            .expect("host decodes an admitted block K");
         // decode returned Ok, which initialises every slot of its output
-        let expected: alloc::vec::Vec<u32> =
-            slots.iter().map(|slot| unsafe { slot.assume_init() }.to_bits()).collect();
+        let expected: alloc::vec::Vec<u32> = slots
+            .iter()
+            .map(|slot| unsafe { slot.assume_init() }.to_bits())
+            .collect();
 
         let observed: alloc::vec::Vec<u32> = run_block_run_kernel(layout, &packed, elements)
             .iter()
             .map(|value| value.to_bits())
             .collect();
 
-        assert_eq!(observed.len(), elements, "{format:?}: every element of 4096 blocks was compared");
-        let mismatches = expected.iter().zip(&observed).filter(|(want, got)| want != got).count();
-        assert_eq!(mismatches, 0, "{format:?}: the rendered run helper must equal the host decode");
+        assert_eq!(
+            observed.len(),
+            elements,
+            "{format:?}: every element of 4096 blocks was compared"
+        );
+        let mismatches = expected
+            .iter()
+            .zip(&observed)
+            .filter(|(want, got)| want != got)
+            .count();
+        assert_eq!(
+            mismatches, 0,
+            "{format:?}: the rendered run helper must equal the host decode"
+        );
     }
 }
 
@@ -645,26 +831,44 @@ fn a_rendered_unpack_equals_the_host_decode_bit_for_bit_for_every_admitted_block
         let NumericFormat::Block(layout) = format else {
             panic!("{format:?} is a block format");
         };
-        let codec = FormatCodec::for_format(format).expect("an admitted block K resolves a host codec");
+        let codec =
+            FormatCodec::for_format(format).expect("an admitted block K resolves a host codec");
         let blocks = 4096usize;
         let elements = blocks * usize::from(layout.elements);
         let values = random_values(0x5eed_0007, elements);
         let mut packed = alloc::vec![0u8; codec.packed_len(elements).expect("whole blocks")];
-        codec.encode(&values, &mut packed).expect("host encodes an admitted block K");
+        codec
+            .encode(&values, &mut packed)
+            .expect("host encodes an admitted block K");
         let mut slots = alloc::vec![core::mem::MaybeUninit::<f32>::uninit(); elements];
-        codec.decode(&packed, &mut slots).expect("host decodes an admitted block K");
+        codec
+            .decode(&packed, &mut slots)
+            .expect("host decodes an admitted block K");
         // decode returned Ok, which initialises every slot of its output
-        let expected: alloc::vec::Vec<u32> =
-            slots.iter().map(|slot| unsafe { slot.assume_init() }.to_bits()).collect();
+        let expected: alloc::vec::Vec<u32> = slots
+            .iter()
+            .map(|slot| unsafe { slot.assume_init() }.to_bits())
+            .collect();
 
         let observed: alloc::vec::Vec<u32> = run_block_unpack_kernel(layout, &packed, elements)
             .iter()
             .map(|value| value.to_bits())
             .collect();
 
-        assert_eq!(observed.len(), elements, "{format:?}: every element of 4096 blocks was compared");
-        let mismatches = expected.iter().zip(&observed).filter(|(want, got)| want != got).count();
-        assert_eq!(mismatches, 0, "{format:?}: rendered MSL decode must equal the host decode");
+        assert_eq!(
+            observed.len(),
+            elements,
+            "{format:?}: every element of 4096 blocks was compared"
+        );
+        let mismatches = expected
+            .iter()
+            .zip(&observed)
+            .filter(|(want, got)| want != got)
+            .count();
+        assert_eq!(
+            mismatches, 0,
+            "{format:?}: rendered MSL decode must equal the host decode"
+        );
     }
 }
 
@@ -679,33 +883,61 @@ fn level_format_of(format: NumericFormat) -> proxima_numeric::LevelFormat {
 fn iq4_xs_element_renders_the_explicit_ladder_under_six_bit_sub_scales() {
     let format = level_format_of(NumericFormat::Iq4Xs);
 
-    let source = super::layout_render::level_block_element_msl(&format, "iq4_xs_element").expect("iq4_xs renders");
+    let source = super::layout_render::level_block_element_msl(&format, "iq4_xs_element")
+        .expect("iq4_xs renders");
 
     assert!(source.contains("constant char iq4_xs_element_levels[16] = { -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113 };"), "the ladder is IQ4_NL's:\n{source}");
-    assert!(source.contains("float sub_scale = sub_scale_raw - 32.0f;"), "the sub-block scale is biased by 32:\n{source}");
-    assert!(source.contains("float value = raw * effective_scale;"), "the level is scaled, not re-biased:\n{source}");
+    assert!(
+        source.contains("float sub_scale = sub_scale_raw - 32.0f;"),
+        "the sub-block scale is biased by 32:\n{source}"
+    );
+    assert!(
+        source.contains("float value = raw * effective_scale;"),
+        "the level is scaled, not re-biased:\n{source}"
+    );
 }
 
 #[test]
 fn iq3_s_element_renders_the_signed_grid_with_its_sign_plane_and_doubled_sub_scale() {
     let format = level_format_of(NumericFormat::Iq3S);
 
-    let source = super::layout_render::level_block_element_msl(&format, "iq3_s_element").expect("iq3_s renders");
+    let source = super::layout_render::level_block_element_msl(&format, "iq3_s_element")
+        .expect("iq3_s renders");
 
-    assert!(source.contains("constant uint iq3_s_element_grid[512]"), "the 512-entry grid is a constant table:\n{source}");
-    let table = source.split("};").next().expect("the table ends with a brace");
-    assert_eq!(table.matches("0x").count(), 512, "every grid entry is rendered once");
-    assert!(source.contains("float sub_scale = (2.0f * sub_scale_raw) - -1.0f;"), "the sub-block scale is 2 * nibble + 1:\n{source}");
-    assert!(source.contains("negative != 0u ? -(float)magnitude"), "a set sign bit negates the magnitude:\n{source}");
+    assert!(
+        source.contains("constant uint iq3_s_element_grid[512]"),
+        "the 512-entry grid is a constant table:\n{source}"
+    );
+    let table = source
+        .split("};")
+        .next()
+        .expect("the table ends with a brace");
+    assert_eq!(
+        table.matches("0x").count(),
+        512,
+        "every grid entry is rendered once"
+    );
+    assert!(
+        source.contains("float sub_scale = (2.0f * sub_scale_raw) - -1.0f;"),
+        "the sub-block scale is 2 * nibble + 1:\n{source}"
+    );
+    assert!(
+        source.contains("negative != 0u ? -(float)magnitude"),
+        "a set sign bit negates the magnitude:\n{source}"
+    );
 }
 
 #[test]
 fn level_element_refuses_a_signed_grid_whose_sign_is_a_table_index() {
     let format = level_format_of(NumericFormat::Iq3Xxs);
 
-    let refusal = super::layout_render::level_block_element_msl(&format, "iq3_xxs_element").expect_err("a sign table is not rendered");
+    let refusal = super::layout_render::level_block_element_msl(&format, "iq3_xxs_element")
+        .expect_err("a sign table is not rendered");
 
-    assert!(refusal.to_string().contains("sign is a table index"), "{refusal}");
+    assert!(
+        refusal.to_string().contains("sign is a table index"),
+        "{refusal}"
+    );
 }
 
 #[test]
@@ -718,10 +950,15 @@ fn control_one_changed_sub_scale_bias_changes_the_rendered_iq4_xs_element() {
     let sub = layout.sub.as_mut().expect("iq4_xs has sub-blocks");
     sub.scale.bias = 31;
 
-    let original = super::layout_render::level_block_element_msl(&format, "iq4_xs_element").expect("renders");
-    let altered = super::layout_render::level_block_element_msl(&changed, "iq4_xs_element").expect("renders");
+    let original =
+        super::layout_render::level_block_element_msl(&format, "iq4_xs_element").expect("renders");
+    let altered =
+        super::layout_render::level_block_element_msl(&changed, "iq4_xs_element").expect("renders");
 
-    assert_ne!(original, altered, "the bias is the only field changed and the text must follow it");
+    assert_ne!(
+        original, altered,
+        "the bias is the only field changed and the text must follow it"
+    );
     assert!(altered.contains("sub_scale_raw - 31.0f"));
 }
 
@@ -739,12 +976,17 @@ fn scalar_cache_read_is_the_text_the_decode_split_emits_for_each_scalar_width() 
     for (format, storage) in formats {
         let read = scalar_cache_read(&format).expect("a whole-byte scalar layout is readable");
         let op = attention_op(9, 8, 256, 512, 1, -511);
-        let source = super::render_cached_attention_decode_split(&op, "entry", (Some(format), Some(format)))
-            .expect("the decode split renders a scalar cache");
+        let source =
+            super::render_cached_attention_decode_split(&op, "entry", (Some(format), Some(format)))
+                .expect("the decode split renders a scalar cache");
 
         assert_eq!(read.storage, storage);
         assert!(read.load.starts_with("omega_kv_scalar_"), "{}", read.load);
-        assert_eq!(source.matches(read.helper.as_str()).count(), 1, "the decode split pushes the helper once");
+        assert_eq!(
+            source.matches(read.helper.as_str()).count(),
+            1,
+            "the decode split pushes the helper once"
+        );
         assert!(source.contains(&format!("{}_x4(kr4_cached[index])", read.load)));
     }
 }
@@ -767,20 +1009,40 @@ fn q4_0_super_element_rendered_from_its_layout_equals_the_retired_literal() {
 fn iq4_xs_word_decode_loads_every_word_without_an_alignment_select() {
     let format = level_format_of(NumericFormat::Iq4Xs);
 
-    let words = super::layout_render::level_run_word_decode_msl(&format, "iq4_xs_dequant_half16_words", "iq4_xs_element", 16)
-        .expect("iq4_xs block bytes and plane offsets are word multiples");
+    let words = super::layout_render::level_run_word_decode_msl(
+        &format,
+        "iq4_xs_dequant_half16_words",
+        "iq4_xs_element",
+        16,
+    )
+    .expect("iq4_xs block bytes and plane offsets are word multiples");
 
-    assert!(!words.contains("_aligned"), "no per-load alignment flag or select:\n{words}");
-    assert!(words.contains("((device const uint *)low_bytes)["), "the aligned word load:\n{words}");
+    assert!(
+        !words.contains("_aligned"),
+        "no per-load alignment flag or select:\n{words}"
+    );
+    assert!(
+        words.contains("((device const uint *)low_bytes)["),
+        "the aligned word load:\n{words}"
+    );
 }
 
 #[test]
 fn iq4_xs_guarded_decode_keeps_the_runtime_alignment_select() {
     let format = level_format_of(NumericFormat::Iq4Xs);
 
-    let guarded = super::layout_render::level_run_decode_msl(&format, "iq4_xs_dequant_half16", "iq4_xs_element", 16).expect("renders");
+    let guarded = super::layout_render::level_run_decode_msl(
+        &format,
+        "iq4_xs_dequant_half16",
+        "iq4_xs_element",
+        16,
+    )
+    .expect("renders");
 
-    assert!(guarded.contains("low_aligned ? ((device const uint *)low_bytes)["), "{guarded}");
+    assert!(
+        guarded.contains("low_aligned ? ((device const uint *)low_bytes)["),
+        "{guarded}"
+    );
 }
 
 #[test]
@@ -791,9 +1053,23 @@ fn a_block_size_that_is_not_a_word_multiple_has_no_word_decode_and_keeps_the_gua
     };
     layout.block_bytes += 1;
 
-    let words = super::layout_render::level_run_word_decode_msl(&format, "iq4_xs_dequant_half16_words", "iq4_xs_element", 16);
-    let guarded = super::layout_render::level_run_decode_msl(&format, "iq4_xs_dequant_half16", "iq4_xs_element", 16).expect("renders");
+    let words = super::layout_render::level_run_word_decode_msl(
+        &format,
+        "iq4_xs_dequant_half16_words",
+        "iq4_xs_element",
+        16,
+    );
+    let guarded = super::layout_render::level_run_decode_msl(
+        &format,
+        "iq4_xs_dequant_half16",
+        "iq4_xs_element",
+        16,
+    )
+    .expect("renders");
 
-    assert!(words.is_none(), "a 137-byte block puts later blocks off word boundaries");
+    assert!(
+        words.is_none(),
+        "a 137-byte block puts later blocks off word boundaries"
+    );
     assert!(guarded.contains("low_aligned ?"), "{guarded}");
 }

@@ -71,17 +71,18 @@ pub(crate) use crate::lowering::{
     dispatch_bindings, gather_count, gather_is_reduction_invariant, gather_slots,
     is_cooperative_reduce_op, reduction_dims, with_reduction_dims,
 };
+use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
+#[cfg(test)]
+use proxima_tensor::StepArg;
 use proxima_tensor::{
-    BoundOp, BoundOpKind, ComposedBody, Keep, Layout, Lookup, NodeId, ReduceInit, ScalarOp, is_product_of,
+    BoundOp, BoundOpKind, ComposedBody, Keep, Layout, Lookup, NodeId, ReduceInit, ScalarOp,
+    is_product_of,
 };
 #[cfg(feature = "metal-tiled-gemm")]
 use proxima_tensor::{
     ContractionForm, Executes, ProductContraction, contraction_form, dense_batched_contraction,
     product_contraction,
 };
-#[cfg(test)]
-use proxima_tensor::StepArg;
-use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
 // `QuantizedBlock` itself is re-exported from the crate root only behind
 // `std` (see `proxima_tensor::lib`'s own `#[cfg(feature = "std")]` on it),
 // so `codec_from_quantized_block` -- the only user of it in this
@@ -110,9 +111,12 @@ use crate::identity::{
 #[cfg(feature = "metal-packed-row-nsg2")]
 use crate::sized::PACKED_ROW_NSG;
 use crate::sized::SIMD_WIDTH;
-use sub_block_assembled_matvec::{LevelCodes, assembled_multi_row_matvec_msl, level_matvec_msl, level_reads_per_lane, level_stage_msl, level_table_rendered};
-use matmul_form::{FlatBlockForm, FlatLaunch, Fold};
 pub use matmul_form::LaneRun;
+use matmul_form::{FlatBlockForm, FlatLaunch, Fold};
+use sub_block_assembled_matvec::{
+    LevelCodes, assembled_multi_row_matvec_msl, level_matvec_msl, level_reads_per_lane,
+    level_stage_msl, level_table_rendered,
+};
 use sub_block_matvec::{SubBlockMatvecGeometry, sub_block_matvec_msl};
 
 mod emit_knobs;
@@ -129,10 +133,10 @@ mod cached_attention_decode_split;
 #[cfg(feature = "metal-attn-split-rows")]
 mod cached_attention_flash_tiled;
 #[cfg(feature = "metal-attn-split-rows")]
-mod flash_refusal;
-#[cfg(feature = "metal-attn-split-rows")]
 mod cached_attention_row_tiled;
 mod cached_softmax_weights_render;
+#[cfg(feature = "metal-attn-split-rows")]
+mod flash_refusal;
 mod selection_render;
 #[macro_use]
 mod elementwise_reduce_core;
@@ -146,16 +150,19 @@ mod q4_0_planes;
 mod tiled_gemm_cooperative_scan;
 #[cfg(feature = "metal-tiled-gemm")]
 mod contraction_grant;
-mod tiled_gemm_tile;
+pub mod dialect;
+pub mod encode_render;
 mod expert_grouped_gemm;
 mod index_narrowing;
-pub mod encode_render;
 pub mod layout_render;
 mod matmul_form;
 mod scaled_float_render;
 mod sub_block_assembled_matvec;
 mod sub_block_matvec;
+mod tiled_gemm_tile;
 mod wide_grid;
+#[cfg(feature = "metal-tiled-gemm")]
+pub(crate) use contraction_grant::with_contraction_grants;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) use emit_and_classify::emit_inner_with_mma_selection_and_layout;
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -174,19 +181,17 @@ pub(crate) use emit_and_classify::validate_attention_variant_storage;
 pub use emit_and_classify::*;
 pub use emit_knobs::{EmitKnobs, ReductionLiteral};
 pub use expert_grouped_gemm::GroupedGemmFormats;
-#[cfg(feature = "metal-tiled-gemm")]
-pub(crate) use contraction_grant::with_contraction_grants;
 pub use kernel_types_identity::*;
-pub(crate) use tiled_gemm_tile::TiledGemmTile;
 pub use signature_tokens_prelude::CachedAttentionForm;
 pub use signature_tokens_prelude::context_chunks_for;
 pub(crate) use signature_tokens_prelude::*;
 #[cfg(feature = "metal-attn-variants")]
 pub use signature_tokens_prelude::{
-    AttentionDecomposition, AttentionKvReuse, AttentionKvStorage, AttentionMmaPrecision, AttentionPrefetch,
-    AttentionQueryParallelism, AttentionSimdTopology, AttentionSimdgroupCount, AttentionTileHeight,
-    AttentionVariant,
+    AttentionDecomposition, AttentionKvReuse, AttentionKvStorage, AttentionMmaPrecision,
+    AttentionPrefetch, AttentionQueryParallelism, AttentionSimdTopology, AttentionSimdgroupCount,
+    AttentionTileHeight, AttentionVariant,
 };
+pub(crate) use tiled_gemm_tile::TiledGemmTile;
 // plain (non-pub) reexports: `render_cached_attention`/
 // `render_cached_attention_merge` only need to reach `msl`'s own child
 // modules (`emit_and_classify`'s and `tests`'s `use super::*`), which
@@ -207,10 +212,10 @@ pub use signature_tokens_prelude::{
 use cached_attention_decode_split::index_literal;
 #[cfg(feature = "metal-attn-split-decode")]
 use cached_attention_decode_split::render_cached_attention_decode_split;
-#[cfg(test)]
-use cached_attention_render::render_cached_attention;
 #[cfg(feature = "metal-attn-variants")]
 use cached_attention_render::cached_attention_kv_codec;
+#[cfg(test)]
+use cached_attention_render::render_cached_attention;
 use cached_attention_render::{
     cached_attention_kv_codecs, render_cached_attention_with_mma_selection,
 };
@@ -230,6 +235,14 @@ pub(crate) use cached_attention_render::emit_cached_attention_merge;
 pub(crate) use cached_attention_render::emit_cached_attention_merge_with_schedule;
 #[cfg(test)]
 use cached_attention_render::render_cached_attention_merge;
+#[cfg(feature = "metal-attn-split-rows")]
+use cached_attention_render::{ROW_TILED_KV_REASON, row_tiled_cached_type};
+pub use cached_attention_render::{
+    cached_attention_key_codec_for, cached_attention_kv_codec_for, cached_attention_kv_codecs_for,
+};
+pub use cached_attention_render::{
+    cached_attention_row_tiled_kv_codec_for, cached_attention_row_tiled_reads,
+};
 use cached_softmax_weights_render::render_cached_softmax_weights;
 pub(crate) use elementwise_reduce_core::*;
 #[cfg(any(
@@ -237,10 +250,10 @@ pub(crate) use elementwise_reduce_core::*;
     all(feature = "metal", target_os = "macos")
 ))]
 pub(crate) use expert_grouped_gemm::ROUTE_COMPACTION_MISMATCH_FAULT;
-#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
-pub(crate) use expert_grouped_gemm::route_compaction_key;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) use expert_grouped_gemm::route_compaction_indirect_offset;
+#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+pub(crate) use expert_grouped_gemm::route_compaction_key;
 use expert_grouped_gemm::*;
 #[cfg(any(
     all(test, feature = "metal-grouped-gemm"),
@@ -248,18 +261,10 @@ use expert_grouped_gemm::*;
 ))]
 pub(crate) use expert_grouped_gemm::{route_prepass, route_prepass_active};
 use index_narrowing::*;
-use packed_row_blocked_ggml::*;
-pub use cached_attention_render::{
-    cached_attention_key_codec_for, cached_attention_kv_codec_for, cached_attention_kv_codecs_for,
-};
-pub use cached_attention_render::{
-    cached_attention_row_tiled_kv_codec_for, cached_attention_row_tiled_reads,
-};
-#[cfg(feature = "metal-attn-split-rows")]
-use cached_attention_render::{ROW_TILED_KV_REASON, row_tiled_cached_type};
 pub use layout_render::device_row_store_dtype;
-pub use scaled_float_render::{q4_0_unpack_msl, q5_0_unpack_msl, q5_1_unpack_msl, q8_0_unpack_msl};
+use packed_row_blocked_ggml::*;
 use scaled_float_render::*;
+pub use scaled_float_render::{q4_0_unpack_msl, q5_0_unpack_msl, q5_1_unpack_msl, q8_0_unpack_msl};
 use selection_render::render_top_fraction_select;
 use tiled_gemm_cooperative_scan::*;
 #[cfg(any(test, all(feature = "metal", target_os = "macos")))]
@@ -275,10 +280,6 @@ pub(crate) use tiled_gemm_cooperative_scan::wide_cooperative_reduce_width;
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[doc(hidden)]
 pub mod attn_golden_tests;
-#[cfg(any(test, feature = "test-support"))]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-#[doc(hidden)]
-pub mod golden_support;
 #[cfg(all(test, feature = "metal-attn-split-rows"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod attn_rows_tests;
@@ -289,16 +290,22 @@ mod attn_split_tests;
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod cooperative_fold_tests;
 #[cfg(test)]
+mod encode_golden_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod encode_render_tests;
+#[cfg(any(test, feature = "test-support"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[doc(hidden)]
+pub mod golden_support;
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod index_narrowing_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod layout_int_tests;
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod encode_render_tests;
-#[cfg(test)]
-mod encode_golden_tests;
+mod layout_render_identity_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod layout_render_tests;

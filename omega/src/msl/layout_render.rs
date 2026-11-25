@@ -1,7 +1,8 @@
 //! The one MSL emitter over a [`FloatLayout`]: load (decode) and store (encode) from the fields.
 //!
 //! Teaching pointer: `proxima_numeric::float_layout_codec::{decode, encode}` is the CPU algorithm
-//! and this module renders the same integer steps as MSL, so the two agree code for code. A layout
+//! and `crate::render` renders the same integer steps as target-language text, so the two agree code
+//! for code; this module calls it with the `Msl` dialect and the widest hardware scalar. A layout
 //! whose fields equal a Metal hardware type (`float`, `half`, `bfloat`) renders through that type's
 //! conversion; every other layout renders as field arithmetic whose only inputs are the numeric
 //! constants of the struct. Compose the pieces with [`layout_unpack_msl`] for a flat element
@@ -13,21 +14,26 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use proxima_numeric::block_layout::{BlockLayout, CodeRegion, Coded, Field, Plane};
-use proxima_numeric::float_layout::{FloatLayout, NanNarrow, NanWiden, SignEncoding, Specials};
+use proxima_numeric::float_layout::FloatLayout;
 use proxima_numeric::{DType, FormatCodec, LevelFormat, LevelGeometry, LevelTable, NumericFormat};
 
+use crate::render::{self, Dialect, HARDWARE_COUNT, HardwareScalar, Refusal};
+
+use super::dialect::Msl;
+
+#[cfg(feature = "wgpu-backend")]
 pub(crate) const F32_FRACTION_BITS: u32 = 23;
+#[cfg(feature = "wgpu-backend")]
 pub(crate) const F32_INFINITY_BITS: u32 = 0x7f80_0000;
+#[cfg(feature = "wgpu-backend")]
 pub(crate) const F32_QUIET_BIT: u32 = 1 << 22;
+#[cfg(feature = "wgpu-backend")]
 pub(crate) const F32_ABS_MASK: u32 = 0x7fff_ffff;
 
-type HardwareRow = (u8, u8, Specials, i16, &'static str, u64, Option<&'static str>);
-
-const HARDWARE_TYPES: [HardwareRow; 3] = [
-    (8, 23, Specials::InfinityOnOverflow, 127, "float", 4, Some("f")),
-    (5, 10, Specials::InfinityOnOverflow, 15, "half", 2, Some("h")),
-    (8, 7, Specials::InfinityOnOverflow, 127, "bfloat", 2, None),
-];
+/// The Metal spelling of each row of the hardware table, in table order: the type name and, when
+/// Metal gives it one, the literal suffix. [`Msl`] reads this table.
+pub(crate) const SCALAR_SPELLINGS: [(&str, Option<&str>); HARDWARE_COUNT] =
+    [("float", Some("f")), ("half", Some("h")), ("bfloat", None)];
 
 /// A Metal scalar type a [`FloatLayout`] equals field by field: its name and the bytes one
 /// element occupies. The vector and `simdgroup` 8x8 spellings derive from the name.
@@ -39,8 +45,12 @@ pub struct HardwareType {
 }
 
 impl HardwareType {
-    fn from_row(row: &HardwareRow) -> Self {
-        Self { scalar: row.4, bytes: row.5, zero_suffix: row.6 }
+    fn from_scalar(scalar: HardwareScalar) -> Self {
+        Self {
+            scalar: Msl.scalar(scalar),
+            bytes: u64::from(scalar.bytes()),
+            zero_suffix: SCALAR_SPELLINGS[scalar.index()].1,
+        }
     }
     /// The zero literal of this type: `0.0h` for `half`, `0.0f` for `float`, and the scalar cast
     /// of `0.0f` for a type Metal gives no literal suffix.
@@ -73,34 +83,29 @@ impl HardwareType {
 }
 
 /// The Metal type whose fields equal `layout`'s, compared field by field and never by name.
-/// The one table every stage type derives from; a layout with no row is `None`, never a fallback.
+/// The one table every stage type derives from ([`HardwareScalar::of`]); a layout with no row is
+/// `None`, never a fallback.
 #[must_use]
 pub fn hardware_stage_type(layout: &FloatLayout) -> Option<HardwareType> {
-    HARDWARE_TYPES
-        .iter()
-        .find(|(exponent_bits, mantissa_bits, specials, bias, _, _, _)| {
-            *exponent_bits == layout.exponent_bits
-                && *mantissa_bits == layout.mantissa_bits
-                && *specials == layout.specials
-                && *bias == layout.bias()
-                && layout.sign == SignEncoding::Magnitude
-        })
-        .map(HardwareType::from_row)
+    HardwareScalar::of(layout).map(HardwareType::from_scalar)
 }
 
 /// The bytes one element of the hardware scalar named `scalar` (`float`, `half`, `bfloat`)
-/// occupies: the `bytes` of its [`HARDWARE_TYPES`] row, for a caller that holds a class by name.
+/// occupies, for a caller that holds a class by name.
 #[must_use]
 pub fn hardware_scalar_bytes(scalar: &str) -> Option<u64> {
-    HARDWARE_TYPES.iter().find(|row| row.4 == scalar).map(|row| row.5)
+    HardwareScalar::all()
+        .map(HardwareType::from_scalar)
+        .find(|row| row.scalar == scalar)
+        .map(|row| row.bytes)
 }
 
-/// The word row of [`HARDWARE_TYPES`]: its name and bytes are the one decision for every layout
-/// the kernel computes in the widest hardware float, token and buffer width alike.
+/// The widest hardware row: its name and bytes are the one decision for every layout the kernel
+/// computes in the widest hardware float, token and buffer width alike.
 #[must_use]
 pub fn hardware_word() -> Option<HardwareType> {
     // why: the emitter computes every non-half/bfloat layout in the widest hardware float
-    HARDWARE_TYPES.iter().max_by_key(|row| row.5).map(HardwareType::from_row)
+    HardwareScalar::widest().map(HardwareType::from_scalar)
 }
 
 /// The Metal scalar type name of [`hardware_stage_type`].
@@ -126,307 +131,42 @@ pub fn device_row_store_dtype(format: &NumericFormat) -> Option<DType> {
     (hardware_type(layout) == Some("half")).then_some(DType::Layout(*layout))
 }
 
-pub(crate) const fn exponent_ones(layout: &FloatLayout) -> u32 {
-    (1u32 << layout.exponent_bits) - 1
+fn wide_scalar() -> Result<HardwareScalar, Refusal> {
+    HardwareScalar::widest().ok_or(Refusal::NoWideScalar)
 }
 
-pub(crate) const fn mantissa_mask(layout: &FloatLayout) -> u32 {
-    ((1u64 << layout.mantissa_bits) - 1) as u32
-}
-
-pub(crate) const fn sign_shift(layout: &FloatLayout) -> u32 {
-    layout.exponent_bits as u32 + layout.mantissa_bits as u32
-}
-
-pub(crate) const fn infinity_code(layout: &FloatLayout) -> u32 {
-    exponent_ones(layout) << layout.mantissa_bits
-}
-
-pub(crate) const fn max_normal_code(layout: &FloatLayout) -> u32 {
-    if matches!(layout.specials, Specials::NanOnly) {
-        // the NaN is the all-ones code, so the largest finite one is the code below it, whatever the
-        // mantissa width (a layout with no mantissa has the exponent byte alone)
-        return (infinity_code(layout) | mantissa_mask(layout)) - 1;
-    }
-    let top = match layout.specials {
-        Specials::None | Specials::NanOnly => infinity_code(layout),
-        Specials::SaturateOnOverflow | Specials::InfinityOnOverflow => {
-            infinity_code(layout) - (1u32 << layout.mantissa_bits)
-        }
-    };
-    top | mantissa_mask(layout)
-}
-
-pub(crate) const fn overflow_code(layout: &FloatLayout) -> u32 {
-    match layout.specials {
-        Specials::InfinityOnOverflow => infinity_code(layout),
-        Specials::None | Specials::NanOnly | Specials::SaturateOnOverflow => {
-            max_normal_code(layout)
-        }
-    }
-}
-
-pub(crate) const fn quiet_bit(layout: &FloatLayout) -> u32 {
-    (1u32 << layout.mantissa_bits) >> 1
-}
-
-pub(crate) const fn reserves_all_ones(layout: &FloatLayout) -> bool {
-    matches!(
-        layout.specials,
-        Specials::SaturateOnOverflow | Specials::InfinityOnOverflow
-    )
-}
-
-fn integer_scale(layout: &FloatLayout) -> f32 {
-    let exponent = 1 - i32::from(layout.bias()) - i32::from(layout.mantissa_bits);
-    f32::from_bits(((exponent + 127).clamp(1, 254) as u32) << 23)
-}
-
-fn integer_load_msl(layout: &FloatLayout, name: &str) -> String {
-    let mantissa_bits = layout.mantissa_bits;
-    let mantissa_mask = (1u64 << mantissa_bits) - 1;
-    let scale = integer_scale(layout);
-    // 64-bit integer arithmetic here slowed the q8_0 k-cache load on metal, so the wide type is used only when 32 bits cannot hold the signed difference; the q8_0 arm of cached_attention_decode_split_times_a_binary16_k_cache_against_a_q4_0_k_cache (omega/tests/cached_attention_decode_split_parity.rs, feature instrument) prints that load's per-step gpu time, and a_rendered_wide_integer_load_equals_the_host_decode_bit_for_bit_on_boundary_codes (layout_render_tests.rs) pins the long arm
-    let signed = if mantissa_bits <= 30 { "int" } else { "long" };
-    let value = match layout.sign {
-        SignEncoding::Absent => "(float)mantissa".to_string(),
-        SignEncoding::Magnitude => format!(
-            "((code >> {mantissa_bits}u) & 1u) == 0u ? (float)mantissa : -(float)mantissa"
-        ),
-        SignEncoding::TwosComplement => format!(
-            "(float)(({signed})mantissa - ({signed})(((code >> {mantissa_bits}u) & 1u) << {mantissa_bits}u))"
-        ),
-    };
-    format!(
-        "
-static inline float {name}(uint code) {{
-    uint mantissa = code & {mantissa_mask:#x}u;
-    return ({value}) * {scale:e}f;
-}}
-"
-    )
-}
-
-fn integer_store_msl(layout: &FloatLayout, name: &str) -> String {
-    let mantissa_bits = layout.mantissa_bits;
-    let mantissa_mask = (1u64 << mantissa_bits) - 1;
-    let unscale = 1.0 / integer_scale(layout);
-    let body = match layout.sign {
-        SignEncoding::Absent => {
-            format!("    return (uint)clamp(rint(scaled), 0.0f, {mantissa_mask}.0f);")
-        }
-        SignEncoding::Magnitude => format!(
-            "    uint magnitude = (uint)min(rint(fabs(scaled)), {mantissa_mask}.0f);\n    return magnitude | ((as_type<uint>(scaled) >> 31u) << {mantissa_bits}u);"
-        ),
-        SignEncoding::TwosComplement => format!(
-            "    int clamped = (int)clamp(rint(scaled), -{negative_limit}.0f, {mantissa_mask}.0f);\n    return (uint)clamped & {full_mask:#x}u;",
-            negative_limit = 1u64 << mantissa_bits,
-            full_mask = (1u64 << (mantissa_bits + 1)) - 1
-        ),
-    };
-    format!(
-        "
-static inline uint {name}(float value) {{
-    float scaled = value * {unscale:e}f;
-{body}
-}}
-"
-    )
+// why: the public emitters return text, so a refusal becomes an `#error` line and the kernel
+// fails to compile with the typed reason instead of rendering something else
+fn refused(refusal: Refusal) -> String {
+    format!("#error {refusal}\n")
 }
 
 /// Renders `static inline float name(uint code)`: the value of the `layout.width()`-bit `code`.
+/// [`render::load`] with the [`Msl`] dialect and the widest hardware scalar.
 #[must_use]
 pub fn layout_load_msl(layout: FloatLayout, name: &str) -> String {
-    if layout.exponent_bits == 0 {
-        return integer_load_msl(&layout, name);
-    }
-    match hardware_type(&layout) {
-        Some("float") => format!(
-            "\nstatic inline float {name}(uint code) {{\n    return as_type<float>(code);\n}}\n"
-        ),
-        Some(narrow) => format!(
-            "\nstatic inline float {name}(uint code) {{\n    return (float)as_type<{narrow}>((ushort)code);\n}}\n"
-        ),
-        None => field_load_msl(&layout, name),
-    }
-}
-
-fn field_load_msl(layout: &FloatLayout, name: &str) -> String {
-    let mantissa_bits = layout.mantissa_bits;
-    let mantissa_mask = mantissa_mask(layout);
-    let exponent_ones = exponent_ones(layout);
-    let sign_shift = sign_shift(layout);
-    let bias = layout.bias();
-    let fraction_shift = F32_FRACTION_BITS - u32::from(mantissa_bits);
-    let implicit = 1u64 << mantissa_bits;
-    let reserved = field_load_reserved_msl(layout, exponent_ones, fraction_shift);
-    // no mantissa field means no subnormal range: field 0 is itself the lowest power of two
-    // (`FloatLayout::lowest_exponent`, OCP MX v1.0 Table 7), never zero
-    let (zero_exponent_significand, zero_exponent_scale) = if mantissa_bits == 0 {
-        (String::from("1u"), layout.lowest_exponent().to_string())
-    } else {
-        (String::from("mantissa"), format!("(1 - ({bias}) - {mantissa_bits})"))
-    };
-    format!(
-        "
-static inline uint {name}_scaled_bits(uint significand, int scale) {{
-    if (significand == 0u) {{
-        return 0u;
-    }}
-    int lead = 31 - (int)clz(significand);
-    int biased = lead + scale + 127;
-    if (biased >= 255) {{
-        return {F32_INFINITY_BITS:#010x}u;
-    }}
-    if (biased >= 1) {{
-        return ((uint)biased << {F32_FRACTION_BITS}u) | ((significand << (uint)({F32_FRACTION_BITS} - lead)) & 0x7fffffu);
-    }}
-    int shift = scale + 149;
-    if (shift >= 0) {{
-        return significand << (uint)shift;
-    }}
-    return -shift >= 32 ? 0u : significand >> (uint)(-shift);
-}}
-
-static inline float {name}(uint code) {{
-    uint mantissa = code & {mantissa_mask:#x}u;
-    uint exponent = (code >> {mantissa_bits}u) & {exponent_ones:#x}u;
-    uint sign = ((code >> {sign_shift}u) & 1u) << 31u;
-{reserved}    uint significand = exponent == 0u ? {zero_exponent_significand} : ({implicit:#x}u | mantissa);
-    int scale = exponent == 0u ? {zero_exponent_scale} : ((int)exponent - ({bias}) - {mantissa_bits});
-    return as_type<float>(sign | {name}_scaled_bits(significand, scale));
-}}
-"
-    )
-}
-
-fn field_load_reserved_msl(
-    layout: &FloatLayout,
-    exponent_ones: u32,
-    fraction_shift: u32,
-) -> String {
-    let payload = match layout.nan.widen {
-        NanWiden::Quiet => format!(" | (mantissa << {fraction_shift}u)"),
-        NanWiden::Canonical => String::new(),
-    };
-    if layout.specials == Specials::NanOnly {
-        return format!(
-            "    if (exponent == {exponent_ones:#x}u && mantissa == {:#x}u) {{\n        return as_type<float>(sign | {F32_INFINITY_BITS:#010x}u | {F32_QUIET_BIT:#x}u{payload});\n    }}\n",
-            mantissa_mask(layout)
-        );
-    }
-    if !reserves_all_ones(layout) {
-        return String::new();
-    }
-    format!(
-        "    if (exponent == {exponent_ones:#x}u) {{
-        return as_type<float>(sign | {F32_INFINITY_BITS:#010x}u | (mantissa == 0u ? 0u : ({F32_QUIET_BIT:#x}u{payload})));
-    }}
-"
-    )
+    wide_scalar()
+        .and_then(|wide| render::load(&Msl, wide, layout, name))
+        .unwrap_or_else(refused)
 }
 
 /// Renders `static inline uint name(float value)`: the `layout.width()`-bit code nearest `value`,
-/// ties to the even code, overflow and NaN under the layout's [`Specials`].
+/// ties to the even code, overflow and NaN under the layout's `Specials`. [`render::store`] with
+/// the [`Msl`] dialect and the widest hardware scalar.
 #[must_use]
 pub fn layout_store_msl(layout: FloatLayout, name: &str) -> String {
-    if layout.exponent_bits == 0 {
-        return integer_store_msl(&layout, name);
-    }
-    match hardware_type(&layout) {
-        Some("float") => format!(
-            "\nstatic inline uint {name}(float value) {{\n    return as_type<uint>(value);\n}}\n"
-        ),
-        Some(narrow) => format!(
-            "\nstatic inline uint {name}(float value) {{\n    return (uint)as_type<ushort>(({narrow})value);\n}}\n"
-        ),
-        None => field_store_msl(&layout, name),
-    }
-}
-
-fn field_store_nan_msl(layout: &FloatLayout) -> String {
-    if layout.specials == Specials::NanOnly {
-        return format!(
-            "        return sign | {:#x}u | {:#x}u;\n",
-            infinity_code(layout),
-            mantissa_mask(layout)
-        );
-    }
-    if !reserves_all_ones(layout) {
-        return format!("        return {:#x}u;\n", max_normal_code(layout));
-    }
-    let payload = match layout.nan.narrow {
-        NanNarrow::Preserve => format!(
-            "((bits & 0x7fffffu) >> {}u) | ",
-            F32_FRACTION_BITS - u32::from(layout.mantissa_bits)
-        ),
-        NanNarrow::Canonical => String::new(),
-    };
-    format!(
-        "        return sign | {:#x}u | ({payload}{:#x}u);\n",
-        infinity_code(layout),
-        quiet_bit(layout)
-    )
+    wide_scalar()
+        .and_then(|wide| render::store(&Msl, wide, layout, name))
+        .unwrap_or_else(refused)
 }
 
 /// The MSL that sends a NaN `value` to the layout's own NaN code, the one step a hardware
 /// conversion cannot be trusted with because it emits a single canonical NaN.
 #[must_use]
 pub fn field_store_nan_branch_msl(layout: &FloatLayout) -> String {
-    let nan = field_store_nan_msl(layout);
-    let sign_shift = sign_shift(layout);
-    format!(
-        "    uint bits = as_type<uint>(value);\n    uint sign = (bits >> 31u) << {sign_shift}u;\n    if ((bits & {F32_ABS_MASK:#x}u) > {F32_INFINITY_BITS:#010x}u) {{\n{nan}    }}\n"
-    )
-}
-
-fn field_store_msl(layout: &FloatLayout, name: &str) -> String {
-    let mantissa_bits = layout.mantissa_bits;
-    let sign_shift = sign_shift(layout);
-    let bias = layout.bias();
-    let exponent_ones = exponent_ones(layout);
-    let overflow = overflow_code(layout);
-    let value_shift = F32_FRACTION_BITS - u32::from(mantissa_bits);
-    let nan = field_store_nan_msl(layout);
-    format!(
-        "
-static inline uint {name}_round_shift(uint value, uint shift) {{
-    if (shift == 0u) {{
-        return value;
-    }}
-    if (shift > {shift_limit}u) {{
-        return 0u;
-    }}
-    uint quotient = value >> shift;
-    uint remainder = value & ((1u << shift) - 1u);
-    uint halfway = 1u << (shift - 1u);
-    return (remainder > halfway || (remainder == halfway && (quotient & 1u) == 1u)) ? quotient + 1u : quotient;
-}}
-
-static inline uint {name}(float value) {{
-    uint bits = as_type<uint>(value);
-    uint sign = (bits >> 31u) << {sign_shift}u;
-    uint abs_bits = bits & {F32_ABS_MASK:#x}u;
-    if (abs_bits > {F32_INFINITY_BITS:#010x}u) {{
-{nan}    }}
-    if ((abs_bits >> {F32_FRACTION_BITS}u) == 0xffu) {{
-        return sign | {overflow:#x}u;
-    }}
-    uint exponent_field = abs_bits >> {F32_FRACTION_BITS}u;
-    uint significand = exponent_field == 0u ? abs_bits : ((abs_bits & 0x7fffffu) | 0x800000u);
-    int source_exponent = exponent_field == 0u ? 1 : (int)exponent_field;
-    int target = source_exponent - 127 + ({bias});
-    if (target > {exponent_ones}) {{
-        return sign | {overflow:#x}u;
-    }}
-    uint base_exponent = target < 1 ? 0u : (uint)(target - 1);
-    uint extra_shift = target < 1 ? (uint)(1 - target) : 0u;
-    uint code = (base_exponent << {mantissa_bits}u) + {name}_round_shift(significand, {value_shift}u + extra_shift);
-    return sign | min(code, {overflow:#x}u);
-}}
-",
-        shift_limit = F32_FRACTION_BITS + 1,
-    )
+    wide_scalar()
+        .map(|wide| render::store_nan_branch(&Msl, wide, layout))
+        .unwrap_or_else(refused)
 }
 
 /// Renders `static inline float name(device const uchar *payload, uint index)`, the flat element
@@ -434,43 +174,9 @@ static inline uint {name}(float value) {{
 /// width neither fills whole bytes nor divides a byte, because such an element has no flat address.
 #[must_use]
 pub fn layout_unpack_msl(layout: FloatLayout, name: &str) -> Option<String> {
-    let width = u32::from(layout.width());
-    let value_name = format!("{name}_value");
-    let code = if width % 8 == 0 {
-        let bytes = width / 8;
-        let gathered = (0..bytes)
-            .map(|byte| format!("((uint)payload[offset + {byte}u] << {}u)", byte * 8))
-            .collect::<Vec<_>>()
-            .join(" | ");
-        format!("    uint offset = index * {bytes}u;\n    uint code = {gathered};\n")
-    } else if 8 % width == 0 {
-        let mask = (1u32 << width) - 1;
-        format!(
-            "    uint bit = index * {width}u;\n    uint code = ((uint)payload[bit / 8u] >> (bit % 8u)) & {mask:#x}u;\n"
-        )
-    } else if width <= 16 {
-        straddling_unpack_msl(width)
-    } else {
-        return None;
-    };
-    let value = layout_load_msl(layout, &value_name);
-    Some(format!(
-        "{value}\nstatic inline float {name}(device const uchar *payload, uint index) {{\n{code}    return {value_name}(code);\n}}\n"
-    ))
-}
-
-/// The statements that read a `width`-bit field at bit `index * width` of a dense low-bits-first
-/// stream, joining the two or three bytes that cover it. Each trailing byte is read only when the
-/// field reaches into it, so the last element never reads past the payload.
-fn straddling_unpack_msl(width: u32) -> String {
-    let mask = (1u32 << width) - 1;
-    let spans = (7 + width).div_ceil(8);
-    let joined = (1..spans)
-        .map(|byte| format!(" | (shift + {width}u > {}u ? (uint)payload[first + {byte}u] << {}u : 0u)", byte * 8, byte * 8))
-        .collect::<String>();
-    format!(
-        "    uint bit = index * {width}u;\n    uint first = bit / 8u;\n    uint shift = bit % 8u;\n    uint word = (uint)payload[first]{joined};\n    uint code = (word >> shift) & {mask:#x}u;\n"
-    )
+    wide_scalar()
+        .and_then(|wide| render::unpack(&Msl, wide, layout, name))
+        .ok()
 }
 
 /// The statements that bind `{binding}_address` to the bit address of the plane's field for
@@ -497,7 +203,11 @@ fn plane_address_msl(plane: &Plane, index: &str, binding: &str) -> String {
 /// The most bytes any element's field of `plane` touches: one when every field sits inside a byte,
 /// two or more when a field straddles a byte boundary (a 6-bit plane at bit 6 spans two bytes).
 fn plane_byte_span(plane: &Plane) -> u32 {
-    let elements: usize = plane.digits.iter().map(|digit| usize::from(digit.radix)).product();
+    let elements: usize = plane
+        .digits
+        .iter()
+        .map(|digit| usize::from(digit.radix))
+        .product();
     (0..elements)
         .map(|index| (plane.address(index) as u32 % 8 + u32::from(plane.bits)).div_ceil(8))
         .max()
@@ -564,31 +274,54 @@ fn run_words(plane: &Plane, layout: &BlockLayout, run: u64) -> Option<RunWords> 
     }
     let stride = u32::from(digit.stride_bits);
     let bits = u32::from(plane.bits);
-    let starts: Vec<u32> = (0..u32::from(layout.elements)).step_by(run as usize).map(|slot| plane.address(slot as usize) as u32).collect();
+    let starts: Vec<u32> = (0..u32::from(layout.elements))
+        .step_by(run as usize)
+        .map(|slot| plane.address(slot as usize) as u32)
+        .collect();
     let shifts: Vec<u32> = starts.iter().map(|address| address % 8).collect();
     let first = *shifts.first()?;
     let static_shift = shifts.iter().all(|shift| *shift == first).then_some(first);
     let max_shift = shifts.iter().copied().max()?;
     let reach = (run - 1) * stride + bits;
     if static_shift.is_none() {
-        let lanes_fit = stride % 8 == 0 && (0..run).all(|lane| (lane * stride) % 32 + max_shift + bits <= 32);
+        let lanes_fit =
+            stride % 8 == 0 && (0..run).all(|lane| (lane * stride) % 32 + max_shift + bits <= 32);
         if !lanes_fit {
             return None;
         }
     }
     let words = (max_shift + reach).div_ceil(32);
     let safe = (0..words)
-        .map(|word| starts.iter().all(|address| address / 8 + 4 * (word + 1) <= u32::from(layout.block_bytes)))
+        .map(|word| {
+            starts
+                .iter()
+                .all(|address| address / 8 + 4 * (word + 1) <= u32::from(layout.block_bytes))
+        })
         .collect();
-    let word_aligned = layout.block_bytes.is_multiple_of(4) && starts.iter().all(|address| (address / 8).is_multiple_of(4));
-    Some(RunWords { stride_bits: stride, static_shift, words, safe, word_aligned })
+    let word_aligned = layout.block_bytes.is_multiple_of(4)
+        && starts.iter().all(|address| (address / 8).is_multiple_of(4));
+    Some(RunWords {
+        stride_bits: stride,
+        static_shift,
+        words,
+        safe,
+        word_aligned,
+    })
 }
 
 /// Statements binding `uint {binding}_codes[run]` to the plane's field for each element of the
 /// run starting at `slot`: each word is one aligned `uint` load (a runtime pointer-alignment check
 /// falls back to assembling the word from guarded byte reads), and each lane is a constant shift
 /// and mask of its word, joined across a word boundary where its field straddles one.
-fn run_words_msl(plane: &Plane, plan: &RunWords, layout: &BlockLayout, run: u64, slot: &str, binding: &str, aligned: bool) -> String {
+fn run_words_msl(
+    plane: &Plane,
+    plan: &RunWords,
+    layout: &BlockLayout,
+    run: u64,
+    slot: &str,
+    binding: &str,
+    aligned: bool,
+) -> String {
     let mask = (1u32 << plane.bits) - 1;
     let bits = u32::from(plane.bits);
     let block_bytes = layout.block_bytes;
@@ -597,7 +330,9 @@ fn run_words_msl(plane: &Plane, plan: &RunWords, layout: &BlockLayout, run: u64,
         "    uint {binding}_first = {binding}_address / 8u;\n    uint {binding}_shift = {binding}_address % 8u;\n    device const uchar *{binding}_bytes = block + {binding}_first;\n"
     ));
     if !aligned {
-        text.push_str(&format!("    bool {binding}_aligned = (((ulong){binding}_bytes) & 3ul) == 0ul;\n"));
+        text.push_str(&format!(
+            "    bool {binding}_aligned = (((ulong){binding}_bytes) & 3ul) == 0ul;\n"
+        ));
     }
     for word in 0..plan.words {
         let assembled = (0..4)
@@ -610,7 +345,9 @@ fn run_words_msl(plane: &Plane, plan: &RunWords, layout: &BlockLayout, run: u64,
         let load = if plan.safe[word as usize] && aligned {
             format!("((device const uint *){binding}_bytes)[{word}u]")
         } else if plan.safe[word as usize] {
-            format!("{binding}_aligned ? ((device const uint *){binding}_bytes)[{word}u] : ({assembled})")
+            format!(
+                "{binding}_aligned ? ((device const uint *){binding}_bytes)[{word}u] : ({assembled})"
+            )
         } else {
             assembled
         };
@@ -757,7 +494,12 @@ fn scale_expression(layout: &BlockLayout, binding: &str, helper: &str) -> String
     let span = layout.run_elements();
     let stride = runs.stride_bytes;
     let gathered = (0..usize::from(layout.scale.layout.width()) / 8)
-        .map(|byte| format!("((uint)block[{first}u + (index / {span}u) * {stride}u + {byte}u] << {}u)", byte * 8))
+        .map(|byte| {
+            format!(
+                "((uint)block[{first}u + (index / {span}u) * {stride}u + {byte}u] << {}u)",
+                byte * 8
+            )
+        })
         .collect::<Vec<_>>()
         .join(" | ");
     format!("    float {binding} = {helper}({gathered});\n")
@@ -833,12 +575,19 @@ pub(super) struct ScalarCacheRead {
 #[must_use]
 pub(super) fn scalar_cache_read(format: &NumericFormat) -> Option<ScalarCacheRead> {
     let (layout, storage) = readable_scalar_cache(format)?;
-    let load = format!("omega_kv_scalar_{}", crate::identity::description_fingerprint(&layout));
+    let load = format!(
+        "omega_kv_scalar_{}",
+        crate::identity::description_fingerprint(&layout)
+    );
     let element = layout_load_msl(layout, &load);
     let helper = format!(
         "{element}static inline float4 {load}_x4({storage}4 value) {{ return float4({load}((uint)value.x), {load}((uint)value.y), {load}((uint)value.z), {load}((uint)value.w)); }}\n"
     );
-    Some(ScalarCacheRead { storage, load, helper })
+    Some(ScalarCacheRead {
+        storage,
+        load,
+        helper,
+    })
 }
 
 /// Whether a cached-attention kernel reads a cache stored as `format` through a rendered layout
@@ -966,7 +715,12 @@ pub fn level_run_decode_msl(
 /// (one uniform per kernel) and which a misaligned binding never satisfies. The decision reads the
 /// layout description alone, never a format name.
 #[must_use = "None means the layout cannot prove word alignment"]
-pub fn level_run_word_decode_msl(format: &LevelFormat, function: &str, name: &str, run: u64) -> Option<String> {
+pub fn level_run_word_decode_msl(
+    format: &LevelFormat,
+    function: &str,
+    name: &str,
+    run: u64,
+) -> Option<String> {
     run_decode_msl(format, function, name, run, true).ok()
 }
 
@@ -978,7 +732,12 @@ pub fn level_run_word_decode_msl(format: &LevelFormat, function: &str, name: &st
 /// What [`level_run_decode_msl`] refuses.
 #[doc(hidden)]
 #[must_use = "the refusal names why the format has no rendered run decode"]
-pub fn level_run_decode_per_element_msl(format: &LevelFormat, function: &str, name: &str, run: u64) -> Result<String, LevelRenderRefusal> {
+pub fn level_run_decode_per_element_msl(
+    format: &LevelFormat,
+    function: &str,
+    name: &str,
+    run: u64,
+) -> Result<String, LevelRenderRefusal> {
     run_decode_form_msl(format, function, name, run, RunForm::PerElement)
 }
 
@@ -988,18 +747,32 @@ enum RunForm {
     PerElement,
 }
 
-fn run_decode_msl(format: &LevelFormat, function: &str, name: &str, run: u64, aligned: bool) -> Result<String, LevelRenderRefusal> {
+fn run_decode_msl(
+    format: &LevelFormat,
+    function: &str,
+    name: &str,
+    run: u64,
+    aligned: bool,
+) -> Result<String, LevelRenderRefusal> {
     run_decode_form_msl(format, function, name, run, RunForm::Runs { aligned })
 }
 
-fn run_decode_form_msl(format: &LevelFormat, function: &str, name: &str, run: u64, form: RunForm) -> Result<String, LevelRenderRefusal> {
+fn run_decode_form_msl(
+    format: &LevelFormat,
+    function: &str,
+    name: &str,
+    run: u64,
+    form: RunForm,
+) -> Result<String, LevelRenderRefusal> {
     let layout = renderable_level_layout(format)?;
     let mut head = field_expression(&layout.scale, "scale", &format!("{name}_scale"));
     let mut scale = "scale";
     if let Some(sub) = &layout.sub {
         let span = u64::from(layout.elements / sub.count);
         if span % run != 0 {
-            return Err(LevelRenderRefusal("a decode run that straddles two sub-block scales"));
+            return Err(LevelRenderRefusal(
+                "a decode run that straddles two sub-block scales",
+            ));
         }
         head.push_str(&format!("    uint sub_block = slot / {span}u;\n"));
         head.push_str(&coded_expression(
@@ -1016,18 +789,43 @@ fn run_decode_form_msl(format: &LevelFormat, function: &str, name: &str, run: u6
         scale = "effective_scale";
     }
     let RunForm::Runs { aligned } = form else {
-        return Ok(per_element_run_msl(layout, &format.levels, (function, name), run, (&head, scale)));
+        return Ok(per_element_run_msl(
+            layout,
+            &format.levels,
+            (function, name),
+            run,
+            (&head, scale),
+        ));
     };
-    if let Some(words) = word_run_level_msl(layout, &format.levels, (function, name), run, (&head, scale), aligned) {
+    if let Some(words) = word_run_level_msl(
+        layout,
+        &format.levels,
+        (function, name),
+        run,
+        (&head, scale),
+        aligned,
+    ) {
         return Ok(words);
     }
     if aligned {
         return Err(LevelRenderRefusal("no word-aligned run decode"));
     }
-    Ok(per_element_run_msl(layout, &format.levels, (function, name), run, (&head, scale)))
+    Ok(per_element_run_msl(
+        layout,
+        &format.levels,
+        (function, name),
+        run,
+        (&head, scale),
+    ))
 }
 
-fn per_element_run_msl(layout: &BlockLayout, levels: &LevelTable, (function, name): (&str, &str), run: u64, (head, scale): (&str, &str)) -> String {
+fn per_element_run_msl(
+    layout: &BlockLayout,
+    levels: &LevelTable,
+    (function, name): (&str, &str),
+    run: u64,
+    (head, scale): (&str, &str),
+) -> String {
     let raw = raw_level_msl(layout, Codes::Levels(levels), name);
     format!(
         "\nstatic inline void {function}(device const uchar *block, uint slot, thread half *out) {{\n{head}    for (uint run = 0u; run < {run}u; ++run) {{\n        uint index = slot + run;\n{raw}        out[run] = (half)(raw * {scale});\n    }}\n}}\n"
@@ -1044,16 +842,38 @@ struct PlaneWindow {
 /// Decides whether, for every run start, the plane's fields of the `count` elements `slot`,
 /// `slot + step`, ... lie at a constant bit stride and fit in a `uint` window inside the block.
 /// `None` sends the caller to the per-element form.
-fn plane_window(plane: &Plane, layout: &BlockLayout, run: u32, (count, step): (u32, u32)) -> Option<PlaneWindow> {
-    let stride = if count > 1 { plane.address(step as usize).checked_sub(plane.address(0))? as u32 } else { 0 };
-    let starts: Vec<usize> = (0..usize::from(layout.elements)).step_by(run as usize).collect();
-    let steady = starts
+fn plane_window(
+    plane: &Plane,
+    layout: &BlockLayout,
+    run: u32,
+    (count, step): (u32, u32),
+) -> Option<PlaneWindow> {
+    let stride = if count > 1 {
+        plane.address(step as usize).checked_sub(plane.address(0))? as u32
+    } else {
+        0
+    };
+    let starts: Vec<usize> = (0..usize::from(layout.elements))
+        .step_by(run as usize)
+        .collect();
+    let steady = starts.iter().all(|start| {
+        (0..count).all(|field| {
+            plane.address(start + (field * step) as usize)
+                == plane.address(*start) + (field * stride) as usize
+        })
+    });
+    let max_shift = starts
         .iter()
-        .all(|start| (0..count).all(|field| plane.address(start + (field * step) as usize) == plane.address(*start) + (field * stride) as usize));
-    let max_shift = starts.iter().map(|start| plane.address(*start) as u32 % 8).max()?;
+        .map(|start| plane.address(*start) as u32 % 8)
+        .max()?;
     let nbytes = (max_shift + (count - 1) * stride + u32::from(plane.bits)).div_ceil(8);
-    let inside = starts.iter().all(|start| plane.address(*start) as u32 / 8 + nbytes <= u32::from(layout.block_bytes));
-    (steady && inside && nbytes <= 4).then_some(PlaneWindow { stride_bits: stride, nbytes })
+    let inside = starts
+        .iter()
+        .all(|start| plane.address(*start) as u32 / 8 + nbytes <= u32::from(layout.block_bytes));
+    (steady && inside && nbytes <= 4).then_some(PlaneWindow {
+        stride_bits: stride,
+        nbytes,
+    })
 }
 
 /// Statements binding `uint {binding}_window` (the plane's bytes for the run, little endian) and
@@ -1061,7 +881,10 @@ fn plane_window(plane: &Plane, layout: &BlockLayout, run: u32, (count, step): (u
 fn plane_window_msl(plane: &Plane, window: &PlaneWindow, binding: &str) -> String {
     let mut text = plane_address_msl(plane, "slot", binding);
     text.push_str(&format!("    device const uchar *{binding}_bytes = block + {binding}_address / 8u;\n    uint {binding}_shift = {binding}_address % 8u;\n"));
-    let joined = (0..window.nbytes).map(|byte| format!("((uint){binding}_bytes[{byte}u] << {}u)", byte * 8)).collect::<Vec<_>>().join(" | ");
+    let joined = (0..window.nbytes)
+        .map(|byte| format!("((uint){binding}_bytes[{byte}u] << {}u)", byte * 8))
+        .collect::<Vec<_>>()
+        .join(" | ");
     text.push_str(&format!("    uint {binding}_window = {joined};\n"));
     text
 }
@@ -1070,8 +893,21 @@ fn plane_window_msl(plane: &Plane, window: &PlaneWindow, binding: &str) -> Strin
 /// windows, then one grid word is fetched per `lanes` elements and its magnitude bytes are split
 /// with constant shifts; the sign is XORed into the float's sign bit, so no per-element branch,
 /// byte load or plane address remains. Every element is the same value `signed_grid_raw_msl` gives.
-fn signed_grid_run_msl(layout: &BlockLayout, levels: &LevelTable, (function, name): (&str, &str), run: u64, (head, scale): (&str, &str)) -> Option<String> {
-    let LevelTable::SignedGrid { lanes, sign, unit_shift, sign_table: None, .. } = levels else {
+fn signed_grid_run_msl(
+    layout: &BlockLayout,
+    levels: &LevelTable,
+    (function, name): (&str, &str),
+    run: u64,
+    (head, scale): (&str, &str),
+) -> Option<String> {
+    let LevelTable::SignedGrid {
+        lanes,
+        sign,
+        unit_shift,
+        sign_table: None,
+        ..
+    } = levels
+    else {
         return None;
     };
     let (run, lanes) = (u32::try_from(run).ok()?, u32::from(*lanes));
@@ -1092,13 +928,24 @@ fn signed_grid_run_msl(layout: &BlockLayout, levels: &LevelTable, (function, nam
         body.push_str(&plane_window_msl(plane, window, "high"));
     }
     body.push_str(&plane_window_msl(sign, &sign_window, "sign"));
-    let unit = if *unit_shift == 0 { String::new() } else { format!(" * {:e}f", 0.5f32.powi(i32::from(*unit_shift))) };
+    let unit = if *unit_shift == 0 {
+        String::new()
+    } else {
+        format!(" * {:e}f", 0.5f32.powi(i32::from(*unit_shift)))
+    };
     let low_mask = (1u32 << coded.low.bits) - 1;
     for group in 0..groups {
-        let mut code = format!("((low_window >> (low_shift + {}u)) & {low_mask:#x}u)", group * low_window.stride_bits);
+        let mut code = format!(
+            "((low_window >> (low_shift + {}u)) & {low_mask:#x}u)",
+            group * low_window.stride_bits
+        );
         if let (Some(plane), Some(window)) = (high, &high_window) {
             let mask = (1u32 << plane.bits) - 1;
-            code.push_str(&format!(" | (((high_window >> (high_shift + {}u)) & {mask:#x}u) << {}u)", group * window.stride_bits, coded.low.bits));
+            code.push_str(&format!(
+                " | (((high_window >> (high_shift + {}u)) & {mask:#x}u) << {}u)",
+                group * window.stride_bits,
+                coded.low.bits
+            ));
         }
         body.push_str(&format!("    uint grid{group} = {name}_grid[{code}];\n"));
     }
@@ -1110,7 +957,9 @@ fn signed_grid_run_msl(layout: &BlockLayout, levels: &LevelTable, (function, nam
             element * sign_window.stride_bits
         ));
     }
-    Some(format!("\nstatic inline void {function}(device const uchar *block, uint slot, thread half *out) {{\n{head}{body}}}\n"))
+    Some(format!(
+        "\nstatic inline void {function}(device const uchar *block, uint slot, thread half *out) {{\n{head}{body}}}\n"
+    ))
 }
 
 /// The word-load form of [`level_run_decode_msl`]'s body, from the planes' description alone: each
@@ -1127,7 +976,11 @@ fn word_run_level_msl(
     aligned: bool,
 ) -> Option<String> {
     if matches!(levels, LevelTable::SignedGrid { .. }) {
-        return if aligned { None } else { signed_grid_run_msl(layout, levels, (function, name), run, (head, scale)) };
+        return if aligned {
+            None
+        } else {
+            signed_grid_run_msl(layout, levels, (function, name), run, (head, scale))
+        };
     }
     if layout.element.packed_radix > 1 {
         return None;
@@ -1144,15 +997,22 @@ fn word_run_level_msl(
         if aligned && !high_plan.word_aligned {
             return None;
         }
-        body.push_str(&run_words_msl(high, &high_plan, layout, run, "slot", "high", aligned));
-        code = format!("(low_codes[run] | (high_codes[run] << {}u))", coded.low.bits);
+        body.push_str(&run_words_msl(
+            high, &high_plan, layout, run, "slot", "high", aligned,
+        ));
+        code = format!(
+            "(low_codes[run] | (high_codes[run] << {}u))",
+            coded.low.bits
+        );
     }
     let (table, raw) = level_lookup_msl(levels, name, &code);
     let params = "(device const uchar *block, uint slot, thread half *out)";
     let lane = format!("        float raw = {raw};\n        out[run] = (half)(raw * {scale});\n");
     let open = format!("    {RUN_UNROLL} for (uint run = 0u; run < {run}u; ++run) {{\n");
     let (setup, close) = (format!("{head}{body}"), "    }\n}\n");
-    Some(format!("{table}\nstatic inline void {function}{params} {{\n{setup}{open}{lane}{close}"))
+    Some(format!(
+        "{table}\nstatic inline void {function}{params} {{\n{setup}{open}{lane}{close}"
+    ))
 }
 
 /// The run decode's level lookup: an explicit table becomes a `constant float` array, read as
@@ -1197,9 +1057,15 @@ fn renderable_level_layout(format: &LevelFormat) -> Result<&BlockLayout, LevelRe
     }
     match &format.levels {
         LevelTable::Linear { .. } | LevelTable::Explicit(_) => {}
-        LevelTable::SignedGrid { sign_table: None, lanes, .. } if *lanes > 0 => {}
+        LevelTable::SignedGrid {
+            sign_table: None,
+            lanes,
+            ..
+        } if *lanes > 0 => {}
         LevelTable::SignedGrid { .. } => {
-            return Err(LevelRenderRefusal("a signed grid whose sign is a table index"));
+            return Err(LevelRenderRefusal(
+                "a signed grid whose sign is a table index",
+            ));
         }
         LevelTable::SignedGrid64 { .. } | LevelTable::DeltaGrid { .. } => {
             return Err(LevelRenderRefusal("64-bit and delta grids"));
@@ -1216,11 +1082,17 @@ enum Codes<'a> {
 
 fn level_table_msl(levels: &LevelTable, name: &str) -> String {
     match levels {
-        LevelTable::Linear { zero_point, step, .. } => format!(
+        LevelTable::Linear {
+            zero_point, step, ..
+        } => format!(
             "\nstatic inline float {name}_code(uint code) {{\n    return (float)(({zero_point}) + ({step}) * (int)code);\n}}\n"
         ),
         LevelTable::Explicit(values) => {
-            let entries = values.iter().map(i8::to_string).collect::<Vec<_>>().join(", ");
+            let entries = values
+                .iter()
+                .map(i8::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
             format!(
                 "\nconstant char {name}_levels[{}] = {{ {entries} }};\nstatic inline float {name}_code(uint code) {{\n    return (float){name}_levels[code];\n}}\n",
                 values.len()
@@ -1229,10 +1101,18 @@ fn level_table_msl(levels: &LevelTable, name: &str) -> String {
         LevelTable::SignedGrid { grid, .. } => {
             let rows = grid
                 .chunks(8)
-                .map(|row| row.iter().map(|entry| format!("{entry:#010x}u")).collect::<Vec<_>>().join(", "))
+                .map(|row| {
+                    row.iter()
+                        .map(|entry| format!("{entry:#010x}u"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
                 .collect::<Vec<_>>()
                 .join(",\n    ");
-            format!("\nconstant uint {name}_grid[{}] = {{\n    {rows}\n}};\n", grid.len())
+            format!(
+                "\nconstant uint {name}_grid[{}] = {{\n    {rows}\n}};\n",
+                grid.len()
+            )
         }
         LevelTable::SignedGrid64 { .. } | LevelTable::DeltaGrid { .. } => String::new(),
     }
@@ -1241,16 +1121,25 @@ fn level_table_msl(levels: &LevelTable, name: &str) -> String {
 /// The statements that bind `float raw` (the element's level) for `codes`.
 fn raw_level_msl(layout: &BlockLayout, codes: Codes<'_>, name: &str) -> String {
     match codes {
-        Codes::Levels(LevelTable::SignedGrid { lanes, sign, unit_shift, .. }) => {
-            signed_grid_raw_msl(&layout.element, name, *lanes, sign, *unit_shift)
-        }
+        Codes::Levels(LevelTable::SignedGrid {
+            lanes,
+            sign,
+            unit_shift,
+            ..
+        }) => signed_grid_raw_msl(&layout.element, name, *lanes, sign, *unit_shift),
         Codes::Affine | Codes::Levels(_) => {
             coded_expression(&layout.element, "index", "raw", &format!("{name}_code"))
         }
     }
 }
 
-fn signed_grid_raw_msl(coded: &Coded, name: &str, lanes: u8, sign: &Plane, unit_shift: u8) -> String {
+fn signed_grid_raw_msl(
+    coded: &Coded,
+    name: &str,
+    lanes: u8,
+    sign: &Plane,
+    unit_shift: u8,
+) -> String {
     let (mut text, code) = coded_assembly(coded, "index", "raw_code");
     text.push_str(&format!(
         "    uint magnitude = ({name}_grid[{code}] >> (8u * (index % {lanes}u))) & 0xFFu;\n"
@@ -1406,13 +1295,19 @@ fn run_element_msl(layout: &BlockLayout, name: &str, lane: usize) -> String {
 
 #[cfg(test)]
 mod hardware_type_tests {
-    use super::{HARDWARE_TYPES, HardwareType};
+    use super::HardwareType;
+    use crate::render::HardwareScalar;
 
     #[test]
     fn zero_literal_takes_the_suffix_column_and_casts_a_type_with_no_suffix() {
-        let types = HARDWARE_TYPES.iter().map(HardwareType::from_row).collect::<Vec<_>>();
+        let types = HardwareScalar::all()
+            .map(HardwareType::from_scalar)
+            .collect::<Vec<_>>();
 
-        let literals = types.iter().map(HardwareType::zero_literal).collect::<Vec<_>>();
+        let literals = types
+            .iter()
+            .map(HardwareType::zero_literal)
+            .collect::<Vec<_>>();
 
         assert_eq!(literals[..2], ["0.0f", "0.0h"]);
         assert_eq!(literals[2], format!("({})0.0f", types[2].scalar));

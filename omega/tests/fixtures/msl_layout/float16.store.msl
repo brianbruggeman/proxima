@@ -1,0 +1,4 @@
+
+static inline uint probe(float value) {
+    return (uint)as_type<ushort>((half)value);
+}

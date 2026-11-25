@@ -64,23 +64,21 @@ mod cuda_cached_attention;
 mod cuda_cached_attention_mma;
 #[cfg(feature = "cuda")]
 mod cuda_cached_attention_tiled;
-#[cfg(feature = "cuda")]
-pub mod cuda_layout;
-#[cfg(feature = "cuda")]
-pub mod cuda_encode;
 #[cfg(feature = "cuda-driver")]
 pub mod cuda_driver;
+#[cfg(feature = "cuda")]
+pub mod cuda_encode;
+#[cfg(feature = "cuda")]
+pub mod cuda_layout;
+#[cfg(feature = "cuda-driver")]
+mod derived_quantize;
 pub mod ffi;
 #[cfg(feature = "cuda-driver")]
 pub mod gpu_runtime;
 #[cfg(feature = "alloc")]
 pub mod kernel_params;
 #[cfg(feature = "cuda-driver")]
-mod derived_quantize;
-#[cfg(feature = "cuda-driver")]
 pub use derived_quantize::ActivationRefusal;
-#[cfg(feature = "cuda-driver")]
-pub mod kernel_cache_config;
 #[cfg(feature = "cuda-driver")]
 pub mod cuda_kernel_cache;
 #[cfg(feature = "cuda-driver")]
@@ -88,32 +86,44 @@ pub mod cuda_ptx_store;
 #[cfg(feature = "door")]
 pub mod door;
 #[cfg(feature = "alloc")]
+pub mod encode_render;
+#[cfg(feature = "alloc")]
 mod epilogue;
 pub mod error;
 #[cfg(feature = "alloc")]
 mod grid;
 #[cfg(feature = "alloc")]
 mod identity;
-#[cfg(feature = "alloc")]
-pub mod resident_identity;
-#[cfg(any(feature = "cuda", feature = "metal-grouped-gemm", all(feature = "metal", target_os = "macos"), test))]
-mod route_compaction;
+#[cfg(feature = "cuda-driver")]
+pub mod kernel_cache_config;
 #[cfg(feature = "alloc")]
 mod lowering;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod metal;
 #[cfg(proxima_mlx)]
 pub mod mlx;
-#[cfg(feature = "alloc")]
-pub mod encode_render;
 #[cfg(feature = "instrument")]
 pub mod op_timing;
+#[cfg(feature = "alloc")]
+pub mod resident_identity;
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal-grouped-gemm",
+    all(feature = "metal", target_os = "macos"),
+    test
+))]
+mod route_compaction;
 #[cfg(feature = "instrument")]
 pub use op_timing::OpGpuTiming;
+#[cfg(all(test, feature = "cuda", feature = "wgpu-backend",))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod layout_text_tests;
 #[cfg(feature = "alloc")]
 pub mod msl;
 #[cfg(feature = "onnx-door")]
 pub mod onnx_door;
+#[cfg(feature = "alloc")]
+pub mod render;
 pub mod sized;
 #[cfg(feature = "train")]
 pub mod train;
@@ -123,13 +133,6 @@ pub mod wgpu_driver;
 pub mod wgsl;
 #[cfg(feature = "wgpu-backend")]
 pub mod wgsl_layout;
-#[cfg(all(
-    test,
-    feature = "cuda",
-    feature = "wgpu-backend",
-))]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod layout_text_tests;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{
@@ -156,20 +159,19 @@ pub use metal::{
 };
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub use metal::{
-    DispatchType, MathMode, MetalDevice, MetalError, Plan, pipeline_cache_len, checkpoint_mmap_resident_pages,
+    DispatchType, MathMode, MetalDevice, MetalError, Plan, checkpoint_mmap_resident_pages,
     discard_checkpoint_mmap_range, discard_checkpoint_mmap_range_immediate, execute, execute_plan,
-    execute_plan_named, page_size, plan, plan_named,
+    execute_plan_named, page_size, pipeline_cache_len, plan, plan_named,
 };
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 pub use metal::{
     PlacedBuffer, allocate_placed_buffer, allocate_placed_buffer_over,
     execute_plan_named_with_placements, execute_plan_named_with_placements_and_expert_sources,
     execute_plan_named_with_placements_overlapping, execute_plan_with_placements,
-    move_placed_buffer_bytes, placed_buffer_len,
-    plan_named_with_placed_inputs, plan_named_with_placed_inputs_laid_out, plan_named_with_placed_inputs_scheduled,
-    read_placed_buffer, read_placed_buffer_f32_into,
-    try_read_placed_buffer_f32, try_write_placed_buffer_f32, write_placed_buffer,
-    zero_placed_buffer, zero_placed_buffer_range,
+    move_placed_buffer_bytes, placed_buffer_len, plan_named_with_placed_inputs,
+    plan_named_with_placed_inputs_laid_out, plan_named_with_placed_inputs_scheduled,
+    read_placed_buffer, read_placed_buffer_f32_into, try_read_placed_buffer_f32,
+    try_write_placed_buffer_f32, write_placed_buffer, zero_placed_buffer, zero_placed_buffer_range,
 };
 #[cfg(all(
     feature = "metal-output-placement",
@@ -183,23 +185,23 @@ pub use metal::{
 };
 #[cfg(all(feature = "alloc", feature = "metal-attn-variants"))]
 pub use msl::{
-    AttentionDecomposition, AttentionDispatchManifest, AttentionKvReuse, AttentionKvStorage, AttentionMmaPrecision,
-    AttentionPrefetch, AttentionQueryParallelism, AttentionSimdTopology, AttentionSimdgroupCount,
-    AttentionTileHeight, AttentionVariant, emit_with_attention_variant, inspect_attention_variant,
+    AttentionDecomposition, AttentionDispatchManifest, AttentionKvReuse, AttentionKvStorage,
+    AttentionMmaPrecision, AttentionPrefetch, AttentionQueryParallelism, AttentionSimdTopology,
+    AttentionSimdgroupCount, AttentionTileHeight, AttentionVariant, emit_with_attention_variant,
+    inspect_attention_variant,
 };
 #[cfg(feature = "alloc")]
 pub use msl::{
-    BFLOAT16_BLOCK_BYTES, BFLOAT16_BLOCK_ELEMENTS, Binding, CachedAttentionForm,
-    Codec, EmitKnobs, FLOAT16_BLOCK_BYTES, FLOAT16_BLOCK_ELEMENTS, GridSpec, Kernel, PackedOperands,
-    Q2K_BLOCK_BYTES, Q2K_BLOCK_ELEMENTS, Q2K_UNPACK_MSL, Q3K_BLOCK_BYTES, Q3K_PAIR_DOT_MSL,
-    Q3K_UNPACK_MSL, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS, Q4K_BLOCK_BYTES,
-    Q4K_BLOCK_ELEMENTS, Q4K_UNPACK_MSL, Q5_0_BLOCK_BYTES, Q5_0_BLOCK_ELEMENTS,
-    Q5_1_BLOCK_BYTES, Q5_1_BLOCK_ELEMENTS, Q5K_BLOCK_BYTES, Q5K_UNPACK_MSL,
-    Q6K_BLOCK_BYTES, Q6K_UNPACK_MSL, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS, ReductionLiteral, q4_0_unpack_msl,
-    q5_0_unpack_msl, q5_1_unpack_msl, q8_0_unpack_msl,
-    cached_attention_key_codec_for, cached_attention_kv_codec_for, cached_attention_kv_codecs_for,
-    cached_attention_row_tiled_kv_codec_for, cached_attention_row_tiled_reads, context_chunks_for,
-    device_row_store_dtype, emit, emit_with_knobs,
+    BFLOAT16_BLOCK_BYTES, BFLOAT16_BLOCK_ELEMENTS, Binding, CachedAttentionForm, Codec, EmitKnobs,
+    FLOAT16_BLOCK_BYTES, FLOAT16_BLOCK_ELEMENTS, GridSpec, Kernel, PackedOperands, Q2K_BLOCK_BYTES,
+    Q2K_BLOCK_ELEMENTS, Q2K_UNPACK_MSL, Q3K_BLOCK_BYTES, Q3K_PAIR_DOT_MSL, Q3K_UNPACK_MSL,
+    Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS, Q4K_UNPACK_MSL,
+    Q5_0_BLOCK_BYTES, Q5_0_BLOCK_ELEMENTS, Q5_1_BLOCK_BYTES, Q5_1_BLOCK_ELEMENTS, Q5K_BLOCK_BYTES,
+    Q5K_UNPACK_MSL, Q6K_BLOCK_BYTES, Q6K_UNPACK_MSL, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS,
+    ReductionLiteral, cached_attention_key_codec_for, cached_attention_kv_codec_for,
+    cached_attention_kv_codecs_for, cached_attention_row_tiled_kv_codec_for,
+    cached_attention_row_tiled_reads, context_chunks_for, device_row_store_dtype, emit,
+    emit_with_knobs, q4_0_unpack_msl, q5_0_unpack_msl, q5_1_unpack_msl, q8_0_unpack_msl,
 };
 #[cfg(feature = "wgpu-backend")]
 pub use wgpu_driver::{

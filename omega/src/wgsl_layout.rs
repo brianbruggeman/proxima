@@ -11,8 +11,10 @@ use alloc::string::String;
 use proxima_numeric::float_layout::{FloatLayout, NanNarrow, NanWiden, SignEncoding, Specials};
 
 use crate::msl::layout_render::{
-    F32_ABS_MASK, F32_FRACTION_BITS, F32_INFINITY_BITS, F32_QUIET_BIT, exponent_ones,
-    hardware_type, infinity_code, mantissa_mask, overflow_code, quiet_bit, reserves_all_ones,
+    F32_ABS_MASK, F32_FRACTION_BITS, F32_INFINITY_BITS, F32_QUIET_BIT, hardware_type,
+};
+use crate::render::{
+    exponent_ones, infinity_code, mantissa_mask, overflow_code, quiet_bit, reserves_all_ones,
     sign_shift,
 };
 
@@ -184,7 +186,7 @@ fn field_store_nan(layout: &FloatLayout) -> String {
     if !reserves_all_ones(layout) {
         return format!(
             "        return {:#x}u;\n",
-            crate::msl::layout_render::max_normal_code(layout)
+            crate::render::max_normal_code(layout)
         );
     }
     let kept = match layout.nan.narrow {

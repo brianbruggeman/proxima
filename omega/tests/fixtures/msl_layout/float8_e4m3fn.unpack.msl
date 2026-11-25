@@ -1,0 +1,37 @@
+
+static inline uint probe_value_scaled_bits(uint significand, int scale) {
+    if (significand == 0u) {
+        return 0u;
+    }
+    int lead = 31 - (int)clz(significand);
+    int biased = lead + scale + 127;
+    if (biased >= 255) {
+        return 0x7f800000u;
+    }
+    if (biased >= 1) {
+        return ((uint)biased << 23u) | ((significand << (uint)(23 - lead)) & 0x7fffffu);
+    }
+    int shift = scale + 149;
+    if (shift >= 0) {
+        return significand << (uint)shift;
+    }
+    return -shift >= 32 ? 0u : significand >> (uint)(-shift);
+}
+
+static inline float probe_value(uint code) {
+    uint mantissa = code & 0x7u;
+    uint exponent = (code >> 3u) & 0xfu;
+    uint sign = ((code >> 7u) & 1u) << 31u;
+    if (exponent == 0xfu && mantissa == 0x7u) {
+        return as_type<float>(sign | 0x7f800000u | 0x400000u | (mantissa << 20u));
+    }
+    uint significand = exponent == 0u ? mantissa : (0x8u | mantissa);
+    int scale = exponent == 0u ? (1 - (7) - 3) : ((int)exponent - (7) - 3);
+    return as_type<float>(sign | probe_value_scaled_bits(significand, scale));
+}
+
+static inline float probe(device const uchar *payload, uint index) {
+    uint offset = index * 1u;
+    uint code = ((uint)payload[offset + 0u] << 0u);
+    return probe_value(code);
+}

@@ -1,0 +1,28 @@
+
+static inline uint probe_scaled_bits(uint significand, int scale) {
+    if (significand == 0u) {
+        return 0u;
+    }
+    int lead = 31 - (int)clz(significand);
+    int biased = lead + scale + 127;
+    if (biased >= 255) {
+        return 0x7f800000u;
+    }
+    if (biased >= 1) {
+        return ((uint)biased << 23u) | ((significand << (uint)(23 - lead)) & 0x7fffffu);
+    }
+    int shift = scale + 149;
+    if (shift >= 0) {
+        return significand << (uint)shift;
+    }
+    return -shift >= 32 ? 0u : significand >> (uint)(-shift);
+}
+
+static inline float probe(uint code) {
+    uint mantissa = code & 0x1u;
+    uint exponent = (code >> 1u) & 0x3u;
+    uint sign = ((code >> 3u) & 1u) << 31u;
+    uint significand = exponent == 0u ? mantissa : (0x2u | mantissa);
+    int scale = exponent == 0u ? (1 - (1) - 1) : ((int)exponent - (1) - 1);
+    return as_type<float>(sign | probe_scaled_bits(significand, scale));
+}
