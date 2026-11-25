@@ -55,8 +55,10 @@ use crate::bind::{
 };
 use crate::bind_leaves::{Role, consumers_of, role_of};
 use crate::error::InteropError;
-use crate::model_weights::{Materialized, begin_owner_generation};
+use crate::model_weights::{Materialized, begin_owner_generation, stored_for};
 use crate::profiles::{BindingProfile, TensorAlias};
+#[cfg(feature = "instrument")]
+use proxima_telemetry::debug;
 
 fn find_entry<'manifest>(
     manifest: &'manifest Manifest,
@@ -321,11 +323,14 @@ pub(crate) fn bind_program_leaves_reusing<'file>(
         binding,
         runtime_inputs,
     )?;
+    let started = std::time::Instant::now();
+    let mut tally = RecodeTally::default();
     let filled = (|| {
         for view in &views {
             if reuse.adopt_into(view.leaf.as_str(), &mut weights) {
                 continue;
             }
+            let (owned_from, packed_from) = (weights.owned.len(), weights.packed_owned.len());
             bind_safetensors_leaf(
                 manifest,
                 file_bytes,
@@ -334,6 +339,12 @@ pub(crate) fn bind_program_leaves_reusing<'file>(
                 view,
                 &mut weights,
             )?;
+            tally.note_leaf(
+                view.leaf.as_str(),
+                view.bytes.len(),
+                &weights,
+                (owned_from, packed_from),
+            );
         }
         for (leaf, shape) in &stacks {
             if reuse.adopt_into(leaf, &mut weights) {
@@ -352,13 +363,68 @@ pub(crate) fn bind_program_leaves_reusing<'file>(
         Ok(())
     })();
     match filled {
-        Ok(()) => Ok(weights),
+        Ok(()) => {
+            emit_bind_materialized(&tally, started.elapsed().as_micros());
+            Ok(weights)
+        }
         Err(error) => {
             // a failed pass hands back what it adopted so the next pass offers the same buffers
             reuse.keep(&mut weights);
             Err(error)
         }
     }
+}
+
+/// What one bind pass recoded: leaves built by a precision rule, the stored
+/// bytes they were read from, and the bytes they now occupy. A leaf adopted
+/// from [`Materialized`] was recoded by an earlier pass and is not counted.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RecodeTally {
+    leaves: usize,
+    bytes_before: usize,
+    bytes_after: usize,
+}
+
+impl RecodeTally {
+    /// Counts the entries a bind of `leaf` appended to `weights` after the
+    /// `(owned, packed_owned)` lengths in `from` that carry a recoded
+    /// `<leaf>@<codec>` name; `source_bytes` is the stored tensor's length.
+    fn note_leaf(
+        &mut self,
+        leaf: &str,
+        source_bytes: usize,
+        weights: &BoundWeights<'_>,
+        from: (usize, usize),
+    ) {
+        let recoded = |name: &str| name.len() > leaf.len() && stored_for(name, leaf);
+        let widened = weights.owned[from.0..]
+            .iter()
+            .filter(|(name, _)| recoded(name))
+            .map(|(_, values)| core::mem::size_of_val(values.as_slice()));
+        let packed = weights.packed_owned[from.1..]
+            .iter()
+            .filter(|(name, _, _)| recoded(name))
+            .map(|(_, bytes, _)| bytes.len());
+        for after in widened.chain(packed) {
+            self.leaves += 1;
+            self.bytes_before += source_bytes;
+            self.bytes_after += after;
+        }
+    }
+}
+
+/// One `bind_materialized` event per bind pass: the leaves recoded, the bytes
+/// before and after, and the pass's elapsed microseconds.
+#[cfg_attr(not(feature = "instrument"), allow(unused_variables))]
+fn emit_bind_materialized(tally: &RecodeTally, elapsed_micros: u128) {
+    #[cfg(feature = "instrument")]
+    debug!(
+        recoded_leaves = tally.leaves,
+        bytes_before = tally.bytes_before,
+        bytes_after = tally.bytes_after,
+        elapsed_micros = elapsed_micros as u64,
+        "bind_materialized"
+    );
 }
 
 /// The routed-MoE arm. A routed leaf is a stacked expert projection
@@ -2378,6 +2444,81 @@ mod tests {
         assert_eq!(Some(*codec), expert_stack_codec(DType::Layout(two_byte_layout())));
         assert!(core::ptr::eq(bytes.as_ptr(), whole.as_ptr()));
         assert!(weights.owned.is_empty());
+    }
+
+    #[test]
+    fn recode_tally_counts_every_rule_matched_leaf_with_its_bytes_before_and_after() {
+        let (file_bytes, manifest, data_start) = ramp_checkpoint(PART_LEAF, 4, 8);
+        let binding = BindingProfile::default();
+        let view = part_view(
+            &file_bytes,
+            &manifest,
+            data_start,
+            &binding,
+            &[4, 8],
+            Role::Native,
+        )
+        .expect("[4, 8] is the stored matrix");
+        let rules = [crate::serving::WeightPrecisionRule {
+            pattern: crate::serving::NamePattern::Exact(PART_LEAF),
+            target: GgmlType::Q8_0,
+        }];
+        let mut weights = BoundWeights::new(&rules);
+        let (owned_from, packed_from) = (weights.owned.len(), weights.packed_owned.len());
+        let mut tally = RecodeTally::default();
+
+        bind_safetensors_leaf(
+            &manifest,
+            &file_bytes,
+            data_start,
+            &binding,
+            &view,
+            &mut weights,
+        )
+        .expect("the rule-matched leaf recodes");
+        tally.note_leaf(
+            PART_LEAF,
+            view.bytes.len(),
+            &weights,
+            (owned_from, packed_from),
+        );
+
+        let matched = 1;
+        assert_eq!(weights.packed_owned.len(), matched);
+        assert_eq!(tally.leaves, matched);
+        assert_eq!(tally.bytes_before, view.bytes.len());
+        assert_eq!(tally.bytes_after, weights.packed_owned[0].1.len());
+        assert!(tally.bytes_after < tally.bytes_before);
+    }
+
+    #[test]
+    fn recode_tally_ignores_a_leaf_no_rule_matched() {
+        let (file_bytes, manifest, data_start) = ramp_checkpoint(PART_LEAF, 4, 8);
+        let binding = BindingProfile::default();
+        let view = part_view(
+            &file_bytes,
+            &manifest,
+            data_start,
+            &binding,
+            &[4, 8],
+            Role::Native,
+        )
+        .expect("[4, 8] is the stored matrix");
+        let mut weights = BoundWeights::new(&[]);
+        let mut tally = RecodeTally::default();
+
+        bind_safetensors_leaf(
+            &manifest,
+            &file_bytes,
+            data_start,
+            &binding,
+            &view,
+            &mut weights,
+        )
+        .expect("the unruled leaf binds");
+        tally.note_leaf(PART_LEAF, view.bytes.len(), &weights, (0, 0));
+
+        assert_eq!(tally, RecodeTally::default());
     }
 
     #[test]

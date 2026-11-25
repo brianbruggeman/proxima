@@ -36,7 +36,8 @@ use crate::hf_bind::bind_program_leaves_reusing;
 use crate::profiles::BindingProfile;
 use crate::serving::WeightPrecisionRule;
 
-fn stored_for(name: &str, leaf: &str) -> bool {
+/// `name` is `leaf` itself or its recoded `<leaf>@<codec>` form.
+pub(crate) fn stored_for(name: &str, leaf: &str) -> bool {
     name == leaf
         || (name.len() > leaf.len()
             && name.as_bytes().get(leaf.len()) == Some(&b'@')
