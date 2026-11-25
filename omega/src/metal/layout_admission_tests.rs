@@ -7,6 +7,8 @@ use proxima_tensor::{
     AxisTerm, Extent, IndexMap, NodeId, Op, ScalarOp, TensorError, append, bind, infer, map,
 };
 
+use super::configured::prospective_input_capacity;
+use super::pipeline_buffers_upload::allocation_capacity;
 use super::prepare_uniforms_pack::{device_element_bytes, reject_unsupported_gpu_dtype};
 use super::{MetalError, packed_operands_of};
 use crate::msl::emit;
@@ -182,7 +184,7 @@ fn float_layout_admit_buffer_bytes_derive_from_layout_fields() {
         specials: Specials::InfinityOnOverflow,
         bias_override: Some(15),
         sign: SignEncoding::Magnitude,
-    nan: NanPolicy::IEEE,
+        nan: NanPolicy::IEEE,
     };
     let cases = [
         (DType::Layout(FloatLayout::BF32), 4),
@@ -260,5 +262,27 @@ fn a_packed_codec_without_a_metal_unpack_kernel_is_refused_by_name() {
     // what "no codec" means
     packed_operands_of(&[nodes[0]], &[QuantizedBlock::Float32(&[])]).expect(
         "a Float32 carrier legitimately has no codec; only a PACKED block without a kernel is refused",
+    );
+}
+
+#[test]
+fn zero_length_input_reserves_the_capacity_of_its_own_dtype() {
+    let narrow_by_fields = FloatLayout {
+        exponent_bits: 5,
+        mantissa_bits: 10,
+        specials: Specials::InfinityOnOverflow,
+        bias_override: Some(15),
+        sign: SignEncoding::Magnitude,
+        nan: NanPolicy::IEEE,
+    };
+    let dtype = DType::Layout(narrow_by_fields);
+
+    let (mapping, physical) =
+        prospective_input_capacity(0, 0, dtype).expect("a zero-length input has a capacity");
+
+    assert_eq!(mapping, None);
+    assert_eq!(
+        physical,
+        allocation_capacity(0, dtype).expect("capacity of one element") as u64
     );
 }

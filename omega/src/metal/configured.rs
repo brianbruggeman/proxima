@@ -1,5 +1,6 @@
 use super::*;
 use conflaguration::Validate;
+use proxima_numeric::NumericFormat;
 use proxima_numeric::float_layout::FloatLayout;
 
 /// prepares the existing [`Plan`] using explicit [`RuntimeConfig`] policy.
@@ -102,7 +103,12 @@ pub fn plan_named_with_config_and_placed_inputs(
         },
     );
     let has_dense_bf16_candidate = plan.prepared.resolved.iter().any(|bound| {
-        crate::msl::has_dense_bf16_mma_candidate(bound, &plan.packed_operands, plan.numeric_policy, &plan.emit_knobs)
+        crate::msl::has_dense_bf16_mma_candidate(
+            bound,
+            &plan.packed_operands,
+            plan.numeric_policy,
+            &plan.emit_knobs,
+        )
     });
     if !config.dense_mma_input_layout.derive_from_operands
         && config
@@ -307,9 +313,11 @@ impl Plan {
                     reason: "converted uploads have no bounded host workspace contract",
                 });
             }
-            let byte_length = checked_bytes(values.len() as u64, 4)?;
+            let byte_length =
+                checked_bytes(values.len() as u64, device_element_bytes(*dtype) as u64)?;
             let address = values.as_ptr() as usize;
-            let (mapping, physical) = prospective_input_capacity(address, byte_length as usize)?;
+            let (mapping, physical) =
+                prospective_input_capacity(address, byte_length as usize, *dtype)?;
             if let Some(mapping) = mapping
                 && !mappings.insert(mapping)
             {
@@ -349,9 +357,10 @@ impl Plan {
                 .extents
                 .iter()
                 .try_fold(1_u64, |total, extent| checked_bytes(total, *extent))?;
-            checked_bytes(elements.max(1), 4)?;
-            let output = allocation_capacity(bound.output_len(), DType::FLOAT32)? as u64;
-            let uniform = pack_uniforms_byte_len(bound, self.numeric_policy, &self.emit_knobs).max(1) as u64;
+            checked_bytes(elements.max(1), device_element_bytes(bound.dtype) as u64)?;
+            let output = allocation_capacity(bound.output_len(), bound.dtype)? as u64;
+            let uniform =
+                pack_uniforms_byte_len(bound, self.numeric_policy, &self.emit_knobs).max(1) as u64;
             for physical in [output, uniform] {
                 check_limit("max_buffer_length", physical, Some(hardware_limit))?;
                 check_limit(
@@ -363,6 +372,7 @@ impl Plan {
                 largest = largest.max(physical);
             }
         }
+        let host_element_bytes = NumericFormat::host_element().size_bytes() as u64;
         let host_bytes =
             self.prepared
                 .effective_outputs
@@ -374,7 +384,7 @@ impl Plan {
                         .of(*node)
                         .iter()
                         .try_fold(1_u64, |count, extent| checked_bytes(count, *extent))?;
-                    checked_sum(total, checked_bytes(elements, 4)?)
+                    checked_sum(total, checked_bytes(elements, host_element_bytes)?)
                 })?;
         check_limit(
             "max_host_tensor_bytes",
@@ -395,12 +405,13 @@ impl Plan {
     }
 }
 
-fn prospective_input_capacity(
+pub(super) fn prospective_input_capacity(
     address: usize,
     byte_length: usize,
+    dtype: DType,
 ) -> Result<(Option<(usize, usize)>, u64), MetalError> {
     if byte_length == 0 {
-        return Ok((None, allocation_capacity(0, DType::FLOAT32)? as u64));
+        return Ok((None, allocation_capacity(0, dtype)? as u64));
     }
     if expert_mapping_identity().is_some() {
         return Err(MetalError::UnsupportedConstraint {
