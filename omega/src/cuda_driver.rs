@@ -5450,7 +5450,7 @@ pub mod rocm {
 
     use std::ffi::{CStr, CString};
     use std::ptr;
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
 
     use std::collections::BTreeMap;
 
@@ -6391,11 +6391,35 @@ pub mod rocm {
         HipWave::from_lanes(u64::from(config.hip_wave))
     }
 
-    /// Opens the configured ROCm device and plans `program` on the shared executor: the same
-    /// `plan_with_config` path a CUDA device takes, under the HIP grant of the resolved wave.
+    type HipDriverKey = (u32, Option<u64>);
+    type HipDriverTable = proxima_primitives::sync::blocking::Mutex<BTreeMap<HipDriverKey, super::CudaDriver<HipRuntime>>>;
+
+    static HIP_DRIVERS: OnceLock<HipDriverTable> = OnceLock::new();
+
+    /// The process's one driver for `(config.hip_device, wave)`, opened on first use: the HIP
+    /// counterpart of the single CUDA driver, so every plan shares its device context, weight ledger
+    /// and kernel cache. Clones share state (every field is an `Arc`). A failed open is not cached,
+    /// so a missing runtime stays the typed [`HipDriverError`] on each call.
     ///
     /// # Errors
-    /// The refusals of [`HipRuntime::open`] and of `plan_with_config`.
+    /// The refusals of [`HipRuntime::open`].
+    pub fn shared_driver(config: &RuntimeConfig, wave: Option<HipWave>) -> Result<super::CudaDriver<HipRuntime>, HipDriverError> {
+        let drivers = HIP_DRIVERS.get_or_init(|| proxima_primitives::sync::blocking::Mutex::new(BTreeMap::new()));
+        let key = (config.hip_device, wave.map(HipWave::lanes));
+        let mut open = drivers.lock();
+        if let Some(driver) = open.get(&key) {
+            return Ok(driver.clone());
+        }
+        let driver = super::CudaDriver::<HipRuntime>::open(config, wave)?;
+        open.insert(key, driver.clone());
+        Ok(driver)
+    }
+
+    /// Plans `program` on the shared executor over [`shared_driver`]: the same `plan_with_config`
+    /// path a CUDA device takes, under the HIP grant of the resolved wave.
+    ///
+    /// # Errors
+    /// The refusals of [`shared_driver`] and of `plan_with_config`.
     pub fn plan(
         config: &RuntimeConfig,
         wave: Option<HipWave>,
@@ -6404,7 +6428,7 @@ pub mod rocm {
         named: &[(&str, QuantizedBlock<'_>)],
         outputs: &[NodeId],
     ) -> Result<super::HipPlan, super::CudaDriverError> {
-        let driver = super::CudaDriver::<HipRuntime>::open(config, wave)?;
+        let driver = shared_driver(config, wave)?;
         driver.plan_with_config(program, symbols, outputs, named, config)
     }
 
@@ -7814,5 +7838,61 @@ mod recording_runtime {
                 .filter(|event| matches!(event, Event::Download { .. }))
                 .collect::<Vec<_>>()
         );
+    }
+
+    fn named_blocks<'a, Block: Into<QuantizedBlock<'a>>>(
+        first: Block,
+        second: Block,
+        activation: Block,
+    ) -> [(&'static str, QuantizedBlock<'a>); 3] {
+        [("w0", first.into()), ("w1", second.into()), ("x", activation.into())]
+    }
+
+    #[test]
+    fn two_named_plans_on_one_driver_upload_each_weight_once_in_total() {
+        let (program, out) = two_layer_program();
+        let weight_first = weight_values((HIDDEN * INPUT) as usize, 1.0);
+        let weight_second = weight_values((OUTPUT * HIDDEN) as usize, 7.0);
+        let activation = weight_values(INPUT as usize, 3.0);
+        let named = named_blocks(weight_first.as_slice(), weight_second.as_slice(), activation.as_slice());
+        let driver = CudaDriver::<RecordingRuntime>::recording();
+        let resident = BTreeSet::from(["w0", "w1"]);
+        for _ in 0..2 {
+            let mut plan = driver
+                .plan(&program, &[], &[out], NumericPolicy::default(), &named)
+                .expect("the shared named-plan entry plans the two-layer program");
+            plan.mark_resident(&resident);
+            plan.execute_named(&named, None)
+                .expect("the recording runtime executes the plan");
+        }
+        let all = driver.events();
+        for bytes in [size_of_val(weight_first.as_slice()), size_of_val(weight_second.as_slice())] {
+            assert_eq!(uploads_of(&all, bytes), 1, "a {bytes}-byte weight uploads once across both plans");
+        }
+    }
+
+    #[test]
+    fn refit_symbols_on_a_named_plan_returns_true_and_uploads_no_weight() {
+        let (program, out) = two_layer_program();
+        let weight_first = weight_values((HIDDEN * INPUT) as usize, 1.0);
+        let weight_second = weight_values((OUTPUT * HIDDEN) as usize, 7.0);
+        let activation = weight_values(INPUT as usize, 3.0);
+        let named = named_blocks(weight_first.as_slice(), weight_second.as_slice(), activation.as_slice());
+        let driver = CudaDriver::<RecordingRuntime>::recording();
+        let mut plan = driver
+            .plan(&program, &[], &[out], NumericPolicy::default(), &named)
+            .expect("the shared named-plan entry plans the two-layer program");
+        plan.mark_resident(&BTreeSet::from(["w0", "w1"]));
+        plan.execute_named(&named, None)
+            .expect("the recording runtime executes the plan");
+        let before = driver.events().len();
+        let refitted = plan
+            .refit_symbols(&[], NumericPolicy::default())
+            .expect("refit shape inference succeeds");
+        let after = driver.events();
+        assert!(refitted, "a named plan carries no constraints, so it refits in place");
+        for bytes in [size_of_val(weight_first.as_slice()), size_of_val(weight_second.as_slice())] {
+            assert_eq!(uploads_of(&after[before..], bytes), 0, "refit uploads no {bytes}-byte weight");
+        }
     }
 }

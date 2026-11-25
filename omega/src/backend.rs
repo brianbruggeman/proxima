@@ -1701,6 +1701,7 @@ pub fn refit_cuda_symbols(
 ) -> Result<bool, BackendError> {
     match plan {
         Plan::Cuda(cuda_plan) => Ok(cuda_plan.refit_symbols(symbols, numeric_policy)?),
+        Plan::Rocm(rocm_plan) => Ok(rocm_plan.refit_symbols(symbols, numeric_policy)?),
         #[allow(unreachable_patterns)]
         _ => Ok(false),
     }
@@ -2283,7 +2284,7 @@ fn plan_hip(
     named: &[(&str, QuantizedBlock<'_>)],
     outputs: &[NodeId],
 ) -> Result<Box<crate::cuda_driver::HipPlan>, BackendError> {
-    let driver = CudaDriver::<crate::cuda_driver::rocm::HipRuntime>::open(config, wave)?;
+    let driver = crate::cuda_driver::rocm::shared_driver(config, wave)?;
     let plan = driver
         .plan_with_config(program, symbols, outputs, named, config)
         .map_err(map_cuda_configuration_error)?;
@@ -2305,7 +2306,9 @@ fn plan_named_hip(
         hip_device: device,
         ..RuntimeConfig::default()
     };
-    Ok(Plan::Rocm(plan_hip(&config, wave, program, symbols, named, outputs)?))
+    let driver = crate::cuda_driver::rocm::shared_driver(&config, wave)?;
+    let plan = driver.plan(program, symbols, outputs, numeric_policy, named)?;
+    Ok(Plan::Rocm(Box::new(plan)))
 }
 
 #[cfg(feature = "cuda-driver")]
@@ -2517,6 +2520,7 @@ pub fn park_cuda_carried(plan: &mut Plan) {
 pub fn drain_cuda_carried(plan: &mut Plan) -> Result<Vec<(NodeId, Vec<f32>)>, BackendError> {
     match plan {
         Plan::Cuda(cuda_plan) => Ok(cuda_plan.drain_carried()?),
+        Plan::Rocm(rocm_plan) => Ok(rocm_plan.drain_carried()?),
         #[allow(unreachable_patterns)]
         _ => Ok(Vec::new()),
     }
@@ -2528,6 +2532,7 @@ pub fn drain_cuda_carried(plan: &mut Plan) -> Result<Vec<(NodeId, Vec<f32>)>, Ba
 pub fn cuda_carried_host_bytes(plan: &Plan) -> Option<u64> {
     match plan {
         Plan::Cuda(cuda_plan) => Some(cuda_plan.carried_host_bytes()),
+        Plan::Rocm(rocm_plan) => Some(rocm_plan.carried_host_bytes()),
         #[allow(unreachable_patterns)]
         _ => None,
     }
