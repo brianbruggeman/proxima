@@ -465,6 +465,40 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
             true,
             NumericPolicy::bit_exact(),
             None,
+            None,
+        ),
+    )
+}
+
+/// [`evaluate_quantized_named_with_scratch_and_experts`] with the kernels of the
+/// one-shot step running under `kernel_policy`: a caller whose plan grants
+/// `reassociation` or `approx_functions` hands them here. The step still binds
+/// [`NumericPolicy::bit_exact`], so the bound ops are the ones the plain entry
+/// point builds; only the kernels' permissions differ.
+// the plain entry point's seven plus the activation flag and the policy; bundling them would mint a type
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_quantized_named_with_kernel_policy<'block>(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'block>)],
+    outputs: &[NodeId],
+    scratch: (&mut BufferPools, &mut Option<BTreeSet<NodeId>>),
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
+    exact_activations: bool,
+    kernel_policy: NumericPolicy,
+) -> Result<Evaluated, TensorError> {
+    let blocks = resolve_named_blocks_with_experts(program, named, expert_sources)?;
+    evaluate_quantized_with_policy(
+        (program, symbols, &blocks, outputs),
+        scratch,
+        expert_sources,
+        (
+            exact_activations,
+            true,
+            true,
+            NumericPolicy::bit_exact(),
+            None,
+            Some(kernel_policy),
         ),
     )
 }
@@ -493,6 +527,7 @@ pub fn evaluate_quantized_named_with_config<'block>(
             config.allow_fusion,
             config.numeric,
             config.max_host_tensor_bytes,
+            None,
         ),
     )
 }
@@ -543,7 +578,14 @@ fn evaluate_quantized_with_policy(
     inputs: (&[Op], &[u64], &[QuantizedBlock<'_>], &[NodeId]),
     scratch: (&mut BufferPools, &mut Option<BTreeSet<NodeId>>),
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
-    options: (bool, bool, bool, NumericPolicy, Option<u64>),
+    options: (
+        bool,
+        bool,
+        bool,
+        NumericPolicy,
+        Option<u64>,
+        Option<NumericPolicy>,
+    ),
 ) -> Result<Evaluated, TensorError> {
     let (program, symbols, blocks, outputs) = inputs;
     let (pools, validated_weight_nodes) = scratch;
@@ -553,6 +595,7 @@ fn evaluate_quantized_with_policy(
         allow_fusion,
         numeric_policy,
         max_host_tensor_bytes,
+        kernel_policy,
     ) = options;
     #[cfg(feature = "instrument")]
     let setup_started = instrument::read_ticks();
@@ -588,7 +631,10 @@ fn evaluate_quantized_with_policy(
         allow_fusion,
         numeric_policy,
     };
-    let prepared = prepare_step(program, shapes, &inputs.quantized_weights, outputs, options)?;
+    let mut prepared = prepare_step(program, shapes, &inputs.quantized_weights, outputs, options)?;
+    // a one-shot entry has no plan, and has always run the reordering dot tile, so its kernels keep reassociation
+    prepared.numeric_policy =
+        kernel_policy.unwrap_or_else(|| numeric_policy.with_reassociation(true));
     materialize_step_inputs(program, &prepared, &mut inputs, &mut pools.0)?;
     #[cfg(feature = "instrument")]
     let setup_ticks = instrument::elapsed_ticks(setup_started);
@@ -714,10 +760,7 @@ pub(super) fn prepare_step(
 /// `blocks` is the per-`block_node_ids` slice the caller already validated
 /// length-exactly; a `Float32`/`Int32` carrier is not packed and stays out.
 #[must_use]
-pub(super) fn packed_leaf_nodes(
-    program: &[Op],
-    blocks: &[QuantizedBlock<'_>],
-) -> BTreeSet<NodeId> {
+pub(super) fn packed_leaf_nodes(program: &[Op], blocks: &[QuantizedBlock<'_>]) -> BTreeSet<NodeId> {
     block_node_ids(program)
         .into_iter()
         .zip(blocks)
@@ -1034,7 +1077,10 @@ pub(super) fn run_prepared_step(
             0
         } else {
             if computed.dtype == DType::FLOAT64 {
-                super::run_int8_activation_dot::refuse_quantized_activation_reader(computed, &activation_layouts)?;
+                super::run_int8_activation_dot::refuse_quantized_activation_reader(
+                    computed,
+                    &activation_layouts,
+                )?;
             }
             let island = float64_island::step(
                 computed,
@@ -1229,7 +1275,10 @@ pub(super) fn run_prepared_step(
                     continue;
                 };
                 let consumer = &resolved[consumer_index];
-                super::run_int8_activation_dot::refuse_quantized_activation_reader(consumer, &activation_layouts)?;
+                super::run_int8_activation_dot::refuse_quantized_activation_reader(
+                    consumer,
+                    &activation_layouts,
+                )?;
                 let reduce_values = buffers[reduce_node.0 as usize].as_deref().unwrap_or(&[]);
                 let mut fused_output = take_or_allocate(free_buffers, consumer.output_len());
                 let fuse_started = std::time::Instant::now();
@@ -1267,7 +1316,10 @@ pub(super) fn run_prepared_step(
                     continue;
                 };
                 let tail = &resolved[cluster.tail_index];
-                super::run_int8_activation_dot::refuse_quantized_activation_reader(tail, &activation_layouts)?;
+                super::run_int8_activation_dot::refuse_quantized_activation_reader(
+                    tail,
+                    &activation_layouts,
+                )?;
                 let mut fused_output = take_or_allocate(free_buffers, tail.output_len());
                 let fuse_started = std::time::Instant::now();
                 apply_layer_norm_cluster_fused(
@@ -1975,12 +2027,16 @@ pub(super) fn evaluate_pooled(
     // `evaluate_quantized`'s identical `live_now` doc for why this replaces
     // `live_count(&buffers)`'s O(program.len()) full rescan per node (the
     // quadratic cost this landing removes).
-    let activation_layouts = super::run_int8_activation_dot::quantized_activation_layouts(&resolved);
+    let activation_layouts =
+        super::run_int8_activation_dot::quantized_activation_layouts(&resolved);
     let mut peak_live_buffers = live_count(&buffers);
     let mut live_now = peak_live_buffers;
     let mut wide: Vec<Option<Cow<'static, [f64]>>> = Vec::new();
     for (position, computed) in resolved.iter().enumerate() {
-        super::run_int8_activation_dot::refuse_quantized_activation_reader(computed, &activation_layouts)?;
+        super::run_int8_activation_dot::refuse_quantized_activation_reader(
+            computed,
+            &activation_layouts,
+        )?;
         let island = float64_island::step(
             computed,
             &buffers,
@@ -2229,9 +2285,13 @@ pub fn evaluate_parallel(
     let mut wide: Vec<Option<Cow<'static, [f64]>>> = Vec::new();
     let mut wide_pool: Vec<Vec<f64>> = Vec::new();
     let mut narrow_pool: Vec<Vec<f32>> = Vec::new();
-    let activation_layouts = super::run_int8_activation_dot::quantized_activation_layouts(&resolved);
+    let activation_layouts =
+        super::run_int8_activation_dot::quantized_activation_layouts(&resolved);
     for (position, computed) in resolved.iter().enumerate() {
-        super::run_int8_activation_dot::refuse_quantized_activation_reader(computed, &activation_layouts)?;
+        super::run_int8_activation_dot::refuse_quantized_activation_reader(
+            computed,
+            &activation_layouts,
+        )?;
         let island = float64_island::step(
             computed,
             &buffers,
