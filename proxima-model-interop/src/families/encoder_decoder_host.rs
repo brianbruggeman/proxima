@@ -750,6 +750,9 @@ impl Drop for SessionGuard<'_> {
 struct Session {
     runtime: BackendRuntime,
     weights_epoch: u64,
+    /// whether the checkpoint mapping was declared on the thread that serves the call; a runtime built at load is not
+    /// yet, because the declaration is per thread and the mapping may still be swapped for a stored one
+    mapped: bool,
 }
 
 /// A loaded checkpoint ready to transcribe.
@@ -856,7 +859,18 @@ impl Model {
     #[must_use]
     pub fn with_settings(mut self, settings: ServingSettings) -> Self {
         self.settings = settings;
+        // the runtime is built first so its gpu context is created while the store is read; a refused
+        // setting leaves no session and surfaces from the first call exactly as before
+        let mut session = self.unmapped_runtime().ok().map(|runtime| Session {
+            runtime,
+            weights_epoch: 0,
+            mapped: false,
+        });
         self.resolve_store();
+        if let Some(prebuilt) = session.as_mut() {
+            prebuilt.weights_epoch = self.weights.allocation_epoch();
+        }
+        self.session = Mutex::new(session);
         self
     }
 
@@ -1016,11 +1030,19 @@ impl Model {
 
     #[cfg_attr(feature = "instrument", proxima_telemetry::instrument(level = "debug"))]
     fn runtime(&self) -> Result<BackendRuntime> {
+        let runtime = self.unmapped_runtime()?;
+        // the registration is thread-local, so it is made on the thread that builds this call's runtime
+        register_mapping(self.mapping.bytes());
+        Ok(runtime)
+    }
+
+    /// The runtime without the mapping declaration. Building it starts the gpu driver warm-up, so `with_settings`
+    /// calls this before the store is read and the context is created while the store loads.
+    #[cfg_attr(feature = "instrument", proxima_telemetry::instrument(level = "debug"))]
+    fn unmapped_runtime(&self) -> Result<BackendRuntime> {
         let config = self.settings.as_serving_config(&[]);
         apply_serving_config(&config, 0)
             .map_err(|error| anyhow::anyhow!("serving settings are not admitted: {error:?}"))?;
-        // the registration is thread-local, so it is made on the thread that builds this call's runtime
-        register_mapping(self.mapping.bytes());
         Ok(BackendRuntime::new(&config))
     }
 
@@ -1034,8 +1056,13 @@ impl Model {
             None => Session {
                 runtime: self.runtime()?,
                 weights_epoch: self.weights.allocation_epoch(),
+                mapped: true,
             },
         };
+        if !session.mapped {
+            register_mapping(self.mapping.bytes());
+            session.mapped = true;
+        }
         if session.weights_epoch != self.weights.allocation_epoch() {
             session.runtime.drop_segment_plans();
         }
@@ -1046,7 +1073,7 @@ impl Model {
         })
     }
 
-    /// Plan-cache `(hits, misses)` of the held runtime; `None` before the first successful call.
+    /// Plan-cache `(hits, misses)` of the held runtime; `None` when no runtime is held (a refused setting, or a call in flight). A runtime built at load holds `(0, 0)` until the first call.
     pub fn plan_counts(&self) -> Option<(usize, usize)> {
         self.session
             .lock()
