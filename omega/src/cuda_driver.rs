@@ -6590,6 +6590,7 @@ mod recording_runtime {
 
     use std::collections::HashSet;
 
+    use proxima_primitives::sync::mpsc::channel;
     use proxima_primitives::sync::oneshot;
 
     use crate::owner_config::OwnerConfig;
@@ -7012,9 +7013,9 @@ mod recording_runtime {
         let flow = owner.serve(Command::Step {
             lease: lease.clone(),
             frame: short,
-            completion: Arc::clone(&completion),
+            completion: completion.sender(),
         });
-        let stepped = block_on_thread(completion.wait());
+        let stepped = block_on_thread(completion.wait()).expect("the owner answered the step");
 
         let mut queued = Frame::default();
         queued.dynamic.push(("x".into(), Held(Arc::clone(&activation))));
@@ -7022,9 +7023,9 @@ mod recording_runtime {
         DeviceOwner::<RecordingRuntime, _>::reject(Command::Step {
             lease,
             frame: queued,
-            completion: Arc::clone(&queued_completion),
+            completion: queued_completion.sender(),
         });
-        let rejected = block_on_thread(queued_completion.wait());
+        let rejected = block_on_thread(queued_completion.wait()).expect("the owner answered the rejection");
 
         assert_eq!(flow, OwnerFlow::Drain, "a driver failure drains the owner");
         assert!(
@@ -7035,6 +7036,92 @@ mod recording_runtime {
             matches!(rejected, Err(DeviceOwnerError::Stopped)),
             "a command queued behind the fault is answered Stopped"
         );
+    }
+
+    #[test]
+    fn a_step_whose_owner_drops_the_reply_answers_stopped() {
+        let weight_first = Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0));
+        let weight_second = Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0));
+        let activation = Arc::from(weight_values(INPUT as usize, 3.0));
+        let mut owner = recording_owner(RecordingRuntime::new(), 1);
+        let (reply, answer) = oneshot::channel();
+        owner.serve(Command::Register {
+            request: Box::new(owner_request(&weight_first, &weight_second, &activation)),
+            reply,
+        });
+        let lease = block_on_thread(answer).expect("the owner answers").expect("the owner registers the plan");
+        let (commands, mut queue) = channel(1);
+        let handle = DeviceHandle::new(DeviceKey(0), commands);
+        let mut frame = Frame::default();
+        frame.dynamic.push(("x".into(), Held(Arc::clone(&activation))));
+        let caller = thread::spawn(move || {
+            let completion = Completion::new();
+            block_on_thread(handle.step(&lease, frame, &completion))
+        });
+
+        let command = block_on_thread(queue.recv()).expect("the step reached the owner queue");
+        drop(command);
+        let answered = caller.join().expect("the caller thread ends instead of hanging");
+
+        assert!(
+            matches!(answered, Err(DeviceOwnerError::Stopped)),
+            "a reply dropped unanswered reads as Stopped"
+        );
+    }
+
+    #[test]
+    fn a_step_completed_once_answers_its_value() {
+        let weight_first = Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0));
+        let weight_second = Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0));
+        let activation = Arc::from(weight_values(INPUT as usize, 3.0));
+        let mut owner = recording_owner(RecordingRuntime::new(), 1);
+        let (reply, answer) = oneshot::channel();
+        owner.serve(Command::Register {
+            request: Box::new(owner_request(&weight_first, &weight_second, &activation)),
+            reply,
+        });
+        let lease = block_on_thread(answer).expect("the owner answers").expect("the owner registers the plan");
+        let (commands, mut queue) = channel(1);
+        let handle = DeviceHandle::new(DeviceKey(0), commands);
+        let mut frame = Frame::default();
+        frame.residents.extend((0..2).map(|slot| ResidentRef { slot, address: 0, len: 0 }));
+        frame.dynamic.push(("x".into(), Held(Arc::clone(&activation))));
+        let caller = thread::spawn(move || {
+            let completion = Completion::new();
+            block_on_thread(handle.step(&lease, frame, &completion))
+        });
+
+        let command = block_on_thread(queue.recv()).expect("the step reached the owner queue");
+        let flow = owner.serve(command);
+        let answered = caller.join().expect("the caller thread ends");
+
+        assert_eq!(flow, OwnerFlow::Continue, "a completed step keeps the owner serving");
+        assert!(
+            matches!(answered, Ok(StepOutcome::Done { sequence: 0, .. })),
+            "the first completed step answers its value with sequence zero"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_step_reply_never_answers_the_next_step() {
+        let completion = Completion::<Arc<str>>::new();
+        let cancelled = completion.sender();
+        let next = completion.sender();
+        next.complete("reply b".into());
+        cancelled.complete("reply a".into());
+
+        let answered = block_on_thread(completion.wait());
+
+        assert_eq!(answered.as_deref(), Some("reply b"), "the late reply of the cancelled step is discarded");
+
+        let dropped = completion.sender();
+        let current = completion.sender();
+        drop(dropped);
+        current.complete("reply c".into());
+
+        let after_drop = block_on_thread(completion.wait());
+
+        assert_eq!(after_drop.as_deref(), Some("reply c"), "a stale sender dropped late does not answer stopped");
     }
 
     #[test]

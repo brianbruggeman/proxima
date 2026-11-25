@@ -10,6 +10,7 @@ use std::future::Future;
 use std::ops::Range;
 use std::pin::pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, JoinHandle, Thread};
 use std::vec::Vec;
@@ -354,14 +355,24 @@ pub enum StepOutcome<Block> {
 
 pub type StepReply<Block> = Result<StepOutcome<Block>, DeviceOwnerError>;
 
-/// One reusable reply slot: a ring and a [`Notify`] permit, so a reply is a push and a wake.
+/// One reusable reply slot, the caller's waiting end: a ring and a [`Notify`] permit, so a reply
+/// is a push and a wake.
 ///
-/// Composes [`proxima_core::ring::Ring`] and [`proxima_primitives::sync::notify::Notify`].
-/// `Ring` rounds capacity up to 2 (its Vyukov protocol is degenerate at 1), so the slot holds
-/// two; the protocol is one outstanding step per slot.
+/// Composes [`proxima_core::ring::Ring`] and [`proxima_primitives::sync::notify::Notify`]. It is
+/// not a `oneshot` because the plan reuses one slot across every step; a oneshot would allocate
+/// per step. The owner side is [`CompletionSender`], which answers `None` if dropped unanswered.
+///
+/// Every entry carries the generation of the sender that published it, and [`sender`](Self::sender)
+/// bumps the generation, so a reply from a step the caller abandoned is stale and never answers a
+/// later step. `Ring` rounds capacity up to 2 (its Vyukov protocol is degenerate at 1). A stale
+/// sender discards its reply when it sees it is no longer current, and only the current sender
+/// ever evicts: if its push finds the ring full, the ring holds only stale entries (the current
+/// sender publishes once), so it dequeues one and retries. A stale entry therefore never starves
+/// the current reply, and `wait` discards stale entries it dequeues.
 pub struct Completion<Value> {
-    ring: Ring<Value>,
+    ring: Ring<(u64, Option<Value>)>,
     ready: Notify,
+    generation: AtomicU64,
 }
 
 impl<Value> Completion<Value> {
@@ -370,23 +381,69 @@ impl<Value> Completion<Value> {
         Arc::new(Self {
             ring: Ring::with_capacity(1),
             ready: Notify::new(),
+            generation: AtomicU64::new(0),
         })
     }
 
-    /// Publishes the reply and wakes the waiter; the owner side of the slot.
-    pub fn complete(&self, value: Value) {
-        if self.ring.push(value).is_ok() {
-            self.ready.notify_one();
+    /// Hands out the owner's end of the slot for one step, making every earlier sender stale.
+    #[must_use]
+    pub fn sender(self: &Arc<Self>) -> CompletionSender<Value> {
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        CompletionSender {
+            slot: Some(Arc::clone(self)),
+            generation,
         }
     }
 
-    /// Awaits the owner's reply.
-    pub async fn wait(&self) -> Value {
+    /// Awaits the current step's reply; `None` means the owner dropped its end without answering.
+    pub async fn wait(&self) -> Option<Value> {
         loop {
-            if let Some(value) = self.ring.dequeue() {
-                return value;
+            while let Some((generation, reply)) = self.ring.dequeue() {
+                if generation == self.generation.load(Ordering::Acquire) {
+                    return reply;
+                }
             }
             self.ready.notified().await;
+        }
+    }
+
+    fn publish(&self, generation: u64, reply: Option<Value>) {
+        let mut entry = (generation, reply);
+        while generation == self.generation.load(Ordering::Acquire) {
+            match self.ring.push(entry) {
+                Ok(()) => {
+                    self.ready.notify_one();
+                    return;
+                }
+                Err(returned) => {
+                    entry = returned;
+                    let _ = self.ring.dequeue();
+                }
+            }
+        }
+    }
+}
+
+/// The owner's end of a [`Completion`]. Consuming [`complete`](Self::complete) answers the
+/// waiter; dropping it unanswered wakes the waiter with `None`, so a stopped owner cannot hang a step.
+pub struct CompletionSender<Value> {
+    slot: Option<Arc<Completion<Value>>>,
+    generation: u64,
+}
+
+impl<Value> CompletionSender<Value> {
+    /// Publishes the reply and wakes the waiter; a no-op once a newer sender has been taken.
+    pub fn complete(mut self, value: Value) {
+        if let Some(slot) = self.slot.take() {
+            slot.publish(self.generation, Some(value));
+        }
+    }
+}
+
+impl<Value> Drop for CompletionSender<Value> {
+    fn drop(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            slot.publish(self.generation, None);
         }
     }
 }
@@ -414,7 +471,7 @@ pub enum Command<Block> {
     Step {
         lease: PlanLease,
         frame: Frame<Block>,
-        completion: Arc<Completion<StepReply<Block>>>,
+        completion: CompletionSender<StepReply<Block>>,
     },
     Retire {
         lease: PlanLease,
@@ -781,13 +838,13 @@ impl<Block> DeviceHandle<Block> {
         let command = Command::Step {
             lease: lease.clone(),
             frame,
-            completion: Arc::clone(completion),
+            completion: completion.sender(),
         };
         self.commands
             .send(command)
             .await
             .map_err(|_| DeviceOwnerError::Closed)?;
-        completion.wait().await
+        completion.wait().await.unwrap_or(Err(DeviceOwnerError::Stopped))
     }
 
     pub async fn retire(&self, lease: &PlanLease) -> Result<(), DeviceOwnerError> {
