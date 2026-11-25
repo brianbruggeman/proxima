@@ -524,7 +524,7 @@ pub enum BackendError {
 
     #[cfg(feature = "cuda-driver")]
     #[error(transparent)]
-    Hip(#[from] crate::cuda_driver::rocm::HipDriverError),
+    Hip(#[from] crate::silicon::hip::error::HipDriverError),
 }
 
 impl From<conflaguration::Error> for BackendError {
@@ -570,7 +570,7 @@ pub enum Plan {
     #[cfg(feature = "cuda-driver")]
     Cuda(Box<crate::cuda_driver::CudaPlan>),
     #[cfg(feature = "cuda-driver")]
-    Rocm(Box<crate::cuda_driver::HipPlan>),
+    Rocm(Box<crate::silicon::hip::runtime::HipPlan>),
 }
 
 /// Raw cold and synchronized execution observations for one candidate.
@@ -772,7 +772,7 @@ fn prefer_candidate<T: PartialEq>(candidates: &mut Vec<T>, preferred: &T) {
 /// live in the `const fn`).
 #[cfg(feature = "cuda-driver")]
 fn auto_hip_driver(config: &RuntimeConfig) -> Option<GpuDriver> {
-    crate::cuda_driver::rocm::HipApi::is_available().then(|| hip_driver(config))
+    crate::ffi::hip::HipApi::is_available().then(|| hip_driver(config))
 }
 
 /// The one place `RuntimeConfig::hip_wave` becomes a driver value; planning
@@ -780,7 +780,7 @@ fn auto_hip_driver(config: &RuntimeConfig) -> Option<GpuDriver> {
 #[cfg(feature = "cuda-driver")]
 fn hip_driver(config: &RuntimeConfig) -> GpuDriver {
     GpuDriver::Hip {
-        wave: crate::cuda_driver::rocm::hip_wave_of(config),
+        wave: crate::silicon::hip::shared::hip_wave_of(config),
         device: config.hip_device,
     }
 }
@@ -2283,8 +2283,8 @@ fn plan_hip(
     symbols: &[u64],
     named: &[(&str, QuantizedBlock<'_>)],
     outputs: &[NodeId],
-) -> Result<Box<crate::cuda_driver::HipPlan>, BackendError> {
-    let driver = crate::cuda_driver::rocm::shared_driver(config, wave)?;
+) -> Result<Box<crate::silicon::hip::runtime::HipPlan>, BackendError> {
+    let driver = crate::silicon::hip::shared::shared_driver(config, wave)?;
     let plan = driver
         .plan_with_config(program, symbols, outputs, named, config)
         .map_err(map_cuda_configuration_error)?;
@@ -2306,7 +2306,7 @@ fn plan_named_hip(
         hip_device: device,
         ..RuntimeConfig::default()
     };
-    let driver = crate::cuda_driver::rocm::shared_driver(&config, wave)?;
+    let driver = crate::silicon::hip::shared::shared_driver(&config, wave)?;
     let plan = driver.plan(program, symbols, outputs, numeric_policy, named)?;
     Ok(Plan::Rocm(Box::new(plan)))
 }
@@ -2926,7 +2926,8 @@ mod hip_routing_tests {
     use super::{BackendError, GpuDriver, plan_named_with_config};
     use crate::config::RuntimeConfig;
     use crate::cuda::HipWave;
-    use crate::cuda_driver::rocm::{HipApi, HipDriverError};
+    use crate::ffi::hip::HipApi;
+    use crate::silicon::hip::error::HipDriverError;
 
     fn negate_program() -> Vec<Op> {
         vec![

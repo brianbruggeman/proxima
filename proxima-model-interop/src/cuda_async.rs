@@ -387,7 +387,7 @@ enum RegisteredPlan {
     // boxed: the plan is 352 bytes against the fake variant's few words, which trips clippy's large_enum_variant.
     Cuda(Box<omega::CudaPlan>),
     // boxed for the same reason as the cuda plan.
-    Rocm(Box<omega::cuda_driver::HipPlan>),
+    Rocm(Box<omega::silicon::hip::runtime::HipPlan>),
     #[cfg(test)]
     Fake {
         program: Vec<Op>,
@@ -956,9 +956,9 @@ impl CudaGpuService<()> {
                                 })
                                 .collect::<Vec<_>>();
                             if let Some(config) = graph.omega_runtime.as_ref().filter(|config| selects_hip(config)) {
-                                let plan = omega::cuda_driver::rocm::plan(
+                                let plan = omega::silicon::hip::shared::plan(
                                     config,
-                                    omega::cuda_driver::rocm::hip_wave_of(config),
+                                    omega::silicon::hip::shared::hip_wave_of(config),
                                     &graph.program,
                                     &graph.symbols,
                                     &named,

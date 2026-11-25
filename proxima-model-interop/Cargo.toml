@@ -190,7 +190,7 @@ gpu = ["dep:omega", "dep:libc", "std", "dep:proxima-telemetry", "proxima-telemet
 # moe-stacked-experts joins on the granite CUDA A/B (PROXNUM-307, versailles RTX 2070); the
 # MoeTopK fusion needs no lane feature because `omega::cuda::executes` admits it at runtime.
 # HIP serving surface: omega's `cuda-driver` feature carries both the NVIDIA lane and the
-# `cuda_driver::rocm` runtime, and the serving stack (`cuda_async`, the residency caches) is keyed on `cuda`,
+# `silicon::hip` runtime, and the serving stack (`cuda_async`, the residency caches) is keyed on `cuda`,
 # so `hip` turns that stack on rather than forking its ~120 cfg sites; cudarc loads its libraries at run time,
 # so a HIP host still needs no NVIDIA library.
 hip = ["cuda", "interop-bgpool"]

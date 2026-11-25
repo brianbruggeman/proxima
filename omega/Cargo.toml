@@ -233,7 +233,7 @@ metal = [
 # wavefront width: 64 for CDNA, 32 for RDNA.
 cuda = ["alloc"]
 # Real card-C driver boundary. NVRTC + cudarc compile and launch the CUDA
-# dialect; `cuda_driver::rocm` resolves `libamdhip64`/`libhiprtc` at run time
+# dialect; `ffi::hip` resolves `libamdhip64`/`libhiprtc` at run time
 # and compiles/launches the HIP dialect without a link-time ROCm dependency.
 # The model graph still needs a binding/argument packer before either can run
 # full inference; the feature makes device initialization and kernel dispatch a
