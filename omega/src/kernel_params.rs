@@ -12,11 +12,12 @@
 //! launch returns is a compile error. Build the params in the function that
 //! performs the launch, after every argument sits where it will stay.
 //!
-//! ```compile_fail
+//! ```compile_fail,E0505
 //! use omega::kernel_params::{KernelArgument, KernelParams};
 //!
 //! struct Buffer(*mut core::ffi::c_void);
-//! impl KernelArgument for Buffer {
+//! // SAFETY: the slot is the address of the field holding the pointer, valid while `self` lives.
+//! unsafe impl KernelArgument for Buffer {
 //!     fn slot(&self) -> *mut core::ffi::c_void {
 //!         (&raw const self.0).cast_mut().cast()
 //!     }
@@ -40,7 +41,13 @@ use core::ffi::c_void;
 use core::marker::PhantomData;
 
 /// A value a kernel receives as one parameter.
-pub trait KernelArgument {
+///
+/// # Safety
+/// [`slot`](Self::slot) must return the address of storage inside `self` that holds the argument's
+/// value exactly as the kernel reads it, and that address must stay valid and unchanged for as long
+/// as `self` is borrowed. The driver dereferences it at launch; an address of a temporary or of
+/// anything else makes the launch read freed or foreign memory.
+pub unsafe trait KernelArgument {
     /// The address of the storage that holds this argument's value as the
     /// kernel reads it (for a device buffer, the address of its stored device
     /// pointer, not the device pointer itself). It borrows `self`, so it is
@@ -138,7 +145,8 @@ mod tests {
         }
     }
 
-    impl KernelArgument for Argument {
+    // SAFETY: the slot is the address of the `pointer` field, which lives as long as `self`.
+    unsafe impl KernelArgument for Argument {
         fn slot(&self) -> *mut c_void {
             (&raw const self.pointer).cast_mut().cast()
         }

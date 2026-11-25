@@ -5996,13 +5996,15 @@ pub mod rocm {
         owner: core::marker::PhantomData<&'buffer HipBuffer>,
     }
 
-    impl KernelArgument for HipBuffer {
+    // SAFETY: the slot is the address of the `pointer` field, which holds the device pointer for as long as `self` lives.
+    unsafe impl KernelArgument for HipBuffer {
         fn slot(&self) -> *mut c_void {
             (&raw const self.pointer).cast_mut().cast::<c_void>()
         }
     }
 
-    impl KernelArgument for HipView<'_> {
+    // SAFETY: the slot is the address of the view's own `pointer` field, valid while the view is borrowed.
+    unsafe impl KernelArgument for HipView<'_> {
         fn slot(&self) -> *mut c_void {
             (&raw const self.pointer).cast_mut().cast::<c_void>()
         }
@@ -6595,13 +6597,15 @@ pub mod rocm {
         element: core::marker::PhantomData<fn() -> Element>,
     }
 
-    impl<Element> KernelArgument for HipWindow<'_, Element> {
+    // SAFETY: delegates to the window's own view, whose slot lives inside the window.
+    unsafe impl<Element> KernelArgument for HipWindow<'_, Element> {
         fn slot(&self) -> *mut c_void {
             self.view.slot()
         }
     }
 
-    impl<Element> KernelArgument for HipWindowMut<'_, Element> {
+    // SAFETY: delegates to the window's own view, whose slot lives inside the window.
+    unsafe impl<Element> KernelArgument for HipWindowMut<'_, Element> {
         fn slot(&self) -> *mut c_void {
             self.view.slot()
         }
