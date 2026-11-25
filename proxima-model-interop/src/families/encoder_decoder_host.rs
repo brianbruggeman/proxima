@@ -19,12 +19,12 @@ use proxima_tensor::spec::{
 use serde_json::Value;
 
 use crate::bind::retarget_recoded_leaves;
-use crate::model_weights::{LeasedWeights, ModelWeights};
 use crate::decode_policy::{DecodeConfig, DecodePolicy};
 use crate::families::encoder_decoder::{
     DecoderLayer, DecoderStem, EncoderLayer, EncoderStem, Linear, encoder,
 };
 use crate::generate::{BackendRuntime, cached_kv_extent, program_hash};
+use crate::model_weights::{LeasedWeights, ModelWeights};
 use crate::profiles::BindingProfile;
 use crate::serving::apply_serving_config;
 use crate::serving_settings::ServingSettings;
@@ -152,11 +152,16 @@ struct Bound<'a> {
     /// leaves an earlier segment's outputs fill, in the order those outputs arrive
     carried_inputs: Vec<NodeId>,
     shape: Shape,
+    /// `Some` asks the next run for per-op GPU time; the run fills the cell
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    op_timings: Option<std::sync::OnceLock<Vec<omega::metal::OpGpuTiming>>>,
 }
 
 impl<'a> Bound<'a> {
     fn new(shape: Shape) -> Self {
         Self {
+            #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+            op_timings: None,
             program: Vec::new(),
             named: BTreeMap::new(),
             weights: LeasedWeights::detached(),
@@ -520,6 +525,21 @@ impl<'a> Bound<'a> {
             .collect();
         let mut resident: BTreeSet<&str> = self.weights.names();
         resident.extend(self.call_resident.iter().map(String::as_str));
+        #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+        if let Some(cell) = &self.op_timings {
+            let (evaluated, timings) = runtime
+                .evaluate_segment_op_timed(
+                    &self.program,
+                    symbols,
+                    &named,
+                    outputs,
+                    &resident,
+                    &BTreeMap::new(),
+                )
+                .map_err(|error| anyhow::anyhow!("{stage} segment does not evaluate: {error:?}"))?;
+            let _ = cell.set(timings);
+            return collect_outputs(&evaluated, outputs);
+        }
         let evaluated = runtime
             .evaluate_segment(&self.program, symbols, &named, outputs, &resident, None)
             .map_err(|error| anyhow::anyhow!("{stage} segment does not evaluate: {error:?}"))?;
@@ -596,6 +616,12 @@ pub struct Model {
     store_miss: Option<(PathBuf, u128)>,
     /// set by the first publish attempt that succeeds, so later calls skip it
     store_published: AtomicBool,
+    /// set by [`Model::with_encode_op_timings`]: the encode program then runs one command buffer per op
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    profile_encode: bool,
+    /// the per-op GPU time of the encode program, filled by the first profiled transcription
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    encode_timings: std::sync::OnceLock<Vec<omega::metal::OpGpuTiming>>,
 }
 
 impl Drop for Model {
@@ -643,6 +669,10 @@ impl Model {
             source_identity,
             store_miss: None,
             store_published: AtomicBool::new(false),
+            #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+            profile_encode: false,
+            #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+            encode_timings: std::sync::OnceLock::new(),
         }
     }
 
@@ -657,6 +687,22 @@ impl Model {
         self.settings = settings;
         self.resolve_store();
         self
+    }
+
+    /// Runs the encode program of the next transcription one command buffer per op, so
+    /// [`Self::encode_op_timings`] can report each op's GPU time. A diagnostic: the serving loop never sets it.
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    #[must_use]
+    pub fn with_encode_op_timings(mut self) -> Self {
+        self.profile_encode = true;
+        self
+    }
+
+    /// The per-op GPU time of the encode program the first profiled transcription ran, or `None`
+    /// before it ran. Bound through the same weights and `weight_precision` rules as the serving encoder.
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    pub fn encode_op_timings(&self) -> Option<&[omega::metal::OpGpuTiming]> {
+        self.encode_timings.get().map(Vec::as_slice)
     }
 
     fn resolve_store(&mut self) {
@@ -876,9 +922,21 @@ impl Model {
             outputs.push(*v);
         }
         bound.bind(self)?;
+        #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+        {
+            bound.op_timings = self.profile_encode.then(std::sync::OnceLock::new);
+        }
         let encode_start = std::time::Instant::now();
         let mut values = bound.run("encode", &outputs, &[], &mut runtime)?;
         let encode = encode_start.elapsed();
+        #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+        if let Some(timings) = bound
+            .op_timings
+            .take()
+            .and_then(std::sync::OnceLock::into_inner)
+        {
+            let _ = self.encode_timings.set(timings);
+        }
         sample_peak(&mut gpu_peak, &runtime);
 
         let mut decoder = Bound::new(self.shape.clone());
@@ -1261,7 +1319,9 @@ mod tests {
         assert_eq!(stored.len(), 1, "one entry, no torn temp file: {stored:?}");
         assert_eq!(
             second.mapping.bytes(),
-            std::fs::read(&stored[0]).expect("reads the entry").as_slice()
+            std::fs::read(&stored[0])
+                .expect("reads the entry")
+                .as_slice()
         );
         let originals = second
             .manifest
@@ -1269,7 +1329,11 @@ mod tests {
             .iter()
             .filter(|entry| !is_filler_name(&entry.name))
             .count();
-        assert_eq!(originals, first.manifest.tensors.len(), "every source tensor is stored");
+        assert_eq!(
+            originals,
+            first.manifest.tensors.len(),
+            "every source tensor is stored"
+        );
     }
 
     #[test]
@@ -1327,7 +1391,10 @@ mod tests {
             ..ServingSettings::default()
         });
 
-        let refusal = model.runtime().err().expect("a build without a gpu backend refuses -ngl all");
+        let refusal = model
+            .runtime()
+            .err()
+            .expect("a build without a gpu backend refuses -ngl all");
 
         assert!(format!("{refusal}").contains("no GPU backend"), "{refusal}");
     }
