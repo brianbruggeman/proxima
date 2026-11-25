@@ -1014,6 +1014,30 @@ fn a_persisted_checkpoint_rebinds_with_no_recode_and_the_same_narrow_bytes() {
 }
 
 #[test]
+fn a_model_reports_a_recode_to_publish_only_after_a_rule_recoded_a_leaf() {
+    let file_bytes = safetensors_fixture();
+    let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses fixture");
+    let data_start = header_data_start(&file_bytes);
+    let identity = (
+        wide_fixture_tensor(&manifest, &[2, 3]),
+        wide_fixture_tensor(&manifest, &[2]),
+        fixture_two_byte_target(&manifest),
+    );
+    let model = ModelWeights::new();
+    assert!(
+        !model.has_recoded(&manifest),
+        "a model that bound nothing has nothing worth a store entry"
+    );
+
+    drop(bind_stored_order(&model, (&manifest, &file_bytes, data_start), identity));
+
+    assert!(
+        model.has_recoded(&manifest),
+        "a model whose rule recoded a leaf has a store entry worth writing"
+    );
+}
+
+#[test]
 fn persisting_a_model_that_recoded_nothing_substitutes_nothing() {
     let file_bytes = safetensors_fixture();
     let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses fixture");

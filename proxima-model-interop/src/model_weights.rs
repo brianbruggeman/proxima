@@ -169,6 +169,18 @@ impl Default for ModelWeights {
 }
 
 impl ModelWeights {
+    /// Whether [`Self::persist_aligned`] would substitute at least one tensor of `manifest`. A store entry is
+    /// worth writing only then: without a recoded tensor it is a full copy of the source checkpoint.
+    #[must_use]
+    pub fn has_recoded(&self, manifest: &Manifest) -> bool {
+        let held = self.held.lock();
+        manifest
+            .tensors
+            .iter()
+            .filter(|entry| !is_filler_name(&entry.name))
+            .any(|entry| held.element_recode(entry).is_some())
+    }
+
     /// How many buffers this model has kept at an address new to their name.
     #[must_use]
     #[cfg(all(feature = "std", feature = "proxima-autograd"))]
