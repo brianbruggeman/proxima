@@ -683,7 +683,8 @@ fn the_row_tiled_kernel_declines_a_half_precision_op() {
         error,
         EmitError::UnsupportedDType {
             node: op.node,
-            dtype: DType::FLOAT16
+            dtype: DType::FLOAT16,
+            backend: "metal",
         }
     );
 }

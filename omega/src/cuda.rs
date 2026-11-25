@@ -248,6 +248,7 @@ pub fn emit_cuda_for_program(
         core::slice::from_ref(resolved),
         packed_operands,
         numeric_policy,
+        &executes(&Target::CUDA),
     );
     emit_cuda_with_operand_dtypes(
         resolved,
@@ -1655,7 +1656,11 @@ pub(crate) fn type_token(target: Target, node: NodeId, dtype: DType) -> Result<&
             })
         }
         DType::Bool => Ok("float"),
-        DType::Layout(_) => Err(EmitError::UnsupportedDType { node, dtype }),
+        DType::Layout(_) => Err(EmitError::UnsupportedDType {
+            node,
+            dtype,
+            backend: target.language_name(),
+        }),
     }
 }
 

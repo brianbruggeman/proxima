@@ -4788,7 +4788,7 @@ pub(super) fn read_back(
     match device_scalar_token(dtype) {
         Some("half") => Ok(read_back_half(buffer, byte_offset, element_count)),
         Some(_) => Ok(read_back_as_device_f32(buffer, byte_offset, element_count)),
-        None => Err(EmitError::UnsupportedDType { node, dtype }.into()),
+        None => Err(EmitError::UnsupportedDType { node, dtype, backend: "metal" }.into()),
     }
 }
 

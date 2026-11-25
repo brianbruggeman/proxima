@@ -1398,7 +1398,7 @@ pub(super) fn upload_block(
         // `Vec<f16>` this allocates is dropped every call regardless.
         Some("half") => upload_block_as_half(device, data).map(|buffer| (buffer, 0)),
         Some(_) => upload_block_as_float(device, data, resident_name),
-        None => Err(EmitError::UnsupportedDType { node, dtype }.into()),
+        None => Err(EmitError::UnsupportedDType { node, dtype, backend: "metal" }.into()),
     }
 }
 

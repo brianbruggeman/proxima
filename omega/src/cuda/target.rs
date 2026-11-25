@@ -94,6 +94,16 @@ impl Target {
         target
     }
 
+    /// The dialect's name as an error names the backend that refused.
+    pub const fn language_name(&self) -> &'static str {
+        match self.language {
+            KernelLanguage::Cuda => "cuda",
+            KernelLanguage::Hip => "hip",
+            KernelLanguage::Metal => "metal",
+            KernelLanguage::Wgsl => "wgsl",
+        }
+    }
+
     /// `warpSize - 1`, the mask that isolates a lane index inside its wave.
     pub const fn lane_bits(&self) -> u64 {
         self.wave - 1

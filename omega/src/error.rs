@@ -240,8 +240,12 @@ pub enum EmitError {
     /// in practice, but [`crate::msl::emit`] is a public entry point a
     /// caller may reach directly with a hand-built `BoundOp`, so this stays
     /// a real rejection rather than a debug assertion.
-    #[error("node {node} declares dtype {dtype:?}, which this metal backend does not emit")]
-    UnsupportedDType { node: NodeId, dtype: DType },
+    #[error("node {node} declares dtype {dtype:?}, which the {backend} backend does not emit")]
+    UnsupportedDType {
+        node: NodeId,
+        dtype: DType,
+        backend: &'static str,
+    },
 
     /// `wgsl::emit_wgsl`'s v1 scope has no gather kernel (no fault buffer, no
     /// indices binding) — see that module's own doc for why this is a

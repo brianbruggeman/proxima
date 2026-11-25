@@ -319,7 +319,11 @@ pub(super) fn grid_threads_with_schedule(
 /// `Float64`) is rejected here by name instead of silently folded into the
 /// 4-byte `float` bucket it does not fit.
 pub(super) fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
-    device_scalar_token(dtype).ok_or(EmitError::UnsupportedDType { node, dtype })
+    device_scalar_token(dtype).ok_or(EmitError::UnsupportedDType {
+        node,
+        dtype,
+        backend: "metal",
+    })
 }
 
 /// The MSL scalar a device buffer of `dtype` holds, selected by the layout's fields: `half` where

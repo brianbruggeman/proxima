@@ -8,7 +8,12 @@ pub use proxima_numeric::codec::Codec;
 #[cfg(feature = "cuda")]
 use proxima_tensor::Op;
 #[cfg(feature = "cuda")]
+use proxima_tensor::Executes;
+#[cfg(feature = "cuda")]
 use proxima_tensor::bind::narrow_accumulations;
+
+#[cfg(feature = "cuda")]
+use crate::bind_plan::binding_policy;
 use proxima_tensor::{BoundOp, NodeId, ScalarOp, gathered_operand_count};
 
 /// What buffer index `n` in `Kernel::bindings` is for, in dispatch order:
@@ -189,17 +194,19 @@ pub fn operand_dtype(table: &OperandDtypes, node: NodeId, fallback: DType) -> DT
     table.get(&node).copied().unwrap_or(fallback)
 }
 
-/// [`operand_dtypes`] for a bound `program`: each node's dtype as `narrow_accumulations` left it,
-/// the program the bind ran on. A node past the program (a bind-level duplicate) is absent, so it
-/// reads in the op's own dtype.
+/// [`operand_dtypes`] for a bound `program`: each node's dtype as `narrow_accumulations` left it
+/// under the policy the bind ran with ([`binding_policy`] of `numeric_policy` and the grant
+/// `executes`), so a node the bind narrowed is read in the dtype it was rendered in. A node past
+/// the program (a bind-level duplicate) is absent, so it reads in the op's own dtype.
 #[cfg(feature = "cuda")]
 pub fn program_operand_dtypes(
     program: &[Op],
     resolved: &[BoundOp],
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    executes: &Executes,
 ) -> OperandDtypes {
-    let program = narrow_accumulations(program, numeric_policy);
+    let program = narrow_accumulations(program, binding_policy(numeric_policy, executes));
     operand_dtypes(resolved, packed_operands, |node| {
         program.get(node.0 as usize).map(Op::dtype)
     })

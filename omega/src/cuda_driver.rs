@@ -274,6 +274,12 @@ pub struct CudaDriver {
     baseline_used_bytes: u64,
 }
 
+/// The grant every `CudaPlan` binds under; the operand-dtype table reads the same one, so the
+/// table names the dtypes the bind produced. HIP binds through its own driver in `rocm`.
+fn plan_grant() -> Executes {
+    cuda_executes(&Target::CUDA)
+}
+
 fn multiprocessor_count(context: &CudaContext) -> Result<u32, CudaDriverError> {
     let count = context.attribute(cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)?;
     Ok(u32::try_from(count).unwrap_or(0))
@@ -1239,8 +1245,13 @@ impl CudaDriver {
             unfused,
             activation_storage,
         )?;
-        let operand_dtypes =
-            program_operand_dtypes(program, &resolved, &packed_operands, numeric_policy);
+        let operand_dtypes = program_operand_dtypes(
+            program,
+            &resolved,
+            &packed_operands,
+            numeric_policy,
+            &plan_grant(),
+        );
         let (kernels, uniforms) = emit_and_pack(
             &resolved,
             None,
@@ -2047,7 +2058,7 @@ fn bind_resolved(
 ) -> Result<(Vec<BoundOp>, PackedOperands, LowerMicros), CudaDriverError> {
     let bind_started = Instant::now();
     let config = BindConfig::new(numeric_policy, !unfused, packed_operands).with_activation_storage(activation_storage);
-    let bound = bind_plan(program, shapes, outputs, &config, &cuda_executes(&Target::CUDA)).map_err(|_| CudaDriverError::UnsupportedGraph {
+    let bound = bind_plan(program, shapes, outputs, &config, &plan_grant()).map_err(|_| CudaDriverError::UnsupportedGraph {
         node: NodeId(0),
         reason: "graph binding failed",
     })?;
@@ -2184,7 +2195,7 @@ fn refresh_bound_resolved(
         numeric_policy,
     )?;
     let config = BindConfig::new(numeric_policy, true, packed_operands).with_activation_storage(activation_storage);
-    let finished = finish_bound(refreshed, program, shapes, &config, &cuda_executes(&Target::CUDA));
+    let finished = finish_bound(refreshed, program, shapes, &config, &plan_grant());
     Ok((finished.resolved, finished.packed, touched))
 }
 
@@ -2207,7 +2218,7 @@ fn reject_unsupported_kinds(
     resolved: &[BoundOp],
     numeric_policy: NumericPolicy,
 ) -> Result<(), CudaDriverError> {
-    let executes = cuda_executes(&Target::CUDA);
+    let executes = plan_grant();
     let mut census: BTreeMap<&'static str, (usize, NodeId)> = BTreeMap::new();
     for bound in resolved
         .iter()
@@ -2518,6 +2529,7 @@ impl CudaPlan {
                     &resolved,
                     &self.packed_operands,
                     numeric_policy,
+                    &plan_grant(),
                 );
                 let (kernels, uniforms) = emit_and_pack(
                     &resolved,
@@ -2550,6 +2562,7 @@ impl CudaPlan {
                     &resolved,
                     &self.packed_operands,
                     numeric_policy,
+                    &plan_grant(),
                 );
                 let (kernels, uniforms) = emit_and_pack(
                     &resolved,
@@ -2916,6 +2929,7 @@ impl CudaPlan {
             core::slice::from_ref(previous),
             &self.packed_operands,
             numeric_policy,
+            &plan_grant(),
         );
         let before = crate::emit_cuda_with_operand_dtypes(
             previous,
@@ -2970,6 +2984,7 @@ impl CudaPlan {
                 core::slice::from_ref(&self.resolved[position]),
                 &self.packed_operands,
                 numeric_policy,
+                &plan_grant(),
             );
             let text_kept = crate::cuda::refit_kernel_with_operand_dtypes(
                 &previous,

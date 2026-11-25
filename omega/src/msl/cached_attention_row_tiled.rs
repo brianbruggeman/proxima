@@ -190,6 +190,7 @@ pub(super) fn render_cached_attention_row_tiled_with(
         return Err(EmitError::UnsupportedDType {
             node: resolved.node,
             dtype: resolved.dtype,
+            backend: "metal",
         });
     }
     if row_schedule.for_op(&resolved.kind).is_flash() {

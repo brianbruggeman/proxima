@@ -412,12 +412,12 @@ fn type_token(node: NodeId, dtype: DType, caps: WgslCaps) -> Result<&'static str
         DType::Layout(layout) if layout.width() <= 32 => {
             match crate::msl::layout_render::hardware_type(&layout) {
                 Some("half") if caps.shader_f16 => Ok("f16"),
-                Some("half") => Err(EmitError::UnsupportedDType { node, dtype }),
+                Some("half") => Err(EmitError::UnsupportedDType { node, dtype, backend: "wgsl" }),
                 _ => Ok("f32"),
             }
         }
-        DType::Layout(_) => Err(EmitError::UnsupportedDType { node, dtype }),
-        other => Err(EmitError::UnsupportedDType { node, dtype: other }),
+        DType::Layout(_) => Err(EmitError::UnsupportedDType { node, dtype, backend: "wgsl" }),
+        other => Err(EmitError::UnsupportedDType { node, dtype: other, backend: "wgsl" }),
     }
 }
 
