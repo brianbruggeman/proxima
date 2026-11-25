@@ -1,28 +1,44 @@
-//! Per-op GPU time of the real whisper encoder on Metal, through the serving path.
+//! Per-op time of the real whisper encoder, through the serving path.
 //!
 //! Loads the checkpoint with `Model::load` and the serving settings from the environment, exactly as
 //! the `whisper` example does, so `PROXIMA_SERVING_WEIGHT_PRECISION` applies and the projections are
 //! the recoded weights the serving encoder binds (`Bound::bind`, which reads `weight_precision_rules`
-//! and calls `ModelWeights::bind`). `Model::with_encode_op_timings` runs the encode program one
-//! command buffer per op through `BackendRuntime::evaluate_segment_op_timed`, the wrapper of
-//! `omega::metal::execute_plan_named_op_timed`. Prints `gpu_ns` per op with its kind and node, then a
-//! total per kind, then the ids the transcription produced.
+//! and calls `ModelWeights::bind`).
+//!
+//! On Metal (`metal` feature, macos, `PROXIMA_SERVING_GPU_LAYERS` not 0) `Model::with_encode_op_timings`
+//! runs the encode program one command buffer per op through `BackendRuntime::evaluate_segment_op_timed`,
+//! the wrapper of `omega::metal::execute_plan_named_op_timed`, and the table prints `gpu_ns` per op.
+//!
+//! On the CPU (`PROXIMA_SERVING_GPU_LAYERS=0`, or a build with no GPU feature) the serving encode runs
+//! `CpuStepPlan::execute` -> `run_prepared_step`, which records every node into the
+//! `PROXIMA_ARENA_PER_NODE=1` table (`proxima_tensor::instrument::record_arena_node_ticks`); the table
+//! prints `cpu_ns` per node with its op kind (the fused `cached_attention` included), extents and the
+//! dot-tile outcome recorded for it. The process must run with `PROXIMA_ARENA_PER_NODE=1`.
 //!
 //! `--wav <file>` and `--model <dir>` are the same inputs the `whisper` example takes. `--passes <n>`
-//! (default 5) runs the timed encode n times in this process and reports each op's min and median
-//! `gpu_ns` over them, the first pass included; its total prints apart as `first_pass_gpu_ns_total`.
+//! (alias `--repeat`, default 5) runs the timed encode n times in this process and reports each op's
+//! min and median over them, the first pass included.
 
-#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
+#[cfg(feature = "instrument")]
 mod run {
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     use anyhow::{Context, Result, bail};
     use conflaguration::Settings;
     use proxima_model_interop::ServingSettings;
     use proxima_model_interop::audio::wav;
-    use proxima_model_interop::families::encoder_decoder_host::{
-        Model, OpSample, kind_totals, reduce_op_passes,
-    };
+    use proxima_model_interop::families::encoder_decoder_host::Model;
+    use proxima_tensor::instrument::ticks_to_nanos;
+
+    fn median(sorted: &[u64]) -> u64 {
+        let middle = sorted.len() / 2;
+        if sorted.len().is_multiple_of(2) {
+            (sorted[middle - 1] + sorted[middle]) / 2
+        } else {
+            sorted[middle]
+        }
+    }
 
     pub fn main() -> Result<()> {
         let mut wav_path: Option<PathBuf> = None;
@@ -33,7 +49,7 @@ mod run {
             match arg.as_str() {
                 "--wav" => wav_path = Some(args.next().context("--wav wants a path")?.into()),
                 "--model" => model_path = Some(args.next().context("--model wants a path")?.into()),
-                "--passes" => {
+                "--passes" | "--repeat" => {
                     passes = args
                         .next()
                         .context("--passes wants a count")?
@@ -49,13 +65,108 @@ mod run {
         let audio = wav::read(&wav_path.context("--wav is required")?)?;
         let settings =
             <ServingSettings as Settings>::from_env().context("serving settings from env")?;
-        let model = Model::load(&model_path.context("--model is required")?)?
-            .with_settings(settings)
-            .with_encode_op_timings();
-        let mut transcript = model.transcribe(&audio.samples, "en")?;
-        for _ in 1..passes {
-            transcript = model.transcribe(&audio.samples, "en")?;
+        let on_gpu = settings.gpu_layers != 0;
+        let model =
+            Model::load(&model_path.context("--model is required")?)?.with_settings(settings);
+        let mut transcript = None;
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        let model = if on_gpu {
+            model.with_encode_op_timings()
+        } else {
+            model
+        };
+        for _ in 0..passes {
+            transcript = Some(model.transcribe(&audio.samples, "en")?);
         }
+        println!("passes={passes} engine={}", engine_name(on_gpu));
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if on_gpu {
+            gpu_table(&model, passes)?;
+        }
+        if !on_gpu || !cfg!(all(feature = "metal", target_os = "macos")) {
+            cpu_table(&model, passes)?;
+        }
+        let ids: Vec<String> = transcript
+            .context("the transcription ran no pass")?
+            .tokens
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        println!("ids={}", ids.join(","));
+        Ok(())
+    }
+
+    fn engine_name(on_gpu: bool) -> &'static str {
+        if on_gpu && cfg!(all(feature = "metal", target_os = "macos")) {
+            "metal"
+        } else {
+            "cpu"
+        }
+    }
+
+    fn cpu_table(model: &Model, passes: usize) -> Result<()> {
+        let raw = model.encode_cpu_node_passes();
+        let first = raw.first().context("the transcription ran no encode")?;
+        if first.0.is_empty() {
+            bail!(
+                "the CPU encode recorded no per-node timings; run with PROXIMA_ARENA_PER_NODE=1 and PROXIMA_SERVING_GPU_LAYERS=0"
+            );
+        }
+        let mut per_node: BTreeMap<u32, Vec<u64>> = BTreeMap::new();
+        for (nodes, _) in &raw {
+            for (node, stat) in nodes {
+                per_node
+                    .entry(*node)
+                    .or_default()
+                    .push(ticks_to_nanos(stat.ticks));
+            }
+        }
+        let mut kind_sums: BTreeMap<&'static str, (usize, u64, u64)> = BTreeMap::new();
+        let mut min_total = 0_u64;
+        for (node, stat) in &first.0 {
+            let mut times = per_node.remove(node).unwrap_or_default();
+            times.sort_unstable();
+            let (min_ns, median_ns) = (times[0], median(&times));
+            let outcomes: Vec<String> = first
+                .1
+                .iter()
+                .filter(|(asked, _, _)| asked == node)
+                .map(|(_, reason, calls)| format!("{reason}x{calls}"))
+                .collect();
+            let dot_tile = if outcomes.is_empty() {
+                "not_asked".to_string()
+            } else {
+                outcomes.join("+")
+            };
+            println!(
+                "op node={node} kind={} extents={:?} hits={} passes={} cpu_ns_min={min_ns} cpu_ns_median={median_ns} dot_tile={dot_tile}",
+                stat.kind_label,
+                stat.extents,
+                stat.count,
+                times.len()
+            );
+            let entry = kind_sums.entry(stat.kind_label).or_insert((0, 0, 0));
+            *entry = (entry.0 + 1, entry.1 + min_ns, entry.2 + median_ns);
+            min_total += min_ns;
+        }
+        for (kind, (count, min_sum, median_sum)) in &kind_sums {
+            println!(
+                "kind={kind} ops={count} passes={passes} cpu_ns_min_total={min_sum} cpu_ns_median_total={median_sum}"
+            );
+        }
+        println!(
+            "ops={} passes={passes} cpu_ns_min_total={min_total}",
+            first.0.len()
+        );
+        Ok(())
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    fn gpu_table(model: &Model, passes: usize) -> Result<()> {
+        use proxima_model_interop::families::encoder_decoder_host::{
+            OpSample, kind_totals, reduce_op_passes,
+        };
+
         let raw = model.encode_op_timing_passes();
         let first_pass = raw
             .first()
@@ -68,8 +179,6 @@ mod run {
             .map(|pass| pass.iter().map(OpSample::from).collect())
             .collect();
         let stats = reduce_op_passes(&sampled)?;
-
-        println!("passes={}", sampled.len());
         let first_total: u64 = first_pass.iter().map(|timing| timing.gpu_ns).sum();
         println!("first_pass_gpu_ns_total={first_total}");
         for stat in &stats {
@@ -88,18 +197,16 @@ mod run {
             "ops={} passes={passes} gpu_ns_min_total={min_total}",
             stats.len()
         );
-        let ids: Vec<String> = transcript.tokens.iter().map(ToString::to_string).collect();
-        println!("ids={}", ids.join(","));
         Ok(())
     }
 }
 
-#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
+#[cfg(feature = "instrument")]
 fn main() -> anyhow::Result<()> {
     run::main()
 }
 
-#[cfg(not(all(feature = "metal", feature = "instrument", target_os = "macos")))]
+#[cfg(not(feature = "instrument"))]
 fn main() {
-    eprintln!("whisper_encoder_op_timed needs the metal and instrument features on macos");
+    eprintln!("whisper_encoder_op_timed needs the instrument feature");
 }

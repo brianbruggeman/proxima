@@ -836,7 +836,7 @@ required-features = ["std", "proxima-autograd"]
 
 [[example]]
 name = "whisper_encoder_op_timed"
-required-features = ["std", "proxima-autograd", "metal", "instrument"]
+required-features = ["std", "proxima-autograd", "instrument"]
 
 [[example]]
 name = "decode_loop_wall_clock"

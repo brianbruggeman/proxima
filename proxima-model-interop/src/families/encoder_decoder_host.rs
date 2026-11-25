@@ -13,6 +13,8 @@ use proxima_numeric::NumericFormat;
 use proxima_primitives::sync::blocking::Mutex;
 use proxima_safetensors::{Manifest, SafetensorsParser};
 use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
+#[cfg(feature = "instrument")]
+use proxima_tensor::instrument::ArenaNodeStat;
 use proxima_tensor::op::{Extent, NodeId, Op};
 use proxima_tensor::spec::{
     CachedLayerRoots, STFT_COS_INPUT, STFT_SIN_INPUT, STFT_WINDOW_INPUT, StftLogMelConfig,
@@ -772,7 +774,15 @@ pub struct Model {
     /// the per-op GPU time of the encode program, one entry per profiled transcription (one pass each)
     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
     encode_timings: Mutex<Vec<Vec<omega::metal::OpGpuTiming>>>,
+    /// the CPU evaluator's per-node record of each encode, one entry per transcription; empty rows unless `PROXIMA_ARENA_PER_NODE=1`
+    #[cfg(feature = "instrument")]
+    encode_cpu_nodes: Mutex<Vec<CpuNodePass>>,
 }
+
+/// One encode's CPU per-node table (`instrument::arena_per_node_snapshot`) and the dot-tile
+/// outcomes (`instrument::dot_tile_decline_snapshot`) recorded over the same window.
+#[cfg(feature = "instrument")]
+pub type CpuNodePass = (Vec<(u32, ArenaNodeStat)>, Vec<(u32, &'static str, u64)>);
 
 impl Drop for Model {
     fn drop(&mut self) {
@@ -824,6 +834,8 @@ impl Model {
             profile_encode: false,
             #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
             encode_timings: Mutex::new(Vec::new()),
+            #[cfg(feature = "instrument")]
+            encode_cpu_nodes: Mutex::new(Vec::new()),
         }
     }
 
@@ -855,6 +867,14 @@ impl Model {
     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
     pub fn encode_op_timing_passes(&self) -> Vec<Vec<omega::metal::OpGpuTiming>> {
         self.encode_timings.lock().clone()
+    }
+
+    /// The CPU evaluator's per-node time of each encode, one [`CpuNodePass`] per transcription in run
+    /// order. Rows are empty unless the process runs with `PROXIMA_ARENA_PER_NODE=1` and the encode
+    /// ran on the CPU engine (`PROXIMA_SERVING_GPU_LAYERS=0`); callers assert the length before trusting it.
+    #[cfg(feature = "instrument")]
+    pub fn encode_cpu_node_passes(&self) -> Vec<CpuNodePass> {
+        self.encode_cpu_nodes.lock().clone()
     }
 
     fn resolve_store(&mut self) {
@@ -1120,9 +1140,19 @@ impl Model {
         {
             bound.op_timings = self.profile_encode.then(std::sync::OnceLock::new);
         }
+        #[cfg(feature = "instrument")]
+        {
+            proxima_tensor::instrument::reset_arena_per_node();
+            proxima_tensor::instrument::reset_dot_tile_decline();
+        }
         let encode_start = std::time::Instant::now();
         let mut values = bound.run("encode", &outputs, &[], runtime)?;
         let encode = encode_start.elapsed();
+        #[cfg(feature = "instrument")]
+        self.encode_cpu_nodes.lock().push((
+            proxima_tensor::instrument::arena_per_node_snapshot(),
+            proxima_tensor::instrument::dot_tile_decline_snapshot(),
+        ));
         #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
         if let Some(timings) = bound
             .op_timings
