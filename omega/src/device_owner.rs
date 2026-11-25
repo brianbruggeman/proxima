@@ -15,6 +15,7 @@ use std::thread::{self, JoinHandle, Thread};
 use std::vec::Vec;
 
 use proxima_core::ring::Ring;
+use proxima_numeric::NumericPolicy;
 use proxima_primitives::sync::mpsc::{Receiver, Sender, channel};
 use proxima_primitives::sync::{Notify, oneshot};
 use proxima_tensor::{Evaluated, NodeId, Op, QuantizedBlock};
@@ -338,6 +339,8 @@ pub enum StepOutcome<Block> {
     Done {
         evaluated: Evaluated,
         frame: Frame<Block>,
+        /// The owner's completion order for this step, counted from zero.
+        sequence: u64,
     },
     NeedResident {
         slots: Vec<u32>,
@@ -390,7 +393,10 @@ pub struct RegisterRequest<Block> {
     pub outputs: Vec<NodeId>,
     pub blocks: Vec<(Arc<str>, Block)>,
     pub resident_names: Vec<Arc<str>>,
-    pub config: RuntimeConfig,
+    pub numeric_policy: NumericPolicy,
+    pub exact_activations: bool,
+    /// `Some` plans through `plan_with_config`; `None` through `plan_with_activation_policy`.
+    pub config: Option<RuntimeConfig>,
 }
 
 /// Every message a [`DeviceOwner`] accepts; each carries its own typed reply.
@@ -435,6 +441,7 @@ pub struct DeviceOwner<R: GpuRuntime, Block> {
     key: DeviceKey,
     driver: CudaDriver<R>,
     registry: PlanRegistry<OwnedPlan<R, Block>>,
+    completed: u64,
 }
 
 impl<R: GpuRuntime, Block> DeviceOwner<R, Block>
@@ -448,6 +455,7 @@ where
             key,
             driver,
             registry: PlanRegistry::new(Arc::new(()), plan_capacity),
+            completed: 0,
         }
     }
 
@@ -459,7 +467,9 @@ where
     pub fn serve(&mut self, command: Command<Block>) -> OwnerFlow {
         match command {
             Command::Register { request, reply } => {
-                let _ = reply.send(self.register(*request));
+                if let Err(Ok(lease)) = reply.send(self.register(*request)) {
+                    let _ = self.registry.retire(&lease);
+                }
             }
             Command::Step {
                 lease,
@@ -493,13 +503,23 @@ where
                 .iter()
                 .map(|(name, block)| (name.as_ref(), QuantizedBlock::from(block)))
                 .collect::<Vec<_>>();
-            self.driver.plan_with_config(
-                &request.program,
-                &request.symbols,
-                &request.outputs,
-                &named,
-                &request.config,
-            )?
+            match &request.config {
+                Some(config) => self.driver.plan_with_config(
+                    &request.program,
+                    &request.symbols,
+                    &request.outputs,
+                    &named,
+                    config,
+                )?,
+                None => self.driver.plan_with_activation_policy(
+                    &request.program,
+                    &request.symbols,
+                    &request.outputs,
+                    request.numeric_policy,
+                    request.exact_activations,
+                    &named,
+                )?,
+            }
         };
         let resident = request
             .resident_names
@@ -507,18 +527,26 @@ where
             .map(AsRef::as_ref)
             .collect::<BTreeSet<&str>>();
         plan.mark_resident(&resident);
-        let owned = OwnedPlan {
-            plan,
-            blocks: request.blocks,
-        };
+        let blocks = request
+            .blocks
+            .into_iter()
+            .filter(|(name, _)| resident.contains(name.as_ref()))
+            .collect();
+        let owned = OwnedPlan { plan, blocks };
         Ok(self.registry.register(owned)?)
     }
 
     fn step(&mut self, lease: &PlanLease, frame: Frame<Block>) -> StepReply<Block> {
         let outcome =
             execute_registered_plan(&mut self.registry, lease, |owned| Self::run(owned, &frame))??;
+        let sequence = self.completed;
+        self.completed = self.completed.wrapping_add(1);
         Ok(match outcome {
-            Ok(evaluated) => StepOutcome::Done { evaluated, frame },
+            Ok(evaluated) => StepOutcome::Done {
+                evaluated,
+                frame,
+                sequence,
+            },
             Err(slots) => StepOutcome::NeedResident { slots, frame },
         })
     }

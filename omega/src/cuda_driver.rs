@@ -6591,9 +6591,11 @@ mod recording_runtime {
 
     use std::collections::HashSet;
 
+    use proxima_primitives::sync::oneshot;
+
     use crate::owner_config::OwnerConfig;
     use crate::device_owner::{
-        Completion, DeviceHandle, DeviceKey, DeviceOwner, Frame, RegisterRequest, ResidentRef,
+        Command, Completion, DeviceHandle, DeviceKey, DeviceOwner, Frame, RegisterRequest, ResidentRef,
         StepOutcome, block_on_thread, launch_on_thread, run_device_owner,
     };
 
@@ -6630,6 +6632,7 @@ mod recording_runtime {
         activation: &Arc<[Value]>,
     ) -> RegisterRequest<Held<Value>> {
         let (program, out) = two_layer_program();
+        let config = RuntimeConfig::default();
         RegisterRequest {
             program,
             symbols: Vec::new(),
@@ -6640,7 +6643,9 @@ mod recording_runtime {
                 ("x".into(), Held(Arc::clone(activation))),
             ],
             resident_names: vec!["w0".into(), "w1".into()],
-            config: RuntimeConfig::default(),
+            numeric_policy: config.numeric,
+            exact_activations: config.exact_activations,
+            config: Some(config),
         }
     }
 
@@ -6795,6 +6800,122 @@ mod recording_runtime {
         assert_eq!(done, 100, "every step succeeds whichever side of a release it lands on");
         assert!(released, "every release is answered");
         assert_eq!(runtime.event_threads().into_iter().collect::<HashSet<_>>().len(), 1);
+    }
+
+    #[test]
+    fn the_owner_replays_the_direct_driver_log_for_an_activation_policy_plan() {
+        let steps = 20;
+        let weight_first = weight_values((HIDDEN * INPUT) as usize, 1.0);
+        let weight_second = weight_values((OUTPUT * HIDDEN) as usize, 7.0);
+        let activation = weight_values(INPUT as usize, 3.0);
+        let (program, out) = two_layer_program();
+        let named = named_blocks(&weight_first, &weight_second, &activation);
+        let config = RuntimeConfig::default();
+        let direct = CudaDriver::<RecordingRuntime>::recording();
+        let mut plan = direct
+            .plan_with_activation_policy(&program, &[], &[out], config.numeric, config.exact_activations, &named)
+            .expect("the recording driver plans the two-layer program by activation policy");
+        plan.mark_resident(&BTreeSet::from(["w0", "w1"]));
+        for _ in 0..steps {
+            plan.execute_named(&named, None).expect("the direct plan executes");
+        }
+
+        let runtime = RecordingRuntime::new();
+        let owner_runtime = runtime.clone();
+        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), move |plan_capacity| {
+            recording_owner(owner_runtime, plan_capacity)
+        });
+        let mut request = owner_request(
+            &Arc::from(weight_first),
+            &Arc::from(weight_second),
+            &Arc::from(activation),
+        );
+        request.config = None;
+        let done = block_on_thread(drive_plan(handle.clone(), request, steps));
+        block_on_thread(handle.shutdown()).expect("the owner shuts down");
+        owner.join().expect("the owner thread ends");
+
+        assert_eq!(done, steps);
+        assert_eq!(runtime.event_log(), direct.events(), "the owner plans by activation policy as the direct driver does");
+    }
+
+    #[test]
+    fn a_register_whose_caller_left_frees_its_plan_slot() {
+        let weight_first = Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0));
+        let weight_second = Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0));
+        let activation = Arc::from(weight_values(INPUT as usize, 3.0));
+        let mut owner = recording_owner(RecordingRuntime::new(), 1);
+
+        let (reply, receiver) = oneshot::channel();
+        drop(receiver);
+        owner.serve(Command::Register {
+            request: Box::new(owner_request(&weight_first, &weight_second, &activation)),
+            reply,
+        });
+        let (reply, answer) = oneshot::channel();
+        owner.serve(Command::Register {
+            request: Box::new(owner_request(&weight_first, &weight_second, &activation)),
+            reply,
+        });
+
+        let second = block_on_thread(answer).expect("the owner answers the second register");
+        assert!(second.is_ok(), "the abandoned register's plan slot was freed");
+    }
+
+    #[test]
+    fn steps_report_their_owner_completion_sequence_in_order() {
+        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), move |plan_capacity| {
+            recording_owner(RecordingRuntime::new(), plan_capacity)
+        });
+        let request = owner_request(
+            &Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0)),
+            &Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0)),
+            &Arc::from(weight_values(INPUT as usize, 3.0)),
+        );
+        let activation = Arc::clone(&request.blocks[2].1.0);
+
+        let sequences = block_on_thread(async {
+            let lease = handle.register(request).await.expect("the owner registers the plan");
+            let completion = Completion::new();
+            let mut frame = Frame::default();
+            let mut sequences = Vec::new();
+            for _ in 0..3 {
+                frame.clear();
+                frame.residents.extend((0..2).map(|slot| ResidentRef { slot, address: 0, len: 0 }));
+                frame.dynamic.push(("x".into(), Held(Arc::clone(&activation))));
+                match handle.step(&lease, frame, &completion).await.expect("the owner steps the plan") {
+                    StepOutcome::Done { frame: returned, sequence, .. } => {
+                        frame = returned;
+                        sequences.push(sequence);
+                    }
+                    StepOutcome::NeedResident { .. } => panic!("registered weights are resident"),
+                }
+            }
+            sequences
+        });
+        block_on_thread(handle.shutdown()).expect("the owner shuts down");
+        owner.join().expect("the owner thread ends");
+
+        assert_eq!(sequences, vec![0, 1, 2], "the owner numbers its completed steps from zero");
+    }
+
+    #[test]
+    fn a_registered_plan_keeps_no_reference_to_its_dynamic_block() {
+        let weight_first = Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0));
+        let weight_second = Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0));
+        let activation = Arc::from(weight_values(INPUT as usize, 3.0));
+        let mut owner = recording_owner(RecordingRuntime::new(), 1);
+
+        let (reply, answer) = oneshot::channel();
+        owner.serve(Command::Register {
+            request: Box::new(owner_request(&weight_first, &weight_second, &activation)),
+            reply,
+        });
+        let lease = block_on_thread(answer).expect("the owner answers").expect("the owner registers the plan");
+
+        assert_eq!(Arc::strong_count(&activation), 1, "the dynamic block is not retained");
+        assert_eq!(Arc::strong_count(&weight_first), 2, "a resident block is retained");
+        drop(lease);
     }
 
     #[test]
