@@ -624,7 +624,7 @@ extern "C" __global__ void __launch_bounds__(256, 2) omega_cuda_reduce_r3_ax0_1_
         const long long feature = feature_first + warp_feature * 32 + row * 8 + group;
         const long long token = token_first + warp_token * 32 + col * 8 + quad * 2 + pair;
         if (feature >= feature_total || token >= token_total) { continue; }
-        long long output_coord[2];
+        long long output_coord[2] = {0};
         long long feature_rest = feature;
         long long token_rest = token;
         output_coord[1] = feature_rest % u.output_extents[1]; feature_rest /= u.output_extents[1];
