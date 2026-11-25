@@ -6391,6 +6391,10 @@ fn assert_whole_attention_parity(rows: u32, keys: u32, heads: u32, head_dim: u32
         identities.iter().any(|identity| identity.contains("omega_cuda_cached_attention_static") && identity.contains("_wp")),
         "the whole-plane attention kernel is absent from the cuda plan, the chain ran unfused: {identities:?}"
     );
+    assert!(
+        identities.iter().any(|identity| identity.contains("omega_cuda_cached_attention_static") && identity.contains("_wp") && identity.contains("_tq32")),
+        "{rows} query rows is past the tile threshold, so the whole-plane attention must take the tiled entry, not the per-row one: {identities:?}"
+    );
     assert!(relative < 1e-4, "cuda whole attention vs the cpu chain: relative={relative}, tolerance 1e-4");
 }
 

@@ -16,7 +16,7 @@ use crate::cuda::{
 };
 use crate::cuda_cached_attention_mma::{MMA_ATTENTION_BODY, MMA_ATTENTION_HELPERS};
 use crate::cuda_cached_attention_tiled::{
-    TILED_ATTENTION_BODY, cached_attention_tile_rows, cached_attention_uses_mma,
+    cached_attention_tile_rows, cached_attention_uses_mma, tiled_attention_body,
 };
 use crate::error::EmitError;
 
@@ -89,7 +89,11 @@ pub(crate) fn render_cached_attention_cuda(
 }
 
 fn unsplit_tail(resolved: &BoundOp, numeric_policy: NumericPolicy) -> String {
-    let body = if cached_attention_uses_mma(&resolved.kind, numeric_policy) { MMA_ATTENTION_BODY } else { TILED_ATTENTION_BODY };
+    let body = if cached_attention_uses_mma(&resolved.kind, numeric_policy) {
+        String::from(MMA_ATTENTION_BODY)
+    } else {
+        tiled_attention_body(&resolved.kind)
+    };
     match cached_attention_tile_rows(&resolved.kind, numeric_policy) {
         Some(tile_rows) => format!("    constexpr int tile_rows = {tile_rows};\n{body}"),
         None => per_row_body(planes_of(&resolved.kind)),

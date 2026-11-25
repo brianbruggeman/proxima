@@ -1,25 +1,44 @@
+use alloc::format;
+use alloc::string::{String, ToString};
+
+use proxima_numeric::NumericPolicy;
 use proxima_tensor::{BoundOpKind, ScorePlanes};
-use proxima_numeric::{NumericPolicy};
+
+use crate::cuda::target::Target;
 
 const ATTENTION_TILE_ITEMS: u64 = 32;
 
 pub(crate) const ATTENTION_TILE_MIN_ROWS: u64 = 16;
 
-const ATTENTION_TILE_HEAD_DIM: u64 = 128;
+/// Floats one warp stages per row: every lane moves one vector load, so a tiled row is at most this
+/// wide. A paired row fills it exactly (its lanes score one key each and own four dims each);
+/// a whole plane may be narrower, and the lanes past its width idle.
+pub(crate) const LANE_FLOATS: u64 = Target::CUDA.wave * 4;
 
 const MMA_HEAD_DIMS: core::ops::RangeInclusive<u64> = 64..=256;
 
 const MMA_HEAD_DIM_STEP: u64 = 16;
 
+/// The tensor-core body reads the paired planes and rounds Q, K and V to half precision, which only a
+/// policy that quantizes activations accepts; a whole-plane op stays on the full-precision
+/// shared-memory body.
 pub(crate) fn cached_attention_uses_mma(kind: &BoundOpKind, numeric_policy: NumericPolicy) -> bool {
-    numeric_policy.activation_quantization && cached_attention_tile_rows(kind, numeric_policy).is_some()
+    numeric_policy.activation_quantization
+        && !is_whole(kind)
+        && cached_attention_tile_rows(kind, numeric_policy).is_some()
 }
 
-fn head_dim_fits(head_dim: u64, numeric_policy: NumericPolicy) -> bool {
-    if numeric_policy.activation_quantization {
-        MMA_HEAD_DIMS.contains(&head_dim) && head_dim.is_multiple_of(MMA_HEAD_DIM_STEP)
-    } else {
-        head_dim == ATTENTION_TILE_HEAD_DIM
+fn is_whole(kind: &BoundOpKind) -> bool {
+    matches!(kind, BoundOpKind::CachedAttention { planes: ScorePlanes::Whole, .. })
+}
+
+fn head_dim_fits(head_dim: u64, planes: ScorePlanes, numeric_policy: NumericPolicy) -> bool {
+    match planes {
+        ScorePlanes::Whole => head_dim > 0 && head_dim.is_multiple_of(4) && head_dim <= LANE_FLOATS,
+        _ if numeric_policy.activation_quantization => {
+            MMA_HEAD_DIMS.contains(&head_dim) && head_dim.is_multiple_of(MMA_HEAD_DIM_STEP)
+        }
+        _ => head_dim == LANE_FLOATS,
     }
 }
 
@@ -35,23 +54,66 @@ pub(crate) fn cached_attention_tile_rows(kind: &BoundOpKind, numeric_policy: Num
     else {
         return None;
     };
-    if *planes == ScorePlanes::Whole {
-        return None;
-    }
-    let vector_planes = rotary_dim % 8 == 0 && (head_dim - rotary_dim) % 4 == 0;
+    let vector_planes = match planes {
+        ScorePlanes::Whole => true,
+        _ => rotary_dim % 8 == 0 && (head_dim - rotary_dim) % 4 == 0,
+    };
     let fits = (1..=ATTENTION_TILE_ITEMS).contains(query_groups)
-        && head_dim_fits(*head_dim, numeric_policy)
+        && head_dim_fits(*head_dim, *planes, numeric_policy)
         && vector_planes;
     (fits && *query_rows >= ATTENTION_TILE_MIN_ROWS).then(|| ATTENTION_TILE_ITEMS / query_groups)
 }
 
-pub(crate) const TILED_ATTENTION_BODY: &str = "\
+const PAIRED_QUERY_LOAD: &str = "\
+dimension < pair_dim ? *(const float4*)&in0[base + dimension]
+                : dimension < 2 * pair_dim ? *(const float4*)&in1[base + dimension - pair_dim]
+                : *(const float4*)&pass_query[pass_base + dimension - rotary_dim]";
+
+const PAIRED_KEY_LOAD: &str = "\
+dimension < pair_dim ? (cached ? cached_key_at4(in2, kbase + dimension) : *(const float4*)&in4[kbase + dimension])
+                    : dimension < 2 * pair_dim ? (cached ? cached_key_at4(in3, kbase + dimension - pair_dim) : *(const float4*)&in5[kbase + dimension - pair_dim])
+                    : *(const float4*)&(cached ? pass_cached_key : pass_new_key)[kpass + dimension - rotary_dim]";
+
+const WHOLE_QUERY_LOAD: &str = "\
+*(const float4*)&in0[base + dimension]";
+
+const WHOLE_KEY_LOAD: &str = "\
+(cached ? cached_key_at4(in2, kbase + dimension) : *(const float4*)&in4[kbase + dimension])";
+
+/// The shared-memory tiled body for one op: the template with its row width, chunk count, stage
+/// stride and plane loads taken from the bound `head_dim` and `planes`. A paired op at the full
+/// lane width renders byte-for-byte the text the body had when that width was a literal.
+pub(crate) fn tiled_attention_body(kind: &BoundOpKind) -> String {
+    let BoundOpKind::CachedAttention { head_dim, planes, .. } = kind else {
+        return String::new();
+    };
+    let (query_load, key_load) = match planes {
+        ScorePlanes::Whole => (WHOLE_QUERY_LOAD, WHOLE_KEY_LOAD),
+        _ => (PAIRED_QUERY_LOAD, PAIRED_KEY_LOAD),
+    };
+    let idle_floats = LANE_FLOATS.saturating_sub(*head_dim);
+    let (stage_pad, dead_lane) = if idle_floats == 0 {
+        (String::new(), "")
+    } else {
+        (format!(" + {idle_floats}"), " || lane >= dim_chunks")
+    };
+    TILED_ATTENTION_TEMPLATE
+        .replace("@head_width@", &head_dim.to_string())
+        .replace("@dim_chunks@", &(head_dim / 4).to_string())
+        .replace("@key_stride@", &(head_dim + 4).to_string())
+        .replace("@stage_pad@", &stage_pad)
+        .replace("@dead_lane@", dead_lane)
+        .replace("@query_load@", query_load)
+        .replace("@key_load@", key_load)
+}
+
+const TILED_ATTENTION_TEMPLATE: &str = "\
     constexpr int warps = 4;
     constexpr int per_warp = 8;
     constexpr int items = tile_rows * (int)query_groups;
     constexpr int key_tile = 32;
-    constexpr int key_stride = 132;
-    constexpr int dim_chunks = 32;
+    constexpr int key_stride = @key_stride@;
+    constexpr int dim_chunks = @dim_chunks@;
     const float negative_infinity = -__int_as_float(0x7f800000);
     const int tid = (int)threadIdx.x;
     const int warp = tid >> 5;
@@ -66,8 +128,8 @@ pub(crate) const TILED_ATTENTION_BODY: &str = "\
         const long long relative = key - cached_key_rows - row;
         return key < cached_key_rows ? relative >= cached_lower : relative <= new_upper;
     };
-    __shared__ __align__(16) float tile_query[warps * per_warp * 128];
-    __shared__ __align__(16) float tile_stage[key_tile * key_stride];
+    __shared__ __align__(16) float tile_query[warps * per_warp * @head_width@];
+    __shared__ __align__(16) float tile_stage[key_tile * key_stride@stage_pad@];
     __shared__ __align__(16) float tile_weight[warps * per_warp * key_tile];
     for (int index = tid; index < items * dim_chunks; index += (int)blockDim.x) {
         const int item = index / dim_chunks;
@@ -78,11 +140,9 @@ pub(crate) const TILED_ATTENTION_BODY: &str = "\
         const long long pass_base = row * (kv_heads * query_groups * pass_dim) + head * pass_dim;
         float4 value = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         if (row <= last_row) {
-            value = dimension < pair_dim ? *(const float4*)&in0[base + dimension]
-                : dimension < 2 * pair_dim ? *(const float4*)&in1[base + dimension - pair_dim]
-                : *(const float4*)&pass_query[pass_base + dimension - rotary_dim];
+            value = @query_load@;
         }
-        *(float4*)&tile_query[item * 128 + dimension] = value;
+        *(float4*)&tile_query[item * @head_width@ + dimension] = value;
     }
     long long item_row[per_warp];
     float running_max[per_warp];
@@ -113,9 +173,7 @@ pub(crate) const TILED_ATTENTION_BODY: &str = "\
                 const long long key_row = cached ? key : key - cached_key_rows;
                 const long long kbase = key_row * (kv_heads * pair_dim) + kv_head * pair_dim;
                 const long long kpass = key_row * (kv_heads * pass_dim) + kv_head * pass_dim;
-                key_value = dimension < pair_dim ? (cached ? cached_key_at4(in2, kbase + dimension) : *(const float4*)&in4[kbase + dimension])
-                    : dimension < 2 * pair_dim ? (cached ? cached_key_at4(in3, kbase + dimension - pair_dim) : *(const float4*)&in5[kbase + dimension - pair_dim])
-                    : *(const float4*)&(cached ? pass_cached_key : pass_new_key)[kpass + dimension - rotary_dim];
+                key_value = @key_load@;
             }
             *(float4*)&tile_stage[offset * key_stride + dimension] = key_value;
         }
@@ -127,7 +185,7 @@ pub(crate) const TILED_ATTENTION_BODY: &str = "\
             const float4 key_chunk = *(const float4*)&tile_stage[lane * key_stride + chunk * 4];
             #pragma unroll
             for (int slot = 0; slot < per_warp; slot++) {
-                const float4 query_chunk = *(const float4*)&tile_query[(warp * per_warp + slot) * 128 + chunk * 4];
+                const float4 query_chunk = *(const float4*)&tile_query[(warp * per_warp + slot) * @head_width@ + chunk * 4];
                 score[slot] += query_chunk.x * key_chunk.x + query_chunk.y * key_chunk.y
                     + query_chunk.z * key_chunk.z + query_chunk.w * key_chunk.w;
             }
@@ -192,7 +250,7 @@ pub(crate) const TILED_ATTENTION_BODY: &str = "\
     for (int slot = 0; slot < per_warp; slot++) {
         float total = running_sum[slot];
         for (int offset = 16; offset > 0; offset >>= 1) { total += __shfl_xor_sync(PROXIMA_ALL_LANES, total, offset); }
-        if (item_row[slot] < 0) { continue; }
+        if (item_row[slot] < 0@dead_lane@) { continue; }
         const int item = warp * per_warp + slot;
         const long long head = kv_head * query_groups + item % (int)query_groups;
         const long long vector_index = item_row[slot] * (kv_heads * query_groups) + head;

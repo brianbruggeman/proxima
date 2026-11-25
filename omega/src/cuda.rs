@@ -5123,7 +5123,7 @@ mod tests {
 
     #[test]
     fn whole_attention_kernel_scores_one_head_dim_plane_with_no_odd_reads_and_no_ninth_operand() {
-        let kernel = emit_cuda(&whole_attention_op(1500, 6, 64), &no_packed()).expect("whole attention emits");
+        let kernel = emit_cuda(&whole_attention_op(ATTENTION_TILE_MIN_ROWS - 1, 6, 64), &no_packed()).expect("whole attention emits");
 
         assert!(kernel.source.contains("constexpr long long pair_dim = head_dim;"));
         assert!(kernel.source.contains("partial += in0[qbase + pair] * (cached ? cached_key_at(in2, kbase + pair) : in4[kbase + pair]);"));
@@ -5161,14 +5161,71 @@ mod tests {
     }
 
     #[test]
-    fn whole_attention_above_the_tile_threshold_stays_one_block_per_vector_never_the_paired_tiled_body() {
-        let rows = ATTENTION_TILE_MIN_ROWS * 94;
+    fn whole_attention_below_the_tile_threshold_stays_one_block_per_vector() {
+        let rows = ATTENTION_TILE_MIN_ROWS - 1;
         let kernel = emit_cuda(&whole_attention_op(rows, 8, 128), &no_packed()).expect("whole attention emits");
 
         assert!(!kernel.entry.contains("_tq"), "{}", kernel.entry);
         assert_eq!(kernel.grid.blocks(), rows * 8);
         assert_eq!(kernel.grid.block_width(), Some(ATTENTION_WARPS * WARP_SIZE));
         assert!(kernel.prologue.is_empty(), "a whole bind has no split or merge dispatch");
+    }
+
+    #[test]
+    fn whole_attention_above_the_tile_threshold_stages_k_and_v_tiles_once_per_row_tile() {
+        let rows = 1500;
+        let kernel = emit_cuda(&whole_attention_op(rows, 6, 64), &no_packed()).expect("whole attention emits");
+
+        assert!(kernel.entry.contains("_wp") && kernel.entry.contains("_tq32"), "{}", kernel.entry);
+        assert!(kernel.source.contains("constexpr int tile_rows = 32;"));
+        assert_eq!(kernel.grid.blocks(), rows.div_ceil(32) * 6);
+        assert_eq!(kernel.grid.block_width(), Some(ATTENTION_WARPS * WARP_SIZE));
+        assert!(kernel.prologue.is_empty(), "a whole bind has no split or merge dispatch");
+        for present in ["tile_stage[key_tile * key_stride + 64]", "constexpr int dim_chunks = 16;", "constexpr int key_stride = 68;"] {
+            assert!(kernel.source.contains(present), "`{present}` derives from the bound head_dim 64");
+        }
+        for absent in ["in1[", "in5[", "in8", "pass_query[pass_base +", "mma", "@"] {
+            assert!(!kernel.source.contains(absent), "`{absent}` has no place in a 64-wide tiled whole kernel");
+        }
+        let body = crate::cuda_cached_attention_tiled::tiled_attention_body(&whole_attention_op(rows, 6, 64).kind);
+        assert!(!body.contains("128"), "the tiled body derives its width from the op, no literal lane width");
+        assert!(kernel.source.ends_with(&body));
+    }
+
+    #[test]
+    fn whole_attention_off_the_tiled_widths_stays_per_row_above_the_threshold() {
+        for head_dim in [132, 38] {
+            let kernel = emit_cuda(&whole_attention_op(64, 6, head_dim), &no_packed()).expect("whole attention emits");
+
+            assert!(!kernel.entry.contains("_tq"), "head_dim {head_dim}: {}", kernel.entry);
+        }
+    }
+
+    #[test]
+    fn whole_attention_never_takes_the_reduced_precision_tensor_core_body_under_a_quantizing_policy() {
+        let policy = NumericPolicy::bit_exact().with_activation_quantization(true);
+        let kernel = emit_cuda_with_policy(&whole_attention_op(64, 6, 64), &no_packed(), policy).expect("whole attention emits");
+
+        assert!(kernel.entry.contains("_tq32") && !kernel.entry.contains("_mma"), "{}", kernel.entry);
+        assert!(!kernel.source.contains("mma"));
+    }
+
+    #[test]
+    fn paired_attention_at_the_full_lane_width_renders_the_tiled_body_byte_for_byte_as_before() {
+        let mut kind = attention_kind(8, 0, 128, 128);
+        let BoundOpKind::CachedAttention { query_rows, new_key_rows, query_groups, .. } = &mut kind else {
+            unreachable!("attention_kind always builds a CachedAttention kind");
+        };
+        *query_rows = ATTENTION_TILE_MIN_ROWS * 4;
+        *new_key_rows = ATTENTION_TILE_MIN_ROWS * 4;
+        *query_groups = 2;
+        let before = include_str!("cuda_cached_attention_tiled_paired_128.cu");
+
+        assert_eq!(crate::cuda_cached_attention_tiled::tiled_attention_body(&kind), before);
+        let op = BoundOp { extents: vec![64, 1, 2, 128], ..attention_op_with(kind) };
+        let kernel = emit_cuda(&op, &no_packed()).expect("paired emits");
+        assert!(kernel.entry.contains("_tq16") && !kernel.entry.contains("_wp"), "{}", kernel.entry);
+        assert!(kernel.source.ends_with(before), "the emitted paired kernel carries the pre-derivation body verbatim");
     }
 
     #[test]
