@@ -5467,7 +5467,8 @@ pub mod rocm {
     //! sonames tried), the element-window arithmetic and the kernel-parameter
     //! order.
     //! Numerical parity on a real device is a separate gate that needs the
-    //! hardware; [`HipRuntime::smoke_add_one`] is that gate's entry point.
+    //! hardware; [`CudaDriver::smoke_add_one`](super::CudaDriver::smoke_add_one) on a
+    //! `CudaDriver<HipRuntime>` (from [`shared_driver`]) is that gate's entry point.
     //!
     //! # Scope
     //!
@@ -6376,39 +6377,6 @@ pub mod rocm {
         }
     }
 
-    /// A hand-authored add-one kernel: the driver-boundary oracle, deliberately
-    /// not produced by the emitter so a failure isolates the launch path from the
-    /// renderer. Its layout is the same `inputs, output, uniforms` contract every
-    /// emitted kernel follows.
-    fn add_one_kernel(elements: usize) -> Result<HipKernel, HipDriverError> {
-        Ok(HipKernel {
-            source: String::from(
-                "extern \"C\" __global__ void proxima_add_one(\n\
-                 \x20   const float *in, float *out, const unsigned int *u\n\
-                 ) {\n\
-                 \x20   unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;\n\
-                 \x20   if (i < u[0]) out[i] = in[i] + 1.0f;\n\
-                 }\n",
-            ),
-            entry: String::from("proxima_add_one"),
-            bindings: vec![
-                Binding::Input(proxima_tensor::NodeId(0)),
-                Binding::Output(proxima_tensor::NodeId(1)),
-                Binding::Uniforms,
-            ],
-            grid: crate::cuda::HipGridSpec::launch(
-                proxima_tensor::NodeId(1),
-                elements as u64,
-                None,
-                "add_one",
-            )
-            .map_err(|_| HipDriverError::IdleLaunch)?,
-            extra_outputs: Vec::new(),
-            prologue: Vec::new(),
-            route_compaction_words: 0,
-        })
-    }
-
     /// Probe kernel: writes the device's `warpSize`, so the wave width the
     /// emitter is built for comes from the hardware, never from a card table.
     fn warp_size_kernel() -> Result<HipKernel, HipDriverError> {
@@ -6743,33 +6711,6 @@ pub mod rocm {
             unsafe { self.launch(arguments, shape) }?;
             self.synchronize()?;
             Ok(self.download(&lanes)?.first().copied().unwrap_or(0))
-        }
-
-        /// The driver-boundary smoke: the hand-authored add-one kernel (a float kernel, so call it with
-        /// four-byte floats) through build, upload, launch, synchronize and readback on this runtime.
-        ///
-        /// # Errors
-        /// [`HipDriverError::InputTooLarge`] past the launch ABI, and any build, launch or copy error.
-        pub fn smoke_add_one<Element: DeviceElement>(&self, input: &[Element]) -> Result<Vec<Element>, HipDriverError> {
-            if input.is_empty() {
-                return Ok(Vec::new());
-            }
-            let kernel = add_one_kernel(input.len())?;
-            let count = u32::try_from(input.len()).map_err(|_| HipDriverError::InputTooLarge(input.len()))?;
-            let function = self.build_function(&kernel)?;
-            let device_input = self.upload(input)?;
-            let mut device_output = self.alloc_zeros::<Element>(input.len())?;
-            let uniforms = self.upload(&count.to_ne_bytes())?;
-            let too_large = HipDriverError::GridTooLarge { threads: kernel.grid.threads() };
-            let grid = u32::try_from(kernel.grid.blocks()).map_err(|_| too_large)?;
-            let width = u32::try_from(kernel.grid.block_width_or_default()).unwrap_or(u32::MAX);
-            let mut arguments = self.launch_arguments(&function);
-            arguments.push(&device_input).push_mut(&mut device_output).push(&uniforms);
-            let shape = LaunchShape { grid_dim: (grid, 1, 1), block_dim: (width, 1, 1), shared_mem_bytes: 0 };
-            // SAFETY: the add-one kernel's parameters are input, output, uniforms, as pushed.
-            unsafe { self.launch(arguments, shape) }?;
-            self.synchronize()?;
-            self.download(&device_output)
         }
 
         fn slice_from<Element: DeviceElement>(buffer: HipBuffer, len: usize) -> HipSlice<Element> {
@@ -7270,11 +7211,11 @@ pub mod rocm {
 
         #[test]
         fn the_smoke_matches_the_host_oracle_when_a_device_is_present() {
-            let Ok(runtime) = HipRuntime::open(0, None) else {
+            let Ok(driver) = shared_driver(&RuntimeConfig::default(), None) else {
                 return;
             };
             let input = [0.0f32, 1.0, -2.5, 42.0, 1e6];
-            let output = runtime.smoke_add_one(&input).expect("the smoke kernel runs");
+            let output = driver.smoke_add_one(&input).expect("the shared smoke kernel runs through hiprtc");
             assert_eq!(output.len(), input.len());
             for (index, (found, expected)) in output.iter().zip(input.iter()).enumerate() {
                 assert!(
