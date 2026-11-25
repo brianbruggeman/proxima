@@ -5396,6 +5396,7 @@ pub mod rocm {
 
     use crate::config::RuntimeConfig;
     use crate::cuda::{EmitDevice, HipKernel, HipWave, emit_hip_at_wave};
+    use crate::kernel_params::{KernelArgument, KernelParams};
     use crate::lowering::PackedOperands;
     use proxima_numeric::NumericPolicy;
     use proxima_tensor::bind::kv_read_only_by_fused_attention;
@@ -5867,6 +5868,18 @@ pub mod rocm {
         pointer: *mut c_void,
         len: usize,
         owner: core::marker::PhantomData<&'buffer HipBuffer>,
+    }
+
+    impl KernelArgument for HipBuffer {
+        fn slot(&self) -> *mut c_void {
+            (&raw const self.pointer).cast_mut().cast::<c_void>()
+        }
+    }
+
+    impl KernelArgument for HipView<'_> {
+        fn slot(&self) -> *mut c_void {
+            (&raw const self.pointer).cast_mut().cast::<c_void>()
+        }
     }
 
     impl HipView<'_> {
@@ -6410,12 +6423,11 @@ pub mod rocm {
             let device_output = self.allocate_f32(output_len)?;
             let device_uniforms = self.upload_bytes(uniforms)?;
 
-            let mut parameters: Vec<*mut c_void> = device_inputs
-                .iter()
-                .map(|input| (&raw const input.pointer).cast_mut().cast::<c_void>())
-                .collect();
-            parameters.push((&raw const device_output.pointer).cast_mut().cast::<c_void>());
-            parameters.push((&raw const device_uniforms.pointer).cast_mut().cast::<c_void>());
+            let mut parameters = KernelParams::with_capacity(device_inputs.len() + 2);
+            for input in &device_inputs {
+                parameters.push(input);
+            }
+            parameters.push(&device_output).push(&device_uniforms);
 
             // SAFETY: every parameter points at a live `*mut c_void` holding a
             // device allocation of the size the emitted kernel expects, and the
