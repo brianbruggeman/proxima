@@ -23,6 +23,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
 use xxhash_rust::xxh3::Xxh3;
@@ -39,6 +40,9 @@ pub const STORE_LAYOUT_VERSION: u32 = 1;
 
 const STORE_EXTENSION: &str = "safetensors";
 const TORN_EXTENSION: &str = "tmp";
+
+/// Distinguishes the temp files of threads in one process publishing the same key.
+static NEXT_TORN: AtomicU64 = AtomicU64::new(0);
 
 /// The `xxh3` digest naming the store entry for one source checkpoint under one
 /// ordered rule list at one alignment. Inputs: the source's header bytes (the
@@ -124,7 +128,8 @@ pub fn lookup(dir: &Path, key: u128) -> Option<PathBuf> {
 /// fails; the temp file is removed first.
 pub fn publish(dir: &Path, key: u128, bytes: &[u8]) -> Result<PathBuf, InteropError> {
     fs::create_dir_all(dir)?;
-    let torn = dir.join(format!("{key:032x}.{}.{TORN_EXTENSION}", process::id()));
+    let sequence = NEXT_TORN.fetch_add(1, Ordering::Relaxed);
+    let torn = dir.join(format!("{key:032x}.{}.{sequence}.{TORN_EXTENSION}", process::id()));
     let target = store_path(dir, key);
     let written = write_synced(&torn, bytes).and_then(|()| fs::rename(&torn, &target));
     if let Err(error) = written {
