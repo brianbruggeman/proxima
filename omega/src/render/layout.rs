@@ -116,6 +116,15 @@ impl<'dialect, D: Dialect> Tokens<'dialect, D> {
         (1u32 << self.top_bit()) - 1
     }
 
+    fn admit(&self, layout: &FloatLayout) -> Result<(), Refusal> {
+        if u32::from(layout.width()) > self.word_bits() {
+            return Err(Refusal::CodeWiderThanWord {
+                width: layout.width(),
+            });
+        }
+        Ok(())
+    }
+
     fn word_head(&self, name: &str, parameters: &str) -> String {
         self.dialect.function(self.word, name, parameters)
     }
@@ -263,6 +272,7 @@ pub fn load<D: Dialect>(
     name: &str,
 ) -> Result<String, Refusal> {
     let tokens = Tokens::new(dialect, wide);
+    tokens.admit(&layout)?;
     if !layout.is_float() {
         return integer_load(&tokens, &layout, name);
     }
@@ -439,6 +449,7 @@ pub fn store<D: Dialect>(
     name: &str,
 ) -> Result<String, Refusal> {
     let tokens = Tokens::new(dialect, wide);
+    tokens.admit(&layout)?;
     if !layout.is_float() {
         return integer_store(&tokens, &layout, name);
     }
@@ -667,6 +678,7 @@ pub fn unpack<D: Dialect>(
     name: &str,
 ) -> Result<String, Refusal> {
     let tokens = Tokens::new(dialect, wide);
+    tokens.admit(&layout)?;
     let suffix = tokens.suffix;
     let width = u32::from(layout.width());
     let value_name = format!("{name}_value");

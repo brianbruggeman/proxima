@@ -120,6 +120,84 @@ fn the_nan_branch_is_byte_identical_to_the_captured_base_output_for_every_layout
 }
 
 #[test]
+fn every_fixture_file_is_read_by_some_comparison() {
+    let mut expected: Vec<String> = Vec::new();
+    for (layout, name) in held_by_the_wide_scalar() {
+        expected.push(format!("{name}.load.msl"));
+        expected.push(format!("{name}.store.msl"));
+        expected.push(format!("{name}.unpack.msl"));
+        if layout.is_float() {
+            expected.push(format!("{name}.nan.msl"));
+        }
+    }
+    let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/msl_layout");
+
+    let mut present: Vec<String> = std::fs::read_dir(&directory)
+        .expect("the fixture directory exists")
+        .map(|entry| {
+            entry
+                .expect("a readable directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    present.sort();
+    expected.sort();
+
+    assert!(!present.is_empty(), "no fixture was found");
+    assert_eq!(present, expected);
+}
+
+#[test]
+fn a_layout_wider_than_the_wide_scalar_is_refused_by_load_store_and_unpack_with_its_width() {
+    let word_bits = wide().layout().width();
+    let wider: Vec<(FloatLayout, &str)> = NAMED_LAYOUTS
+        .iter()
+        .filter(|(layout, _)| layout.width() > word_bits)
+        .copied()
+        .collect();
+
+    assert!(
+        !wider.is_empty(),
+        "no named layout is wider than the wide scalar"
+    );
+    for (layout, name) in wider {
+        let refusal = Refusal::CodeWiderThanWord {
+            width: layout.width(),
+        };
+        assert_eq!(
+            render::load(&Msl, wide(), layout, "probe"),
+            Err(refusal),
+            "{name} load"
+        );
+        assert_eq!(
+            render::store(&Msl, wide(), layout, "probe"),
+            Err(refusal),
+            "{name} store"
+        );
+        assert_eq!(
+            render::unpack(&Msl, wide(), layout, "probe"),
+            Err(refusal),
+            "{name} unpack"
+        );
+        assert!(
+            layout_load_msl(layout, "probe").starts_with("#error"),
+            "{name} msl load"
+        );
+        assert!(
+            layout_store_msl(layout, "probe").starts_with("#error"),
+            "{name} msl store"
+        );
+        assert_eq!(
+            layout_unpack_msl(layout, "probe"),
+            None,
+            "{name} msl unpack"
+        );
+    }
+}
+
+#[test]
 fn an_element_wider_than_a_byte_that_straddles_no_two_bytes_is_refused_with_its_width() {
     let seventeen_bits = FloatLayout {
         exponent_bits: 5,
