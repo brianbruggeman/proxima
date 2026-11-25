@@ -40,18 +40,15 @@ async fn cuda_device_name_and_literal_sync_async_output_match() {
     let synchronous_device = driver
         .device_snapshot()
         .expect("device name should resolve");
-    assert_eq!(synchronous_device.ordinal, 0);
-    assert!(!synchronous_device.name.is_empty());
+    assert!(synchronous_device.identity.starts_with("cuda:0:"));
+    assert!(synchronous_device.identity.len() > "cuda:0:".len());
 
     let service = CudaGpuService::start(&OwnerConfig::default()).expect("CUDA owner should start");
     let owner_device = service
         .device_snapshot()
         .await
         .expect("owner device should resolve");
-    assert_eq!(
-        (owner_device.ordinal, &owner_device.name),
-        (0, &synchronous_device.name)
-    );
+    assert_eq!(owner_device.identity, synchronous_device.identity);
     let program = negate_program();
     let values = [3.0_f32, -4.0];
     let named = [("values", QuantizedBlock::Float32(&values))];
@@ -103,7 +100,7 @@ async fn cuda_device_name_and_literal_sync_async_output_match() {
     eprintln!(
         "{}",
         serde_json::json!({
-            "device_ordinal": activity.ordinal, "device_name": activity.name,
+            "device_identity": activity.identity,
             "job": "literal-parity", "generation": lease.generation(),
             "submission_index": 0, "owner_completion_sequence": receipt.completion_sequence, "status": "ok",
             "sync_output": synchronous.root(), "async_output": asynchronous.root(),
@@ -122,8 +119,8 @@ async fn cuda_device_completions_follow_submission_order() {
         .await
         .expect("owner device should resolve");
     assert_eq!(
-        device.name,
-        driver.device_snapshot().expect("device name").name
+        device.identity,
+        driver.device_snapshot().expect("device identity").identity
     );
     let program = negate_program();
     let first = [1.0_f32, 2.0];
@@ -215,7 +212,7 @@ async fn cuda_device_completions_follow_submission_order() {
         eprintln!(
             "{}",
             serde_json::json!({
-                "device_ordinal": activity.ordinal, "device_name": activity.name,
+                "device_identity": activity.identity,
                 "job": format!("ordered-{submission_index}"), "generation": lease.generation(),
                 "submission_index": submission_index, "owner_completion_sequence": owner_completion_sequence,
                 "status": "ok", "output": values,
@@ -239,8 +236,8 @@ async fn cuda_device_over_budget_refuses_before_upload_or_launch() {
         .await
         .expect("owner device should resolve");
     assert_eq!(
-        before.name,
-        driver.device_snapshot().expect("device name").name
+        before.identity,
+        driver.device_snapshot().expect("device identity").identity
     );
     assert_eq!((before.graph_uploads, before.graph_launches), (0, 0));
     let values = [1.0_f32, 2.0];
@@ -259,7 +256,7 @@ async fn cuda_device_over_budget_refuses_before_upload_or_launch() {
     eprintln!(
         "{}",
         serde_json::json!({
-            "device_ordinal": after.ordinal, "device_name": after.name,
+            "device_identity": after.identity,
             "job": "over-budget", "generation": null,
             "submission_index": null, "completion_index": null,
             "status": "refused-over-capacity", "source_bytes": 14, "byte_limit": 4,

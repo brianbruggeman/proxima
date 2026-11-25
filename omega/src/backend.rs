@@ -2351,15 +2351,29 @@ static CUDA_DRIVER: OnceLock<Result<CudaDriver, String>> = OnceLock::new();
 
 #[cfg(feature = "cuda-driver")]
 fn cuda_driver() -> Result<&'static CudaDriver, BackendError> {
-    let driver = match CUDA_DRIVER
+    shared_cuda_driver_ref().map_err(BackendError::Cuda)
+}
+
+#[cfg(feature = "cuda-driver")]
+fn shared_cuda_driver_ref() -> Result<&'static CudaDriver, CudaDriverError> {
+    CUDA_DRIVER
         .get_or_init(|| crate::cuda_driver::CudaDriver::new(0).map_err(|error| error.to_string()))
-    {
-        Ok(driver) => driver,
-        Err(error) => {
-            return Err(BackendError::Cuda(CudaDriverError::Driver(error.clone())));
-        }
-    };
-    Ok(driver)
+        .as_ref()
+        .map_err(|error| CudaDriverError::Driver(error.clone()))
+}
+
+/// A clone of the process-wide CUDA driver the plan path shares, opened on first use.
+///
+/// The clone shares the driver's context, stream, resident ledger and graph counters (see
+/// [`CudaDriver`]'s `Arc` state), so an owner opened over it reports the same activity as the
+/// synchronous path. A failed first open is cached as the `String` it rendered to and returned
+/// as [`CudaDriverError::Driver`].
+///
+/// # Errors
+/// [`CudaDriverError::Driver`] when the device could not be opened.
+#[cfg(feature = "cuda-driver")]
+pub fn shared_cuda_driver() -> Result<CudaDriver, CudaDriverError> {
+    shared_cuda_driver_ref().cloned()
 }
 
 /// Diagnostic counterpart of [`execute_plan_named`], reachable only when a

@@ -420,6 +420,9 @@ pub enum Command<Block> {
         lease: PlanLease,
         reply: oneshot::Sender<Result<(), DeviceOwnerError>>,
     },
+    Snapshot {
+        reply: oneshot::Sender<Result<CudaDeviceSnapshot, DeviceOwnerError>>,
+    },
     ReleaseNames {
         names: Vec<Arc<str>>,
         reply: oneshot::Sender<()>,
@@ -491,6 +494,9 @@ where
             }
             Command::Retire { lease, reply } => {
                 let _ = reply.send(self.registry.retire(&lease).map_err(Into::into));
+            }
+            Command::Snapshot { reply } => {
+                let _ = reply.send(self.driver.device_snapshot().map_err(Into::into));
             }
             Command::ReleaseNames { names, reply } => {
                 self.driver
@@ -597,6 +603,9 @@ where
             Command::Retire { reply, .. } => {
                 let _ = reply.send(Err(DeviceOwnerError::Stopped));
             }
+            Command::Snapshot { reply } => {
+                let _ = reply.send(Err(DeviceOwnerError::Stopped));
+            }
             Command::ReleaseNames { reply, .. }
             | Command::ReleaseRanges { reply, .. }
             | Command::Shutdown { reply } => {
@@ -664,6 +673,9 @@ where
             Command::Retire { reply, .. } => {
                 let _ = reply.send(Err(DeviceOwnerError::Driver(error)));
             }
+            Command::Snapshot { reply } => {
+                let _ = reply.send(Err(DeviceOwnerError::Driver(error)));
+            }
             Command::ReleaseNames { reply, .. }
             | Command::ReleaseRanges { reply, .. }
             | Command::Shutdown { reply } => {
@@ -676,7 +688,7 @@ where
 /// The owner loop as a future for the caller to spawn on any executor.
 ///
 /// Composes [`run_owner`] over a private lifecycle: the device opens lazily, by calling `open`
-/// on the first `Register`, `Step` or `Retire`. A failed open answers that one command with the
+/// on the first `Register`, `Step`, `Retire` or `Snapshot`. A failed open answers that one command with the
 /// open error and the next command retries; `ReleaseNames`, `ReleaseRanges` and `Shutdown` never
 /// open the device. `Shutdown`, or a `Step` that fails in the driver, closes the queue and every
 /// queued command is rejected with [`DeviceOwnerError::Stopped`].
@@ -784,6 +796,11 @@ impl<Block> DeviceHandle<Block> {
             reply,
         })
         .await?
+    }
+
+    /// Reads the device identity and graph activity from the owner, opening the device if it is not open yet.
+    pub async fn snapshot(&self) -> Result<CudaDeviceSnapshot, DeviceOwnerError> {
+        self.ask(|reply| Command::Snapshot { reply }).await?
     }
 
     pub async fn release_names(&self, names: Vec<Arc<str>>) -> Result<(), DeviceOwnerError> {

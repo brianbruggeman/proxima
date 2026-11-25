@@ -354,8 +354,8 @@ fn multiprocessor_count(context: &CudaContext) -> Result<u32, CudaDriverError> {
 /// Device identity and successful graph upload/launch submissions from one CUDA driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CudaDeviceSnapshot {
-    pub ordinal: usize,
-    pub name: String,
+    /// The runtime's [`GpuRuntime::device_identity`], e.g. `cuda:0:<device name>`.
+    pub identity: String,
     pub graph_uploads: u64,
     pub graph_launches: u64,
 }
@@ -809,16 +809,6 @@ impl CudaDriver<CudarcRuntime> {
         })
     }
 
-    /// Reads the selected CUDA device and the driver's graph activity counters.
-    pub fn device_snapshot(&self) -> Result<CudaDeviceSnapshot, CudaDriverError> {
-        Ok(CudaDeviceSnapshot {
-            ordinal: self.runtime.context.ordinal(),
-            name: self.runtime.context.name()?,
-            graph_uploads: self.graph_uploads.load(Ordering::Relaxed),
-            graph_launches: self.graph_launches.load(Ordering::Relaxed),
-        })
-    }
-
     /// Loads a precompiled PTX module and returns one of its entry points; see [`CudarcRuntime::precompiled_function`].
     ///
     /// # Errors
@@ -861,6 +851,15 @@ impl CudaDriver<CudarcRuntime> {
 impl<R: GpuRuntime> CudaDriver<R>
 where CudaDriverError: From<R::Error> + From<R::BuildError>
 {
+    /// Reads the runtime's device identity and the driver's graph activity counters.
+    pub fn device_snapshot(&self) -> Result<CudaDeviceSnapshot, CudaDriverError> {
+        Ok(CudaDeviceSnapshot {
+            identity: self.runtime.device_identity()?,
+            graph_uploads: self.graph_uploads.load(Ordering::Relaxed),
+            graph_launches: self.graph_launches.load(Ordering::Relaxed),
+        })
+    }
+
     /// Number of NVRTC/module compilations performed by this driver. A
     /// steady-state plan should stop increasing this after its first dispatch
     /// of each distinct kernel identity.
@@ -6910,6 +6909,29 @@ mod recording_runtime {
         owner.join().expect("the owner thread ends");
 
         assert_eq!(sequences, vec![0, 1, 2], "the owner numbers its completed steps from zero");
+    }
+
+    #[test]
+    fn snapshot_names_the_recording_device_and_counts_graph_activity() {
+        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), recording_open(RecordingRuntime::new()));
+        let request = owner_request(
+            &Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0)),
+            &Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0)),
+            &Arc::from(weight_values(INPUT as usize, 3.0)),
+        );
+
+        let before = block_on_thread(handle.snapshot()).expect("a snapshot opens the device and reads it");
+        let done = block_on_thread(drive_plan(handle.clone(), request, 1));
+        let after = block_on_thread(handle.snapshot()).expect("the owner snapshots after the step");
+        block_on_thread(handle.shutdown()).expect("the owner shuts down");
+        owner.join().expect("the owner thread ends");
+
+        assert_eq!(before.identity, "recording:0", "the identity is the recording runtime's own");
+        assert_eq!(after.identity, before.identity);
+        assert_eq!((before.graph_uploads, before.graph_launches), (0, 0), "no step has run yet");
+        assert_eq!(done, 1);
+        assert!(after.graph_launches > 0, "one step launches at least one graph");
+        assert!(after.graph_uploads > 0, "one step uploads its inputs");
     }
 
     #[test]
