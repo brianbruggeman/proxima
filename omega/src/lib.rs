@@ -71,7 +71,6 @@ pub mod cuda_encode;
 #[cfg(feature = "cuda-driver")]
 pub mod cuda_driver;
 pub mod ffi;
-pub mod silicon;
 #[cfg(feature = "cuda-driver")]
 pub mod gpu_runtime;
 #[cfg(feature = "alloc")]

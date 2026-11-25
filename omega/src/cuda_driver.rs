@@ -79,7 +79,7 @@ pub enum CudaDriverError {
     #[error("CUDA driver: {0}")]
     Driver(String),
     #[error(transparent)]
-    Hip(#[from] crate::silicon::hip::error::HipDriverError),
+    Hip(#[from] crate::backend::hip::error::HipDriverError),
     #[error("CUDA NVRTC: {0}")]
     Nvrtc(String),
     #[error("CUDA header `{header}` not found; tried: {tried}")]

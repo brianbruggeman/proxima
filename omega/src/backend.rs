@@ -66,6 +66,8 @@
 //! so a wrapper would relocate the impl without enabling any composition. The
 //! free-function pair stays.
 
+#[cfg(feature = "cuda-driver")]
+pub mod hip;
 mod stage_totals;
 pub use stage_totals::{
     StagePhases, StageTotals, record_block_copied, record_pipeline_compile, record_stage_phases,
@@ -524,7 +526,7 @@ pub enum BackendError {
 
     #[cfg(feature = "cuda-driver")]
     #[error(transparent)]
-    Hip(#[from] crate::silicon::hip::error::HipDriverError),
+    Hip(#[from] crate::backend::hip::error::HipDriverError),
 }
 
 impl From<conflaguration::Error> for BackendError {
@@ -570,7 +572,7 @@ pub enum Plan {
     #[cfg(feature = "cuda-driver")]
     Cuda(Box<crate::cuda_driver::CudaPlan>),
     #[cfg(feature = "cuda-driver")]
-    Rocm(Box<crate::silicon::hip::runtime::HipPlan>),
+    Rocm(Box<crate::backend::hip::runtime::HipPlan>),
 }
 
 /// Raw cold and synchronized execution observations for one candidate.
@@ -780,7 +782,7 @@ fn auto_hip_driver(config: &RuntimeConfig) -> Option<GpuDriver> {
 #[cfg(feature = "cuda-driver")]
 fn hip_driver(config: &RuntimeConfig) -> GpuDriver {
     GpuDriver::Hip {
-        wave: crate::silicon::hip::shared::hip_wave_of(config),
+        wave: crate::backend::hip::shared::hip_wave_of(config),
         device: config.hip_device,
     }
 }
@@ -1998,7 +2000,7 @@ fn evict_resident_names<'name>(names: impl IntoIterator<Item = &'name str>) {
         if let Some(Ok(driver)) = CUDA_DRIVER.get() {
             driver.release_resident_names(names.iter().copied());
         }
-        crate::silicon::hip::shared::release_resident_names(&names);
+        crate::backend::hip::shared::release_resident_names(&names);
     }
 }
 
@@ -2285,8 +2287,8 @@ fn plan_hip(
     symbols: &[u64],
     named: &[(&str, QuantizedBlock<'_>)],
     outputs: &[NodeId],
-) -> Result<Box<crate::silicon::hip::runtime::HipPlan>, BackendError> {
-    let driver = crate::silicon::hip::shared::shared_driver(config, wave)?;
+) -> Result<Box<crate::backend::hip::runtime::HipPlan>, BackendError> {
+    let driver = crate::backend::hip::shared::shared_driver(config, wave)?;
     let plan = driver
         .plan_with_config(program, symbols, outputs, named, config)
         .map_err(map_cuda_configuration_error)?;
@@ -2308,7 +2310,7 @@ fn plan_named_hip(
         hip_device: device,
         ..RuntimeConfig::default()
     };
-    let driver = crate::silicon::hip::shared::shared_driver(&config, wave)?;
+    let driver = crate::backend::hip::shared::shared_driver(&config, wave)?;
     let plan = driver.plan(program, symbols, outputs, numeric_policy, named)?;
     Ok(Plan::Rocm(Box::new(plan)))
 }
@@ -2929,7 +2931,7 @@ mod hip_routing_tests {
     use crate::config::RuntimeConfig;
     use crate::cuda::HipWave;
     use crate::ffi::hip::HipApi;
-    use crate::silicon::hip::error::HipDriverError;
+    use crate::backend::hip::error::HipDriverError;
 
     fn negate_program() -> Vec<Op> {
         vec![

@@ -3,7 +3,7 @@
 //!
 //! Everything here is `dlopen`-time: no link dependency, no headers, no build-script probing, so a
 //! host with no ROCm installed gets a typed [`HipDriverError::RuntimeNotInstalled`] instead of a
-//! build failure. [`crate::silicon::hip`] holds the device, buffers, modules and launch that sit on
+//! build failure. [`crate::backend::hip`] holds the device, buffers, modules and launch that sit on
 //! the safe methods of [`HipApi`].
 
 use alloc::format;
@@ -16,7 +16,7 @@ use std::ffi::{CStr, CString};
 use std::ptr;
 use std::sync::Arc;
 
-use crate::silicon::hip::error::HipDriverError;
+use crate::backend::hip::error::HipDriverError;
 
 /// The address a kernel launch reads one argument from: `KernelArgument::slot`'s return type.
 pub type KernelSlot = *mut c_void;

@@ -1038,7 +1038,7 @@ fn hip_wave_builder_env_and_toml_agree_and_only_device_32_or_64_validate() {
         assert_eq!(selected.lanes(), u64::from(wave));
         #[cfg(feature = "cuda-driver")]
         assert_eq!(
-            crate::silicon::hip::shared::hip_wave_of(&config),
+            crate::backend::hip::shared::hip_wave_of(&config),
             Some(selected),
             "the production config-to-wave mapping must agree with HipWave::from_lanes"
         );

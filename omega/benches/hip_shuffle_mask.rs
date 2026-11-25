@@ -4,11 +4,11 @@
 //! is 4 bytes, so every HIP kernel emitted at every configured wave must carry an 8-byte all-lanes
 //! value. The two rows are the two wavefront widths llama.cpp's ROCm build distinguishes — 64-lane
 //! CDNA (the default) and 32-lane RDNA — both loaded through `RuntimeConfig` (the conflaguration
-//! surface) and both bound and emitted with the same `config.numeric` transform `silicon::hip::shared::plan`
+//! surface) and both bound and emitted with the same `config.numeric` transform `backend::hip::shared::plan`
 //! applies, never a bench-only policy.
 //!
 //! This is an emission bench because the host has no ROCm device; the device compile is
-//! `silicon::hip::rocm_tests::hiprtc_compiles_the_emitted_wave32_and_wave64_masks`, which names its
+//! `backend::hip::rocm_tests::hiprtc_compiles_the_emitted_wave32_and_wave64_masks`, which names its
 //! skip when the runtime is absent.
 //!
 //! `cargo bench -p proxima-omega --no-default-features --features std,cuda \

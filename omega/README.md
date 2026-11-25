@@ -26,7 +26,7 @@ Teaching material, in order: [`docs/omega/`](../docs/omega/README.md).
 - `alloc` (`no_std` + alloc): adds the MSL emitter (`msl`)
 - `std` (default): adds `std::error::Error`, `config`, and the backend-agnostic `backend` plan/execute pair
 - `train` (default-off): adds [`train`], a forward+backward+optimizer step over `proxima-autograd` configured by one `TrainConfig`; inference builds never compile it
-- engine and driver features are additive and listed under `[features]` in `Cargo.toml`: `cpu` (`:84`), `metal` (`:188`, in the default set, effective on macOS), `wgpu-backend` (`:382`), `cuda` (`:234`, emits both card-C dialects: CUDA C for NVIDIA, HIP C++ for AMD ROCm, with the dialect and wavefront width chosen per emit via `cuda::emit_hip_at_wave` at `omega/src/cuda.rs:6645`), `cuda-driver` (`:241`, resolves `libamdhip64`/`libhiprtc` at run time and adds `silicon::hip`)
+- engine and driver features are additive and listed under `[features]` in `Cargo.toml`: `cpu` (`:84`), `metal` (`:188`, in the default set, effective on macOS), `wgpu-backend` (`:382`), `cuda` (`:234`, emits both card-C dialects: CUDA C for NVIDIA, HIP C++ for AMD ROCm, with the dialect and wavefront width chosen per emit via `cuda::emit_hip_at_wave` at `omega/src/cuda.rs:6645`), `cuda-driver` (`:241`, resolves `libamdhip64`/`libhiprtc` at run time and adds `backend::hip`)
 - `coreml-lane` writes a Core ML package, compiles it with `xcrun coremlcompiler` and caches it by package sha256; it is a package writer, not a selectable engine
 - `mlx-gdn` compiles against an MLX installation named by `PROXIMA_MLX_PREFIX`; `mlx` exposes that capability to a native adapter. Neither is a `RuntimeConfig` value.
 
