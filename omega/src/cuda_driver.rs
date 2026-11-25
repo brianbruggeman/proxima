@@ -2534,6 +2534,34 @@ fn store_ptx(store: &PtxStore, key: &CacheKey, ptx: &Ptx) {
     }
 }
 
+/// The kernel disk store's lookup, compile, store sequence for one code object under `key`: a stored
+/// entry that verifies is returned and counted as a disk hit, otherwise `compile` runs and its bytes
+/// are stored. The binary framing is the cubin path's ([`encode_binary_entry`]).
+fn stored_or_compiled<Failure>(
+    counters: &CompileCounters,
+    key: &CacheKey,
+    compile: impl FnOnce() -> Result<Vec<u8>, Failure>,
+) -> Result<Vec<u8>, Failure> {
+    let name = key.to_hex();
+    let started = Instant::now();
+    let stored = counters
+        .disk_store
+        .get(&name)
+        .ok()
+        .flatten()
+        .and_then(|entry| decode_binary_entry(key, &entry).ok().map(<[u8]>::to_vec));
+    CompileCounters::add(&counters.disk_read_micros, started);
+    if let Some(image) = stored {
+        counters.disk_cache_hits.fetch_add(1, Ordering::Relaxed);
+        return Ok(image);
+    }
+    let image = compile()?;
+    if let Err(error) = counters.disk_store.put(&name, &encode_binary_entry(key, &image)) {
+        proxima_telemetry::warn!(file = %name, error = %error, "kernel cache write failed; kernel stays uncached");
+    }
+    Ok(image)
+}
+
 impl<R: GpuRuntime> DevicePlan<R>
 where CudaDriverError: From<R::Error> + From<R::BuildError>
 {
@@ -5458,6 +5486,9 @@ pub mod rocm {
 
     use std::collections::BTreeMap;
 
+    use cudarc::nvrtc::CompileOptions;
+
+    use super::CacheKey;
     use crate::config::RuntimeConfig;
     use crate::cuda::{EmitDevice, HipKernel, HipWave};
     use crate::kernel_params::{KernelArgument, KernelParams};
@@ -6129,6 +6160,16 @@ pub mod rocm {
         /// source is rejected, [`HipDriverError::Rtc`] when hipRTC itself fails,
         /// and [`HipDriverError::Runtime`] when the object cannot be loaded.
         pub fn compile(&self, source: &str, options: &[&str]) -> Result<HipModule, HipDriverError> {
+            self.load_code_object(&self.compile_code_object(source, options)?)
+        }
+
+        /// Compiles HIP C++ to the code-object bytes [`Self::load_code_object`] loads, so a caller can
+        /// keep the bytes between processes.
+        ///
+        /// # Errors
+        /// [`HipDriverError::CompileLog`] with the compiler's own log when the source is rejected, and
+        /// [`HipDriverError::Rtc`] when hipRTC itself fails.
+        pub fn compile_code_object(&self, source: &str, options: &[&str]) -> Result<Vec<u8>, HipDriverError> {
             let Ok(source_c) = CString::new(source) else {
                 return Err(HipDriverError::BindingContract);
             };
@@ -6190,7 +6231,14 @@ pub mod rocm {
             if status != RTC_SUCCESS {
                 return Err(self.api.rtc_error("hiprtcGetCode", status));
             }
+            Ok(code)
+        }
 
+        /// Loads a code object produced by [`Self::compile_code_object`] for this device's arch.
+        ///
+        /// # Errors
+        /// [`HipDriverError::Runtime`] when the object cannot be loaded.
+        pub fn load_code_object(&self, code: &[u8]) -> Result<HipModule, HipDriverError> {
             let mut handle = ptr::null_mut();
             // SAFETY: `code` holds a complete code object; HIP copies it.
             let status =
@@ -6574,6 +6622,14 @@ pub mod rocm {
     /// calls unless this is defined; it is harmless on 6.3 and later.
     const HIPRTC_OPTIONS: &[&str] = &["-DHIP_ENABLE_WARP_SYNC_BUILTINS"];
 
+    /// The kernel disk store's name for the code object `source` compiles to on `arch` under `options`.
+    /// The resolved hipRTC flags carry the `--offload-arch`, so another arch or option set is another
+    /// key; the schema version and framing are the CUDA path's ([`CacheKey`]).
+    fn code_object_key(source: &str, arch: &str, options: &[&str]) -> CacheKey {
+        let flags = CompileOptions { options: compile_options(Some(arch), options), ..CompileOptions::default() };
+        CacheKey::new(source, None, (0, 0), &flags, (0, 0))
+    }
+
     /// Built functions by entry name, each bucket holding `(source, function)` pairs.
     type FunctionCache<Function> = BTreeMap<String, Vec<(String, Function)>>;
 
@@ -6633,6 +6689,25 @@ pub mod rocm {
         #[must_use]
         pub fn device(&self) -> &HipDevice {
             &self.device
+        }
+
+        /// The module for `source`, its code object read from the kernel disk store when one built for
+        /// this device's arch and these hipRTC options is there. Without a known arch no key can name
+        /// the target, so the object is compiled and never stored.
+        fn code_object_module(&self, source: &str) -> Result<HipModule, HipDriverError> {
+            let compile = || -> Result<Vec<u8>, HipDriverError> {
+                let code = self.device.compile_code_object(source, HIPRTC_OPTIONS)?;
+                self.compile_counters.compilations.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                Ok(code)
+            };
+            let code = match self.device.arch().filter(|arch| !arch.is_empty()) {
+                Some(arch) => {
+                    let key = code_object_key(source, arch, HIPRTC_OPTIONS);
+                    super::stored_or_compiled(&self.compile_counters, &key, compile)?
+                }
+                None => compile()?,
+            };
+            self.device.load_code_object(&code)
         }
 
         /// Opens `ordinal` and emits for `configured`, or for the width the device reports
@@ -6815,10 +6890,8 @@ pub mod rocm {
 
         fn build_function(&self, kernel: &CudaKernel) -> Result<HipFunction, HipDriverError> {
             cached_by_source(&self.functions, &kernel.entry, &kernel.source, || {
-                let module = Arc::new(self.device.compile(&kernel.source, HIPRTC_OPTIONS)?);
-                let function = HipFunction { handle: module.function(&kernel.entry)?, _module: module };
-                self.compile_counters.compilations.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                Ok(function)
+                let module = Arc::new(self.code_object_module(&kernel.source)?);
+                Ok(HipFunction { handle: module.function(&kernel.entry)?, _module: module })
             })
         }
 
@@ -6827,7 +6900,7 @@ pub mod rocm {
         }
 
         fn load_module(&self, image: HipImage) -> Result<Arc<HipModule>, HipDriverError> {
-            Ok(Arc::new(self.device.compile(&image.0, HIPRTC_OPTIONS)?))
+            Ok(Arc::new(self.code_object_module(&image.0)?))
         }
 
         fn load_function(&self, module: &Arc<HipModule>, entry: &str) -> Result<HipFunction, HipDriverError> {
@@ -6955,7 +7028,68 @@ pub mod rocm {
 
         use proxima_primitives::sync::blocking::Mutex;
 
-        use super::{FunctionCache, HIPRTC_OPTIONS, cached_by_source, compile_options, element_window};
+        use super::super::{CompileCounters, stored_or_compiled};
+        use super::{FunctionCache, HIPRTC_OPTIONS, cached_by_source, code_object_key, compile_options, element_window};
+        use crate::cuda_ptx_store::PtxStore;
+
+        const SOURCE: &str = "#include <hip/hip_runtime.h>\nextern \"C\" __global__ void touch_first() { }\n";
+        const CODE_OBJECT: &[u8] = b"\x7fELF\x02\x01\x01\x40amdgcn-amd-amdhsa--gfx1100 code object bytes";
+
+        fn compiled(compiles: &AtomicUsize) -> Result<Vec<u8>, Infallible> {
+            compiles.fetch_add(1, Ordering::Relaxed);
+            Ok(CODE_OBJECT.to_vec())
+        }
+
+        #[test]
+        fn a_code_object_compiles_once_then_reads_back_from_the_disk_store() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let counters = CompileCounters::new(PtxStore::Directory(root.path().to_path_buf()));
+            let compiles = AtomicUsize::new(0);
+            let key = code_object_key(SOURCE, "gfx1100", HIPRTC_OPTIONS);
+
+            let first = stored_or_compiled(&counters, &key, || compiled(&compiles));
+            let second = stored_or_compiled(&counters, &key, || compiled(&compiles));
+
+            assert_eq!(first, Ok(CODE_OBJECT.to_vec()));
+            assert_eq!(second, Ok(CODE_OBJECT.to_vec()), "the stored bytes are the compiled bytes");
+            assert_eq!(compiles.load(Ordering::Relaxed), 1, "the second call reads the store and compiles nothing");
+            assert_eq!(counters.disk_cache_hits.load(Ordering::Relaxed), 1, "the read-back is counted as a disk hit");
+        }
+
+        #[test]
+        fn another_arch_or_another_source_compiles_again() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let counters = CompileCounters::new(PtxStore::Directory(root.path().to_path_buf()));
+            let compiles = AtomicUsize::new(0);
+            let keys = [
+                code_object_key(SOURCE, "gfx1100", HIPRTC_OPTIONS),
+                code_object_key(SOURCE, "gfx90a", HIPRTC_OPTIONS),
+                code_object_key("extern \"C\" __global__ void other() {}\n", "gfx1100", HIPRTC_OPTIONS),
+                code_object_key(SOURCE, "gfx1100", &[]),
+            ];
+
+            for key in &keys {
+                stored_or_compiled(&counters, key, || compiled(&compiles)).expect("compiles");
+            }
+
+            assert_eq!(compiles.load(Ordering::Relaxed), keys.len(), "no key reads another key's code object");
+            assert_eq!(counters.disk_cache_hits.load(Ordering::Relaxed), 0);
+        }
+
+        #[test]
+        fn a_corrupt_stored_code_object_is_recompiled_not_loaded() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let counters = CompileCounters::new(PtxStore::Directory(root.path().to_path_buf()));
+            let compiles = AtomicUsize::new(0);
+            let key = code_object_key(SOURCE, "gfx1100", HIPRTC_OPTIONS);
+            std::fs::write(root.path().join(key.to_hex()), b"PXKC truncated").expect("corrupt the entry");
+
+            let image = stored_or_compiled(&counters, &key, || compiled(&compiles));
+
+            assert_eq!(image, Ok(CODE_OBJECT.to_vec()));
+            assert_eq!(compiles.load(Ordering::Relaxed), 1, "a rejected entry compiles");
+            assert_eq!(counters.disk_cache_hits.load(Ordering::Relaxed), 0);
+        }
 
         fn build_counted(builds: &AtomicUsize, tag: &str) -> Result<String, Infallible> {
             builds.fetch_add(1, Ordering::Relaxed);
