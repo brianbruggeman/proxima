@@ -75,7 +75,10 @@ use proxima_tensor::{
     BoundOp, BoundOpKind, ComposedBody, Keep, Layout, Lookup, NodeId, ReduceInit, ScalarOp, is_product_of,
 };
 #[cfg(feature = "metal-tiled-gemm")]
-use proxima_tensor::{ContractionForm, Executes, ProductContraction, contraction_form, product_contraction};
+use proxima_tensor::{
+    ContractionForm, Executes, ProductContraction, contraction_form, dense_batched_contraction,
+    product_contraction,
+};
 #[cfg(test)]
 use proxima_tensor::StepArg;
 use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};

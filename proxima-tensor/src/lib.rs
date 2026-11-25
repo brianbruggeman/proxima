@@ -278,7 +278,7 @@ pub use bind::{
     node_last_reader, node_retirement, op_read_nodes, prune_dead, refit_cached_attention_rows, touches_changed,
 };
 #[cfg(any(feature = "std", feature = "alloc"))]
-pub use bind::{ContractionForm, ProductContraction, contraction_form, changed_nodes, gathered_operand_count, is_product_of, product_contraction, refit_cached_attention_at, touched_positions};
+pub use bind::{ContractionForm, ProductContraction, contraction_form, changed_nodes, dense_batched_contraction, gathered_operand_count, is_product_of, product_contraction, refit_cached_attention_at, touched_positions};
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use bind::{
     ACTIVATION_GROUP_ELEMENTS, ACTIVATION_REACH, Missing, activation_is_flat, collapsed_extent, derive_activation_quantize, is_derived,

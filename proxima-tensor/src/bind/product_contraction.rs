@@ -12,6 +12,10 @@ pub struct ProductContraction {
     /// along, whether or not the activation strides them too: the routed token
     /// axes. Empty for a dense weight.
     pub routed_positions: Vec<usize>,
+    /// Output positions both operands stride, or neither strides over an extent of one:
+    /// the attention heads of `non_causal_attention_heads`. Always empty for a
+    /// [`product_contraction`]; filled by [`dense_batched_contraction`].
+    pub batch_positions: Vec<usize>,
     pub token_total: u64,
     pub reduction_extent: u64,
     pub gathered_operands: usize,
@@ -43,6 +47,7 @@ struct AxisSplit {
     feature_positions: Vec<usize>,
     token_positions: Vec<usize>,
     routed_positions: Vec<usize>,
+    batch_positions: Vec<usize>,
     token_total: u64,
     reduction_extent: u64,
 }
@@ -64,6 +69,7 @@ fn split_axes(
     let mut feature_positions = Vec::new();
     let mut token_positions = Vec::new();
     let mut routed_positions = Vec::new();
+    let mut batch_positions = Vec::new();
     for (position, &axis) in output_axes.iter().enumerate() {
         let routed = route_stride(route, axis) != 0;
         match (weight_layout.stride(axis) != 0, activation_layout.stride(axis) != 0, routed) {
@@ -78,6 +84,8 @@ fn split_axes(
                 token_positions.push(position);
                 routed_positions.push(position);
             }
+            (true, true, false) => batch_positions.push(position),
+            (false, false, false) if extents[axis as usize] == 1 => batch_positions.push(position),
             _ => return None,
         }
     }
@@ -95,6 +103,7 @@ fn split_axes(
         feature_positions,
         token_positions,
         routed_positions,
+        batch_positions,
         token_total,
         reduction_extent,
     })
@@ -103,9 +112,77 @@ fn split_axes(
 /// `Some` for a `Keep::Reduce` add-from-zero whose body is one multiply of
 /// operands 0 and 1, with every output position owned by exactly one of the
 /// two operands: the weight (`weight` is its operand index) makes it a
-/// feature position, the other operand makes it a token position.
+/// feature position, the other operand makes it a token position. A batch
+/// position refuses it; [`dense_batched_contraction`] is the batch-aware reading.
 #[must_use]
 pub fn product_contraction(bound: &BoundOp, weight: usize) -> Option<ProductContraction> {
+    product_facts(bound, weight).filter(|facts| facts.batch_positions.is_empty())
+}
+
+/// The batch-aware reading of a dense two-operand product: the weight operand
+/// index, and the facts narrowed to one matrix. Roles come from stride
+/// ownership, never from packed-ness: the weight owns the last exclusively
+/// owned output position, whose position is the one feature position; the first
+/// position the other operand exclusively owns is the one token position, with
+/// `token_total` its extent; every other position (both-strided, broadcast over
+/// an extent of one, or a further exclusive position) is a batch position, in
+/// output-axis order. `None` when no position is exclusively owned by each
+/// operand, or an axis neither operand strides has an extent above one.
+///
+/// This is the shape a backend's dense batched matmul takes, for example the
+/// output of `non_causal_attention_heads`; a backend asks [`contraction_form`]
+/// of the result rather than deriving ownership itself.
+#[must_use]
+pub fn dense_batched_contraction(bound: &BoundOp) -> Option<(usize, ProductContraction)> {
+    let BoundOpKind::Reduce {
+        output_axes,
+        operands,
+        ..
+    } = &bound.kind
+    else {
+        return None;
+    };
+    let [first, second] = operands.as_slice() else {
+        return None;
+    };
+    let weight = output_axes.iter().rev().find_map(|&axis| {
+        match (first.1.stride(axis) != 0, second.1.stride(axis) != 0) {
+            (true, false) => Some(0),
+            (false, true) => Some(1),
+            _ => None,
+        }
+    })?;
+    let facts = product_facts(bound, weight)?;
+    let feature = *facts.feature_positions.last()?;
+    let token = *facts.token_positions.first()?;
+    let mut batch_positions = facts.batch_positions;
+    batch_positions.extend(
+        facts
+            .feature_positions
+            .iter()
+            .copied()
+            .filter(|&position| position != feature),
+    );
+    batch_positions.extend(
+        facts
+            .token_positions
+            .iter()
+            .copied()
+            .filter(|&position| position != token),
+    );
+    batch_positions.sort_unstable_by_key(|&position| output_axes[position]);
+    let narrowed = ProductContraction {
+        feature_positions: alloc::vec![feature],
+        token_positions: alloc::vec![token],
+        routed_positions: Vec::new(),
+        batch_positions,
+        token_total: bound.extents[output_axes[token] as usize],
+        ..facts
+    };
+    Some((weight, narrowed))
+}
+
+fn product_facts(bound: &BoundOp, weight: usize) -> Option<ProductContraction> {
     let BoundOpKind::Reduce {
         keep: Keep::Reduce,
         reduce_op: ScalarOp::Add,
@@ -130,6 +207,7 @@ pub fn product_contraction(bound: &BoundOp, weight: usize) -> Option<ProductCont
         feature_positions: split.feature_positions,
         token_positions: split.token_positions,
         routed_positions: split.routed_positions,
+        batch_positions: split.batch_positions,
         token_total: split.token_total,
         reduction_extent: split.reduction_extent,
         gathered_operands: gathered_operand_count(bound),
@@ -236,8 +314,44 @@ mod tests {
     }
 
     #[test]
-    fn an_output_axis_owned_by_both_operands_is_refused() {
-        assert_eq!(dense_split(&[8, 4, 32], &[32, 32, 1], &[0, 32, 1]), None);
+    fn an_output_axis_both_operands_stride_is_a_batch_position() {
+        let split = split_axes(
+            &[8, 4, 32],
+            &[0, 1],
+            &layout(&[32, 32, 1]),
+            &layout(&[0, 32, 1]),
+            None,
+        )
+        .expect("batched");
+        assert_eq!(split.feature_positions, vec![0]);
+        assert!(split.token_positions.is_empty());
+        assert_eq!(split.batch_positions, vec![1]);
+    }
+
+    #[test]
+    fn an_axis_neither_operand_strides_is_a_batch_position_only_at_extent_one() {
+        let weight = layout(&[32, 0, 1]);
+        let activation = layout(&[0, 0, 1]);
+        let broadcast = split_axes(&[8, 1, 32], &[0, 1], &weight, &activation, None)
+            .expect("an extent of one broadcasts");
+        assert_eq!(broadcast.batch_positions, vec![1]);
+        assert!(split_axes(&[8, 4, 32], &[0, 1], &weight, &activation, None).is_none());
+    }
+
+    #[test]
+    fn a_dense_product_has_no_batch_positions_and_a_batched_one_is_not_a_product_contraction() {
+        let bound = bound_contraction(&contraction_program(4));
+        assert!(
+            product_contraction(&bound, 1)
+                .expect("a dense product")
+                .batch_positions
+                .is_empty()
+        );
+        let batched = batched_contractions(&attention_program(3, 5, 2));
+        assert!(!batched.is_empty());
+        for (bound, weight, _) in &batched {
+            assert_eq!(product_contraction(bound, *weight), None);
+        }
     }
 
     #[test]
@@ -327,6 +441,101 @@ mod tests {
         assert_eq!(contraction.token_total, 4);
         assert_eq!(contraction.reduction_extent, 16);
         assert_eq!(contraction.gathered_operands, 0);
+    }
+
+    #[test]
+    fn a_projection_reads_features_from_the_weight_and_tokens_from_the_activation_with_no_batch() {
+        let bound = bound_contraction(&contraction_program(4));
+        let (weight, facts) = dense_batched_contraction(&bound).expect("a projection");
+        assert!(
+            bound.operands()[weight].1.stride(1) != 0,
+            "the weight strides the out axis"
+        );
+        assert_eq!(facts.feature_positions, vec![1]);
+        assert_eq!(facts.token_positions, vec![0]);
+        assert!(facts.batch_positions.is_empty());
+        assert_eq!(facts.token_total, 4);
+        assert_eq!(facts.reduction_extent, 16);
+    }
+
+    const ATTENTION_HEADS: u32 = 3;
+
+    fn attention_program(queries: u32, keys: u32, head_dim: u32) -> Vec<Op> {
+        let dtype = activation_dtype();
+        let leaf = |program: &mut Vec<Op>, name: &str, shape: &[u32]| {
+            let extents = shape.iter().map(|&size| Extent::Static(size)).collect();
+            crate::spec::input_leaf(program, dtype, extents, name)
+        };
+        let mut program = Vec::new();
+        let query = leaf(&mut program, "q", &[queries, ATTENTION_HEADS, head_dim]);
+        let key = leaf(&mut program, "k", &[keys, ATTENTION_HEADS, head_dim]);
+        let value = leaf(&mut program, "v", &[keys, ATTENTION_HEADS, head_dim]);
+        let inv_sqrt =
+            crate::spec::scalar_constant_like(&mut program, 0.5, query).expect("scale builds");
+        crate::spec::non_causal_attention_heads(
+            &mut program,
+            &[(query, key)],
+            value,
+            inv_sqrt,
+            "u",
+            "i",
+            "d",
+        )
+        .expect("attention builds");
+        program
+    }
+
+    fn batched_contractions(program: &[Op]) -> Vec<(BoundOp, usize, ProductContraction)> {
+        let shapes = shape::infer(program, &[]).expect("the attention infers");
+        let output = NodeId((program.len() - 1) as u32);
+        bind(program, &shapes, &[output], NumericPolicy::bit_exact())
+            .expect("the attention binds")
+            .into_iter()
+            .filter_map(|bound| {
+                dense_batched_contraction(&bound).map(|(weight, facts)| (bound, weight, facts))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn attention_scores_and_values_are_batched_over_heads_with_query_rows_as_tokens() {
+        let (queries, keys, head_dim) = (3, 5, 2);
+        let batched = batched_contractions(&attention_program(queries, keys, head_dim));
+        assert_eq!(
+            batched.len(),
+            2,
+            "the score product and the value product are the dense batched contractions"
+        );
+        for (_, _, facts) in &batched {
+            assert_eq!(
+                facts.batch_positions,
+                vec![0],
+                "the head axis leads the output"
+            );
+            assert_eq!(
+                facts.token_positions,
+                vec![1],
+                "the query axis is the token position"
+            );
+            assert_eq!(facts.feature_positions, vec![2]);
+            assert_eq!(facts.token_total, u64::from(queries));
+        }
+        let mut reductions: Vec<u64> = batched
+            .iter()
+            .map(|(_, _, facts)| facts.reduction_extent)
+            .collect();
+        reductions.sort_unstable();
+        assert_eq!(reductions, vec![u64::from(head_dim), u64::from(keys)]);
+    }
+
+    #[test]
+    fn a_decode_shaped_attention_keeps_the_head_axis_batched_not_a_token() {
+        let batched = batched_contractions(&attention_program(1, 5, 2));
+        assert_eq!(batched.len(), 2);
+        for (_, _, facts) in &batched {
+            assert_eq!(facts.batch_positions, vec![0]);
+            assert_eq!(facts.token_total, 1);
+        }
     }
 
     #[test]

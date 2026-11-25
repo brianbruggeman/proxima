@@ -5225,53 +5225,26 @@ pub(super) fn classify_dense_batched_gemm(
         if !epilogue_broadcast_axes.is_empty() {
             return Err(DenseBatchedGemmRejection::BroadcastEpilogueNotSupported);
         }
-        let mut exclusive_axes: Vec<(u16, usize)> = Vec::new();
-        let mut batch_axes: Vec<u16> = Vec::new();
         let operands = resolved.operands();
-        // Matrix roles follow output ownership, not expression operand order:
-        // the final exclusively-owned result axis is the feature axis (its
-        // owner is the weight operand) and the first exclusively-owned axis
-        // from the other operand is tokens. Taking the first token candidate
-        // in declaration order is a fixed per-node choice, so a decode-shaped
-        // call (`query` extent 1) never flips `heads` into the token role.
-        // Ownership is decided before extent: a degenerate axis only joins
-        // the batch grid when neither operand strides it. Shared axes and
-        // additional exclusive axes are addressed independently by that grid.
-        for &axis in output_axes {
-            match (
-                operands[0].1.stride(axis) == 0,
-                operands[1].1.stride(axis) == 0,
-            ) {
-                (false, true) => exclusive_axes.push((axis, 0)),
-                (true, false) => exclusive_axes.push((axis, 1)),
-                (false, false) => batch_axes.push(axis),
-                (true, true) => {
-                    if resolved.extents[axis as usize] != 1 {
-                        return Err(DenseBatchedGemmRejection::AxisOwnershipAmbiguous);
-                    }
-                    batch_axes.push(axis);
-                }
-            }
-        }
-        let Some(&(feature_axis, weight)) = exclusive_axes.last() else {
+        let Some((weight, contraction)) = dense_batched_contraction(resolved) else {
             return Err(DenseBatchedGemmRejection::AxisOwnershipAmbiguous);
         };
         let other = 1 - weight;
-        let Some(&(token_axis, _)) = exclusive_axes.iter().find(|(_, owner)| *owner == other)
+        let axes_at = |positions: &[usize]| -> Vec<u16> {
+            positions
+                .iter()
+                .map(|&position| output_axes[position])
+                .collect()
+        };
+        let feature_axes = axes_at(&contraction.feature_positions);
+        let token_axes = axes_at(&contraction.token_positions);
+        let batch_axes = axes_at(&contraction.batch_positions);
+        let (&[feature_axis], &[token_axis]) = (feature_axes.as_slice(), token_axes.as_slice())
         else {
             return Err(DenseBatchedGemmRejection::AxisOwnershipAmbiguous);
         };
-        batch_axes.extend(
-            exclusive_axes
-                .iter()
-                .map(|(axis, _)| *axis)
-                .filter(|&axis| axis != feature_axis && axis != token_axis),
-        );
         let weight_layout = &operands[weight].1;
         let other_layout = &operands[other].1;
-        batch_axes.sort_unstable();
-        let feature_axes = alloc::vec![feature_axis];
-        let token_axes = alloc::vec![token_axis];
         // A single-axis group trivially folds contiguously (no `windows(2)`
         // pairs to check) -- this call remains for defence-in-depth (a
         // future change widening `feature_axes`/`token_axes` back past one
@@ -5288,11 +5261,10 @@ pub(super) fn classify_dense_batched_gemm(
         if !groups_contiguous {
             return Err(DenseBatchedGemmRejection::AxisGroupNotContiguous);
         }
-        let token_extent: u64 = token_axes
-            .iter()
-            .map(|&axis| resolved.extents[axis as usize])
-            .product();
-        if token_extent < crate::sized::TILED_GEMM_MIN_TOKENS {
+        let token_extent = contraction.token_total;
+        if contraction_form(&contraction, &with_contraction_grants(Executes::BASE))
+            != ContractionForm::Tiled
+        {
             return Err(DenseBatchedGemmRejection::TokenExtentBelowMinimum {
                 token_extent,
                 min_tokens: crate::sized::TILED_GEMM_MIN_TOKENS,
