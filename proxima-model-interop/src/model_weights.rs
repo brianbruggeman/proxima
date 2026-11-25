@@ -24,15 +24,19 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use core::ops::Deref;
 
+use proxima_numeric::DType;
 use proxima_primitives::sync::blocking::Mutex;
-use proxima_safetensors::Manifest;
+use proxima_safetensors::{
+    FORMAT_VERSION_KEY, Manifest, SafetensorsModel, TensorEntry, TensorPayload, write_complete,
+};
 use proxima_tensor::op::Op;
 
 use crate::bind::BoundWeights;
 use crate::error::InteropError;
-use crate::hf_bind::bind_program_leaves_reusing;
+use crate::hf_bind::{bind_program_leaves_reusing, expert_stack_codec, tensor_bytes};
 use crate::profiles::BindingProfile;
 use crate::serving::WeightPrecisionRule;
 
@@ -104,6 +108,20 @@ impl Materialized {
         weights.resident_bytes += entry.1.len();
         weights.packed_owned.push(entry);
         true
+    }
+
+    /// The recoded buffer held for `entry`'s tensor when it can replace the
+    /// tensor in a written file: its codec has an element layout the shared
+    /// binder reads back packed, and the bytes fill `entry`'s shape exactly.
+    fn element_recode(&self, entry: &TensorEntry) -> Option<(DType, &[u8])> {
+        let (_, bytes, codec) = self.stores.packed_owned.iter().find(|(name, _, _)| {
+            name.len() > entry.name.len() && stored_for(name, &entry.name)
+        })?;
+        let dtype = DType::Layout(codec.element_layout()?);
+        let elements = entry.shape.iter().product::<u64>();
+        let fills_shape = bytes.len() as u64 == elements * dtype.size_bytes() as u64;
+        (expert_stack_codec(dtype) == Some(*codec) && fills_shape)
+            .then_some((dtype, bytes.as_slice()))
     }
 
     /// Takes `weights`' materialized entries, keeping the first buffer held
@@ -188,6 +206,69 @@ impl ModelWeights {
             weights: bound?,
             home: Some(self),
         })
+    }
+
+    /// Rewrites the checkpoint `manifest`/`file_bytes` describe into `out`,
+    /// each tensor this model recoded at an element layout replacing its source
+    /// under the stored name and shape, and returns how many it replaced.
+    /// Every other tensor, and the manifest's metadata, is carried byte for byte.
+    ///
+    /// A replaced tensor is stored in the codec's own element layout, so a
+    /// later [`Self::bind`] over the written file finds the leaf already at its
+    /// rule's target: [`crate::bind_safetensors_program_leaves`] filters a rule
+    /// whose target equals the stored type (`precision_target_for`) and binds a
+    /// zero-copy packed block, with no recode. The codec is read from the held
+    /// `(name, bytes, codec)` tuple, never parsed from the `@<codec>` suffix,
+    /// and the layout is accepted only where the shared binder reads it back
+    /// packed (`expert_stack_codec`).
+    ///
+    /// Not persisted, and so still recoded by the next bind: a block-quant
+    /// target (its stored form has no element dtype a safetensors header can
+    /// declare) and a wide-target leaf, which the binder transposes to the
+    /// program's `[in, out]` order and so no longer has the stored shape. Both
+    /// are carried from the source unchanged.
+    ///
+    /// The write composes [`proxima_safetensors::write_complete`]: tensors are
+    /// laid out back to back, so tensor offsets are not page aligned.
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::UnknownTensor`] when a manifest range lies outside
+    /// `file_bytes`; [`InteropError::Safetensors`] from the writer.
+    pub fn persist(
+        &self,
+        manifest: &Manifest,
+        file_bytes: &[u8],
+        data_start: u64,
+        out: &mut Vec<u8>,
+    ) -> Result<usize, InteropError> {
+        let held = self.held.lock();
+        let mut substituted = 0;
+        let mut tensors = Vec::with_capacity(manifest.tensors.len());
+        for entry in &manifest.tensors {
+            let source = tensor_bytes(file_bytes, data_start, entry)?;
+            let (dtype, data) = match held.element_recode(entry) {
+                Some(recoded) => {
+                    substituted += 1;
+                    recoded
+                }
+                None => (entry.dtype, source),
+            };
+            tensors.push(TensorPayload {
+                name: entry.name.clone(),
+                dtype,
+                shape: entry.shape.clone(),
+                data,
+            });
+        }
+        let metadata = manifest
+            .metadata
+            .iter()
+            .filter(|(key, _)| key.as_str() != FORMAT_VERSION_KEY)
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        out.extend(write_complete(&SafetensorsModel { tensors, metadata })?);
+        Ok(substituted)
     }
 }
 

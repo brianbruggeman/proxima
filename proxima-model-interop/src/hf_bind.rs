@@ -77,7 +77,7 @@ fn find_entry<'manifest>(
 /// caller of this module hands in the WHOLE file buffer, matching
 /// `bind.rs`'s GGUF convention (`parsed.tensor_data_range`) instead of a
 /// caller having to pre-slice the header off itself.
-fn tensor_bytes<'file>(
+pub(crate) fn tensor_bytes<'file>(
     file_bytes: &'file [u8],
     data_start: u64,
     entry: &proxima_safetensors::TensorEntry,
@@ -501,7 +501,7 @@ fn expert_row_part<T: Copy>(
 ///
 /// Selects the codec whose layout fields equal the stored element type's, among the two the
 /// gathered kernel serves; every other layout keeps the dequantize-and-transpose path.
-fn expert_stack_codec(dtype: DType) -> Option<Codec> {
+pub(crate) fn expert_stack_codec(dtype: DType) -> Option<Codec> {
     let DType::Layout(layout) = dtype else {
         return None;
     };

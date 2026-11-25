@@ -8,7 +8,8 @@ use std::vec::Vec;
 use proxima_model_interop::profiles::{BindingProfile, TensorAlias};
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::{
-    BoundWeights, Codec, InteropError, NamePattern, WeightPrecisionRule, retarget_recoded_leaves,
+    BoundWeights, Codec, InteropError, LeasedWeights, ModelWeights, NamePattern,
+    WeightPrecisionRule, retarget_recoded_leaves,
 };
 use proxima_safetensors::{Manifest, SafetensorsModel, TensorPayload, write_complete};
 use proxima_numeric::DType;
@@ -905,6 +906,131 @@ fn a_stored_order_contracted_leaf_recodes_under_a_suffix_rule() {
         fixture_tensor_bytes(&file_bytes, data_start, oracle),
         "stored order, packed, not transposed"
     );
+}
+
+/// Binds the stored-order fixture program under a suffix rule through `model`,
+/// so a persisted file and its source are read by the same program and rules.
+fn bind_stored_order<'file, 'store>(
+    model: &'store ModelWeights,
+    (manifest, file_bytes, data_start): (&Manifest, &'file [u8], u64),
+    (matrix, norm, target): (&str, &str, GgmlType),
+) -> LeasedWeights<'file, 'store> {
+    let rules = [WeightPrecisionRule {
+        pattern: NamePattern::Suffix(matrix),
+        target,
+    }];
+    let binding = BindingProfile {
+        aliases: ["scale", "bias"]
+            .map(|leaf| TensorAlias::Rename {
+                leaf: leaf.into(),
+                from: norm.into(),
+            })
+            .into(),
+        ..BindingProfile::default()
+    };
+    model
+        .bind(
+            manifest,
+            file_bytes,
+            data_start,
+            &stored_order_program(matrix, "tokens"),
+            &binding,
+            &["tokens".into()],
+            &rules,
+        )
+        .expect("the stored-order program binds under the suffix rule")
+}
+
+#[test]
+fn a_persisted_checkpoint_rebinds_with_no_recode_and_the_same_narrow_bytes() {
+    let file_bytes = safetensors_fixture();
+    let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses fixture");
+    let data_start = header_data_start(&file_bytes);
+    let matrix = wide_fixture_tensor(&manifest, &[2, 3]);
+    let identity = (
+        matrix,
+        wide_fixture_tensor(&manifest, &[2]),
+        fixture_two_byte_target(&manifest),
+    );
+    let model = ModelWeights::new();
+    let first_bytes = {
+        let first = bind_stored_order(&model, (&manifest, &file_bytes, data_start), identity);
+        let [(name, bytes, _)] = first.packed_owned() else {
+            panic!("the rule matches exactly one leaf, so one buffer is recoded");
+        };
+        assert!(name.starts_with(matrix) && name.contains('@'), "{name}");
+        bytes.clone()
+    };
+
+    let mut persisted = Vec::new();
+    let substituted = model
+        .persist(&manifest, &file_bytes, data_start, &mut persisted)
+        .expect("a held recode persists");
+
+    assert_eq!(substituted, 1, "one rule-matched leaf was recoded");
+    let reopened = proxima_safetensors::parse_complete(&persisted).expect("parses persisted file");
+    let entry = reopened.tensor(matrix).expect("the stored name is kept");
+    assert_eq!(entry.shape, [2, 3], "the stored shape is kept");
+    assert_eq!(entry.dtype, narrow_fixture_tensor(&manifest, &[2, 3]).dtype);
+    assert_eq!(reopened.tensors.len(), manifest.tensors.len());
+    let carried = manifest.tensor("extra.weight").expect("fixture has extra");
+    assert_eq!(
+        fixture_tensor_bytes(
+            &persisted,
+            header_data_start(&persisted),
+            reopened.tensor("extra.weight").expect("kept")
+        ),
+        fixture_tensor_bytes(&file_bytes, data_start, carried),
+        "an unrecoded tensor is carried byte for byte"
+    );
+
+    let second_model = ModelWeights::new();
+    let second_start = header_data_start(&persisted);
+    let second = bind_stored_order(
+        &second_model,
+        (&reopened, &persisted, second_start),
+        identity,
+    );
+    assert!(second.packed_owned().is_empty(), "no leaf is recoded again");
+    assert!(second.owned().iter().all(|(name, _)| !name.contains('@')));
+    let (_, QuantizedBlock::Packed { bytes, .. }) = second
+        .packed()
+        .iter()
+        .find(|(name, _)| name == matrix)
+        .expect("the rule-matched leaf binds under its stored name")
+    else {
+        panic!("the rule-matched leaf binds as a packed block");
+    };
+    let mapping = persisted.as_ptr_range();
+    assert!(
+        mapping.contains(&bytes.as_ptr()),
+        "the block borrows the second mapping instead of owning a copy"
+    );
+    assert_eq!(
+        *bytes,
+        first_bytes.as_slice(),
+        "bit for bit the first bind's bytes"
+    );
+}
+
+#[test]
+fn persisting_a_model_that_recoded_nothing_substitutes_nothing() {
+    let file_bytes = safetensors_fixture();
+    let manifest = proxima_safetensors::parse_complete(&file_bytes).expect("parses fixture");
+    let mut persisted = Vec::new();
+
+    let substituted = ModelWeights::new()
+        .persist(
+            &manifest,
+            &file_bytes,
+            header_data_start(&file_bytes),
+            &mut persisted,
+        )
+        .expect("an empty model persists a plain copy");
+
+    assert_eq!(substituted, 0);
+    let reopened = proxima_safetensors::parse_complete(&persisted).expect("parses persisted file");
+    assert_eq!(reopened.tensors.len(), manifest.tensors.len());
 }
 
 #[test]
