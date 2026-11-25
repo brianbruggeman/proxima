@@ -72,10 +72,7 @@ use proxima_primitives::sync::blocking::Mutex;
 use proxima_primitives::sync::AsyncMutex;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use serving_context::ServingContext;
-#[cfg(any(
-    not(feature = "gpu"),
-    all(feature = "instrument", feature = "metal", target_os = "macos")
-))]
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch_and_experts;
 use proxima_tensor::cpu::{
     Evaluated, ExpertSource, QuantizedBlock,

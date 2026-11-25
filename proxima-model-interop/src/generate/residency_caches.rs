@@ -6335,6 +6335,9 @@ pub(crate) struct BackendRuntime {
     pub(super) prefix_retention: PrefixRetention,
 }
 
+#[cfg(all(not(feature = "gpu"), feature = "std", feature = "proxima-autograd"))]
+type HandoffLeaves<'names> = &'names [(NodeId, &'names str)];
+
 #[cfg(not(feature = "gpu"))]
 impl BackendRuntime {
     const CPU_PLAN_CLASSES: usize = 8;
@@ -6345,7 +6348,9 @@ impl BackendRuntime {
             validated_weight_nodes: None,
             exact_activations: _config.exact_activations,
             cpu_numeric_policy: proxima_numeric::NumericPolicy::bit_exact()
-                .with_flash_narrowing(_config.numeric_policy.flash_narrowing),
+                .with_flash_narrowing(_config.numeric_policy.flash_narrowing)
+                .with_reassociation(_config.numeric_policy.reassociation)
+                .with_approx_functions(_config.numeric_policy.approx_functions),
             cpu_plans: alloc::collections::BTreeMap::new(),
             kv_pad: alloc::collections::BTreeMap::new(),
             prefix_retention: PrefixRetention::Keep,
@@ -6398,7 +6403,7 @@ impl BackendRuntime {
         named: &[(&str, QuantizedBlock<'_>)],
         outputs: &[NodeId],
         resident_names: &BTreeSet<&str>,
-        handoff: (&[(NodeId, &str)], &[(NodeId, &str)]),
+        handoff: (HandoffLeaves<'_>, HandoffLeaves<'_>),
     ) -> Result<Evaluated, InteropError> {
         let mut host_outputs = outputs.to_vec();
         host_outputs.extend(handoff.0.iter().map(|(node, _)| *node));
@@ -6543,14 +6548,15 @@ impl BackendRuntime {
                 expert_sources,
             )?);
         }
-        Ok(evaluate_quantized_named_with_scratch_and_experts(
+        Ok(proxima_tensor::cpu::evaluate_quantized_named_with_kernel_policy(
             program,
             symbols,
             named,
             outputs,
-            &mut self.free_buffers,
-            &mut self.validated_weight_nodes,
+            (&mut self.free_buffers, &mut self.validated_weight_nodes),
             expert_sources,
+            false,
+            self.cpu_numeric_policy,
         )?)
     }
 }
