@@ -8,29 +8,43 @@
 //! `omega::metal::execute_plan_named_op_timed`. Prints `gpu_ns` per op with its kind and node, then a
 //! total per kind, then the ids the transcription produced.
 //!
-//! `--wav <file>` and `--model <dir>` are the same inputs the `whisper` example takes.
+//! `--wav <file>` and `--model <dir>` are the same inputs the `whisper` example takes. `--passes <n>`
+//! (default 5) runs the timed encode n times in this process and reports each op's min and median
+//! `gpu_ns` over them, the first pass included; its total prints apart as `first_pass_gpu_ns_total`.
 
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 mod run {
-    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     use anyhow::{Context, Result, bail};
     use conflaguration::Settings;
     use proxima_model_interop::ServingSettings;
     use proxima_model_interop::audio::wav;
-    use proxima_model_interop::families::encoder_decoder_host::Model;
+    use proxima_model_interop::families::encoder_decoder_host::{
+        Model, OpSample, kind_totals, reduce_op_passes,
+    };
 
     pub fn main() -> Result<()> {
         let mut wav_path: Option<PathBuf> = None;
         let mut model_path: Option<PathBuf> = None;
+        let mut passes: usize = 5;
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--wav" => wav_path = Some(args.next().context("--wav wants a path")?.into()),
                 "--model" => model_path = Some(args.next().context("--model wants a path")?.into()),
+                "--passes" => {
+                    passes = args
+                        .next()
+                        .context("--passes wants a count")?
+                        .parse()
+                        .context("--passes wants a positive integer")?;
+                }
                 other => bail!("unknown argument {other}"),
             }
+        }
+        if passes == 0 {
+            bail!("--passes must be at least 1");
         }
         let audio = wav::read(&wav_path.context("--wav is required")?)?;
         let settings =
@@ -38,29 +52,42 @@ mod run {
         let model = Model::load(&model_path.context("--model is required")?)?
             .with_settings(settings)
             .with_encode_op_timings();
-        let transcript = model.transcribe(&audio.samples, "en")?;
-        let timings = model
-            .encode_op_timings()
+        let mut transcript = model.transcribe(&audio.samples, "en")?;
+        for _ in 1..passes {
+            transcript = model.transcribe(&audio.samples, "en")?;
+        }
+        let raw = model.encode_op_timing_passes();
+        let first_pass = raw
+            .first()
             .context("the transcription ran no profiled encode")?;
-        if timings.is_empty() {
+        if first_pass.is_empty() {
             bail!("the timed run returned no per-op timings");
         }
+        let sampled: Vec<Vec<OpSample>> = raw
+            .iter()
+            .map(|pass| pass.iter().map(OpSample::from).collect())
+            .collect();
+        let stats = reduce_op_passes(&sampled)?;
 
-        let mut per_kind: BTreeMap<&'static str, (usize, u64)> = BTreeMap::new();
-        for timing in timings {
+        println!("passes={}", sampled.len());
+        let first_total: u64 = first_pass.iter().map(|timing| timing.gpu_ns).sum();
+        println!("first_pass_gpu_ns_total={first_total}");
+        for stat in &stats {
             println!(
-                "op node={} kind={} extents={:?} gpu_ns={}",
-                timing.node.0, timing.kind, timing.extents, timing.gpu_ns
+                "op node={} kind={} extents={:?} passes={} gpu_ns_min={} gpu_ns_median={}",
+                stat.node.0, stat.kind, stat.extents, stat.passes, stat.min_ns, stat.median_ns
             );
-            let entry = per_kind.entry(timing.kind).or_insert((0, 0));
-            entry.0 += 1;
-            entry.1 += timing.gpu_ns;
         }
-        for (kind, (count, nanos)) in &per_kind {
-            println!("kind={kind} ops={count} gpu_ns_total={nanos}");
+        for (kind, (count, min_total, median_total)) in kind_totals(&stats) {
+            println!(
+                "kind={kind} ops={count} passes={passes} gpu_ns_min_total={min_total} gpu_ns_median_total={median_total}"
+            );
         }
-        let total: u64 = timings.iter().map(|timing| timing.gpu_ns).sum();
-        println!("ops={} gpu_ns_total={total}", timings.len());
+        let min_total: u64 = stats.iter().map(|stat| stat.min_ns).sum();
+        println!(
+            "ops={} passes={passes} gpu_ns_min_total={min_total}",
+            stats.len()
+        );
         let ids: Vec<String> = transcript.tokens.iter().map(ToString::to_string).collect();
         println!("ids={}", ids.join(","));
         Ok(())

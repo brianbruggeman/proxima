@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+use proxima_primitives::sync::blocking::Mutex;
 use proxima_safetensors::{Manifest, SafetensorsParser};
 use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
 use proxima_tensor::op::{Extent, NodeId, Op};
@@ -619,9 +621,9 @@ pub struct Model {
     /// set by [`Model::with_encode_op_timings`]: the encode program then runs one command buffer per op
     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
     profile_encode: bool,
-    /// the per-op GPU time of the encode program, filled by the first profiled transcription
+    /// the per-op GPU time of the encode program, one entry per profiled transcription (one pass each)
     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-    encode_timings: std::sync::OnceLock<Vec<omega::metal::OpGpuTiming>>,
+    encode_timings: Mutex<Vec<Vec<omega::metal::OpGpuTiming>>>,
 }
 
 impl Drop for Model {
@@ -672,7 +674,7 @@ impl Model {
             #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
             profile_encode: false,
             #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-            encode_timings: std::sync::OnceLock::new(),
+            encode_timings: Mutex::new(Vec::new()),
         }
     }
 
@@ -698,11 +700,12 @@ impl Model {
         self
     }
 
-    /// The per-op GPU time of the encode program the first profiled transcription ran, or `None`
-    /// before it ran. Bound through the same weights and `weight_precision` rules as the serving encoder.
+    /// The per-op GPU time of the encode program, one `Vec` per profiled transcription in run order
+    /// (empty before the first). A single pass is not a usable measurement: reduce the passes with
+    /// [`reduce_op_passes`]. Bound through the same weights and `weight_precision` rules as the serving encoder.
     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
-    pub fn encode_op_timings(&self) -> Option<&[omega::metal::OpGpuTiming]> {
-        self.encode_timings.get().map(Vec::as_slice)
+    pub fn encode_op_timing_passes(&self) -> Vec<Vec<omega::metal::OpGpuTiming>> {
+        self.encode_timings.lock().clone()
     }
 
     fn resolve_store(&mut self) {
@@ -935,7 +938,7 @@ impl Model {
             .take()
             .and_then(std::sync::OnceLock::into_inner)
         {
-            let _ = self.encode_timings.set(timings);
+            self.encode_timings.lock().push(timings);
         }
         sample_peak(&mut gpu_peak, &runtime);
 
@@ -1086,6 +1089,107 @@ fn pad(wav: &[f32]) -> Result<Vec<f32>> {
     }
     out[200..200 + wav.len()].copy_from_slice(wav);
     Ok(out)
+}
+
+/// The identity and GPU time of one timed op, the part of `omega::metal::OpGpuTiming` the pass
+/// reduction reads.
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpSample {
+    pub node: NodeId,
+    pub kind: &'static str,
+    pub extents: Vec<u64>,
+    pub gpu_ns: u64,
+}
+
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+impl From<&omega::metal::OpGpuTiming> for OpSample {
+    fn from(timing: &omega::metal::OpGpuTiming) -> Self {
+        Self {
+            node: timing.node,
+            kind: timing.kind,
+            extents: timing.extents.clone(),
+            gpu_ns: timing.gpu_ns,
+        }
+    }
+}
+
+/// One op's GPU time over every timed pass: `min_ns` and `median_ns` (the mean of the two middle
+/// values for an even pass count, integer division), with `passes` naming how many went in.
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpPassStats {
+    pub node: NodeId,
+    pub kind: &'static str,
+    pub extents: Vec<u64>,
+    pub passes: usize,
+    pub min_ns: u64,
+    pub median_ns: u64,
+}
+
+/// Reduces `passes` (each the encode program's ops in program order) to per-op min and median
+/// `gpu_ns`. Every pass is included, the first too. Errors when there are no passes or the passes
+/// disagree on the op count or on an op's node or kind.
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+pub fn reduce_op_passes(passes: &[Vec<OpSample>]) -> Result<Vec<OpPassStats>> {
+    let first = passes.first().context("no timed passes to reduce")?;
+    for (index, pass) in passes.iter().enumerate() {
+        if pass.len() != first.len() {
+            bail!(
+                "pass {index} timed {} ops, pass 0 timed {}",
+                pass.len(),
+                first.len()
+            );
+        }
+    }
+    first
+        .iter()
+        .enumerate()
+        .map(|(position, anchor)| {
+            let mut times = Vec::with_capacity(passes.len());
+            for (index, pass) in passes.iter().enumerate() {
+                let sample = &pass[position];
+                if sample.node != anchor.node || sample.kind != anchor.kind {
+                    bail!(
+                        "pass {index} op {position} is node {} kind {}, pass 0 has node {} kind {}",
+                        sample.node.0,
+                        sample.kind,
+                        anchor.node.0,
+                        anchor.kind
+                    );
+                }
+                times.push(sample.gpu_ns);
+            }
+            times.sort_unstable();
+            let middle = times.len() / 2;
+            let median_ns = if times.len() % 2 == 0 {
+                (times[middle - 1] + times[middle]) / 2
+            } else {
+                times[middle]
+            };
+            Ok(OpPassStats {
+                node: anchor.node,
+                kind: anchor.kind,
+                extents: anchor.extents.clone(),
+                passes: times.len(),
+                min_ns: times[0],
+                median_ns,
+            })
+        })
+        .collect()
+}
+
+/// Per-kind `(ops, sum of per-op mins, sum of per-op medians)` over the reduced ops.
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+pub fn kind_totals(stats: &[OpPassStats]) -> BTreeMap<&'static str, (usize, u64, u64)> {
+    let mut totals: BTreeMap<&'static str, (usize, u64, u64)> = BTreeMap::new();
+    for stat in stats {
+        let entry = totals.entry(stat.kind).or_insert((0, 0, 0));
+        entry.0 += 1;
+        entry.1 += stat.min_ns;
+        entry.2 += stat.median_ns;
+    }
+    totals
 }
 
 #[cfg(test)]
@@ -1411,5 +1515,73 @@ mod tests {
             loaded.numeric_policy,
             ServingSettings::default().numeric_policy
         );
+    }
+
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    fn sample(node: u32, kind: &'static str, gpu_ns: u64) -> OpSample {
+        OpSample {
+            node: NodeId(node),
+            kind,
+            extents: vec![1500, 64],
+            gpu_ns,
+        }
+    }
+
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    #[test]
+    fn pass_reduction_takes_min_and_median_per_op_with_a_slow_first_pass() {
+        // the attention op is slow on the first pass, as the measured node 170 was
+        let passes = vec![
+            vec![sample(170, "cached_attention", 4_800_000), sample(171, "ffn", 900)],
+            vec![sample(170, "cached_attention", 1_650_000), sample(171, "ffn", 700)],
+            vec![sample(170, "cached_attention", 1_630_000), sample(171, "ffn", 800)],
+        ];
+
+        let stats = reduce_op_passes(&passes).expect("three aligned passes reduce");
+
+        assert_eq!(stats[0].min_ns, 1_630_000);
+        assert_eq!(stats[0].median_ns, 1_650_000);
+        assert_eq!(stats[0].passes, 3);
+        assert_eq!((stats[1].min_ns, stats[1].median_ns), (700, 800));
+    }
+
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    #[test]
+    fn pass_reduction_median_of_an_even_count_is_the_mean_of_the_middle_two() {
+        let passes = vec![
+            vec![sample(1, "ffn", 10)],
+            vec![sample(1, "ffn", 40)],
+            vec![sample(1, "ffn", 20)],
+            vec![sample(1, "ffn", 100)],
+        ];
+
+        let stats = reduce_op_passes(&passes).expect("four aligned passes reduce");
+
+        assert_eq!((stats[0].min_ns, stats[0].median_ns), (10, 30));
+    }
+
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    #[test]
+    fn pass_reduction_rejects_misaligned_or_empty_passes() {
+        assert!(reduce_op_passes(&[]).is_err());
+        let short = vec![vec![sample(1, "ffn", 5)], vec![]];
+        assert!(reduce_op_passes(&short).is_err());
+        let moved = vec![vec![sample(1, "ffn", 5)], vec![sample(2, "ffn", 5)]];
+        assert!(reduce_op_passes(&moved).is_err());
+    }
+
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    #[test]
+    fn kind_totals_sum_per_op_mins_and_medians_by_kind() {
+        let passes = vec![
+            vec![sample(1, "ffn", 10), sample(2, "ffn", 50), sample(3, "norm", 7)],
+            vec![sample(1, "ffn", 30), sample(2, "ffn", 40), sample(3, "norm", 5)],
+        ];
+        let stats = reduce_op_passes(&passes).expect("two aligned passes reduce");
+
+        let totals = kind_totals(&stats);
+
+        assert_eq!(totals["ffn"], (2, 50, 20 + 45));
+        assert_eq!(totals["norm"], (1, 5, 6));
     }
 }
