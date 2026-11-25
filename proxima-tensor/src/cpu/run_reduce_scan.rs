@@ -1228,6 +1228,7 @@ pub(super) fn run_reduce_with_quantized_weights<B: Deref<Target = [f32]>>(
     session: Option<&MatmulSession<'_>>,
     exact_activations: bool,
     output: &mut [f32],
+    numeric_policy: NumericPolicy,
 ) -> Result<(), TensorError> {
     if let Some(weight_node) = quantized_operand(resolved, quantized_weights) {
         let weight_block =
@@ -1256,7 +1257,7 @@ pub(super) fn run_reduce_with_quantized_weights<B: Deref<Target = [f32]>>(
             output,
         );
     }
-    run_reduce(resolved, buffers, output, None)
+    run_reduce(resolved, buffers, output, None, numeric_policy)
 }
 
 /// The axis structure one `Keep::Reduce` fold's own binding already carries:
@@ -1409,12 +1410,13 @@ pub(super) fn run_reduce<B: Deref<Target = [f32]>>(
     buffers: &[Option<B>],
     output: &mut [f32],
     packed_width: Option<&PackedWidthPanels>,
+    numeric_policy: NumericPolicy,
 ) -> Result<(), TensorError> {
     #[cfg(feature = "instrument")]
     let node_started = instrument::read_ticks();
     let outcome = match coalesce_dims(resolved).filter(|_| packed_width.is_none()) {
-        Some(coalesced) => run_reduce_planned(&coalesced, buffers, output, None),
-        None => run_reduce_planned(resolved, buffers, output, packed_width),
+        Some(coalesced) => run_reduce_planned(&coalesced, buffers, output, None, numeric_policy),
+        None => run_reduce_planned(resolved, buffers, output, packed_width, numeric_policy),
     };
     #[cfg(feature = "instrument")]
     instrument::record_reduce_node_ticks(
@@ -1431,6 +1433,7 @@ pub(super) fn run_reduce_planned<B: Deref<Target = [f32]>>(
     buffers: &[Option<B>],
     output: &mut [f32],
     packed_width: Option<&PackedWidthPanels>,
+    numeric_policy: NumericPolicy,
 ) -> Result<(), TensorError> {
     // only the `aarch64` width-tile block below reads this; every other
     // target's caller always passes `None`, so name it used here rather
@@ -1445,7 +1448,7 @@ pub(super) fn run_reduce_planned<B: Deref<Target = [f32]>>(
         && let Ok(base) = usize::try_from(resolved.operands()[scalar as usize].1.base)
         && let Some(&scale) = scalars[scalar as usize].get(base)
     {
-        run_reduce_planned(&peeled, buffers, output, packed_width)?;
+        run_reduce_planned(&peeled, buffers, output, packed_width, numeric_policy)?;
         scale_output(&peeled, scale, output);
         return Ok(());
     }
@@ -1459,7 +1462,7 @@ pub(super) fn run_reduce_planned<B: Deref<Target = [f32]>>(
                 node: resolved.node,
                 reason: "leading-axis chunk starts past the reduce output",
             })?;
-            run_reduce_planned(chunk, buffers, tail, None)?;
+            run_reduce_planned(chunk, buffers, tail, None, numeric_policy)?;
         }
         return Ok(());
     }

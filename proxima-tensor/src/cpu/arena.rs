@@ -1416,7 +1416,13 @@ pub(super) fn run_resolved_nodes_in_arena(
             let mut moe_topk_extra = Vec::new();
             let mut round_extra: Vec<Vec<f32>> = Vec::new();
             match arena.packed_width_panels.get(&node) {
-                Some(packed) => run_reduce(computed, &arena.buffers, &mut output, Some(packed))?,
+                Some(packed) => run_reduce(
+                    computed,
+                    &arena.buffers,
+                    &mut output,
+                    Some(packed),
+                    NumericPolicy::bit_exact(),
+                )?,
                 None => run_node_into_with_round_sink(
                     computed,
                     &arena.buffers,
@@ -1428,6 +1434,7 @@ pub(super) fn run_resolved_nodes_in_arena(
                     Some(&mut gdn_state),
                     Some(&mut moe_topk_extra),
                     Some(&mut round_extra),
+                    NumericPolicy::bit_exact(),
                 )?,
             }
             #[cfg(feature = "epilogue-profile-probe")]

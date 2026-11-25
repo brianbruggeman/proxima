@@ -520,6 +520,9 @@ pub(super) struct StepPrepared {
     layer_norm_cluster_fire_at: FireAt,
     layer_norm_cluster_keepalive: BTreeMap<NodeId, usize>,
     layer_norm_cluster_retire_at: BTreeMap<usize, Vec<NodeId>>,
+    /// The policy this step bound under, read once here and handed to every
+    /// kernel, so a kernel gates on a field instead of re-deriving the policy.
+    numeric_policy: NumericPolicy,
 }
 
 /// The bind switches a prepared step depends on.
@@ -827,6 +830,7 @@ pub(super) fn assemble_step(
         layer_norm_cluster_fire_at,
         layer_norm_cluster_keepalive,
         layer_norm_cluster_retire_at,
+        numeric_policy,
     }
 }
 
@@ -904,6 +908,7 @@ pub(super) fn run_prepared_step(
         layer_norm_cluster_fire_at,
         layer_norm_cluster_keepalive,
         layer_norm_cluster_retire_at,
+        numeric_policy,
         ..
     } = prepared;
     let root = *root;
@@ -1102,6 +1107,7 @@ pub(super) fn run_prepared_step(
                     Some(&mut gdn_state),
                     Some(&mut moe_topk_extra),
                     Some(&mut round_extra),
+                    *numeric_policy,
                 );
                 if let Some((activation, original)) = rounded_original {
                     buffers[activation.0 as usize] = original;
@@ -2427,6 +2433,7 @@ pub(super) fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
                 Some(&mut gdn_state),
                 Some(&mut moe_topk_extra),
                 Some(&mut round_extra),
+                NumericPolicy::bit_exact(),
             )?;
             #[cfg(feature = "instrument")]
             counter!(

@@ -116,6 +116,7 @@ pub(super) fn run_node_into_with_gdn_state<B: Deref<Target = [f32]> + Sync>(
         gdn_state_sink,
         moe_topk_extra_sink,
         None,
+        NumericPolicy::bit_exact(),
     )
 }
 
@@ -140,6 +141,7 @@ pub(super) fn run_node_into_with_round_sink<B: Deref<Target = [f32]> + Sync>(
     gdn_state_sink: Option<&mut Vec<f32>>,
     moe_topk_extra_sink: Option<&mut Vec<f32>>,
     round_sink: Option<&mut Vec<Vec<f32>>>,
+    numeric_policy: NumericPolicy,
 ) -> Result<(), TensorError> {
     if let BoundOpKind::Reduce {
         accumulator: DType::FLOAT64,
@@ -219,8 +221,9 @@ pub(super) fn run_node_into_with_round_sink<B: Deref<Target = [f32]> + Sync>(
                     session,
                     exact_activations,
                     output,
+                    numeric_policy,
                 ),
-                None => run_reduce(resolved, buffers, output, None),
+                None => run_reduce(resolved, buffers, output, None, numeric_policy),
             }
         }
         BoundOpKind::Reduce {
@@ -244,6 +247,7 @@ pub(super) fn run_node_into_with_round_sink<B: Deref<Target = [f32]> + Sync>(
             exact_activations,
             output,
             round_sink,
+            numeric_policy,
         ),
     };
     result?;
@@ -283,6 +287,7 @@ pub(super) fn run_round_batched_reduce<B: Deref<Target = [f32]> + Sync>(
     exact_activations: bool,
     output: &mut [f32],
     mut round_sink: Option<&mut Vec<Vec<f32>>>,
+    numeric_policy: NumericPolicy,
 ) -> Result<(), TensorError> {
     let BoundOpKind::RoundBatchedReduce {
         element_body,
@@ -351,6 +356,7 @@ pub(super) fn run_round_batched_reduce<B: Deref<Target = [f32]> + Sync>(
                 None,
                 None,
                 None,
+                numeric_policy,
             )?;
         } else {
             let mut round_output = vec![0.0f32; output.len()];
@@ -365,6 +371,7 @@ pub(super) fn run_round_batched_reduce<B: Deref<Target = [f32]> + Sync>(
                 None,
                 None,
                 None,
+                numeric_policy,
             )?;
             if let Some(sink) = round_sink.as_deref_mut() {
                 sink.push(round_output);
@@ -1651,6 +1658,7 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
                     Some(&mut gdn_state),
                     Some(&mut moe_topk_extra),
                     Some(&mut round_extra),
+                    NumericPolicy::bit_exact(),
                 )?;
                 #[cfg(feature = "instrument")]
                 record_bound_op_operand_access(resolved, *buffers);
