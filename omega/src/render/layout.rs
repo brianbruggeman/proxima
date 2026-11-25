@@ -625,25 +625,25 @@ fn field_store<D: Dialect>(
     );
     let target = dialect.declare(
         signed,
-        "target",
+        "target_exponent",
         &format!("source_exponent - {wide_bias} + ({bias})"),
     );
-    let overflow_branch = dialect.branch(&format!("target > {field_ones}"));
+    let overflow_branch = dialect.branch(&format!("target_exponent > {field_ones}"));
     let base_exponent = dialect.declare(
         word,
         "base_exponent",
         &dialect.select(
-            "target < 1",
+            "target_exponent < 1",
             &format!("0{suffix}"),
-            &dialect.cast(word, "(target - 1)"),
+            &dialect.cast(word, "(target_exponent - 1)"),
         ),
     );
     let extra_shift = dialect.declare(
         word,
         "extra_shift",
         &dialect.select(
-            "target < 1",
-            &dialect.cast(word, "(1 - target)"),
+            "target_exponent < 1",
+            &dialect.cast(word, "(1 - target_exponent)"),
             &format!("0{suffix}"),
         ),
     );

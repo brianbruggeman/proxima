@@ -25,12 +25,12 @@ static inline uint probe(float value) {
     uint exponent_field = abs_bits >> 23u;
     uint significand = exponent_field == 0u ? abs_bits : ((abs_bits & 0x7fffffu) | 0x800000u);
     int source_exponent = exponent_field == 0u ? 1 : (int)exponent_field;
-    int target = source_exponent - 127 + (127);
-    if (target > 255) {
+    int target_exponent = source_exponent - 127 + (127);
+    if (target_exponent > 255) {
         return sign | 0xfeu;
     }
-    uint base_exponent = target < 1 ? 0u : (uint)(target - 1);
-    uint extra_shift = target < 1 ? (uint)(1 - target) : 0u;
+    uint base_exponent = target_exponent < 1 ? 0u : (uint)(target_exponent - 1);
+    uint extra_shift = target_exponent < 1 ? (uint)(1 - target_exponent) : 0u;
     uint code = (base_exponent << 0u) + probe_round_shift(significand, 23u + extra_shift);
     return sign | min(code, 0xfeu);
 }
