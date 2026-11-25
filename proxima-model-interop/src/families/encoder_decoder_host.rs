@@ -31,7 +31,7 @@ use crate::serving_settings::ServingSettings;
 use crate::source::CheckpointMapping;
 use crate::weight_store::{
     device_alignment, emit_weight_store_hit, emit_weight_store_publish, header_prefix, lookup,
-    modified_nanos, publish, store_key,
+    modified_nanos, publish, register_mapping, store_key, unregister_mapping,
 };
 
 const CHECKPOINT_FILE: &str = "model.safetensors";
@@ -598,6 +598,12 @@ pub struct Model {
     store_published: AtomicBool,
 }
 
+impl Drop for Model {
+    fn drop(&mut self) {
+        unregister_mapping(self.mapping.bytes());
+    }
+}
+
 impl Model {
     pub fn load(dir: &Path) -> Result<Self> {
         let config: Value = serde_json::from_str(
@@ -738,6 +744,8 @@ impl Model {
         let config = self.settings.as_serving_config(&[]);
         apply_serving_config(&config, 0)
             .map_err(|error| anyhow::anyhow!("serving settings are not admitted: {error:?}"))?;
+        // the registration is thread-local, so it is made on the thread that builds this call's runtime
+        register_mapping(self.mapping.bytes());
         Ok(BackendRuntime::new(&config))
     }
 
@@ -749,7 +757,9 @@ impl Model {
     /// On the first call of a weight-store miss it then publishes the weights the call materialized: the bind leases are
     /// back in the model by then, so `persist_aligned` sees every recoded leaf.
     pub fn transcribe(&self, wav: &[f32], language: &str) -> Result<Transcript> {
-        let transcript = self.transcribe_with(wav, language)?;
+        let outcome = self.transcribe_with(wav, language);
+        unregister_mapping(self.mapping.bytes());
+        let transcript = outcome?;
         self.publish_store();
         Ok(transcript)
     }
@@ -1024,7 +1034,7 @@ fn pad(wav: &[f32]) -> Result<Vec<f32>> {
 mod tests {
     use conflaguration::Settings;
     use proxima_numeric::{NumericPolicy, decode_blocks, encode_blocks};
-    use proxima_safetensors::{SafetensorsModel, TensorPayload, write_complete};
+    use proxima_safetensors::{SafetensorsModel, TensorPayload, is_filler_name, write_complete};
 
     use super::*;
 
@@ -1204,6 +1214,78 @@ mod tests {
         });
         let shape = Shape::from_config(&config).expect("the tiny config is complete");
         Model::from_parts(tensors, shape, Value::Null, config, Path::new(""))
+    }
+
+    fn model_with(dir: &Path, settings: ServingSettings) -> Model {
+        let config = serde_json::json!({
+            "encoder_layers": 1, "decoder_layers": 1,
+            "encoder_attention_heads": 2, "decoder_attention_heads": 2,
+            "d_model": 4, "num_mel_bins": 2, "encoder_ffn_dim": 8, "decoder_ffn_dim": 8,
+            "max_source_positions": 2, "max_target_positions": 3, "vocab_size": 6,
+        });
+        let shape = Shape::from_config(&config).expect("the decoder config is complete");
+        let checkpoint = read_checkpoint(&dir.join(CHECKPOINT_FILE)).expect("reads the source");
+        Model::from_parts(checkpoint, shape, Value::Null, config, dir).with_settings(settings)
+    }
+
+    fn stored_settings(store: &Path) -> ServingSettings {
+        ServingSettings::builder()
+            .weight_store(store.display().to_string())
+            .build()
+    }
+
+    fn source_directory() -> tempfile::TempDir {
+        let scratch = tempfile::tempdir().expect("creates a scratch directory");
+        let (source, ..) = decoder_checkpoint();
+        std::fs::write(scratch.path().join(CHECKPOINT_FILE), source.bytes())
+            .expect("writes the source checkpoint");
+        scratch
+    }
+
+    #[test]
+    fn a_store_miss_publishes_once_and_the_next_load_maps_the_stored_file() {
+        let scratch = source_directory();
+        let store = scratch.path().join("store");
+
+        let first = model_with(scratch.path(), stored_settings(&store));
+        assert!(first.store_miss.is_some(), "an empty store is a miss");
+        first.publish_store();
+        let second = model_with(scratch.path(), stored_settings(&store));
+
+        assert!(second.store_miss.is_none(), "the published entry is a hit");
+        let stored = std::fs::read_dir(&store)
+            .expect("lists the store")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        assert_eq!(stored.len(), 1, "one entry, no torn temp file: {stored:?}");
+        assert_eq!(
+            second.mapping.bytes(),
+            std::fs::read(&stored[0]).expect("reads the entry").as_slice()
+        );
+        let originals = second
+            .manifest
+            .tensors
+            .iter()
+            .filter(|entry| !is_filler_name(&entry.name))
+            .count();
+        assert_eq!(originals, first.manifest.tensors.len(), "every source tensor is stored");
+    }
+
+    #[test]
+    fn a_changed_rule_list_is_a_miss_against_an_existing_store() {
+        let scratch = source_directory();
+        let store = scratch.path().join("store");
+        model_with(scratch.path(), stored_settings(&store)).publish_store();
+        let mut reruled: ServingSettings = conflaguration::from_toml_str(
+            "[[weight_precision]]\npattern_kind = \"suffix\"\npattern = \"fc1.weight\"\ntarget = \"q8_0\"",
+        )
+        .expect("the rule toml parses");
+        reruled.weight_store = Some(store.display().to_string());
+
+        let model = model_with(scratch.path(), reruled);
+
+        assert!(model.store_miss.is_some());
     }
 
     #[test]

@@ -184,6 +184,28 @@ pub fn device_alignment() -> usize {
     1
 }
 
+/// Declares `bytes`, a mapped checkpoint, to the backend so a tensor at an
+/// aligned offset inside it binds as an offset view of one no-copy buffer
+/// (`omega::backend::register_checkpoint_mapping`). The registration is the
+/// calling thread's; `bytes` must stay mapped until [`unregister_mapping`].
+#[cfg(feature = "gpu")]
+pub fn register_mapping(bytes: &[u8]) {
+    omega::backend::register_checkpoint_mapping(bytes);
+}
+
+#[cfg(not(feature = "gpu"))]
+pub fn register_mapping(_bytes: &[u8]) {}
+
+/// Withdraws a [`register_mapping`]; a no-op for bytes that are not the
+/// registered mapping.
+#[cfg(feature = "gpu")]
+pub fn unregister_mapping(bytes: &[u8]) {
+    omega::backend::unregister_checkpoint_mapping(bytes);
+}
+
+#[cfg(not(feature = "gpu"))]
+pub fn unregister_mapping(_bytes: &[u8]) {}
+
 #[cfg(test)]
 mod tests {
     use proxima_gguf::types::GgmlType;
