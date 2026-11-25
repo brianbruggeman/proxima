@@ -27,6 +27,7 @@ pub(super) fn run_elementwise_dispatch<B: Deref<Target = [f32]> + Sync>(
     buffers: &[Option<B>],
     session: Option<&MatmulSession<'_>>,
     output: &mut [f32],
+    numeric_policy: NumericPolicy,
 ) -> Result<(), TensorError> {
     match coalesce_dims(resolved) {
         // a fully coalesced node is one flat span with a single outer position, which the
@@ -36,10 +37,12 @@ pub(super) fn run_elementwise_dispatch<B: Deref<Target = [f32]> + Sync>(
                 && element_count(&resolved.extents) >= PARALLEL_THRESHOLD
                 && outer_positions(&coalesced) < 2 =>
         {
-            run_elementwise_dispatch_planned(resolved, buffers, session, output)
+            run_elementwise_dispatch_planned(resolved, buffers, session, output, numeric_policy)
         }
-        Some(coalesced) => run_elementwise_dispatch_planned(&coalesced, buffers, session, output),
-        None => run_elementwise_dispatch_planned(resolved, buffers, session, output),
+        Some(coalesced) => {
+            run_elementwise_dispatch_planned(&coalesced, buffers, session, output, numeric_policy)
+        }
+        None => run_elementwise_dispatch_planned(resolved, buffers, session, output, numeric_policy),
     }
 }
 
@@ -55,18 +58,19 @@ pub(super) fn run_elementwise_dispatch_planned<B: Deref<Target = [f32]> + Sync>(
     buffers: &[Option<B>],
     session: Option<&MatmulSession<'_>>,
     output: &mut [f32],
+    numeric_policy: NumericPolicy,
 ) -> Result<(), TensorError> {
     let Some(session) = session else {
-        return run_elementwise(resolved, buffers, output);
+        return run_elementwise(resolved, buffers, output, numeric_policy);
     };
     if element_count(&resolved.extents) < PARALLEL_THRESHOLD {
-        return run_elementwise(resolved, buffers, output);
+        return run_elementwise(resolved, buffers, output, numeric_policy);
     }
     let workers = matmul_worker_count();
     let (outer_extents, inner_len) = split_innermost(&resolved.extents);
     let outer_len = odometer_len(outer_extents) as usize;
     if workers <= 1 || outer_len < 2 || inner_len == 0 {
-        return run_elementwise(resolved, buffers, output);
+        return run_elementwise(resolved, buffers, output, numeric_policy);
     }
 
     // `row_chunk_count`'s own `MIN_MACS_PER_CHUNK` floor is tuned to a
@@ -117,7 +121,7 @@ pub(super) fn run_elementwise_dispatch_planned<B: Deref<Target = [f32]> + Sync>(
         outer_start += take;
     }
     if chunk_ranges.len() < 2 {
-        return run_elementwise(resolved, buffers, output);
+        return run_elementwise(resolved, buffers, output, numeric_policy);
     }
 
     let round = ElementwiseRowRound {
@@ -125,6 +129,7 @@ pub(super) fn run_elementwise_dispatch_planned<B: Deref<Target = [f32]> + Sync>(
         buffers,
         inner_len,
         chunk_ranges: &chunk_ranges,
+        numeric_policy,
     };
     #[cfg(feature = "instrument")]
     {
@@ -156,6 +161,7 @@ pub(super) struct ElementwiseRowRound<'round, B> {
     pub(super) buffers: &'round [Option<B>],
     pub(super) inner_len: usize,
     pub(super) chunk_ranges: &'round [(usize, usize, usize)],
+    pub(super) numeric_policy: NumericPolicy,
 }
 
 impl<B> CohortRound<TensorError> for ElementwiseRowRound<'_, B>
@@ -182,6 +188,7 @@ where
             outer_start,
             outer_end,
             chunk_output,
+            self.numeric_policy,
         )
     }
 }
@@ -281,10 +288,11 @@ pub(super) fn run_elementwise<B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
     output: &mut [f32],
+    numeric_policy: NumericPolicy,
 ) -> Result<(), TensorError> {
     let (outer_extents, _) = split_innermost(&resolved.extents);
     let outer_len = odometer_len(outer_extents) as usize;
-    run_elementwise_range(resolved, buffers, 0, outer_len, output)
+    run_elementwise_range(resolved, buffers, 0, outer_len, output, numeric_policy)
 }
 
 /// [`run_elementwise`]'s whole computation, restricted to
@@ -301,6 +309,7 @@ pub(super) fn run_elementwise_range<B: Deref<Target = [f32]>>(
     outer_start: usize,
     outer_end: usize,
     output: &mut [f32],
+    numeric_policy: NumericPolicy,
 ) -> Result<(), TensorError> {
     #[cfg(feature = "instrument")]
     let diag_setup_started = instrument::read_ticks();
@@ -530,7 +539,15 @@ pub(super) fn run_elementwise_range<B: Deref<Target = [f32]>>(
         // combined width at that SAME stride reads every row without a
         // second odometer step.
         if full_range_flat {
-            elementwise_width_fast(&shape, &raw, &running, &strides, output, &mut step_values);
+            elementwise_width_fast(
+                &shape,
+                &raw,
+                &running,
+                &strides,
+                output,
+                &mut step_values,
+                numeric_policy.approx_functions,
+            );
             #[cfg(feature = "instrument")]
             {
                 let elements = output.len() as u64;
@@ -594,6 +611,7 @@ pub(super) fn run_elementwise_range<B: Deref<Target = [f32]>>(
                         &strides,
                         &mut out_slice[step_base..step_base + inner_len],
                         &mut step_values,
+                        numeric_policy.approx_functions,
                     );
                     #[cfg(feature = "instrument")]
                     {
@@ -631,6 +649,7 @@ pub(super) fn run_elementwise_range<B: Deref<Target = [f32]>>(
                 &strides,
                 out_slice,
                 &mut step_values,
+                numeric_policy.approx_functions,
             );
             #[cfg(feature = "instrument")]
             {
@@ -679,6 +698,7 @@ pub(super) fn run_elementwise_range<B: Deref<Target = [f32]>>(
                     &row_strides,
                     &mut output[out_base..out_base + inner_len],
                     &mut step_values,
+                    numeric_policy.approx_functions,
                 );
                 #[cfg(feature = "instrument")]
                 {

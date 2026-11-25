@@ -294,6 +294,7 @@ pub(super) fn run_if_int8_activation<B: Deref<Target = [f32]>>(
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
     activation_layouts: &BTreeMap<NodeId, BlockLayout>,
     output: &mut [f32],
+    numeric_policy: NumericPolicy,
 ) -> Result<bool, TensorError> {
     let Some(weight_node) = elementwise_matmul::quantized_operand(resolved, quantized_weights) else {
         return Ok(false);
@@ -324,7 +325,7 @@ pub(super) fn run_if_int8_activation<B: Deref<Target = [f32]>>(
         return Ok(false);
     }
     matmul_int8_activation(resolved.node, codec, bytes, activation_layout, &packed, shape.depth, output)?;
-    apply_reduce_epilogue(resolved, buffers, output)?;
+    apply_reduce_epilogue(resolved, buffers, output, numeric_policy)?;
     Ok(true)
 }
 
@@ -599,7 +600,7 @@ mod tests {
         let weights = BTreeMap::from([(NodeId(0), QuantizedBlock::Packed { codec: q8_0(), bytes: &data.weight })]);
         let layouts = BTreeMap::from([(NodeId(1), BlockLayout::Q8_1)]);
         let mut output = vec![0.0f32; TOKENS * ROWS];
-        let handled = run_if_int8_activation(&resolved, &buffers, &weights, None, &layouts, &mut output);
+        let handled = run_if_int8_activation(&resolved, &buffers, &weights, None, &layouts, &mut output, UNPLANNED_KERNEL_POLICY);
         (handled, output, refuse_quantized_activation_reader(&resolved, &layouts))
     }
 

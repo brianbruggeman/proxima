@@ -543,6 +543,7 @@ pub(super) fn elementwise_width_fast(
     strides: &[i64],
     out: &mut [f32],
     step_values: &mut [f32],
+    approximate_exp: bool,
 ) {
     let span_of = |index: u16| {
         let index = index as usize;
@@ -553,13 +554,16 @@ pub(super) fn elementwise_width_fast(
         }
     };
     match *shape {
+        BodyShape::Unary(ScalarOp::Exponential, a) if approximate_exp => {
+            elementwise_width_unary_monomorphic(Element::exp_approximation, span_of(a), out)
+        }
         BodyShape::Unary(op, a) => elementwise_width_unary(op, span_of(a), out),
         BodyShape::Binary(op, a, b) => elementwise_width_binary(op, span_of(a), span_of(b), out),
         BodyShape::FusedAdamUpdate(roles, _) => {
             elementwise_width_fused_adam_update(roles, raw, running, out)
         }
         BodyShape::Generic(body) => {
-            elementwise_width_generic(body, raw, running, strides, out, step_values, false)
+            elementwise_width_generic(body, raw, running, strides, out, step_values, approximate_exp)
         }
     }
 }

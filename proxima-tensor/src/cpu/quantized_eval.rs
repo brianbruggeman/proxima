@@ -1126,6 +1126,7 @@ pub(super) fn run_prepared_step(
                 expert_sources,
                 &activation_layouts,
                 &mut output,
+                *numeric_policy,
             )?;
             if !int8_activation_handled {
                 super::run_int8_activation_dot::refuse_quantized_activation_reader(

@@ -1,4 +1,5 @@
 use proxima_numeric::block_layout::BlockLayout;
+use smallvec::SmallVec;
 
 use super::*;
 
@@ -199,7 +200,7 @@ pub(super) fn run_node_into_with_round_sink<B: Deref<Target = [f32]> + Sync>(
                         run_embedding_gather_quantized(resolved, buffers, &lookup, block, output)
                     }
                 }
-                None => run_elementwise_dispatch(resolved, buffers, session, output),
+                None => run_elementwise_dispatch(resolved, buffers, session, output, numeric_policy),
             }
         }
         BoundOpKind::Reduce {
@@ -257,7 +258,7 @@ pub(super) fn run_node_into_with_round_sink<B: Deref<Target = [f32]> + Sync>(
         ),
     };
     result?;
-    apply_reduce_epilogue(resolved, buffers, output)
+    apply_reduce_epilogue(resolved, buffers, output, numeric_policy)
 }
 
 /// [`BoundOpKind::RoundBatchedReduce`]'s CPU interpreter: for each round `z`
@@ -403,6 +404,7 @@ pub(super) fn apply_reduce_epilogue<B: Deref<Target = [f32]>>(
     resolved: &BoundOp,
     buffers: &[Option<B>],
     output: &mut [f32],
+    numeric_policy: NumericPolicy,
 ) -> Result<(), TensorError> {
     let BoundOpKind::Reduce {
         output_axes,
@@ -440,6 +442,7 @@ pub(super) fn apply_reduce_epilogue<B: Deref<Target = [f32]>>(
             epilogue_operands,
             &operand_buffers,
             output,
+            numeric_policy,
         );
     } else {
         apply_broadcast_reduce_epilogue(
@@ -450,6 +453,7 @@ pub(super) fn apply_reduce_epilogue<B: Deref<Target = [f32]>>(
             epilogue_operands,
             &operand_buffers,
             output,
+            numeric_policy,
         );
     }
     Ok(())
@@ -459,6 +463,8 @@ pub(super) fn apply_reduce_epilogue<B: Deref<Target = [f32]>>(
 /// [`BoundOpKind::Reduce::output_axes`]'s own (smaller) iteration space,
 /// reading and writing the SAME `output` slot the fold itself wrote —
 /// unchanged from before `epilogue_broadcast_axes` existed.
+// the node, its fold addressing, the fused body, its operands and buffers, and the policy are eight independent inputs; bundling them would only rename the same eight
+#[allow(clippy::too_many_arguments)]
 pub(super) fn apply_plain_reduce_epilogue(
     resolved: &BoundOp,
     output_axes: &[u16],
@@ -467,36 +473,143 @@ pub(super) fn apply_plain_reduce_epilogue(
     epilogue_operands: &[(NodeId, bind::Layout, Option<bind::Lookup>)],
     operand_buffers: &[&[f32]],
     output: &mut [f32],
+    numeric_policy: NumericPolicy,
 ) {
     let extents_local: Vec<u64> = output_axes
         .iter()
         .map(|&axis| resolved.extents[axis as usize])
         .collect();
-    let mut local_coordinate = vec![0u64; output_axes.len()];
-    let mut full_coordinate = vec![0u64; resolved.extents.len()];
-    let mut operand_values = vec![0.0f32; epilogue_operands.len() + 1];
-    let mut step_values = vec![0.0f32; epilogue_body.steps.len()];
+    let rank = extents_local.len();
+    let row_len = extents_local.last().copied().unwrap_or(1) as usize;
+    let outer_rank = rank.saturating_sub(1);
+    // `out_layout` is full rank and indexed by full axis, while the row walks
+    // the LAST LOCAL axis, which is full axis `output_axes[rank - 1]`
+    let out_stride = output_axes
+        .last()
+        .map_or(0, |&axis| out_layout.stride(axis));
+    let operand_strides: Vec<i64> = epilogue_operands
+        .iter()
+        .map(|(_, layout, _)| last_axis_stride(layout, &extents_local))
+        .collect();
 
-    for flat in 0..odometer_len(&extents_local) {
-        unflatten_into(flat, &extents_local, &mut local_coordinate);
+    // the fold wrote `output` in place and each row overwrites it, so a row's
+    // fold values are copied into this one row-sized scratch first
+    let mut fold_row = vec![Default::default(); row_len];
+    let mut strides = operand_strides;
+    strides.push(1);
+    let (reversed, mut reversed_rows) = reversed_operand_rows(&mut strides, row_len);
+    let mut running = vec![0i64; epilogue_operands.len() + 1];
+    let mut step_values =
+        vec![Default::default(); epilogue_body.steps.len() * row_len.min(GENERIC_WIDTH_TILE)];
+    let mut row_out = vec![Default::default(); if out_stride == 1 { 0 } else { row_len }];
+    let mut local_coordinate = vec![0u64; rank];
+    let mut full_coordinate = vec![0u64; resolved.extents.len()];
+
+    for row in 0..odometer_len(&extents_local[..outer_rank]) {
+        unflatten_into(row, &extents_local[..outer_rank], &mut local_coordinate[..outer_rank]);
         full_coordinate.fill(0);
         for (index, &axis) in output_axes.iter().enumerate() {
             full_coordinate[axis as usize] = local_coordinate[index];
         }
-        let offset = out_layout.offset_of(&full_coordinate) as usize;
+        let base = out_layout.offset_of(&full_coordinate);
         for (slot, (_, layout, _)) in epilogue_operands.iter().enumerate() {
-            operand_values[slot] =
-                operand_buffers[slot][layout.offset_of(&local_coordinate) as usize];
+            running[slot] = layout.offset_of(&local_coordinate);
         }
-        operand_values[epilogue_operands.len()] = output[offset];
-        output[offset] = apply_body(epilogue_body, &operand_values, &mut step_values);
+        for (position, slot) in fold_row.iter_mut().enumerate() {
+            *slot = output[(base + position as i64 * out_stride) as usize];
+        }
+        // rebuilt per row because `fold_row` is mutated between rows; inline
+        // storage keeps it off the heap for up to seven operands plus the fold row
+        let mut raw: SmallVec<[_; 8]> = SmallVec::new();
+        raw.extend(operand_buffers.iter().copied());
+        raw.push(fold_row.as_slice());
+        stage_reversed_operands(&reversed, &mut reversed_rows, &mut raw, &mut running);
+        let approximate_exp = numeric_policy.approx_functions;
+        if out_stride == 1 {
+            let start = base as usize;
+            let target = &mut output[start..start + row_len];
+            elementwise_width_generic(
+                epilogue_body,
+                &raw,
+                &running,
+                &strides,
+                target,
+                &mut step_values,
+                approximate_exp,
+            );
+        } else {
+            elementwise_width_generic(
+                epilogue_body,
+                &raw,
+                &running,
+                &strides,
+                &mut row_out,
+                &mut step_values,
+                approximate_exp,
+            );
+            for (position, value) in row_out.iter().enumerate() {
+                output[(base + position as i64 * out_stride) as usize] = *value;
+            }
+        }
     }
+}
+
+/// The slots whose last-axis stride is negative, each with its original
+/// stride and one row-sized scratch. The width kernels' spans are unsigned
+/// (`OperandSpan`), so a reversed operand is read through its scratch at
+/// stride `1`; `strides` is rewritten to match.
+fn reversed_operand_rows<Value: Default + Clone>(
+    strides: &mut [i64],
+    row_len: usize,
+) -> (Vec<(usize, i64)>, Vec<Vec<Value>>) {
+    let reversed: Vec<(usize, i64)> = strides
+        .iter()
+        .enumerate()
+        .filter(|(_, stride)| **stride < 0)
+        .map(|(slot, stride)| (slot, *stride))
+        .collect();
+    for &(slot, _) in &reversed {
+        strides[slot] = 1;
+    }
+    let rows = reversed
+        .iter()
+        .map(|_| vec![Value::default(); row_len])
+        .collect();
+    (reversed, rows)
+}
+
+/// Copies each reversed slot's current row into its scratch, then points
+/// `raw[slot]` at the scratch with base `0` (see [`reversed_operand_rows`]).
+fn stage_reversed_operands<'row, Value: Copy>(
+    reversed: &[(usize, i64)],
+    rows: &'row mut [Vec<Value>],
+    raw: &mut [&'row [Value]],
+    running: &mut [i64],
+) {
+    for (&(slot, stride), row) in reversed.iter().zip(rows.iter_mut()) {
+        let source = raw[slot];
+        let base = running[slot];
+        for (position, value) in row.iter_mut().enumerate() {
+            *value = source[(base + position as i64 * stride) as usize];
+        }
+        running[slot] = 0;
+        raw[slot] = row.as_slice();
+    }
+}
+
+/// `layout`'s stride on the last axis of a `extents`-shaped iteration space
+/// (`0` for a rank-0 space, whose single position needs no stride).
+fn last_axis_stride(layout: &bind::Layout, extents: &[u64]) -> i64 {
+    extents
+        .len()
+        .checked_sub(1)
+        .map_or(0, |axis| layout.stride(axis as u16))
 }
 
 /// The "broadcast-reduce" epilogue (`epilogue_broadcast_axes`'s own doc): the
 /// fold's own scalar result — materialized by `run_reduce`/`run_scan` into
 /// exactly the first `fold_len` slots of `output`, per `out_layout`'s own
-/// (smaller) addressing — is copied into `fold_scratch` FIRST, since the
+/// (smaller) addressing — is copied into `fold_values` FIRST, since the
 /// write loop below overwrites `output` in place at a DIFFERENT (larger)
 /// stride and would otherwise clobber a not-yet-read fold value out from
 /// under a later coordinate sharing its physical slot. After the copy, this
@@ -505,6 +618,8 @@ pub(super) fn apply_plain_reduce_epilogue(
 /// each position via `out_layout` projected onto `output_axes` alone — a
 /// genuine broadcast over every `epilogue_broadcast_axes` entry, since that
 /// projection ignores them entirely.
+// same eight independent inputs as `apply_plain_reduce_epilogue`
+#[allow(clippy::too_many_arguments)]
 pub(super) fn apply_broadcast_reduce_epilogue(
     resolved: &BoundOp,
     output_axes: &[u16],
@@ -513,33 +628,55 @@ pub(super) fn apply_broadcast_reduce_epilogue(
     epilogue_operands: &[(NodeId, bind::Layout, Option<bind::Lookup>)],
     operand_buffers: &[&[f32]],
     output: &mut [f32],
+    numeric_policy: NumericPolicy,
 ) {
     let fold_extents: Vec<u64> = output_axes
         .iter()
         .map(|&axis| resolved.extents[axis as usize])
         .collect();
     let fold_len = odometer_len(&fold_extents) as usize;
-    let fold_scratch: Vec<f32> = output[..fold_len].to_vec();
+    let fold_values = output[..fold_len].to_vec();
 
-    let mut full_coordinate = vec![0u64; resolved.extents.len()];
-    let mut operand_values = vec![0.0f32; epilogue_operands.len() + 1];
-    let mut step_values = vec![0.0f32; epilogue_body.steps.len()];
+    let extents = &resolved.extents;
+    let row_len = extents.last().copied().unwrap_or(1) as usize;
+    let outer_extents = &extents[..extents.len().saturating_sub(1)];
+    let mut strides: Vec<i64> = epilogue_operands
+        .iter()
+        .map(|(_, layout, _)| last_axis_stride(layout, extents))
+        .collect();
+    strides.push(last_axis_stride(out_layout, extents));
+    let (reversed, mut reversed_rows) = reversed_operand_rows(&mut strides, row_len);
+    let mut running = vec![0i64; epilogue_operands.len() + 1];
+    let mut step_values =
+        vec![Default::default(); epilogue_body.steps.len() * row_len.min(GENERIC_WIDTH_TILE)];
+    let mut coordinate = vec![0u64; extents.len()];
 
-    for flat in 0..odometer_len(&resolved.extents) {
-        unflatten_into(flat, &resolved.extents, &mut full_coordinate);
-        // `out_layout` is full rank (`resolved.extents.len()`, per its own
-        // doc) with stride `0` on every axis NOT in `output_axes` — the
-        // fold's own broadcast addressing — so reading it at the FULL
-        // coordinate lands on the same compact `[0, fold_len)` range
-        // `run_reduce`/`run_scan` themselves wrote, regardless of this
-        // position's value on a broadcast axis.
-        let fold_offset = out_layout.offset_of(&full_coordinate) as usize;
+    // `out_layout` is full rank with stride `0` on every axis NOT in
+    // `output_axes`, so reading it at the full coordinate lands on the compact
+    // `[0, fold_len)` range the fold wrote, whatever a broadcast axis holds.
+    let total = odometer_len(extents) as usize;
+    if total == 0 {
+        return;
+    }
+    for (row, target) in output[..total].chunks_exact_mut(row_len).enumerate() {
+        unflatten_into(row as u64, outer_extents, &mut coordinate[..outer_extents.len()]);
         for (slot, (_, layout, _)) in epilogue_operands.iter().enumerate() {
-            operand_values[slot] =
-                operand_buffers[slot][layout.offset_of(&full_coordinate) as usize];
+            running[slot] = layout.offset_of(&coordinate);
         }
-        operand_values[epilogue_operands.len()] = fold_scratch[fold_offset];
-        output[flat as usize] = apply_body(epilogue_body, &operand_values, &mut step_values);
+        running[epilogue_operands.len()] = out_layout.offset_of(&coordinate);
+        let mut raw: SmallVec<[_; 8]> = SmallVec::new();
+        raw.extend(operand_buffers.iter().copied());
+        raw.push(fold_values.as_slice());
+        stage_reversed_operands(&reversed, &mut reversed_rows, &mut raw, &mut running);
+        elementwise_width_generic(
+            epilogue_body,
+            &raw,
+            &running,
+            &strides,
+            target,
+            &mut step_values,
+            numeric_policy.approx_functions,
+        );
     }
 }
 

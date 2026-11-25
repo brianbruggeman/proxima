@@ -317,7 +317,7 @@ fn run_executor(case: &Case) -> Vec<f32> {
     let mut output = vec![0.0f32; case.output_len];
     match &case.op.kind {
         BoundOpKind::Elementwise { .. } => {
-            run_elementwise_dispatch(&case.op, &case.buffers, None, &mut output)
+            run_elementwise_dispatch(&case.op, &case.buffers, None, &mut output, UNPLANNED_KERNEL_POLICY)
                 .expect("generated elementwise op runs");
         }
         _ => {
@@ -332,7 +332,7 @@ fn run_executor_uncoalesced(case: &Case) -> Vec<f32> {
     let mut output = vec![0.0f32; case.output_len];
     match &case.op.kind {
         BoundOpKind::Elementwise { .. } => {
-            run_elementwise_dispatch_planned(&case.op, &case.buffers, None, &mut output)
+            run_elementwise_dispatch_planned(&case.op, &case.buffers, None, &mut output, UNPLANNED_KERNEL_POLICY)
                 .expect("generated elementwise op runs uncoalesced");
         }
         _ => {
@@ -744,7 +744,7 @@ fn epilogue_strides(op: &BoundOp) -> Vec<Vec<i64>> {
 fn run_fold_with_epilogue(op: &BoundOp, buffers: &BufferTable, output_len: usize) -> Column {
     let mut output: Column = vec![Default::default(); output_len];
     run_reduce_planned(op, buffers, &mut output, None, UNPLANNED_KERNEL_POLICY).expect("fold runs");
-    apply_reduce_epilogue(op, buffers, &mut output).expect("epilogue runs");
+    apply_reduce_epilogue(op, buffers, &mut output, UNPLANNED_KERNEL_POLICY).expect("epilogue runs");
     output
 }
 
