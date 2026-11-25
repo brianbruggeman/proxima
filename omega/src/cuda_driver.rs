@@ -5665,6 +5665,7 @@ pub mod rocm {
         unsafe extern "C" fn(*mut c_void, c_int, *const *const c_char) -> c_int;
     type RtcSizeQuery = unsafe extern "C" fn(*mut c_void, *mut usize) -> c_int;
     type RtcWriteText = unsafe extern "C" fn(*mut c_void, *mut c_char) -> c_int;
+    type RtcVersion = unsafe extern "C" fn(*mut c_int, *mut c_int) -> c_int;
     type RtcDestroyProgram = unsafe extern "C" fn(*mut *mut c_void) -> c_int;
     type RtcGetErrorString = unsafe extern "C" fn(c_int) -> *const c_char;
     #[cfg(windows)]
@@ -5761,6 +5762,7 @@ pub mod rocm {
         rtc_get_code: RtcWriteText,
         rtc_destroy_program: RtcDestroyProgram,
         rtc_get_error_string: RtcGetErrorString,
+        rtc_version: Option<RtcVersion>,
     }
 
     impl HipApi {
@@ -5812,6 +5814,7 @@ pub mod rocm {
                 rtc_get_code: resolve(&rtc, rtc_name, "hiprtcGetCode")?,
                 rtc_destroy_program: resolve(&rtc, rtc_name, "hiprtcDestroyProgram")?,
                 rtc_get_error_string: resolve(&rtc, rtc_name, "hiprtcGetErrorString")?,
+                rtc_version: resolve(&rtc, rtc_name, "hiprtcVersion").ok(),
                 _runtime: runtime,
                 _rtc: rtc,
             }))
@@ -6141,6 +6144,17 @@ pub mod rocm {
         #[must_use]
         pub fn arch(&self) -> Option<&str> {
             self.arch.as_deref()
+        }
+
+        /// The `(major, minor)` of the hipRTC that compiles for this device, or `None` when the
+        /// library does not export `hiprtcVersion` or the call fails.
+        #[must_use]
+        pub fn compiler_version(&self) -> Option<(i32, i32)> {
+            let query = self.api.rtc_version?;
+            let (mut major, mut minor) = (0, 0);
+            // SAFETY: both out-parameters are valid for the call.
+            let status = unsafe { query(&mut major, &mut minor) };
+            (status == RTC_SUCCESS).then_some((major, minor))
         }
 
         #[must_use]
@@ -6650,10 +6664,12 @@ pub mod rocm {
 
     /// The kernel disk store's name for the code object `source` compiles to on `arch` under `options`.
     /// The resolved hipRTC flags carry the `--offload-arch`, so another arch or option set is another
-    /// key; the schema version and framing are the CUDA path's ([`CacheKey`]).
-    fn code_object_key(source: &str, arch: &str, options: &[&str]) -> CacheKey {
+    /// key; `compiler` is the hipRTC `(major, minor)` in the key's compiler-version field, so a code
+    /// object is reused only by the compiler version that built it. The schema version and framing
+    /// are the CUDA path's ([`CacheKey`]).
+    fn code_object_key(source: &str, arch: &str, compiler: (i32, i32), options: &[&str]) -> CacheKey {
         let flags = CompileOptions { options: compile_options(Some(arch), options), ..CompileOptions::default() };
-        CacheKey::new(source, None, (0, 0), &flags, (0, 0))
+        CacheKey::new(source, None, compiler, &flags, (0, 0))
     }
 
     /// Built functions by entry name, each bucket holding `(source, function)` pairs.
@@ -6718,20 +6734,21 @@ pub mod rocm {
         }
 
         /// The module for `source`, its code object read from the kernel disk store when one built for
-        /// this device's arch and these hipRTC options is there. Without a known arch no key can name
-        /// the target, so the object is compiled and never stored.
+        /// this device's arch, this hipRTC version and these options is there. Without a known arch or
+        /// compiler version no key can name the target, so the object is compiled and never stored.
         fn code_object_module(&self, source: &str) -> Result<HipModule, HipDriverError> {
             let compile = || -> Result<Vec<u8>, HipDriverError> {
                 let code = self.device.compile_code_object(source, HIPRTC_OPTIONS)?;
                 self.compile_counters.compilations.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 Ok(code)
             };
-            let code = match self.device.arch().filter(|arch| !arch.is_empty()) {
-                Some(arch) => {
-                    let key = code_object_key(source, arch, HIPRTC_OPTIONS);
+            let arch = self.device.arch().filter(|arch| !arch.is_empty());
+            let code = match (arch, self.device.compiler_version()) {
+                (Some(arch), Some(compiler)) => {
+                    let key = code_object_key(source, arch, compiler, HIPRTC_OPTIONS);
                     super::stored_or_compiled(&self.compile_counters, &key, compile)?
                 }
-                None => compile()?,
+                _ => compile()?,
             };
             self.device.load_code_object(&code)
         }
@@ -7035,6 +7052,8 @@ pub mod rocm {
         use crate::cuda_ptx_store::PtxStore;
 
         const SOURCE: &str = "#include <hip/hip_runtime.h>\nextern \"C\" __global__ void touch_first() { }\n";
+        const COMPILER: (i32, i32) = (6, 2);
+        const UPGRADED_COMPILER: (i32, i32) = (6, 3);
         const CODE_OBJECT: &[u8] = b"\x7fELF\x02\x01\x01\x40amdgcn-amd-amdhsa--gfx1100 code object bytes";
 
         fn compiled(compiles: &AtomicUsize) -> Result<Vec<u8>, Infallible> {
@@ -7047,7 +7066,7 @@ pub mod rocm {
             let root = tempfile::tempdir().expect("tempdir");
             let counters = CompileCounters::new(PtxStore::Directory(root.path().to_path_buf()));
             let compiles = AtomicUsize::new(0);
-            let key = code_object_key(SOURCE, "gfx1100", HIPRTC_OPTIONS);
+            let key = code_object_key(SOURCE, "gfx1100", COMPILER, HIPRTC_OPTIONS);
 
             let first = stored_or_compiled(&counters, &key, || compiled(&compiles));
             let second = stored_or_compiled(&counters, &key, || compiled(&compiles));
@@ -7059,15 +7078,32 @@ pub mod rocm {
         }
 
         #[test]
+        fn a_different_compiler_version_compiles_again_instead_of_reading_the_stored_object() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let counters = CompileCounters::new(PtxStore::Directory(root.path().to_path_buf()));
+            let compiles = AtomicUsize::new(0);
+            let before = code_object_key(SOURCE, "gfx1100", COMPILER, HIPRTC_OPTIONS);
+            let after = code_object_key(SOURCE, "gfx1100", UPGRADED_COMPILER, HIPRTC_OPTIONS);
+
+            stored_or_compiled(&counters, &before, || compiled(&compiles)).expect("compiles");
+            stored_or_compiled(&counters, &after, || compiled(&compiles)).expect("compiles");
+            stored_or_compiled(&counters, &after, || compiled(&compiles)).expect("reads back");
+
+            assert_eq!(compiles.load(Ordering::Relaxed), 2, "the upgraded compiler compiles once, then reads its own entry");
+            assert_eq!(counters.disk_cache_hits.load(Ordering::Relaxed), 1);
+        }
+
+        #[test]
         fn another_arch_or_another_source_compiles_again() {
             let root = tempfile::tempdir().expect("tempdir");
             let counters = CompileCounters::new(PtxStore::Directory(root.path().to_path_buf()));
             let compiles = AtomicUsize::new(0);
             let keys = [
-                code_object_key(SOURCE, "gfx1100", HIPRTC_OPTIONS),
-                code_object_key(SOURCE, "gfx90a", HIPRTC_OPTIONS),
-                code_object_key("extern \"C\" __global__ void other() {}\n", "gfx1100", HIPRTC_OPTIONS),
-                code_object_key(SOURCE, "gfx1100", &[]),
+                code_object_key(SOURCE, "gfx1100", COMPILER, HIPRTC_OPTIONS),
+                code_object_key(SOURCE, "gfx90a", COMPILER, HIPRTC_OPTIONS),
+                code_object_key("extern \"C\" __global__ void other() {}\n", "gfx1100", COMPILER, HIPRTC_OPTIONS),
+                code_object_key(SOURCE, "gfx1100", COMPILER, &[]),
+                code_object_key(SOURCE, "gfx1100", UPGRADED_COMPILER, HIPRTC_OPTIONS),
             ];
 
             for key in &keys {
@@ -7083,7 +7119,7 @@ pub mod rocm {
             let root = tempfile::tempdir().expect("tempdir");
             let counters = CompileCounters::new(PtxStore::Directory(root.path().to_path_buf()));
             let compiles = AtomicUsize::new(0);
-            let key = code_object_key(SOURCE, "gfx1100", HIPRTC_OPTIONS);
+            let key = code_object_key(SOURCE, "gfx1100", COMPILER, HIPRTC_OPTIONS);
             std::fs::write(root.path().join(key.to_hex()), b"PXKC truncated").expect("corrupt the entry");
 
             let image = stored_or_compiled(&counters, &key, || compiled(&compiles));
