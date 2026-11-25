@@ -3789,7 +3789,7 @@ impl BackendRuntime {
     /// [`Self::release_call_residents`] for a caller whose other programs' plans hold only weights: it
     /// drops just the plans of `program_key` (the program that read the released names), so the rest
     /// survive to the next call.
-    #[cfg(any(test, all(feature = "std", feature = "proxima-autograd")))]
+    #[cfg(all(feature = "std", feature = "proxima-autograd"))]
     pub(crate) fn release_call_residents_of(&mut self, names: &[&str], program_key: usize) {
         omega::backend::release_resident_names(names.iter().copied());
         self.segment_plans.retain(|key, _| key.0 != program_key);
@@ -3807,7 +3807,7 @@ impl BackendRuntime {
     }
 
     /// Plan-cache `(hits, misses)` since this runtime was built.
-    #[cfg(any(test, all(feature = "std", feature = "proxima-autograd")))]
+    #[cfg(all(feature = "std", feature = "proxima-autograd"))]
     pub(crate) fn plan_counts(&self) -> (usize, usize) {
         (self.plan_hits, self.plan_misses)
     }
