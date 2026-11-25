@@ -3,3 +3,6 @@
 
 #[cfg(feature = "cuda-driver")]
 pub mod hip;
+
+#[cfg(feature = "cuda-driver")]
+pub mod cuda;

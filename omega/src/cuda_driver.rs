@@ -11,11 +11,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::ffi::CString;
+use std::cmp::Reverse;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use conflaguration::Settings;
 use cudarc::driver::sys as cuda_sys;
@@ -2287,28 +2288,37 @@ where
     CudaDriverError: From<R::Error>,
 {
     let mut previous = origin;
-    let mut by_kernel: BTreeMap<&str, (f64, usize, usize)> = BTreeMap::new();
-    let mut total_ms = 0.0f64;
+    let mut by_kernel: BTreeMap<&str, (Duration, usize, usize)> = BTreeMap::new();
+    let mut total = Duration::ZERO;
     for (_, label, output_len, event) in rows {
-        let millis = f64::from(R::elapsed_ms(previous, event)?);
+        let elapsed = R::elapsed(previous, event)?;
         let entry = by_kernel
             .entry(label.as_str())
-            .or_insert((0.0, 0, *output_len));
-        entry.0 += millis;
+            .or_insert((Duration::ZERO, 0, *output_len));
+        entry.0 += elapsed;
         entry.1 += 1;
-        total_ms += millis;
+        total += elapsed;
         previous = event;
     }
     let mut ranked: Vec<_> = by_kernel.into_iter().collect();
-    ranked.sort_by(|left, right| right.1.0.total_cmp(&left.1.0));
-    eprintln!("cuda_event_timing: nodes={} gpu_ms={total_ms:.3}", rows.len());
-    for (label, (millis, count, output_len)) in ranked.iter().take(24) {
+    ranked.sort_by_key(|row| Reverse(row.1.0));
+    eprintln!("cuda_event_timing: nodes={} gpu_ms={}", rows.len(), format_millis(total));
+    for (label, (elapsed, count, output_len)) in ranked.iter().take(24) {
+        let each_nanos = elapsed.as_nanos() / (*count).max(1) as u128;
         eprintln!(
-            "cuda_event_timing_kernel gpu_ms={millis:.3} count={count} each_us={:.1} output_len={output_len} {label}",
-            millis * 1000.0 / *count as f64
+            "cuda_event_timing_kernel gpu_ms={} count={count} each_us={}.{} output_len={output_len} {label}",
+            format_millis(*elapsed),
+            each_nanos / 1_000,
+            each_nanos % 1_000 / 100
         );
     }
     Ok(())
+}
+
+/// Renders a duration as `<millis>.<3 digits>`, the unit the `gpu_ms=` log fields have always used.
+fn format_millis(elapsed: Duration) -> String {
+    let micros = elapsed.as_micros();
+    format!("{}.{:03}", micros / 1_000, micros % 1_000)
 }
 
 fn refresh_refusal_name(refusal: RefreshRefusal) -> &'static str {
@@ -3899,7 +3909,7 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
     #[cfg(feature = "instrument")]
     fn op_timing(&self, launch: &LaunchEvents<R>) -> Result<crate::OpGpuTiming, CudaDriverError> {
         let bound = &self.resolved[launch.position];
-        let millis = R::elapsed_ms(&launch.start, &launch.end)?;
+        let elapsed = R::elapsed(&launch.start, &launch.end)?;
         Ok(crate::OpGpuTiming {
             node: bound.node,
             kind: bound.kind.name(),
@@ -3910,7 +3920,7 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
             },
             operand_bytes: launch.operand_bytes,
             bound_buffer_bytes: launch.operand_bytes,
-            gpu_ns: (millis * 1_000_000.0).max(0.0) as u64,
+            gpu_ns: u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX),
             weight_name: bound
                 .operands()
                 .iter()
@@ -5511,7 +5521,7 @@ mod recording_runtime {
     use core::marker::PhantomData;
     use core::mem::zeroed;
 
-    use crate::gpu_runtime::{DeviceElement, EventMillis};
+    use crate::gpu_runtime::DeviceElement;
 
     use proxima_tensor::{Extent, IndexMap, Keep, Reduce, ReduceInit, ScalarOp, append, map};
 
@@ -5918,10 +5928,10 @@ mod recording_runtime {
             Err(RecordingFailure::EventsUnsupported)
         }
 
-        fn elapsed_ms(
+        fn elapsed(
             _start: &Infallible,
             _end: &Infallible,
-        ) -> Result<EventMillis, RecordingFailure> {
+        ) -> Result<Duration, RecordingFailure> {
             Err(RecordingFailure::EventsUnsupported)
         }
 

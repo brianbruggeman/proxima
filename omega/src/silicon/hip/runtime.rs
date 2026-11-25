@@ -2,6 +2,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::mem::MaybeUninit;
+use core::time::Duration;
 
 use std::sync::Arc;
 
@@ -11,7 +12,7 @@ use crate::cuda_driver::{
     CompileCounters, CudaDriver, DevicePlan, kernel_disk_store, stored_or_compiled,
 };
 use crate::ffi::hip::DevicePointer;
-use crate::gpu_runtime::{DeviceElement, EventMillis, GpuRuntime, LaunchArguments, LaunchShape};
+use crate::gpu_runtime::{DeviceElement, GpuRuntime, LaunchArguments, LaunchShape};
 use crate::kernel_params::KernelParams;
 use crate::lowering::Binding;
 
@@ -479,10 +480,10 @@ impl GpuRuntime for HipRuntime {
         Err(HipDriverError::EventsUnsupported)
     }
 
-    fn elapsed_ms(
+    fn elapsed(
         _start: &core::convert::Infallible,
         _end: &core::convert::Infallible,
-    ) -> Result<EventMillis, HipDriverError> {
+    ) -> Result<Duration, HipDriverError> {
         Err(HipDriverError::EventsUnsupported)
     }
 

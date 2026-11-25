@@ -10,6 +10,7 @@
 //! `Box<dyn>`): `CudaPlan` names its runtime type, so each call is a direct call.
 
 use core::ops::Range;
+use core::time::Duration;
 
 use cudarc::driver::sys::CUevent_flags;
 use cudarc::driver::{CudaContext, CudaEvent, CudaView, CudaViewMut, PushKernelArg, CudaFunction, CudaModule, CudaSlice, CudaStream, DeviceRepr, DriverError, LaunchArgs, LaunchConfig, ValidAsZeroBits};
@@ -22,9 +23,6 @@ use crate::cuda_driver::{CachedCudaModule, CompileCounters, CudaDriverError};
 use proxima_primitives::sync::blocking::Mutex;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-
-/// Milliseconds between two recorded events, as the device runtimes report them.
-pub type EventMillis = f32;
 
 /// An element a runtime moves between host and device.
 ///
@@ -203,11 +201,11 @@ pub trait GpuRuntime: core::fmt::Debug + Clone {
     /// The runtime cannot record events; the caller then skips timing.
     fn record_event(&self) -> Result<Self::Event, Self::Error>;
 
-    /// Milliseconds between two recorded events.
+    /// Time between two recorded events.
     ///
     /// # Errors
     /// An event has not completed or the runtime cannot time it.
-    fn elapsed_ms(start: &Self::Event, end: &Self::Event) -> Result<EventMillis, Self::Error>;
+    fn elapsed(start: &Self::Event, end: &Self::Event) -> Result<Duration, Self::Error>;
 
     /// Blocks until every queued device operation finished.
     ///
@@ -384,8 +382,8 @@ impl GpuRuntime for CudarcRuntime {
         Ok(event)
     }
 
-    fn elapsed_ms(start: &CudaEvent, end: &CudaEvent) -> Result<EventMillis, DriverError> {
-        start.elapsed_ms(end)
+    fn elapsed(start: &CudaEvent, end: &CudaEvent) -> Result<Duration, DriverError> {
+        crate::ffi::cuda::event_elapsed(start, end)
     }
 
     fn synchronize(&self) -> Result<(), DriverError> {
