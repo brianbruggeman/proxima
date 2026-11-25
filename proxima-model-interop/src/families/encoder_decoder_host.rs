@@ -1844,6 +1844,45 @@ mod tests {
         assert!(blocker.is_file(), "nothing replaced the blocker");
     }
 
+    fn offline_settings(gpu_layers: i32) -> ServingSettings {
+        ServingSettings {
+            gpu_layers,
+            weight_store: Some(String::new()),
+            ..ServingSettings::default()
+        }
+    }
+
+    #[test]
+    fn with_settings_leaves_a_held_session_with_no_plans_built() {
+        let model = empty_model().with_settings(offline_settings(0));
+
+        assert_eq!(model.plan_counts(), Some((0, 0)), "a runtime built at load holds no plans");
+        let held = model.session.lock();
+        assert!(!held.as_ref().expect("the session is held").mapped, "the mapping is declared per thread, on first use");
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn a_refused_setting_leaves_no_session_and_the_first_call_surfaces_the_same_error() {
+        let model = empty_model().with_settings(offline_settings(crate::serving::GPU_LAYERS_ALL));
+
+        assert_eq!(model.plan_counts(), None, "a refused setting holds no runtime");
+        let refusal = model
+            .session_guard()
+            .err()
+            .expect("the first call surfaces the refusal");
+        assert!(format!("{refusal}").contains("no GPU backend"), "{refusal}");
+    }
+
+    #[test]
+    fn a_session_built_at_load_registers_the_mapping_on_its_first_call() {
+        let model = empty_model().with_settings(offline_settings(0));
+
+        let guard = model.session_guard().expect("the held session is taken by the first call");
+
+        assert!(guard.session.as_ref().expect("the call holds the session").mapped);
+    }
+
     #[test]
     fn a_store_is_attempted_once_per_model_whatever_the_outcome() {
         let scratch = source_directory();
