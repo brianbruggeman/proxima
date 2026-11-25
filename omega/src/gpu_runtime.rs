@@ -23,7 +23,7 @@ use std::sync::Arc;
 ///
 /// Implemented per type, never blanket, so the set of element types a kernel
 /// ABI accepts stays an explicit list.
-pub trait DeviceElement: DeviceRepr + ValidAsZeroBits + Copy + 'static {}
+pub trait DeviceElement: DeviceRepr + ValidAsZeroBits + Copy + core::fmt::Debug + 'static {}
 
 impl DeviceElement for f32 {}
 impl DeviceElement for u32 {}
@@ -38,13 +38,13 @@ pub struct LaunchShape {
 }
 
 /// The device operations one executor runs on.
-pub trait GpuRuntime {
+pub trait GpuRuntime: core::fmt::Debug {
     /// What a failed device call reports.
     type Error;
     /// A device allocation of `Element`s.
-    type Buffer<Element: DeviceElement>;
+    type Buffer<Element: DeviceElement>: core::fmt::Debug + Clone;
     /// A compiled kernel entry point; cloning shares the loaded handle.
-    type Function: Clone;
+    type Function: core::fmt::Debug + Clone;
     /// A loaded module, from which functions are looked up.
     type Module;
     /// Module bytes a runtime loads: the compile output.

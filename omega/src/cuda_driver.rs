@@ -160,7 +160,7 @@ impl From<DriverError> for CudaDriverError {
 }
 
 // the shared name-keyed identity rule (`crate::resident_identity`) so a fresh plan or arena finds the weight another plan uploaded and a recycled host address is refused.
-type ResidentBuffers = ResidentLedger<CudaGraphBuffer>;
+type ResidentBuffers<R = CudarcRuntime> = ResidentLedger<CudaGraphBuffer<R>>;
 
 fn buffer_elements(buffer: &CudaGraphBuffer) -> u64 {
     match buffer {
@@ -254,22 +254,27 @@ enum Completion<'fault> {
     Defer(Option<(&'fault CudaSlice<u32>, usize, usize)>),
 }
 
+/// Carried state parked by an evicted plan, shared by every plan of the driver.
+type ParkedState<R> = Arc<Mutex<BTreeMap<NodeId, (NodeId, CudaGraphBuffer<R>)>>>;
+/// Appended-row caches parked by an evicted plan.
+type ParkedAppends<R> = Arc<Mutex<BTreeMap<NodeId, (u64, CudaGraphBuffer<R>)>>>;
+
 /// One CUDA context and stream owned by a caller's inference runtime.
 #[derive(Debug, Clone)]
-pub struct CudaDriver {
+pub struct CudaDriver<R: GpuRuntime = CudarcRuntime> {
     context: Arc<CudaContext>,
-    runtime: CudarcRuntime,
+    runtime: R,
     // synchronous ffi callers share these short cache mutations; compilation and dispatch happen outside the guard.
     modules: Arc<Mutex<BTreeMap<String, Vec<CachedCudaModule>>>>,
-    resident_buffers: Arc<Mutex<ResidentBuffers>>,
+    resident_buffers: Arc<Mutex<ResidentBuffers<R>>>,
     compile_counters: Arc<CompileCounters>,
     packed_upload_bytes: Arc<AtomicU64>,
     graph_uploads: Arc<AtomicU64>,
     graph_launches: Arc<AtomicU64>,
     // carried recurrent state whose plan was evicted: keyed by state input node, valued by its output node and device buffer, so the replacement plan adopts it without a host round trip.
-    parked_state: Arc<Mutex<BTreeMap<NodeId, (NodeId, CudaGraphBuffer)>>>,
+    parked_state: ParkedState<R>,
     // appended-row caches whose plan was evicted: keyed by cache input node, valued by its valid row count and device buffer.
-    parked_appends: Arc<Mutex<BTreeMap<NodeId, (u64, CudaGraphBuffer)>>>,
+    parked_appends: ParkedAppends<R>,
     // device bytes already in use when this driver was created, so other contexts and the display are not charged to it.
     baseline_used_bytes: u64,
 }
@@ -304,16 +309,31 @@ struct CachedCudaModule {
 /// Persistent f32 storage for a graph's named inputs and intermediate nodes.
 /// The map owns allocations across dispatches; a shape change is the only
 /// event that replaces a node's device buffer.
-#[derive(Debug, Default)]
-pub struct CudaF32Arena {
-    buffers: BTreeMap<NodeId, CudaGraphBuffer>,
-    route_compaction: BTreeMap<NodeId, CudaSlice<u32>>,
-    uniforms: BTreeMap<NodeId, CudaSlice<u8>>,
+#[derive(Debug)]
+pub struct CudaF32Arena<R: GpuRuntime = CudarcRuntime> {
+    buffers: BTreeMap<NodeId, CudaGraphBuffer<R>>,
+    route_compaction: BTreeMap<NodeId, R::Buffer<u32>>,
+    uniforms: BTreeMap<NodeId, R::Buffer<u8>>,
     uniform_host: BTreeMap<NodeId, Vec<u8>>,
     resident_sources: BTreeMap<NodeId, ResidentIdentity>,
-    pool: BTreeMap<usize, Vec<CudaSlice<f32>>>,
+    pool: BTreeMap<usize, Vec<R::Buffer<f32>>>,
     allocations: u64,
     launch_profile: LaunchProfile,
+}
+
+impl<R: GpuRuntime> Default for CudaF32Arena<R> {
+    fn default() -> Self {
+        Self {
+            buffers: BTreeMap::new(),
+            route_compaction: BTreeMap::new(),
+            uniforms: BTreeMap::new(),
+            uniform_host: BTreeMap::new(),
+            resident_sources: BTreeMap::new(),
+            pool: BTreeMap::new(),
+            allocations: 0,
+            launch_profile: LaunchProfile::default(),
+        }
+    }
 }
 
 /// Which intermediate buffers return to the arena pool after each launch.
@@ -527,10 +547,10 @@ impl LaunchProfile {
 }
 
 #[derive(Debug, Clone)]
-enum CudaGraphBuffer {
-    F32(CudaSlice<f32>),
+enum CudaGraphBuffer<R: GpuRuntime = CudarcRuntime> {
+    F32(R::Buffer<f32>),
     // shared with the driver's resident cache, so a clone is a refcount bump rather than a device copy.
-    Bytes(Arc<CudaSlice<u8>>),
+    Bytes(Arc<R::Buffer<u8>>),
 }
 
 /// The event pair bracketing one launch of a timed execute, with the operand bytes read at launch.
@@ -554,10 +574,10 @@ fn push_buffer<'a, 'b>(args: &'b mut LaunchArgs<'a>, buffer: &'a CudaGraphBuffer
 /// Planning resolves shapes, fusion, dead nodes, and kernel structure once;
 /// execution refreshes only named inputs and reuses the device arena.
 #[derive(Debug)]
-pub struct CudaPlan {
+pub struct DevicePlan<R: GpuRuntime = CudarcRuntime> {
     constraints: Option<ResourceConstraints>,
     block_contract: Vec<(Option<Codec>, bool, usize)>,
-    driver: CudaDriver,
+    driver: CudaDriver<R>,
     program: Vec<Op>,
     shapes: Shapes,
     resolved: Vec<BoundOp>,
@@ -566,7 +586,7 @@ pub struct CudaPlan {
     block_nodes: Vec<NodeId>,
     outputs: Box<[NodeId]>,
     // boxed: the arena is three maps (72 bytes) that only move when the plan is built, keeping CudaPlan inside clippy's large_enum_variant gap against the cpu plan
-    arena: Box<CudaF32Arena>,
+    arena: Box<CudaF32Arena<R>>,
     numeric_policy: NumericPolicy,
     activation_storage: Option<NumericFormat>,
     packed_operands: PackedOperands,
@@ -583,7 +603,7 @@ pub struct CudaPlan {
     // the extents of every node as a line in the row count, valid while the other symbols equal the first element
     shapes_template: Box<Option<SymbolsTemplate>>,
     // one resolved device function per kernel, so a launch skips the module-cache text comparison
-    functions: Vec<Option<CudaFunction>>,
+    functions: Vec<Option<R::Function>>,
     emit_calls: u64,
     emit_reused: u64,
     pack_calls: u64,
@@ -591,6 +611,9 @@ pub struct CudaPlan {
     carry: Box<StateCarry>,
     pool: Box<PoolSchedule>,
 }
+
+/// The plan the CUDA executor builds, on the cudarc runtime. External callers name this alias.
+pub type CudaPlan = DevicePlan<CudarcRuntime>;
 
 /// Device-carried state between calls. Both machines are sans-IO: [`StateSwap`] decides which recurrent
 /// state buffers swap and park, [`KvCarry`] every cache-input row append, growth, truncation and handover;
@@ -1300,7 +1323,7 @@ impl CudaDriver {
         let emit_us = elapsed_micros(emit_started);
         let assemble_started = Instant::now();
         let pool = Box::new(PoolSchedule::build(&resolved, &kernels, outputs));
-        let mut plan = CudaPlan {
+        let mut plan = DevicePlan {
             pool,
             constraints: config.map(|value| value.constraints.clone()),
             block_contract: blocks
@@ -2486,7 +2509,7 @@ fn store_ptx(store: &PtxStore, key: &CacheKey, ptx: &Ptx) {
     }
 }
 
-impl CudaPlan {
+impl DevicePlan {
     #[must_use]
     pub const fn exact_activations(&self) -> bool {
         self.exact_activations
