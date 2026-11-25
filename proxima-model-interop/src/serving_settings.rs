@@ -461,6 +461,15 @@ impl Default for ServingSettings {
 }
 
 impl ServingSettings {
+    /// The directory the weight store lives in: the configured one, or `None` when the value is unset or empty (off).
+    #[must_use]
+    pub fn weight_store_dir(&self) -> Option<std::path::PathBuf> {
+        self.weight_store
+            .as_deref()
+            .filter(|configured| !configured.is_empty())
+            .map(std::path::PathBuf::from)
+    }
+
     /// lowers each rule's target to the on-disk `GgmlType` the recode path binds at;
     /// a target format with no ggml wire type is refused here rather than at bind time.
     pub fn weight_precision_rules(
@@ -1368,6 +1377,16 @@ target = "q8_0"
         assert_eq!(from_toml, built, "toml and builder agree");
         assert_eq!(from_env, built, "env and builder agree");
         assert_eq!(ServingSettings::default().weight_store, None);
+    }
+
+    #[test]
+    fn weight_store_dir_turns_an_empty_value_off_and_names_a_configured_one() {
+        let off = ServingSettings::builder().weight_store(String::new()).build();
+        let named = ServingSettings::builder().weight_store("/var/cache/proxima/weights".to_owned()).build();
+
+        assert_eq!(off.weight_store_dir(), None, "an empty value is off");
+        assert_eq!(named.weight_store_dir(), Some("/var/cache/proxima/weights".into()));
+        assert_eq!(ServingSettings::default().weight_store_dir(), None, "unset is off until the default lands");
     }
 
     #[test]

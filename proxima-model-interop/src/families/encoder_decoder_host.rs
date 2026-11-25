@@ -927,7 +927,7 @@ impl Model {
 
     fn resolve_store(&mut self) {
         self.store_miss = None;
-        let Some(store_dir) = self.settings.weight_store.as_deref().map(PathBuf::from) else {
+        let Some(store_dir) = self.settings.weight_store_dir() else {
             return;
         };
         let Ok(rules) = self.settings.weight_precision_rules() else {
