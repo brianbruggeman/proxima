@@ -5606,6 +5606,8 @@ pub mod rocm {
         InputTooLarge(usize),
         #[error("hip wave width {0} is not supported; expected 32 or 64")]
         UnsupportedWaveWidth(u32),
+        #[error("configured hip wave width {configured} does not match the device's warpSize {device}")]
+        WaveMismatch { configured: u32, device: u32 },
         #[error("hip graph path rejected the graph: {reason}")]
         UnsupportedGraph { reason: &'static str },
         #[error("hip graph node {node:?} could not be emitted: {error}")]
@@ -6411,6 +6413,19 @@ pub mod rocm {
         HipWave::from_lanes(u64::from(config.hip_wave))
     }
 
+    /// The wave a runtime emits for: the device's `probed` width, which a `configured` width must equal
+    /// because the emitted kernels trap on any other `warpSize`.
+    ///
+    /// # Errors
+    /// [`HipDriverError::WaveMismatch`] naming both widths.
+    fn resolve_wave(configured: Option<HipWave>, probed: HipWave) -> Result<HipWave, HipDriverError> {
+        let width = |wave: HipWave| u32::try_from(wave.lanes()).unwrap_or(u32::MAX);
+        match configured {
+            Some(wave) if wave != probed => Err(HipDriverError::WaveMismatch { configured: width(wave), device: width(probed) }),
+            _ => Ok(probed),
+        }
+    }
+
     type HipDriverKey = (u32, Option<u64>);
     type HipDriverTable = proxima_primitives::sync::blocking::Mutex<BTreeMap<HipDriverKey, super::CudaDriver<HipRuntime>>>;
 
@@ -6678,21 +6693,18 @@ pub mod rocm {
             self.device.load_code_object(&code)
         }
 
-        /// Opens `ordinal` and emits for `configured`, or for the width the device reports
-        /// (the `warpSize` probe launched through this runtime's own launch path) when `None`.
+        /// Opens `ordinal`, probes the width the device reports (the `warpSize` kernel launched through
+        /// this runtime's own launch path), and emits for it. A `configured` width must equal the probe.
         ///
         /// # Errors
-        /// The ROCm refusals of [`HipDevice::open`], and [`HipDriverError::UnsupportedWaveWidth`]
-        /// for a reported width other than 32 or 64.
+        /// The ROCm refusals of [`HipDevice::open`], [`HipDriverError::UnsupportedWaveWidth`]
+        /// for a reported width other than 32 or 64, and [`HipDriverError::WaveMismatch`] when
+        /// `configured` differs from the reported width.
         pub fn open(ordinal: c_int, configured: Option<HipWave>) -> Result<Self, HipDriverError> {
             let probe = Self::new(HipDevice::open(ordinal)?, HipWave::Wave64);
-            let wave = match configured {
-                Some(wave) => wave,
-                None => {
-                    let lanes = probe.warp_size()?;
-                    HipWave::from_lanes(u64::from(lanes)).ok_or(HipDriverError::UnsupportedWaveWidth(lanes))?
-                }
-            };
+            let lanes = probe.warp_size()?;
+            let probed = HipWave::from_lanes(u64::from(lanes)).ok_or(HipDriverError::UnsupportedWaveWidth(lanes))?;
+            let wave = resolve_wave(configured, probed)?;
             Ok(Self { wave, ..probe })
         }
 
@@ -7207,6 +7219,25 @@ pub mod rocm {
                 vec![String::from("hiprtc0602.dll"), String::from("hiprtc.dll")]
             );
             assert_eq!(hiprtc_windows_candidates(0), vec![String::from("hiprtc.dll")]);
+        }
+
+        #[test]
+        fn an_unconfigured_wave_takes_the_probed_width() {
+            assert_eq!(resolve_wave(None, HipWave::Wave32).expect("probe wins"), HipWave::Wave32);
+            assert_eq!(resolve_wave(None, HipWave::Wave64).expect("probe wins"), HipWave::Wave64);
+        }
+
+        #[test]
+        fn a_configured_wave_equal_to_the_probe_is_accepted() {
+            assert_eq!(resolve_wave(Some(HipWave::Wave32), HipWave::Wave32).expect("equal"), HipWave::Wave32);
+        }
+
+        #[test]
+        fn a_configured_wave_that_differs_from_the_device_names_both_widths() {
+            let error = resolve_wave(Some(HipWave::Wave64), HipWave::Wave32).expect_err("mismatch refused");
+            assert!(matches!(error, HipDriverError::WaveMismatch { configured: 64, device: 32 }), "{error:?}");
+            let message = error.to_string();
+            assert!(message.contains("64") && message.contains("32"), "{message}");
         }
 
         #[test]
