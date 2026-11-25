@@ -13,6 +13,10 @@ use core::ops::Range;
 
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DeviceRepr, DriverError, LaunchArgs, LaunchConfig, ValidAsZeroBits};
 use cudarc::nvrtc::Ptx;
+use proxima_tensor::Executes;
+
+use crate::cuda::target::Target;
+use crate::cuda::{EmitDevice, executes as cuda_executes};
 use std::sync::Arc;
 
 /// An element a runtime moves between host and device.
@@ -125,6 +129,15 @@ pub trait GpuRuntime {
     /// The launch failed.
     unsafe fn launch(&self, arguments: Self::Launch<'_>, shape: LaunchShape) -> Result<(), Self::Error>;
 
+    /// The operations this runtime's kernels execute, which the bind pass reads.
+    fn executes(&self) -> Executes;
+
+    /// The emit target this runtime's kernels are rendered for.
+    fn emit_target(&self) -> Target;
+
+    /// The device facts that shape emitted launch grids.
+    fn emit_device(&self) -> EmitDevice;
+
     /// Blocks until every queued device operation finished.
     ///
     /// # Errors
@@ -137,6 +150,7 @@ pub trait GpuRuntime {
 pub struct CudarcRuntime {
     context: Arc<CudaContext>,
     stream: Arc<CudaStream>,
+    device: EmitDevice,
 }
 
 impl CudarcRuntime {
@@ -147,8 +161,20 @@ impl CudarcRuntime {
     }
 
     #[must_use]
-    pub fn new(context: Arc<CudaContext>, stream: Arc<CudaStream>) -> Self {
-        Self { context, stream }
+    pub fn new(context: Arc<CudaContext>, stream: Arc<CudaStream>, device: EmitDevice) -> Self {
+        Self { context, stream, device }
+    }
+
+    /// The grant CUDA kernels bind under; the pure function [`GpuRuntime::executes`] returns.
+    #[must_use]
+    pub fn cuda_grant() -> Executes {
+        cuda_executes(&Target::CUDA)
+    }
+
+    /// The target CUDA kernels render for; what [`GpuRuntime::emit_target`] returns.
+    #[must_use]
+    pub fn cuda_target() -> Target {
+        Target::CUDA
     }
 }
 
@@ -217,7 +243,34 @@ impl GpuRuntime for CudarcRuntime {
         unsafe { arguments.launch(config) }.map(|_| ())
     }
 
+    fn executes(&self) -> Executes {
+        Self::cuda_grant()
+    }
+
+    fn emit_target(&self) -> Target {
+        Self::cuda_target()
+    }
+
+    fn emit_device(&self) -> EmitDevice {
+        self.device
+    }
+
     fn synchronize(&self) -> Result<(), DriverError> {
         self.stream.synchronize()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cudarc_runtime_grants_what_the_cuda_executor_hard_coded() {
+        assert_eq!(CudarcRuntime::cuda_grant(), cuda_executes(&Target::CUDA));
+    }
+
+    #[test]
+    fn cudarc_runtime_emits_for_the_cuda_target() {
+        assert_eq!(CudarcRuntime::cuda_target(), Target::CUDA);
     }
 }

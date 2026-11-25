@@ -258,7 +258,6 @@ enum Completion<'fault> {
 #[derive(Debug, Clone)]
 pub struct CudaDriver {
     context: Arc<CudaContext>,
-    device: EmitDevice,
     runtime: CudarcRuntime,
     // synchronous ffi callers share these short cache mutations; compilation and dispatch happen outside the guard.
     modules: Arc<Mutex<BTreeMap<String, Vec<CachedCudaModule>>>>,
@@ -613,8 +612,8 @@ struct KvEncode {
     rendered: RenderedEncode,
 }
 
-fn kv_encode(format: &NumericFormat) -> Option<KvEncode> {
-    let dialect = crate::cuda_encode::CudaEncode { target: Target::CUDA };
+fn kv_encode(target: Target, format: &NumericFormat) -> Option<KvEncode> {
+    let dialect = crate::cuda_encode::CudaEncode { target };
     let rendered = crate::encode_render::format_encode_kernel(&dialect, format, "kv_carry_encode").ok()?;
     Some(KvEncode { format: *format, rendered })
 }
@@ -691,9 +690,8 @@ impl CudaDriver {
             "cuda driver created"
         );
         Ok(Self {
-            runtime: CudarcRuntime::new(Arc::clone(&context), Arc::clone(&stream)),
+            runtime: CudarcRuntime::new(Arc::clone(&context), Arc::clone(&stream), device),
             context,
-            device,
             modules: Arc::new(Mutex::new(BTreeMap::new())),
             resident_buffers: Arc::new(Mutex::new(ResidentLedger::default())),
             compile_counters,
@@ -1278,22 +1276,24 @@ impl CudaDriver {
             numeric_policy,
             unfused,
             activation_storage,
+            &self.runtime.executes(),
         )?;
         let operand_dtypes = program_operand_dtypes(
             program,
             &resolved,
             &packed_operands,
             numeric_policy,
-            &plan_grant(),
+            &self.runtime.executes(),
         );
         let bind_us = elapsed_micros(bind_started);
         let emit_started = Instant::now();
         let (kernels, uniforms) = emit_and_pack(
+            self.runtime.emit_target(),
             &resolved,
             None,
             &packed_operands,
             numeric_policy,
-            self.device,
+            self.runtime.emit_device(),
             &operand_dtypes,
             &mut micros,
         )?;
@@ -2090,10 +2090,11 @@ pub fn probe_bound_graph(
         reason: "shape inference failed",
     })?;
     let (resolved, packed, _) =
-        bind_resolved(program, &shapes, outputs, &packed_operands, numeric_policy, false, activation_storage)?;
+        bind_resolved(program, &shapes, outputs, &packed_operands, numeric_policy, false, activation_storage, &plan_grant())?;
     Ok((resolved, packed))
 }
 
+#[allow(clippy::too_many_arguments)] // one context per argument; a bundle would be a type that only relocates them
 fn bind_resolved(
     program: &[Op],
     shapes: &Shapes,
@@ -2102,15 +2103,16 @@ fn bind_resolved(
     numeric_policy: NumericPolicy,
     unfused: bool,
     activation_storage: Option<NumericFormat>,
+    grant: &Executes,
 ) -> Result<(Vec<BoundOp>, PackedOperands, LowerMicros), CudaDriverError> {
     let bind_started = Instant::now();
     let config = BindConfig::new(numeric_policy, !unfused, packed_operands).with_activation_storage(activation_storage);
-    let bound = bind_plan(program, shapes, outputs, &config, &plan_grant()).map_err(|_| CudaDriverError::UnsupportedGraph {
+    let bound = bind_plan(program, shapes, outputs, &config, grant).map_err(|_| CudaDriverError::UnsupportedGraph {
         node: NodeId(0),
         reason: "graph binding failed",
     })?;
     let (resolved, packed, numeric_policy) = (bound.resolved, bound.packed, bound.policy);
-    validate_resolved(&resolved, numeric_policy)?;
+    validate_resolved(&resolved, numeric_policy, grant)?;
     let micros = LowerMicros {
         bind: bind_started.elapsed().as_micros() as u64,
         ..LowerMicros::default()
@@ -2121,14 +2123,17 @@ fn bind_resolved(
 fn validate_resolved(
     resolved: &[BoundOp],
     numeric_policy: NumericPolicy,
+    grant: &Executes,
 ) -> Result<(), CudaDriverError> {
     for bound in resolved {
         validate_cuda_dtype(bound)?;
     }
-    reject_unsupported_kinds(resolved, numeric_policy)
+    reject_unsupported_kinds(resolved, numeric_policy, grant)
 }
 
+#[allow(clippy::too_many_arguments)] // one context per argument; a bundle would be a type that only relocates them
 fn emit_and_pack(
+    target: Target,
     resolved: &[BoundOp],
     prior: Option<PriorKernels<'_>>,
     packed_operands: &PackedOperands,
@@ -2140,7 +2145,8 @@ fn emit_and_pack(
     let emit_started = Instant::now();
     let (prior_bound, prior_kernels) =
         prior.map_or((&[][..], Vec::new()), |prior| (prior.bound, prior.kernels));
-    let (kernels, reused) = crate::emit_cuda_reusing_with_operand_dtypes(
+    let (kernels, reused) = crate::cuda::emit_reusing_on_target(
+        target,
         prior_bound,
         prior_kernels,
         resolved,
@@ -2212,6 +2218,7 @@ fn refresh_refusal_name(refusal: RefreshRefusal) -> &'static str {
 
 /// Re-derives only the KV-touched ops from `program` at `shapes`, keeping every
 /// other retained op as-is. Returns the refreshed set and the touched count.
+#[allow(clippy::too_many_arguments)] // one context per argument; a bundle would be a type that only relocates them
 fn refresh_bound_resolved(
     (previous, previous_shapes): (&[BoundOp], &Shapes),
     program: &[Op],
@@ -2220,6 +2227,7 @@ fn refresh_bound_resolved(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
     activation_storage: Option<NumericFormat>,
+    grant: &Executes,
 ) -> Result<(Vec<BoundOp>, PackedOperands, usize), RefreshRefusal> {
     let changed: BTreeSet<NodeId> = (0..program.len())
         .map(|position| NodeId(position as u32))
@@ -2242,7 +2250,7 @@ fn refresh_bound_resolved(
         numeric_policy,
     )?;
     let config = BindConfig::new(numeric_policy, true, packed_operands).with_activation_storage(activation_storage);
-    let finished = finish_bound(refreshed, program, shapes, &config, &plan_grant());
+    let finished = finish_bound(refreshed, program, shapes, &config, grant);
     Ok((finished.resolved, finished.packed, touched))
 }
 
@@ -2264,12 +2272,12 @@ fn cuda_admits(executes: &Executes, bound: &BoundOp, numeric_policy: NumericPoli
 fn reject_unsupported_kinds(
     resolved: &[BoundOp],
     numeric_policy: NumericPolicy,
+    executes: &Executes,
 ) -> Result<(), CudaDriverError> {
-    let executes = plan_grant();
     let mut census: BTreeMap<&'static str, (usize, NodeId)> = BTreeMap::new();
     for bound in resolved
         .iter()
-        .filter(|bound| !cuda_admits(&executes, bound, numeric_policy))
+        .filter(|bound| !cuda_admits(executes, bound, numeric_policy))
     {
         census.entry(bound.kind.name()).or_insert((0, bound.node)).0 += 1;
     }
@@ -2556,6 +2564,7 @@ impl CudaPlan {
                 &self.packed_operands,
                 numeric_policy,
                 self.activation_storage,
+                &self.driver.runtime.executes(),
             )
             .map_err(refresh_refusal_name)
         };
@@ -2566,7 +2575,7 @@ impl CudaPlan {
                     bind: refresh_started.elapsed().as_micros() as u64,
                     ..LowerMicros::default()
                 };
-                validate_resolved(&resolved, numeric_policy)?;
+                validate_resolved(&resolved, numeric_policy, &self.driver.runtime.executes())?;
                 let prior = PriorKernels {
                     bound: &previous_bound,
                     kernels: std::mem::take(&mut self.kernels),
@@ -2576,14 +2585,15 @@ impl CudaPlan {
                     &resolved,
                     &self.packed_operands,
                     numeric_policy,
-                    &plan_grant(),
+                    &self.driver.runtime.executes(),
                 );
                 let (kernels, uniforms) = emit_and_pack(
+                    self.driver.runtime.emit_target(),
                     &resolved,
                     Some(prior),
                     &self.packed_operands,
                     numeric_policy,
-                    self.driver.device,
+                    self.driver.runtime.emit_device(),
                     &operand_dtypes,
                     &mut micros,
                 )?;
@@ -2602,6 +2612,7 @@ impl CudaPlan {
                     numeric_policy,
                     false,
                     self.activation_storage,
+                    &self.driver.runtime.executes(),
                 )?;
                 self.packed_operands = packed;
                 let operand_dtypes = program_operand_dtypes(
@@ -2609,14 +2620,15 @@ impl CudaPlan {
                     &resolved,
                     &self.packed_operands,
                     numeric_policy,
-                    &plan_grant(),
+                    &self.driver.runtime.executes(),
                 );
                 let (kernels, uniforms) = emit_and_pack(
+                    self.driver.runtime.emit_target(),
                     &resolved,
                     prior,
                     &self.packed_operands,
                     numeric_policy,
-                    self.driver.device,
+                    self.driver.runtime.emit_device(),
                     &operand_dtypes,
                     &mut micros,
                 )?;
@@ -2730,7 +2742,7 @@ impl CudaPlan {
             node: next.node,
             error: error.to_string(),
         };
-        let device = self.driver.device;
+        let device = self.driver.runtime.emit_device();
         let grid_started = Instant::now();
         if matches!(next.kind, BoundOpKind::CachedAttention { .. }) {
             let kept = crate::cuda::refit_kernel(
@@ -2802,6 +2814,7 @@ impl CudaPlan {
             numeric_policy,
             false,
             self.activation_storage,
+            &self.driver.runtime.executes(),
         )?;
         Ok((shapes, bound))
     }
@@ -2938,7 +2951,7 @@ impl CudaPlan {
         between: &[BoundOp],
         numeric_policy: NumericPolicy,
     ) -> Result<bool, CudaDriverError> {
-        let device = self.driver.device;
+        let device = self.driver.runtime.emit_device();
         let packed = &self.packed_operands;
         if between.len() != previous.len() || previous.len() != self.resolved.len() {
             return Ok(false);
@@ -2976,13 +2989,13 @@ impl CudaPlan {
             core::slice::from_ref(previous),
             &self.packed_operands,
             numeric_policy,
-            &plan_grant(),
+            &self.driver.runtime.executes(),
         );
         let before = crate::emit_cuda_with_operand_dtypes(
             previous,
             &self.packed_operands,
             numeric_policy,
-            self.driver.device,
+            self.driver.runtime.emit_device(),
             &operand_dtypes,
         )
         .map_err(|error| CudaDriverError::Emit {
@@ -3031,7 +3044,7 @@ impl CudaPlan {
                 core::slice::from_ref(&self.resolved[position]),
                 &self.packed_operands,
                 numeric_policy,
-                &plan_grant(),
+                &self.driver.runtime.executes(),
             );
             let text_kept = crate::cuda::refit_kernel_with_operand_dtypes(
                 &previous,
@@ -3039,7 +3052,7 @@ impl CudaPlan {
                 &mut self.kernels[position],
                 &self.packed_operands,
                 numeric_policy,
-                self.driver.device,
+                self.driver.runtime.emit_device(),
                 &operand_dtypes,
             )
             .map_err(|error| CudaDriverError::Emit {
@@ -3465,7 +3478,7 @@ impl CudaPlan {
         let encodes: Option<BTreeMap<NodeId, KvEncode>> = pairs
             .iter()
             .map(|(input, _, format)| {
-                let encode = kv_encode(format).filter(|_| format.is_identity_of(&NumericFormat::default()));
+                let encode = kv_encode(self.driver.runtime.emit_target(), format).filter(|_| format.is_identity_of(&NumericFormat::default()));
                 encode.map(|encode| (*input, encode))
             })
             .collect();
@@ -4517,6 +4530,7 @@ mod tests {
     };
     use crate::cuda::CudaGridSpec;
     use cudarc::driver::LaunchConfig;
+    use crate::gpu_runtime::GpuRuntime;
     use crate::cuda_kernel_cache::CacheKey;
     use crate::cuda_ptx_store::PtxStore;
     use crate::lowering::Codec;
@@ -5286,7 +5300,7 @@ mod tests {
 
         let driver = CudaDriver::new(0).expect("a cuda device");
         let format = NumericFormat::default();
-        let encode = kv_encode(&format).expect("the graph output format renders an encode");
+        let encode = kv_encode(driver.runtime.emit_target(), &format).expect("the graph output format renders an encode");
         let NumericFormat::Scalar(layout) = &format else { panic!("the graph output format is a scalar") };
         let maximum = layout.max_normal();
         let infinity = maximum / (maximum * 0.0);
@@ -5311,7 +5325,7 @@ mod tests {
         let driver = CudaDriver::new(0).expect("a cuda device");
         let mut covered = Vec::new();
         for format in NumericFormat::every() {
-            let Some(encode) = kv_encode(&format) else { continue };
+            let Some(encode) = kv_encode(driver.runtime.emit_target(), &format) else { continue };
             if format.is_identity_of(&NumericFormat::default()) {
                 continue;
             }
