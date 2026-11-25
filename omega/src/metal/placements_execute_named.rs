@@ -104,17 +104,18 @@ fn watch_command_buffer(buffer: &ProtocolObject<dyn MTLCommandBuffer>, chunk: us
 fn precommit_toggles(
     queue: &ProtocolObject<dyn MTLCommandQueue>,
     committed: &[Retained<ProtocolObject<dyn MTLCommandBuffer>>],
+    diagnostics: &MetalDiagnostics,
 ) {
     let previous = committed
         .len()
         .checked_sub(2)
         .and_then(|index| committed.get(index));
-    if env_flags::precommit_wait()
+    if diagnostics.precommit_wait
         && let Some(previous) = previous
     {
         previous.waitUntilCompleted();
     }
-    if env_flags::precommit_ping()
+    if diagnostics.precommit_ping
         && previous.is_none()
         && let Some(empty) = queue.commandBuffer()
     {
@@ -234,47 +235,18 @@ fn upload_substitute_buffers(
     buffers
 }
 
-/// `PROXIMA_COMMAND_BUFFER_CHUNKS=K`, parsed and cached once per process
-/// (matching every other `PROXIMA_*` knob this crate reads, e.g.
-/// `packed_rows_override` in `kernel_types_identity.rs`) -- unlike the
-/// config/plan-shape tier below, the env override is a genuine per-process
-/// A/B switch, so caching it once is correct. Only a positive integer
-/// literal is honored; unset, empty, zero, or unparsable is `None`, falling
-/// through to the per-call config/default tier.
-fn command_buffer_chunk_env_override() -> Option<usize> {
-    static CACHED: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("PROXIMA_COMMAND_BUFFER_CHUNKS")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|parsed| *parsed >= 1)
-    })
-}
-
 /// `PROXIMA_COMMAND_BUFFER_BOUNDARIES=<comma-separated op positions>`
 /// (OWNER_BRIEF_largest_region, Step B): an explicit chunk-boundary list for
-/// coarse per-region GPU timing, read and cached once like every other
-/// `PROXIMA_*` knob this module reads. Only consulted when
-/// `PROXIMA_COMMAND_BUFFER_CHUNKS` is unset (that env var's even-split path
+/// coarse per-region GPU timing, carried by
+/// [`MetalDiagnostics::command_buffer_boundaries`]. Only consulted when
+/// `PROXIMA_COMMAND_BUFFER_CHUNKS` is unset (that switch's even-split path
 /// stays authoritative when both are set) and only for decode-shaped plans
 /// -- prefill keeps its existing `1` boundary count, same scoping as
 /// `command_buffer_chunk_count`'s own doc. A boundary at position `p` starts
 /// a new command buffer whose first op is `p`, reusing
 /// [`command_buffer_chunk_boundaries`]'s own convention.
-fn command_buffer_explicit_boundaries_env() -> Option<Vec<usize>> {
-    static CACHED: std::sync::OnceLock<Option<Vec<usize>>> = std::sync::OnceLock::new();
-    CACHED
-        .get_or_init(|| {
-            std::env::var("PROXIMA_COMMAND_BUFFER_BOUNDARIES")
-                .ok()
-                .map(|value| {
-                    value
-                        .split(',')
-                        .filter_map(|entry| entry.trim().parse::<usize>().ok())
-                        .collect::<Vec<usize>>()
-                })
-        })
-        .clone()
+fn command_buffer_explicit_boundaries(diagnostics: &MetalDiagnostics) -> Option<Vec<usize>> {
+    diagnostics.command_buffer_boundaries.clone()
 }
 
 /// `PROXIMA_COMMAND_BUFFER_CHUNKS=K` (OWNER_BRIEF_structural_difference,
@@ -293,10 +265,10 @@ fn command_buffer_explicit_boundaries_env() -> Option<Vec<usize>> {
 /// (`source=default`) regardless of `plan_chunks`. `decode_shaped == true`
 /// resolves `plan_chunks` through `config_or_default_chunks`
 /// (`source=config` when a caller threaded a nonzero value, `source=default`
-/// otherwise). The env var (`source=env`, [`command_buffer_chunk_env_override`])
-/// wins unconditionally over both.
-fn command_buffer_chunk_count(plan_chunks: u32, decode_shaped: bool) -> usize {
-    let (chunks, source) = match command_buffer_chunk_env_override() {
+/// otherwise). The diagnostic switch (`source=env`,
+/// [`MetalDiagnostics::command_buffer_chunks`]) wins unconditionally over both.
+fn command_buffer_chunk_count(plan_chunks: u32, decode_shaped: bool, diagnostics: &MetalDiagnostics) -> usize {
+    let (chunks, source) = match diagnostics.command_buffer_chunks {
         Some(parsed) => (parsed, "env"),
         None if decode_shaped => config_or_default_chunks(plan_chunks),
         None => (1, "default"),
@@ -365,8 +337,8 @@ pub(super) fn resolved_op_label(resolved: &[BoundOp], position: usize) -> &'stat
 /// built specifically to answer the audit's own question (does a chunked
 /// commit let the CPU write memory an already-committed, possibly still
 /// in-flight, chunk reads) from EXECUTION DATA rather than from reading the
-/// encode loop alone. Read once per process like every other `PROXIMA_*`
-/// knob this module already caches (`command_buffer_chunk_count`'s own doc).
+/// encode loop alone. Armed per step from
+/// [`MetalDiagnostics::chunk_audit`] by `chunk_audit_begin_step`.
 #[cfg(feature = "instrument")]
 struct ChunkAuditWrite {
     buffer_ptr: usize,
@@ -389,6 +361,9 @@ struct ChunkAuditDispatch {
 #[cfg(feature = "instrument")]
 #[derive(Default)]
 struct ChunkAuditState {
+    // set from the plan's diagnostics at the top of a step: the record functions run deep in the
+    // encode path where no plan is in scope, and this state is already the step's own
+    armed: bool,
     current_chunk: usize,
     committed_chunks: usize,
     writes: Vec<ChunkAuditWrite>,
@@ -397,9 +372,9 @@ struct ChunkAuditState {
 
 #[cfg(feature = "instrument")]
 thread_local! {
-    static CHUNK_AUDIT_ENABLED: core::cell::Cell<Option<bool>> = const { core::cell::Cell::new(None) };
     static CHUNK_AUDIT_STATE: core::cell::RefCell<ChunkAuditState> = const {
         core::cell::RefCell::new(ChunkAuditState {
+            armed: false,
             current_chunk: 1,
             committed_chunks: 0,
             writes: Vec::new(),
@@ -410,14 +385,7 @@ thread_local! {
 
 #[cfg(feature = "instrument")]
 pub(super) fn chunk_audit_enabled() -> bool {
-    CHUNK_AUDIT_ENABLED.with(|flag| {
-        if let Some(value) = flag.get() {
-            return value;
-        }
-        let value = std::env::var_os("PROXIMA_CHUNK_AUDIT").is_some();
-        flag.set(Some(value));
-        value
-    })
+    CHUNK_AUDIT_STATE.with(|state| state.borrow().armed)
 }
 
 /// Resets per-step audit state -- called once at the top of
@@ -425,12 +393,13 @@ pub(super) fn chunk_audit_enabled() -> bool {
 /// boundaries are even computed, so a warm call's leftover records from the
 /// PRIOR decode step never bleed into this step's hazard intersection.
 #[cfg(feature = "instrument")]
-fn chunk_audit_begin_step() {
-    if !chunk_audit_enabled() {
-        return;
-    }
+fn chunk_audit_begin_step(diagnostics: &MetalDiagnostics) {
     CHUNK_AUDIT_STATE.with(|state| {
         let mut state = state.borrow_mut();
+        state.armed = diagnostics.chunk_audit;
+        if !state.armed {
+            return;
+        }
         state.current_chunk = 1;
         state.committed_chunks = 0;
         state.writes.clear();
@@ -528,7 +497,7 @@ pub(super) fn chunk_audit_finish(step: u64) {
         return;
     }
     CHUNK_AUDIT_STATE.with(|state| {
-        let state = state.borrow();
+        let mut state = state.borrow_mut();
         let mut hazards: Vec<String> = Vec::new();
         for write in &state.writes {
             for dispatch in &state.dispatches {
@@ -566,6 +535,7 @@ pub(super) fn chunk_audit_finish(step: u64) {
         for hazard in hazards.iter().take(3) {
             eprintln!("chunk_audit_hazard step={step} {hazard}");
         }
+        state.armed = false;
     });
 }
 
@@ -826,7 +796,7 @@ pub(super) fn execute_plan_with_placements_inner(
     }
 
     #[cfg(feature = "instrument")]
-    chunk_audit_begin_step();
+    chunk_audit_begin_step(&plan.diagnostics);
     // plan-owned, reused across calls (`clear` keeps capacity) -- see
     // [`Plan::chunk_status_buffers`]'s own doc. Every command buffer this
     // call commits (main-loop chunk boundaries, the diagnostic substitute-
@@ -851,14 +821,14 @@ pub(super) fn execute_plan_with_placements_inner(
     // blit's extra buffer still gets its own distinct label.
     let mut chunk_label_sequence: usize = 0;
     let mut command_buffer =
-        new_labeled_command_buffer(&queue, "omega.chunk.0").ok_or_else(|| {
+        new_labeled_command_buffer(&queue, "omega.chunk.0", &plan.diagnostics).ok_or_else(|| {
             MetalError::CompileFailed {
                 log: "command queue refused to hand out a command buffer".to_string(),
             }
         })?;
     chunk_label_sequence += 1;
     #[cfg(feature = "instrument")]
-    if env_flags::enqueue_early() {
+    if plan.diagnostics.command_buffer_enqueue_early {
         command_buffer.enqueue();
     }
     // `Concurrent` lets independent dispatches (e.g. Q/K/V from one normed
@@ -896,7 +866,7 @@ pub(super) fn execute_plan_with_placements_inner(
     // off by default: lets the explicit-boundary diagnostic also split a
     // prefill-shaped plan's step-0 command stream.
     let boundaries_prefill_allowed =
-        plan.command_buffer_chunks_decode_shaped || env_flags::boundaries_prefill();
+        plan.command_buffer_chunks_decode_shaped || plan.diagnostics.boundaries_prefill;
     // `PROXIMA_CAPTURE_NODES=packed-multi-token` matches every projection in
     // the step, so the boundary list can only be computed here, after the
     // admission predicate has run.
@@ -916,8 +886,8 @@ pub(super) fn execute_plan_with_placements_inner(
     let auto_capture_boundaries: Option<Vec<usize>> = None;
     let explicit_boundaries = if let Some(boundaries) = auto_capture_boundaries {
         Some(boundaries)
-    } else if command_buffer_chunk_env_override().is_none() && boundaries_prefill_allowed {
-        command_buffer_explicit_boundaries_env()
+    } else if plan.diagnostics.command_buffer_chunks.is_none() && boundaries_prefill_allowed {
+        command_buffer_explicit_boundaries(&plan.diagnostics)
     } else {
         None
     };
@@ -937,6 +907,7 @@ pub(super) fn execute_plan_with_placements_inner(
             let count = command_buffer_chunk_count(
                 plan.command_buffer_chunks,
                 plan.command_buffer_chunks_decode_shaped,
+                &plan.diagnostics,
             );
             (command_buffer_chunk_boundaries(total_ops, count), count, 0)
         };
@@ -959,14 +930,16 @@ pub(super) fn execute_plan_with_placements_inner(
     #[cfg(feature = "instrument")]
     let substitute_buffers: BTreeMap<NodeId, (MetalBuffer, usize)> =
         if CAPTURE_STEP.load(core::sync::atomic::Ordering::Relaxed) == 0 {
-            env_flags::substitute_dump_dir()
+            plan.diagnostics
+                .substitute_dump_dir
+                .as_deref()
                 .map(|dir| upload_substitute_buffers(&device, std::path::Path::new(dir)))
                 .unwrap_or_default()
         } else {
             BTreeMap::new()
         };
     #[cfg(feature = "instrument")]
-    let substitute_blit_after_kernel = env_flags::substitute_blit_after_kernel();
+    let substitute_blit_after_kernel = plan.diagnostics.substitute_blit_after_kernel();
     #[cfg(feature = "instrument")]
     let mut substitutions_applied: u64 = 0;
     let mut next_boundary = 0usize;
@@ -1059,13 +1032,13 @@ pub(super) fn execute_plan_with_placements_inner(
     for (position, bound) in prepared.resolved.iter().enumerate() {
         if next_boundary < chunk_boundaries.len() && chunk_boundaries[next_boundary] == position {
             let new_command_buffer =
-                new_labeled_command_buffer(&queue, &format!("omega.chunk.{chunk_label_sequence}"))
+                new_labeled_command_buffer(&queue, &format!("omega.chunk.{chunk_label_sequence}"), &plan.diagnostics)
                     .ok_or_else(|| MetalError::CompileFailed {
                         log: "command queue refused to hand out a command buffer".to_string(),
                     })?;
             chunk_label_sequence += 1;
             #[cfg(feature = "instrument")]
-            if env_flags::enqueue_early() {
+            if plan.diagnostics.command_buffer_enqueue_early {
                 new_command_buffer.enqueue();
             }
             let new_encoder = EncoderGuard::new(
@@ -1089,7 +1062,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 dispatch_count: chunk_op_count,
                 first_op_label: resolved_op_label(&prepared.resolved, chunk_first_op),
                 last_op_label: resolved_op_label(&prepared.resolved, position.saturating_sub(1)),
-                encoder_status_requested: encoder_error_status_requested(),
+                encoder_status_requested: plan.diagnostics.metal_encoder_error_status,
             });
             chunk_first_op = position;
             chunk_op_count = 0;
@@ -1103,7 +1076,7 @@ pub(super) fn execute_plan_with_placements_inner(
             #[cfg(feature = "instrument")]
             chunk_command_buffers.push(closing_command_buffer.clone());
             #[cfg(feature = "instrument")]
-            precommit_toggles(&queue, &chunk_command_buffers);
+            precommit_toggles(&queue, &chunk_command_buffers, &plan.diagnostics);
             // Same clock-correlation argument as the single-buffer
             // `gpu_exec_started`/`commit_call_start_s` pair below: a tick
             // read immediately before `commit()`, converted through the
@@ -1285,6 +1258,7 @@ pub(super) fn execute_plan_with_placements_inner(
             let blit_command_buffer = new_labeled_command_buffer(
                 &queue,
                 &format!("omega.chunk.{chunk_label_sequence}.substitute-blit"),
+                &plan.diagnostics,
             )
             .ok_or_else(|| MetalError::CompileFailed {
                 log: "command queue refused to hand out a command buffer for the blit".to_string(),
@@ -1306,7 +1280,7 @@ pub(super) fn execute_plan_with_placements_inner(
             }
             blit.endEncoding();
             let continuation_command_buffer =
-                new_labeled_command_buffer(&queue, &format!("omega.chunk.{chunk_label_sequence}"))
+                new_labeled_command_buffer(&queue, &format!("omega.chunk.{chunk_label_sequence}"), &plan.diagnostics)
                     .ok_or_else(|| MetalError::CompileFailed {
                         log: "command queue refused to hand out a command buffer".to_string(),
                     })?;
@@ -1332,7 +1306,7 @@ pub(super) fn execute_plan_with_placements_inner(
                     &prepared.resolved,
                     position.saturating_sub(1).max(chunk_first_op),
                 ),
-                encoder_status_requested: encoder_error_status_requested(),
+                encoder_status_requested: plan.diagnostics.metal_encoder_error_status,
             });
             chunk_status_buffers.push(blit_command_buffer.clone());
             chunk_status_diagnostics.push(BufferDiagnostics {
@@ -1341,7 +1315,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 dispatch_count: 0,
                 first_op_label: "substitute-blit",
                 last_op_label: "substitute-blit",
-                encoder_status_requested: encoder_error_status_requested(),
+                encoder_status_requested: plan.diagnostics.metal_encoder_error_status,
             });
             chunk_first_op = position + 1;
             chunk_op_count = 0;
@@ -1363,8 +1337,12 @@ pub(super) fn execute_plan_with_placements_inner(
         // sentinel-filled -- an early exit is exactly the case this must
         // catch, and every one of those arms is reached only further down.
         #[cfg(feature = "instrument")]
-        if let (Some(target_nodes), Some((buffer, offset))) = (head_debug_target_nodes(), placement)
-            && let Some(target_index) = target_nodes.iter().position(|node| *node == bound.node)
+        if let Some((buffer, offset)) = placement
+            && let Some(target_index) = plan
+                .diagnostics
+                .head_debug_nodes
+                .iter()
+                .position(|node| *node == bound.node)
         {
             let byte_length = bound.output_len().max(1) * device_element_bytes(bound.dtype);
             let (_, grid) = kernel_dispatch_shape(bound, packed_operands, plan.numeric_policy, &plan.emit_knobs)?;
@@ -1381,7 +1359,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 grid_depth = grid.depth,
                 "head_debug: pre-dispatch buffer identity and dispatch shape"
             );
-            if target_index > 0 && env_flags::head_sentinel_fill() {
+            if target_index > 0 && plan.diagnostics.head_sentinel_fill {
                 chunk_audit_record_write(
                     Retained::as_ptr(buffer) as usize,
                     offset,
@@ -1399,7 +1377,7 @@ pub(super) fn execute_plan_with_placements_inner(
         // compare lives in `arena_encode_dispatch_finish::finish`.
         #[cfg(feature = "instrument")]
         if let Some((buffer, offset)) = placement
-            && env_flags::repeat_verify()
+            && plan.diagnostics.repeat_verify
             && plan
                 .prepared
                 .repeat_verify_pairs
@@ -1768,6 +1746,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 let blit_command_buffer = new_labeled_command_buffer(
                     &queue,
                     &format!("omega.chunk.{chunk_label_sequence}.substitute-blit"),
+                    &plan.diagnostics,
                 )
                 .ok_or_else(|| MetalError::CompileFailed {
                     log: "command queue refused to hand out a command buffer for the blit"
@@ -1792,6 +1771,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 let continuation_command_buffer = new_labeled_command_buffer(
                     &queue,
                     &format!("omega.chunk.{chunk_label_sequence}"),
+                    &plan.diagnostics,
                 )
                 .ok_or_else(|| MetalError::CompileFailed {
                     log: "command queue refused to hand out a command buffer".to_string(),
@@ -1815,7 +1795,7 @@ pub(super) fn execute_plan_with_placements_inner(
                     dispatch_count: chunk_op_count,
                     first_op_label: resolved_op_label(&prepared.resolved, chunk_first_op),
                     last_op_label: resolved_op_label(&prepared.resolved, position),
-                    encoder_status_requested: encoder_error_status_requested(),
+                    encoder_status_requested: plan.diagnostics.metal_encoder_error_status,
                 });
                 chunk_status_buffers.push(blit_command_buffer.clone());
                 chunk_status_diagnostics.push(BufferDiagnostics {
@@ -1824,7 +1804,7 @@ pub(super) fn execute_plan_with_placements_inner(
                     dispatch_count: 0,
                     first_op_label: "substitute-blit",
                     last_op_label: "substitute-blit",
-                    encoder_status_requested: encoder_error_status_requested(),
+                    encoder_status_requested: plan.diagnostics.metal_encoder_error_status,
                 });
                 chunk_first_op = position + 1;
                 chunk_op_count = 0;
@@ -1893,7 +1873,7 @@ pub(super) fn execute_plan_with_placements_inner(
         dispatch_count: chunk_op_count,
         first_op_label: resolved_op_label(&prepared.resolved, chunk_first_op),
         last_op_label: resolved_op_label(&prepared.resolved, total_ops.saturating_sub(1)),
-        encoder_status_requested: encoder_error_status_requested(),
+        encoder_status_requested: plan.diagnostics.metal_encoder_error_status,
     });
     #[cfg(feature = "instrument")]
     chunk_command_buffers.push(command_buffer.clone());
@@ -1911,7 +1891,7 @@ pub(super) fn execute_plan_with_placements_inner(
     #[cfg(feature = "instrument")]
     watch_command_buffer(&command_buffer, capture_chunk_index);
     #[cfg(feature = "instrument")]
-    precommit_toggles(&queue, &chunk_command_buffers);
+    precommit_toggles(&queue, &chunk_command_buffers, &plan.diagnostics);
     #[cfg(feature = "instrument")]
     let gpu_exec_started = read_ticks();
     #[cfg(feature = "instrument")]
@@ -2629,7 +2609,7 @@ pub fn execute_plan_timed(
         device_buffers.insert(*node, buffer);
     }
 
-    let command_buffer = new_labeled_command_buffer(&queue, "omega.single.execute_plan_timed")
+    let command_buffer = new_labeled_command_buffer(&queue, "omega.single.execute_plan_timed", &plan.diagnostics)
         .ok_or_else(|| MetalError::CompileFailed {
             log: "command queue refused to hand out a command buffer".to_string(),
         })?;
@@ -2688,7 +2668,7 @@ pub fn execute_plan_timed(
                 &prepared.resolved,
                 prepared.resolved.len().saturating_sub(1),
             ),
-            encoder_status_requested: encoder_error_status_requested(),
+            encoder_status_requested: plan.diagnostics.metal_encoder_error_status,
         },
     )?;
     let gpu_ns =
@@ -2853,8 +2833,9 @@ pub(super) fn validate_selected_expert_routes(
     program: &[Op],
     bound: &BoundOp,
     expert_buffers: Option<&ExpertSourceBuffers>,
+    diagnostics: &MetalDiagnostics,
 ) -> Result<(), MetalError> {
-    let Some(selected) = env_flags::compare_bound_node() else {
+    let Some(selected) = diagnostics.metal_compare_bound_node else {
         return Ok(());
     };
     if selected != bound.node {
@@ -2970,8 +2951,9 @@ pub(super) fn evaluate_selected_bound_cpu(
     packed_operands: &PackedOperands,
     program: &[Op],
     bound: &BoundOp,
+    diagnostics: &MetalDiagnostics,
 ) -> Result<Option<alloc::vec::Vec<f32>>, MetalError> {
-    let selected = env_flags::compare_bound_node();
+    let selected = diagnostics.metal_compare_bound_node;
     if selected != Some(bound.node) {
         return Ok(None);
     }
@@ -3207,31 +3189,6 @@ pub(super) fn report_bound_operands(
         }
         let _ = weight_source;
     }
-}
-
-/// `PROXIMA_HEAD_DEBUG_NODES` (comma-separated `NodeId` integers) parsed
-/// once per process -- the ordered target set `OWNER_BRIEF_gemma_head`'s
-/// per-position identity print and `PROXIMA_HEAD_SENTINEL_FILL` both key
-/// against. Index 0 is the production head root; every later index is a
-/// `PROXIMA_HEAD_REPEATS` duplicate, per the caller's own convention when
-/// setting the env var. `None` (the ordinary, non-debugging run) short-
-/// circuits both call sites to a single `is_none()` check.
-#[cfg(feature = "instrument")]
-fn head_debug_target_nodes() -> Option<&'static [NodeId]> {
-    static TARGETS: std::sync::OnceLock<Vec<NodeId>> = std::sync::OnceLock::new();
-    let targets = TARGETS.get_or_init(|| {
-        std::env::var("PROXIMA_HEAD_DEBUG_NODES")
-            .ok()
-            .map(|value| {
-                value
-                    .split(',')
-                    .filter_map(|entry| entry.trim().parse::<u32>().ok())
-                    .map(NodeId)
-                    .collect()
-            })
-            .unwrap_or_default()
-    });
-    (!targets.is_empty()).then_some(targets.as_slice())
 }
 
 /// Overwrites `buffer[offset..offset + byte_length]` with the IEEE-754

@@ -100,6 +100,8 @@ pub mod kernel_cache_config;
 mod lowering;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod metal;
+#[cfg(feature = "std")]
+pub mod metal_diagnostics;
 #[cfg(proxima_mlx)]
 pub mod mlx;
 #[cfg(feature = "instrument")]

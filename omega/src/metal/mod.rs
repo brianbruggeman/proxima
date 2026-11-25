@@ -235,6 +235,7 @@ use crate::config::{DenseMmaInputLayout, ResourceConstraints, RuntimeConfig};
 #[cfg(feature = "instrument")]
 use crate::emit;
 use crate::error::EmitError;
+use crate::metal_diagnostics::MetalDiagnostics;
 #[cfg(feature = "instrument")]
 use crate::msl::{diagnose_dense_batched_gemm_block, diagnose_packed_row_block};
 use crate::msl::{
@@ -273,7 +274,6 @@ mod pipeline_disk_cache;
 mod resident_nocopy_cache;
 #[cfg(feature = "metal-plan-stable-buffers")]
 mod shared_transient;
-mod env_flags;
 mod metal_context;
 mod metal_device;
 pub use metal_device::MetalDevice;
@@ -340,8 +340,8 @@ fn commit_and_wait(
 /// per Apple's own doc on that option: "enabling this error reporting
 /// option may increase CPU, GPU, and/or memory overhead on some
 /// platforms". [`new_labeled_command_buffer`] is the one place that reads
-/// this; every command buffer this driver creates goes through it, so the
-/// switch is process-wide once set, not per-call-site.
+/// [`MetalDiagnostics::metal_encoder_error_status`]; every command buffer this
+/// driver creates goes through it, so the switch is per plan, not per call site.
 ///
 /// Requesting the option is wired all the way through -- the command
 /// buffer really is created with it set, and [`check_command_buffer_status`]
@@ -349,10 +349,6 @@ fn commit_and_wait(
 /// failing `NSError`'s `userInfo` (`encoder_failure_infos`) into
 /// `MetalError::CommandBufferFailed`'s `encoder_infos` field, only on the
 /// fault branch and only when this switch was on.
-fn encoder_error_status_requested() -> bool {
-    env_flags::encoder_error_status()
-}
-
 /// Every command-buffer-creating call site in this driver goes through
 /// this instead of a bare `queue.commandBuffer()` -- it is what makes
 /// `buffer_label` on [`MetalError::CommandBufferFailed`] non-`None` and
@@ -363,9 +359,10 @@ fn encoder_error_status_requested() -> bool {
 pub(super) fn new_labeled_command_buffer(
     queue: &ProtocolObject<dyn MTLCommandQueue>,
     label: &str,
+    diagnostics: &MetalDiagnostics,
 ) -> Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>> {
     let descriptor = MTLCommandBufferDescriptor::new();
-    if encoder_error_status_requested() {
+    if diagnostics.metal_encoder_error_status {
         descriptor.setErrorOptions(MTLCommandBufferErrorOption::EncoderExecutionStatus);
     }
     let command_buffer = queue.commandBufferWithDescriptor(&descriptor)?;

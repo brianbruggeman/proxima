@@ -62,6 +62,8 @@ pub(super) fn block_byte_len(block: &QuantizedBlock<'_>) -> usize {
     }
 }
 
+// the diagnostics handle is the eighth argument; a bundle struct would only rename this list.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn prepare(
     program: &[Op],
     symbols: &[u64],
@@ -70,6 +72,7 @@ pub(super) fn prepare(
     numeric_policy: NumericPolicy,
     placed_input_nodes: &[NodeId],
     options: (bool, bool),
+    diagnostics: &MetalDiagnostics,
 ) -> Result<Prepared, MetalError> {
     let (fuse_cached_attention, wavefront_schedule) = options;
     prepare_with_options(
@@ -79,6 +82,7 @@ pub(super) fn prepare(
         outputs,
         (numeric_policy, fuse_cached_attention, true, wavefront_schedule),
         placed_input_nodes,
+        diagnostics,
     )
 }
 
@@ -89,6 +93,7 @@ pub(super) fn prepare_with_options(
     outputs: &[NodeId],
     policy: (NumericPolicy, bool, bool, bool),
     placed_input_nodes: &[NodeId],
+    diagnostics: &MetalDiagnostics,
 ) -> Result<Prepared, MetalError> {
     let (numeric_policy, fuse_cached_attention, allow_fusion, wavefront) = policy;
     // this driver binds with `accumulator_narrowing` (see below), so an f64
@@ -166,6 +171,7 @@ pub(super) fn prepare_with_options(
         outputs,
         (numeric_policy, fuse_cached_attention, allow_fusion, wavefront),
         placed_input_nodes,
+        diagnostics,
     )
 }
 
@@ -183,8 +189,12 @@ fn prepare_bound(
     outputs: &[NodeId],
     policy: (NumericPolicy, bool, bool, bool),
     placed_input_nodes: &[NodeId],
+    diagnostics: &MetalDiagnostics,
 ) -> Result<Prepared, MetalError> {
     let (numeric_policy, fuse_cached_attention, allow_fusion, wavefront) = policy;
+    // only the instrument-gated repeat-node pass reads it
+    #[cfg(not(feature = "instrument"))]
+    let _ = diagnostics;
     #[cfg(feature = "instrument")]
     let validate_started = read_ticks();
     // every packed codec's declared dtype is the "these are bytes" marker
@@ -254,8 +264,8 @@ fn prepare_bound(
         alloc::vec::Vec::new();
     #[cfg(feature = "instrument")]
     {
-        let targets = env_flags::repeat_nodes();
-        let repeat_count = env_flags::repeat_count();
+        let targets = diagnostics.repeat_nodes.as_slice();
+        let repeat_count = diagnostics.repeat_count;
         if !targets.is_empty() {
             let (repeated, refusals, pairs) = apply_repeat_nodes(
                 resolved,
@@ -272,7 +282,7 @@ fn prepare_bound(
             // moment its real last reader executes -- promoting it to a
             // requested output keeps that buffer alive through readback the
             // same way `apply_repeat_nodes` already keeps every copy alive.
-            if env_flags::repeat_verify() {
+            if diagnostics.repeat_verify {
                 for (original, _) in &repeat_verify_pairs {
                     if !effective_outputs.contains(original) {
                         effective_outputs.push(*original);
@@ -286,7 +296,7 @@ fn prepare_bound(
                     "PROXIMA_REPEAT_NODES: target declined, not a byte-identical duplicate"
                 );
             }
-            if env_flags::repeat_verify() {
+            if diagnostics.repeat_verify {
                 std::eprintln!(
                     "repeat_nodes targets={:?} count={} refusals={:?} pairs={:?}",
                     targets
@@ -384,7 +394,7 @@ fn prepare_bound(
     // after the placed-output promotion, so each RoPE half already sits next to the reads it shares
     // with its sibling; `fuse_twin_elementwise`'s own doc names the position it keeps.
     #[cfg(feature = "twin-elementwise-fusion")]
-    if std::env::var_os("PROXIMA_DISABLE_TWIN_ELEMENTWISE_FUSION").is_none() {
+    if !diagnostics.disable_twin_elementwise_fusion {
         resolved = fuse_twin_elementwise(resolved, program);
     }
     // last rewrite of the bound ops: every matcher above (cached attention, twin fusion, packed
@@ -2020,6 +2030,8 @@ pub(super) struct RebindContext {
     pub(super) allow_fusion: bool,
     pub(super) wavefront: bool,
     pub(super) placed_input_nodes: Vec<NodeId>,
+    /// The diagnostic switches the plan was built under; a rebind re-reads the repeat-node switches from here.
+    pub(super) diagnostics: MetalDiagnostics,
 }
 
 /// [`prepare_with_options`] at `symbols` over the packed operands `previous` already attributed,
@@ -2047,5 +2059,6 @@ pub(super) fn rebind_at(
             context.wavefront,
         ),
         &context.placed_input_nodes,
+        &context.diagnostics,
     )
 }

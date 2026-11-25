@@ -41,10 +41,17 @@ pub(super) fn execute_op_timed(
     attention_row_schedule: crate::msl::AttentionRowSchedule,
     expert_buffers: Option<&ExpertSourceBuffers>,
     cpu_reference: Option<&BTreeMap<NodeId, alloc::vec::Vec<f32>>>,
+    diagnostics: &MetalDiagnostics,
 ) -> Result<OpGpuTiming, MetalError> {
-    validate_selected_expert_routes(device_buffers, prepared, program, bound, expert_buffers)?;
-    let bounded_cpu =
-        evaluate_selected_bound_cpu(device_buffers, prepared, packed_operands, program, bound)?;
+    validate_selected_expert_routes(device_buffers, prepared, program, bound, expert_buffers, diagnostics)?;
+    let bounded_cpu = evaluate_selected_bound_cpu(
+        device_buffers,
+        prepared,
+        packed_operands,
+        program,
+        bound,
+        diagnostics,
+    )?;
     // this operand's own TENSOR bytes, not the shared buffer's `length()` --
     // see `operand_tensor_bytes`'s own doc: a checkpoint-mapping-offset bind
     // shares ONE buffer across every packed weight, so `buffer.length()`
@@ -87,7 +94,7 @@ pub(super) fn execute_op_timed(
         .iter()
         .find_map(|(source, _, _)| packed_operands.get(source).copied());
 
-    let command_buffer = new_labeled_command_buffer(queue, "omega.single.execute_op_timed")
+    let command_buffer = new_labeled_command_buffer(queue, "omega.single.execute_op_timed", diagnostics)
         .ok_or_else(|| MetalError::CompileFailed {
             log: "command queue refused to hand out a command buffer".to_string(),
         })?;
@@ -130,7 +137,7 @@ pub(super) fn execute_op_timed(
             dispatch_count: 1,
             first_op_label: bound.kind.name(),
             last_op_label: bound.kind.name(),
-            encoder_status_requested: encoder_error_status_requested(),
+            encoder_status_requested: diagnostics.metal_encoder_error_status,
         },
     )?;
     let gpu_ns =
@@ -138,7 +145,7 @@ pub(super) fn execute_op_timed(
     if let Some((fault_buffer, gathers)) = fault {
         check_gather_fault(bound, &fault_buffer, gathers)?;
     }
-    if env_flags::nan_check()
+    if diagnostics.metal_nan_check
         && let Some((first_index, shape, metal_values)) =
             check_op_output_finite(device_buffers, prepared, program, bound.node, kind)?
     {
@@ -378,7 +385,7 @@ pub(super) fn execute_plan_op_timed_inner(
     plan.validate_configured_inputs(blocks)?;
     let prepared = &plan.prepared;
     let packed_operands = &plan.packed_operands;
-    let selected_bound = env_flags::compare_bound_node();
+    let selected_bound = plan.diagnostics.metal_compare_bound_node;
     if let Some(node) = selected_bound
         && !prepared.resolved.iter().any(|bound| bound.node == node)
     {
@@ -485,6 +492,7 @@ pub(super) fn execute_plan_op_timed_inner(
             plan.attention_row_schedule,
             expert_buffers,
             cpu_reference,
+            &plan.diagnostics,
         )?;
         timings.push(timing);
     }
@@ -660,6 +668,7 @@ pub fn execute_plan_with_placements_op_timed(
             plan.attention_row_schedule,
             None,
             None,
+            &plan.diagnostics,
         )?;
         timings.push(timing);
     }
@@ -946,6 +955,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
     let command_buffer = new_labeled_command_buffer(
         &queue,
         "omega.single.execute_plan_with_placements_dispatch_timed",
+        &plan.diagnostics,
     )
     .ok_or_else(|| MetalError::CompileFailed {
         log: "command queue refused to hand out a command buffer".to_string(),
@@ -1237,7 +1247,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
                 &prepared.resolved,
                 prepared.resolved.len().saturating_sub(1),
             ),
-            encoder_status_requested: encoder_error_status_requested(),
+            encoder_status_requested: plan.diagnostics.metal_encoder_error_status,
         },
     )?;
     counter!(GPU_EXEC_CALLS, 1);

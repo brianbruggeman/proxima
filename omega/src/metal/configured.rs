@@ -87,6 +87,7 @@ pub fn plan_named_with_config_and_placed_inputs(
             config.wavefront_schedule,
         ),
         placed_input_nodes,
+        &config.metal_diagnostics,
     )?;
     let mut plan = plan_from_prepared(
         program,
@@ -100,6 +101,7 @@ pub fn plan_named_with_config_and_placed_inputs(
             allow_fusion: config.allow_fusion,
             wavefront: config.wavefront_schedule,
             placed_input_nodes: placed_input_nodes.to_vec(),
+            diagnostics: config.metal_diagnostics.clone(),
         },
     );
     let has_dense_bf16_candidate = plan.prepared.resolved.iter().any(|bound| {

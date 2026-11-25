@@ -456,6 +456,7 @@ mod real_fixture_tests {
             &outputs,
             (NumericPolicy::default(), true, true, wavefront),
             placed,
+            &MetalDiagnostics::default(),
         )
         .expect("the real fixture program prepares")
     }
@@ -466,7 +467,7 @@ mod real_fixture_tests {
         let raw = [0.5f32; 4];
         let weights = [0.25f32; 32];
         let blocks = [QuantizedBlock::Float32(&raw), QuantizedBlock::Float32(&weights)];
-        let pre_wavefront = prepare(&program, &[], &blocks, &outputs, NumericPolicy::default(), &[], (true, false))
+        let pre_wavefront = prepare(&program, &[], &blocks, &outputs, NumericPolicy::default(), &[], (true, false), &MetalDiagnostics::default())
             .expect("the default path prepares");
 
         let off = prepared(false, &[]);

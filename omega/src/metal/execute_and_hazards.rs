@@ -46,6 +46,7 @@ pub(super) fn plan_with_placed_inputs(
     let (requested_policy, layout) = numeric;
     let numeric_policy = layout.map_or(requested_policy, |layout| layout.apply_to(requested_policy));
     let (fuse_cached_attention, wavefront_schedule) = options;
+    let diagnostics = MetalDiagnostics::from_env();
     #[cfg(feature = "instrument")]
     let prepare_started = read_ticks();
     let prepared = prepare(
@@ -56,6 +57,7 @@ pub(super) fn plan_with_placed_inputs(
         requested_policy,
         placed_input_nodes,
         (fuse_cached_attention, wavefront_schedule),
+        &diagnostics,
     )?;
     #[cfg(feature = "instrument")]
     {
@@ -75,6 +77,7 @@ pub(super) fn plan_with_placed_inputs(
             allow_fusion: true,
             wavefront: wavefront_schedule,
             placed_input_nodes: placed_input_nodes.to_vec(),
+            diagnostics,
         },
     );
     plan.dense_mma_input_layout = layout.and_then(|layout| layout.plan_layout());
@@ -125,6 +128,7 @@ pub(super) fn plan_from_prepared(
         math_mode: numeric_policy_as_metal_math_mode(numeric_policy),
         numeric_policy,
         emit_knobs,
+        diagnostics: rebind.diagnostics.clone(),
         dense_mma_input_layout: None,
         attention_mma_selection: crate::msl::AttentionMmaSelection::Legacy,
         attention_row_schedule: crate::msl::AttentionRowSchedule::legacy(),
@@ -310,7 +314,7 @@ pub(super) fn execute_plan_inner(
     #[cfg(feature = "instrument")]
     counter!(BLOCK_UPLOAD_TICKS, elapsed_ticks(block_upload_started));
 
-    let command_buffer = new_labeled_command_buffer(&queue, "omega.single.execute_plan_inner")
+    let command_buffer = new_labeled_command_buffer(&queue, "omega.single.execute_plan_inner", &plan.diagnostics)
         .ok_or_else(|| MetalError::CompileFailed {
             log: "command queue refused to hand out a command buffer".to_string(),
         })?;
@@ -540,7 +544,7 @@ pub(super) fn execute_plan_inner(
                 &prepared.resolved,
                 prepared.resolved.len().saturating_sub(1),
             ),
-            encoder_status_requested: encoder_error_status_requested(),
+            encoder_status_requested: plan.diagnostics.metal_encoder_error_status,
         },
     )?;
     #[cfg(feature = "instrument")]

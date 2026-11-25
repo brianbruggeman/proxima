@@ -7,6 +7,7 @@
 use conflaguration::{FromEnvStr, Settings, Validate, ValidationMessage};
 use proxima_numeric::float_layout::{FloatLayout, SignEncoding};
 use proxima_numeric::{NumericPolicy, Numerics};
+use crate::metal_diagnostics::MetalDiagnostics;
 use crate::msl::EmitKnobs;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -110,6 +111,9 @@ pub struct RuntimeConfig {
     /// Metal emit A/B switches, such as `tiled_gemm_grid2d = false`; the `PROXIMA_*` env spellings are unchanged.
     #[setting(nested, override_prefix = "PROXIMA")]
     pub emit: EmitKnobs,
+    /// Metal debug and diagnostic switches, such as `chunk_audit = true`; the `PROXIMA_*` env spellings are unchanged.
+    #[setting(nested, override_prefix = "PROXIMA")]
+    pub metal_diagnostics: MetalDiagnostics,
     /// Dense matrix fragment layout settings; `auto` derives the plan layout from stored operands.
     #[setting(default)]
     pub dense_mma_input_layout: DenseMmaInputLayout,
@@ -151,6 +155,7 @@ impl Default for RuntimeConfig {
             numeric: NumericPolicy::bit_exact(),
             numerics: Numerics::REFERENCE,
             emit: EmitKnobs::default(),
+            metal_diagnostics: MetalDiagnostics::default(),
             dense_mma_input_layout: DenseMmaInputLayout::default(),
             constraints: ResourceConstraints::default(),
             selection: SelectionConfig::default(),
@@ -982,6 +987,13 @@ impl RuntimeConfigBuilder {
     #[must_use]
     pub fn with_emit(mut self, value: EmitKnobs) -> Self {
         self.inner.emit = value;
+        self
+    }
+
+    /// Set the Metal debug and diagnostic switches.
+    #[must_use]
+    pub fn with_metal_diagnostics(mut self, value: MetalDiagnostics) -> Self {
+        self.inner.metal_diagnostics = value;
         self
     }
 

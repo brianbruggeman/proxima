@@ -190,8 +190,11 @@ fn nothing_to_warm(expert_mapping: Option<(usize, usize)>) -> bool {
 /// Declares every resident model buffer to the driver in one waited command
 /// buffer and returns how many it declared. Returns `Ok(0)` without touching
 /// the device when nothing is registered or resident.
+///
+/// No plan or config is in scope here, so the diagnostics are read from the
+/// process environment at this call.
 pub fn warm_resident_buffers() -> Result<usize, MetalError> {
-    warm_body(expert_mapping_identity())
+    warm_body(expert_mapping_identity(), &MetalDiagnostics::from_env())
 }
 
 /// Warm for the active [`MetalContext`]: idempotent while its residency set is
@@ -200,6 +203,7 @@ pub fn warm_resident_buffers() -> Result<usize, MetalError> {
 /// process-global one.
 pub(super) fn warm_active_context_in(
     expert_mapping: Option<(usize, usize)>,
+    diagnostics: &MetalDiagnostics,
 ) -> Result<usize, MetalError> {
     let held =
         WARM_RESIDENCY_SET.with(|slot| slot.borrow().as_ref().map(|set| set.allocationCount()));
@@ -226,10 +230,13 @@ pub(super) fn warm_active_context_in(
         Ok::<(), MetalError>(())
     })?;
     drop(queue);
-    warm_body(expert_mapping)
+    warm_body(expert_mapping, diagnostics)
 }
 
-fn warm_body(expert_mapping: Option<(usize, usize)>) -> Result<usize, MetalError> {
+fn warm_body(
+    expert_mapping: Option<(usize, usize)>,
+    diagnostics: &MetalDiagnostics,
+) -> Result<usize, MetalError> {
     if nothing_to_warm(expert_mapping) {
         return Ok(0);
     }
@@ -239,7 +246,7 @@ fn warm_body(expert_mapping: Option<(usize, usize)>) -> Result<usize, MetalError
     let residency_started = Instant::now();
     let residency_requested = request_residency(&device, &queue, &buffers)?;
     let residency_ms = residency_started.elapsed().as_secs_f64() * 1000.0;
-    let command_buffer = new_labeled_command_buffer(&queue, "omega.warm_resident_buffers")
+    let command_buffer = new_labeled_command_buffer(&queue, "omega.warm_resident_buffers", diagnostics)
         .ok_or_else(|| MetalError::DriverRefusedObject {
             object: "command buffer",
             reason: "command queue returned none".to_string(),
@@ -262,7 +269,7 @@ fn warm_body(expert_mapping: Option<(usize, usize)>) -> Result<usize, MetalError
             dispatch_count: 0,
             first_op_label: "warm_resident_buffers",
             last_op_label: "warm_resident_buffers",
-            encoder_status_requested: encoder_error_status_requested(),
+            encoder_status_requested: diagnostics.metal_encoder_error_status,
         },
     )?;
     debug!(
@@ -291,7 +298,7 @@ mod tests {
         reset_resident_cache_for_test();
         reset_checkpoint_mapping_for_test();
         assert!(
-            matches!(warm_body(None), Ok(0)),
+            matches!(warm_body(None, &MetalDiagnostics::default()), Ok(0)),
             "an empty set needs no device"
         );
     }
@@ -316,7 +323,7 @@ mod tests {
                 .expect("a resident weight uploads");
         }
 
-        let warmed = warm_body(None).expect("warming two real buffers succeeds");
+        let warmed = warm_body(None, &MetalDiagnostics::default()).expect("warming two real buffers succeeds");
 
         assert_eq!(warmed, 2, "both resident weights are declared");
         if device.respondsToSelector(sel!(newResidencySetWithDescriptor:error:)) {

@@ -23,6 +23,7 @@ use super::warm_resident_buffers::{
     warm_active_context_in,
 };
 use super::{MetalBuffer, NodeId};
+use crate::metal_diagnostics::MetalDiagnostics;
 
 type ResidentBuffers = BTreeMap<String, (usize, usize, MetalBuffer)>;
 type UniformBuffers = BTreeMap<Vec<u8>, (MetalBuffer, u64)>;
@@ -110,7 +111,7 @@ impl MetalContext {
         expert_mapping: Option<(usize, usize)>,
     ) -> Result<usize, super::MetalError> {
         let _guard = self.activate();
-        warm_active_context_in(expert_mapping)
+        warm_active_context_in(expert_mapping, &MetalDiagnostics::from_env())
     }
 
     /// restores the enclosing context when the guard drops, including unwind.

@@ -7,6 +7,7 @@ use objc2_foundation::NSObjectProtocol;
 use objc2_metal::MTLDevice;
 
 use super::super::MetalError;
+use crate::metal_diagnostics::MetalDiagnostics;
 use super::super::arena_encode_dispatch_finish::read_back_as_device_f32;
 use super::super::device_buffers_arena_plan::device_and_queue;
 use super::super::pipeline_buffers_upload::{
@@ -458,7 +459,7 @@ fn clear_detaches_the_mapping_and_warm_residency_sets() {
     upload_packed_bytes_in(None, &device, &mapping_bytes[8..72], Some("view.weight"))
         .expect("an aligned tensor uploads as a view of the mapping");
     assert_eq!(held_mapping_residency_allocations().len(), 1, "the mapping holds one set");
-    warm_active_context_in(None)
+    warm_active_context_in(None, &MetalDiagnostics::default())
         .expect("warming builds the context's warm set the way a model load does");
     assert!(
         held_residency_allocations().is_some_and(|count| count >= 1),

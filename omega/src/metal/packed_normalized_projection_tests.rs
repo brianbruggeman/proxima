@@ -8,6 +8,7 @@ use proxima_tensor::{
 
 use super::prepare_uniforms_pack::prepare;
 use crate::Codec;
+use crate::metal_diagnostics::MetalDiagnostics;
 
 const KV_HEADS: u32 = 4;
 const QUERY_GROUPS: u32 = 8;
@@ -146,6 +147,7 @@ fn a_normalized_attention_output_reduce_binds_as_a_bare_packed_product() {
         NumericPolicy::default(),
         &[],
         (true, false),
+        &MetalDiagnostics::default(),
     )
     .expect("the normalized attention output prepares");
 

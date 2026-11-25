@@ -901,6 +901,11 @@ pub struct Plan {
     /// process environment, `plan_named_with_config*` take
     /// [`RuntimeConfig::emit`]), so a render and its cache key read one record.
     pub(super) emit_knobs: EmitKnobs,
+    /// The debug and diagnostic switches every execution of this plan reads --
+    /// resolved once at construction (`plan_named*` read the process
+    /// environment, `plan_named_with_config*` take
+    /// [`RuntimeConfig::metal_diagnostics`]).
+    pub(super) diagnostics: MetalDiagnostics,
     /// Operand fragment format used by dense tiled matrix multiplication.
     pub(super) dense_mma_input_layout: Option<proxima_numeric::float_layout::FloatLayout>,
     /// MMA selection that keys every attention pipeline this plan resolves.
