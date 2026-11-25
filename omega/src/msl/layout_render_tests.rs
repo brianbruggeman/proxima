@@ -688,6 +688,19 @@ async fn a_rendered_wide_integer_load_equals_the_host_decode_bit_for_bit_on_boun
 #[cfg(all(feature = "metal", target_os = "macos"))]
 #[test]
 fn a_rendered_integer_store_equals_the_host_encode_bit_for_bit_on_nan_inf_and_range_edges() {
+    assert_store_equals_host_encode(|layout| !layout.is_float());
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test]
+fn a_rendered_sign_less_float_store_equals_the_host_encode_bit_for_bit_on_negatives_nan_and_inf() {
+    assert_store_equals_host_encode(|layout| {
+        layout.is_float() && layout.sign == SignEncoding::Absent
+    });
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn assert_store_equals_host_encode(keep: impl Fn(&FloatLayout) -> bool) {
     let wide = HardwareScalar::widest(&Msl).expect("the metal dialect spells a wide scalar");
     let value_type = Msl.scalar(wide).expect("metal spells the wide scalar");
     let word_type = Msl.unsigned(wide.bytes()).expect("metal spells the wide word");
@@ -696,7 +709,8 @@ fn a_rendered_integer_store_equals_the_host_encode_bit_for_bit_on_nan_inf_and_ra
         0x4300_0000, 0xc300_0000, 0x4700_0000, 0xc700_0000, 0x4f00_0000, 0x4f00_0001,
         0xcf00_0000, 0x4f80_0000, 0x4f7f_ffff, 0x7f7f_fffe, 0x7f7f_ffff, 0xff7f_ffff,
         0x7f80_0000, 0xff80_0000, 0x7f80_0001, 0x7fc0_0000, 0x7fff_ffff, 0xffc0_0000,
-        0xffff_fffe, 0xffff_ffff,
+        0xffff_fffe, 0xffff_ffff, 0x0000_0001, 0x8000_0001, 0x007f_ffff, 0x0080_0000,
+        0x3f80_0000, 0xbf80_0000, 0x7f00_0000, 0xff00_0000, 0x3f7f_ffff, 0x4000_0000,
     ];
     let input: alloc::vec::Vec<u8> = inputs.iter().flat_map(|bits| bits.to_le_bytes()).collect();
     let mut compared = 0usize;
@@ -704,7 +718,7 @@ fn a_rendered_integer_store_equals_the_host_encode_bit_for_bit_on_nan_inf_and_ra
 
     for (layout, name) in NAMED_LAYOUTS
         .iter()
-        .filter(|(layout, _)| !layout.is_float() && layout.width() <= wide.layout().width())
+        .filter(|(layout, _)| keep(layout) && layout.width() <= wide.layout().width())
     {
         let source = format!(
             "#include <metal_stdlib>\nusing namespace metal;\n{}\nkernel void probe(device const {value_type} *values [[buffer(0)]], device {word_type} *codes [[buffer(1)]], uint gid [[thread_position_in_grid]]) {{\n    codes[gid] = probe_store(values[gid]);\n}}\n",

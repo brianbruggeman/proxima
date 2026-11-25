@@ -14,7 +14,7 @@ static inline uint probe_round_shift(uint value, uint shift) {
 
 static inline uint probe(float value) {
     uint bits = as_type<uint>(value);
-    uint sign = (bits >> 31u) << 8u;
+    uint sign = 0u;
     uint abs_bits = bits & 0x7fffffffu;
     if (abs_bits > 0x7f800000u) {
         return sign | 0xffu | 0x0u;

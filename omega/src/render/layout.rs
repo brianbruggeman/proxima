@@ -33,6 +33,17 @@ const fn sign_shift(layout: &FloatLayout) -> u32 {
     layout.exponent_bits as u32 + layout.mantissa_bits as u32
 }
 
+/// The sign term a store or-s into its code: the codec drops the sign of a layout that has none,
+/// so the term is zero there and a negative value stores its magnitude.
+fn stored_sign(layout: &FloatLayout, top: u32, suffix: &str) -> String {
+    match layout.sign {
+        SignEncoding::Absent => format!("0{suffix}"),
+        SignEncoding::Magnitude | SignEncoding::TwosComplement => {
+            format!("(bits >> {top}{suffix}) << {}{suffix}", sign_shift(layout))
+        }
+    }
+}
+
 const fn infinity_code(layout: &FloatLayout) -> u32 {
     exponent_ones(layout) << layout.mantissa_bits
 }
@@ -596,11 +607,7 @@ pub fn store_nan_branch<D: Dialect>(
     let sign = dialect.declare(
         &tokens.word,
         "sign",
-        &format!(
-            "(bits >> {}{suffix}) << {}{suffix}",
-            tokens.top_bit(),
-            sign_shift(layout)
-        ),
+        &stored_sign(layout, tokens.top_bit(), suffix),
     );
     let branch = dialect.branch(&format!(
         "(bits & {:#x}{suffix}) > {:#010x}{suffix}",
@@ -621,7 +628,6 @@ fn field_store<D: Dialect>(
     let signed_type = tokens.signed(tokens.wide.bytes())?;
     let (word, suffix, signed) = (tokens.word.as_ref(), tokens.suffix, signed_type.as_ref());
     let mantissa_bits = layout.mantissa_bits;
-    let field_sign = sign_shift(layout);
     let bias = layout.bias();
     let field_ones = exponent_ones(layout);
     let overflow = overflow_code(layout);
@@ -658,7 +664,7 @@ fn field_store<D: Dialect>(
     let sign = dialect.declare(
         word,
         "sign",
-        &format!("(bits >> {top}{suffix}) << {field_sign}{suffix}"),
+        &stored_sign(layout, top, suffix),
     );
     let abs_bits = dialect.declare(word, "abs_bits", &format!("bits & {abs_mask:#x}{suffix}"));
     let nan_branch = dialect.branch(&format!("abs_bits > {wide_infinity:#010x}{suffix}"));
