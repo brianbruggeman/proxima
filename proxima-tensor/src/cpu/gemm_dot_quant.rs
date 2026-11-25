@@ -346,7 +346,7 @@ pub(super) fn packed_dot_tile_plan(
 /// [`neon_tile_plan`]'s gate with the refusing check named: one
 /// reason name per early return, in gate order.
 #[cfg(target_arch = "aarch64")]
-fn neon_tile_decision(
+pub(super) fn neon_tile_decision(
     resolved: &BoundOp,
     shape: &BodyShape,
     reduce_op: ScalarOp,

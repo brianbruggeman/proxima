@@ -1437,6 +1437,32 @@ pub(super) fn run_reduce_planned<B: Deref<Target = [f32]>>(
     // than at every non-aarch64 call site.
     #[cfg(not(target_arch = "aarch64"))]
     let _ = packed_width;
+    // a scalar factor in the body, then several leading axes: each rewrite
+    // recurses into this function on the simpler op (`reduce_scale_split`).
+    #[cfg(target_arch = "aarch64")]
+    if let Some((peeled, scalar)) = peel_scalar_factor(resolved)
+        && let Ok(scalars) = operand_buffers(resolved, buffers)
+        && let Ok(base) = usize::try_from(resolved.operands()[scalar as usize].1.base)
+        && let Some(&scale) = scalars[scalar as usize].get(base)
+    {
+        run_reduce_planned(&peeled, buffers, output, packed_width)?;
+        scale_output(&peeled, scale, output);
+        return Ok(());
+    }
+    #[cfg(target_arch = "aarch64")]
+    if packed_width.is_none()
+        && let Some((chunks, stride)) = split_leading_chunks(resolved)
+    {
+        for (index, chunk) in chunks.iter().enumerate() {
+            let start = usize::try_from(index as i64 * stride).unwrap_or(usize::MAX);
+            let tail = output.get_mut(start..).ok_or(TensorError::NotLowerable {
+                node: resolved.node,
+                reason: "leading-axis chunk starts past the reduce output",
+            })?;
+            run_reduce_planned(chunk, buffers, tail, None)?;
+        }
+        return Ok(());
+    }
     let BoundOpKind::Reduce {
         reduce_op,
         init,
