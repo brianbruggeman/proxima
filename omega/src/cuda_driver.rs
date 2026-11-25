@@ -5922,6 +5922,7 @@ pub mod rocm {
         api: Arc<HipApi>,
         pointer: *mut c_void,
         bytes: usize,
+        ordinal: c_int,
     }
 
     impl core::fmt::Debug for HipBuffer {
@@ -6006,9 +6007,11 @@ pub mod rocm {
     impl Drop for HipBuffer {
         fn drop(&mut self) {
             if !self.pointer.is_null() {
-                // SAFETY: the pointer came from `hipMalloc` on the same device and
-                // is freed exactly once, when the last owner drops it.
-                unsafe { (self.api.hip_free)(self.pointer) };
+                // SAFETY: the pointer came from `hipMalloc` on this ordinal's device, bound
+                // first because the dropping thread may not have it current, and is freed once.
+                release_on_device(&self.api, self.ordinal, || {
+                    unsafe { (self.api.hip_free)(self.pointer) };
+                });
             }
         }
     }
@@ -6018,6 +6021,7 @@ pub mod rocm {
     pub struct HipModule {
         api: Arc<HipApi>,
         handle: *mut c_void,
+        ordinal: c_int,
     }
 
     impl core::fmt::Debug for HipModule {
@@ -6049,8 +6053,11 @@ pub mod rocm {
     impl Drop for HipModule {
         fn drop(&mut self) {
             if !self.handle.is_null() {
-                // SAFETY: the handle came from `hipModuleLoadData` and is unloaded once.
-                unsafe { (self.api.hip_module_unload)(self.handle) };
+                // SAFETY: the handle came from `hipModuleLoadData` on this ordinal's device, bound
+                // first, and is unloaded once.
+                release_on_device(&self.api, self.ordinal, || {
+                    unsafe { (self.api.hip_module_unload)(self.handle) };
+                });
             }
         }
     }
@@ -6275,6 +6282,7 @@ pub mod rocm {
             Ok(HipModule {
                 api: Arc::clone(&self.api),
                 handle,
+                ordinal: self.ordinal,
             })
         }
 
@@ -6340,6 +6348,7 @@ pub mod rocm {
                 api: Arc::clone(&self.api),
                 pointer,
                 bytes: requested,
+                ordinal: self.ordinal,
             })
         }
 
@@ -6626,6 +6635,22 @@ pub mod rocm {
         let result = set_device(ordinal);
         BOUND_ORDINAL.with(|bound| bound.set(result.is_ok().then_some(ordinal)));
         result
+    }
+
+    /// Runs `release` on `ordinal`'s device. A failed bind skips the release: a free on the wrong
+    /// device is worse than a leak, and a `Drop` cannot report, so the runtime reclaims it at teardown.
+    fn release_on_device(api: &HipApi, ordinal: c_int, release: impl FnOnce()) {
+        release_after_bind(ordinal, |bound| api.set_device(bound), release);
+    }
+
+    fn release_after_bind<Failure>(
+        ordinal: c_int,
+        set_device: impl FnOnce(c_int) -> Result<(), Failure>,
+        release: impl FnOnce(),
+    ) {
+        if bind_ordinal(ordinal, set_device).is_ok() {
+            release();
+        }
     }
 
     impl HipApi {
@@ -7351,6 +7376,30 @@ pub mod rocm {
             .join()
             .expect("the bind thread runs");
             assert_eq!(calls, 2);
+        }
+
+        #[test]
+        fn a_release_runs_only_after_its_device_is_bound() {
+            let (bound, released_after_bind, released_after_failure) = std::thread::spawn(|| {
+                let mut bound = Vec::new();
+                let mut released_after_bind = false;
+                release_after_bind(
+                    3,
+                    |ordinal| {
+                        bound.push(ordinal);
+                        Ok::<(), HipDriverError>(())
+                    },
+                    || released_after_bind = true,
+                );
+                let mut released_after_failure = false;
+                release_after_bind(4, |_| Err(HipDriverError::BindingContract), || released_after_failure = true);
+                (bound, released_after_bind, released_after_failure)
+            })
+            .join()
+            .expect("the release thread runs");
+            assert_eq!(bound, vec![3], "the drop binds the object's own ordinal");
+            assert!(released_after_bind, "a bound device runs the release");
+            assert!(!released_after_failure, "a failed bind skips the release");
         }
 
         #[test]
