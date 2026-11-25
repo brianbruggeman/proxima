@@ -559,7 +559,7 @@ pub(super) fn elementwise_width_fast(
             elementwise_width_fused_adam_update(roles, raw, running, out)
         }
         BodyShape::Generic(body) => {
-            elementwise_width_generic(body, raw, running, strides, out, step_values)
+            elementwise_width_generic(body, raw, running, strides, out, step_values, false)
         }
     }
 }
@@ -660,6 +660,10 @@ pub(super) fn elementwise_width_fused_adam_update(
 /// and every `apply_scalar_op` call match [`apply_body`]'s scalar path
 /// exactly: output is bit-identical (`proxima-tensor/docs/discipline.md`
 /// ROW 5).
+///
+/// `approximate_exp` swaps libm's exponential for `exp_approximation!` on
+/// every `Exponential` step; callers pass the plan's
+/// `NumericPolicy::approx_functions`, and `false` is the bit-identical path.
 #[inline(always)]
 pub(super) fn elementwise_width_generic(
     body: &ComposedBody,
@@ -668,6 +672,7 @@ pub(super) fn elementwise_width_generic(
     strides: &[i64],
     out: &mut [f32],
     step_values: &mut [f32],
+    approximate_exp: bool,
 ) {
     let mut tile_start = 0usize;
     while tile_start < out.len() {
@@ -680,6 +685,7 @@ pub(super) fn elementwise_width_generic(
             tile_start,
             &mut out[tile_start..tile_start + tile_len],
             step_values,
+            approximate_exp,
         );
         tile_start += tile_len;
     }
@@ -712,6 +718,7 @@ pub(super) fn elementwise_width_generic_tile(
     tile_start: usize,
     out: &mut [f32],
     step_values: &mut [f32],
+    approximate_exp: bool,
 ) {
     let width = out.len();
     let empty: &[f32] = &[];
@@ -745,7 +752,11 @@ pub(super) fn elementwise_width_generic_tile(
                 }
             };
         }
-        elementwise_width_generic_step(step.op, &spans, row);
+        if approximate_exp && step.op == ScalarOp::Exponential {
+            elementwise_width_unary_monomorphic(|value| exp_approximation!(value), spans[0], row);
+        } else {
+            elementwise_width_generic_step(step.op, &spans, row);
+        }
     }
     let last = body.steps.len() - 1;
     out.copy_from_slice(&step_values[last * width..(last + 1) * width]);

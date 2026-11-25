@@ -522,7 +522,7 @@ pub(super) struct StepPrepared {
     layer_norm_cluster_retire_at: BTreeMap<usize, Vec<NodeId>>,
     /// The policy this step bound under, read once here and handed to every
     /// kernel, so a kernel gates on a field instead of re-deriving the policy.
-    numeric_policy: NumericPolicy,
+    pub(super) numeric_policy: NumericPolicy,
 }
 
 /// The bind switches a prepared step depends on.
@@ -2433,7 +2433,7 @@ pub(super) fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
                 Some(&mut gdn_state),
                 Some(&mut moe_topk_extra),
                 Some(&mut round_extra),
-                NumericPolicy::bit_exact(),
+                UNPLANNED_KERNEL_POLICY,
             )?;
             #[cfg(feature = "instrument")]
             counter!(

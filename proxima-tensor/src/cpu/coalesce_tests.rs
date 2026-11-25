@@ -321,7 +321,7 @@ fn run_executor(case: &Case) -> Vec<f32> {
                 .expect("generated elementwise op runs");
         }
         _ => {
-            run_reduce(&case.op, &case.buffers, &mut output, None, NumericPolicy::bit_exact())
+            run_reduce(&case.op, &case.buffers, &mut output, None, UNPLANNED_KERNEL_POLICY)
                 .expect("generated reduce op runs");
         }
     }
@@ -336,7 +336,7 @@ fn run_executor_uncoalesced(case: &Case) -> Vec<f32> {
                 .expect("generated elementwise op runs uncoalesced");
         }
         _ => {
-            run_reduce_planned(&case.op, &case.buffers, &mut output, None, NumericPolicy::bit_exact())
+            run_reduce_planned(&case.op, &case.buffers, &mut output, None, UNPLANNED_KERNEL_POLICY)
                 .expect("generated reduce op runs uncoalesced");
         }
     }
@@ -743,7 +743,7 @@ fn epilogue_strides(op: &BoundOp) -> Vec<Vec<i64>> {
 /// `run_reduce_planned` followed by `apply_reduce_epilogue`.
 fn run_fold_with_epilogue(op: &BoundOp, buffers: &BufferTable, output_len: usize) -> Column {
     let mut output: Column = vec![Default::default(); output_len];
-    run_reduce_planned(op, buffers, &mut output, None, NumericPolicy::bit_exact()).expect("fold runs");
+    run_reduce_planned(op, buffers, &mut output, None, UNPLANNED_KERNEL_POLICY).expect("fold runs");
     apply_reduce_epilogue(op, buffers, &mut output).expect("epilogue runs");
     output
 }

@@ -1872,6 +1872,7 @@ async fn elementwise_width_generic_matches_scalar_apply_body(
         &strides,
         &mut actual,
         &mut step_values,
+        false,
     );
 
     assert_eq!(
@@ -1923,6 +1924,7 @@ fn elementwise_width_generic_matches_scalar_apply_body_for_a_rope_shaped_stride_
         &strides,
         &mut actual,
         &mut step_values,
+        false,
     );
 
     assert_eq!(
@@ -5409,7 +5411,7 @@ fn an_uncoalesced_three_leading_axis_reduce_declines_width_tile_with_axes_shape_
 
     instrument::reset_width_tile_decline();
     let (gate_passes_before, _, _) = width_tile_counters();
-    run_reduce_planned(reduce, &buffers, &mut output, None, NumericPolicy::bit_exact())
+    run_reduce_planned(reduce, &buffers, &mut output, None, UNPLANNED_KERNEL_POLICY)
         .expect("the uncoalesced three-leading-axis reduce runs on the generic path");
     let (gate_passes_after, _, _) = width_tile_counters();
 
@@ -14424,7 +14426,7 @@ fn round_batched_reduce_matches_k_sequential_reduces() {
         None,
         None,
         Some(&mut round_sink),
-        NumericPolicy::bit_exact(),
+        UNPLANNED_KERNEL_POLICY,
     )
     .expect("round-batched reduce runs both rounds");
 

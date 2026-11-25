@@ -1625,6 +1625,7 @@ pub(super) fn run_reduce_planned<B: Deref<Target = [f32]>>(
 
     let seed = initial_value(*init).unwrap_or(0.0);
     let leading_total = odometer_len(&leading_extents);
+    let approximate_exp = numeric_policy.approx_functions;
 
     // Ported from `width-wt`: the `[k,n]`-layout twin of the dot-path tile
     // below. `reduction_fast_path` (dot tile) and `fast_path` (this tile) are
@@ -2011,6 +2012,7 @@ pub(super) fn run_reduce_planned<B: Deref<Target = [f32]>>(
     // through to the NEON tile unchanged (documented residual, ROW 188).
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     if reduction_fast_path
+        && numeric_policy.reassociation
         && seed == 0.0
         && ACCELERATE_GEMM_ENABLED.load(EpilogueFuseOrdering::Relaxed)
         && let Some(plan) = neon_tile_plan(
@@ -2086,7 +2088,7 @@ pub(super) fn run_reduce_planned<B: Deref<Target = [f32]>>(
     // accumulator type (not the loop shape) is what makes it fit in
     // registers (`proxima-tensor/docs/discipline.md`, attempts 1 and 2).
     #[cfg(target_arch = "aarch64")]
-    let tile_plan = if reduction_fast_path {
+    let tile_plan = if reduction_fast_path && numeric_policy.reassociation {
         neon_tile_plan(
             resolved,
             &shape,
@@ -2548,6 +2550,7 @@ pub(super) fn run_reduce_planned<B: Deref<Target = [f32]>>(
                                 &strides,
                                 &mut generic_row,
                                 &mut generic_step_values,
+                                approximate_exp,
                             );
                             reduce_width_unary(
                                 ScalarOp::Identity,

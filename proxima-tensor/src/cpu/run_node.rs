@@ -2,6 +2,12 @@ use proxima_numeric::block_layout::BlockLayout;
 
 use super::*;
 
+/// The policy an entry point with no plan hands its kernels: reassociation
+/// granted because those entry points have always run the reordering NEON dot
+/// tile, so their results do not move. A [`CpuStepPlan`] hands its own policy.
+pub(super) const UNPLANNED_KERNEL_POLICY: NumericPolicy =
+    NumericPolicy::bit_exact().with_reassociation(true);
+
 #[cfg(test)]
 pub(super) fn run_node(
     resolved: &BoundOp,
@@ -116,7 +122,7 @@ pub(super) fn run_node_into_with_gdn_state<B: Deref<Target = [f32]> + Sync>(
         gdn_state_sink,
         moe_topk_extra_sink,
         None,
-        NumericPolicy::bit_exact(),
+        UNPLANNED_KERNEL_POLICY,
     )
 }
 
@@ -1658,7 +1664,7 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
                     Some(&mut gdn_state),
                     Some(&mut moe_topk_extra),
                     Some(&mut round_extra),
-                    NumericPolicy::bit_exact(),
+                    UNPLANNED_KERNEL_POLICY,
                 )?;
                 #[cfg(feature = "instrument")]
                 record_bound_op_operand_access(resolved, *buffers);

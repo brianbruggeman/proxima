@@ -1421,7 +1421,7 @@ pub(super) fn run_resolved_nodes_in_arena(
                     &arena.buffers,
                     &mut output,
                     Some(packed),
-                    NumericPolicy::bit_exact(),
+                    UNPLANNED_KERNEL_POLICY,
                 )?,
                 None => run_node_into_with_round_sink(
                     computed,
@@ -1434,7 +1434,7 @@ pub(super) fn run_resolved_nodes_in_arena(
                     Some(&mut gdn_state),
                     Some(&mut moe_topk_extra),
                     Some(&mut round_extra),
-                    NumericPolicy::bit_exact(),
+                    UNPLANNED_KERNEL_POLICY,
                 )?,
             }
             #[cfg(feature = "epilogue-profile-probe")]

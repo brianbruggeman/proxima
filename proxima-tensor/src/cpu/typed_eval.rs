@@ -1465,7 +1465,7 @@ pub(super) fn run_reduce_typed<T: Element>(
             .collect();
         // SAFETY: the `TypeId` check above proves `T == f32`.
         let output_f32 = unsafe { reinterpret_slice_mut(output) };
-        return run_reduce(resolved, &buffers_f32, output_f32, None, NumericPolicy::bit_exact());
+        return run_reduce(resolved, &buffers_f32, output_f32, None, UNPLANNED_KERNEL_POLICY);
     }
     run_reduce_generic(resolved, buffers, index_buffers, output)
 }

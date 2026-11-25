@@ -245,6 +245,8 @@ mod gemm_q8_0_act;
 #[macro_use]
 mod gemm_q8k;
 #[macro_use]
+mod exp_approx;
+#[macro_use]
 mod width_kernels;
 #[macro_use]
 mod typed_eval;
