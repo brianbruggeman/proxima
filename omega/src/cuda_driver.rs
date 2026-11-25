@@ -4876,6 +4876,38 @@ mod tests {
     }
 
     #[test]
+    fn a_second_runtime_sharing_the_cache_dir_loads_the_first_runtimes_kernel_without_nvrtc() {
+        let cache = tempfile::tempdir().expect("tempdir");
+        let runtime = || {
+            temp_env::with_var(KERNEL_CACHE_DIR_VAR, Some(cache.path()), || {
+                CudaDriver::new(0)
+            })
+            .expect("a cuda device is required for the persistent kernel cache gate")
+        };
+        let kernel = add_one_kernel(NodeId(0), NodeId(1), INPUT.len())
+            .expect("the add-one probe has three elements");
+
+        let first = runtime();
+        let first_function = first.function_for(&kernel).expect("first runtime build");
+        assert_eq!(first.kernel_compilations(), 1, "the first runtime compiles the kernel once");
+        assert_eq!(first.disk_cache_hits(), 0, "the first runtime finds an empty cache");
+
+        let second = runtime();
+        let second_function = second.function_for(&kernel).expect("second runtime build");
+        assert_eq!(
+            second.kernel_compilations(),
+            0,
+            "the second runtime must load the stored image, not call nvrtc"
+        );
+        assert_eq!(second.disk_cache_hits(), 1, "the second runtime reads one stored entry");
+        assert_eq!(
+            run_ptx(&second, &second_function),
+            run_ptx(&first, &first_function),
+            "a cached image computes what the compiled one did"
+        );
+    }
+
+    #[test]
     fn precompiled_ptx_sources_sharing_a_module_key_load_once_each_and_keep_their_own_function() {
         let driver =
             CudaDriver::new(0).expect("a cuda device is required for the module cache gate");
