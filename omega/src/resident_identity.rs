@@ -341,7 +341,8 @@ mod tests {
         serve(&mut ledger, "freed", &freed, 0).expect("freed upload");
 
         let start = freed.as_ptr() as usize;
-        ledger.release_ranges(&[start..start + freed.len()]);
+        let freed_range: std::ops::Range<usize> = start..start + freed.len();
+        ledger.release_ranges(std::slice::from_ref(&freed_range));
         assert_eq!(ledger.len(), 1);
         assert!(
             ledger
