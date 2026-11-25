@@ -24,7 +24,7 @@ use proxima_numeric::{DType, NumericPolicy};
 use super::grouped_gemm::{GroupedRoute, push_grouped_tile_origin};
 use super::int8_gemm::{INT8_FEATURE_TILE, INT8_TOKEN_TILE, Int8Gemm, int8_gemm_plan, push_int8_gemm_body};
 use super::{
-    Codec, EmitError, PQ2_0_BLOCK_BYTES, PQ2_0_BLOCK_ELEMENTS, Q1_0_BLOCK_BYTES,
+    Codec, EmitError, Target, PQ2_0_BLOCK_BYTES, PQ2_0_BLOCK_ELEMENTS, Q1_0_BLOCK_BYTES,
     Q1_0_BLOCK_ELEMENTS, Q2_0_BLOCK_BYTES, Q2_0_BLOCK_ELEMENTS, Q4_0_BLOCK_BYTES,
     Q4_0_BLOCK_ELEMENTS, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS, Q5_0_BLOCK_BYTES,
     Q5_0_BLOCK_ELEMENTS, Q5K_BLOCK_BYTES, Q6K_BLOCK_BYTES, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS,
@@ -41,6 +41,8 @@ const _: () = assert!(WARP_TILES == 8 && WARP_TOKENS == 64 && ACT_REPS == 2);
 pub(super) const GEMM_THREADS: u64 = 256;
 const STAGE_K: usize = 32;
 const WHOLE_SEGMENT: u64 = 8;
+/// A weight row starts on a block boundary of the widest decoded block (the super-block codecs).
+const WEIGHT_BASE_ALIGNMENT: i64 = Q4K_BLOCK_ELEMENTS as i64;
 const STAGE_PAD: usize = 40;
 
 /// The structure a packed matmul must have for the tensor-core body: which
@@ -144,7 +146,7 @@ pub(super) fn mma_gemm_plan_for(
         Some((weight, codec, prequantized)) => (weight, codec, prequantized, false),
         None if form == ContractionForm::Tiled && first.is_none() && second.is_none() => {
             let weight = plain_weight_slot(resolved, output_axes)?;
-            (weight, staging_codec()?, None, true)
+            (weight, Target::CUDA.mma_operand_codec()?, None, true)
         }
         None => return None,
     };
@@ -164,7 +166,7 @@ pub(super) fn mma_gemm_plan_for(
         && reduce_is_cooperative(resolved, quantized, numeric_policy)
         && !reduction_dims(resolved, output_axes).is_empty()
         && contraction.reduction_extent.is_multiple_of(reduction_granule)
-        && weight_layout.base.rem_euclid(256) == 0;
+        && weight_layout.base.rem_euclid(WEIGHT_BASE_ALIGNMENT) == 0;
     if !eligible {
         return None;
     }
@@ -191,14 +193,6 @@ pub(super) fn mma_gemm_plan_for(
             token_positions,
         },
     )
-}
-
-/// The decode-table codec that stores one element per unit, whose 8-element segment is the f16
-/// staging a plain float weight splits into; read from the table, never named.
-fn staging_codec() -> Option<Codec> {
-    Codec::ALL
-        .into_iter()
-        .find(|&codec| codec_shape(codec).is_some_and(|shape| shape.block_elements == 1))
 }
 
 /// The operand an activation-by-constant contraction reads as its weight: the slot whose rows
@@ -534,9 +528,9 @@ pub(super) fn push_mma_gemm_body(
     source.push_str("            long long element = weight_row + stage_first + load_segment;\n");
     if plain {
         source.push_str(&format!(
-            "            const float4 first = *(const float4 *)(in{weight} + element);
-            const float4 second = *(const float4 *)(in{weight} + element + 4);
-            const float weight_values[8] = {{first.x, first.y, first.z, first.w, second.x, second.y, second.z, second.w}};
+            "            {element_type} weight_values[8];
+            #pragma unroll
+            for (int slot = 0; slot < 8; slot++) {{ weight_values[slot] = in{weight}[element + slot]; }}
             scale = 1.0f;
             #pragma unroll
             for (int pair = 0; pair < 4; pair++) {{

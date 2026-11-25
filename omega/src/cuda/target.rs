@@ -29,6 +29,7 @@
 use alloc::string::String;
 
 use proxima_numeric::all_lanes_mask;
+use proxima_numeric::codec::Codec;
 
 use crate::identity::KernelLanguage;
 
@@ -60,6 +61,9 @@ pub struct Target {
     /// makes the emitter choose the generic body instead of refusing, which is
     /// what lets the same `BoundOp` graph render for both vendors.
     pub card_asm: bool,
+    /// the numeric format name the tensor-core instruction takes as a multiplicand
+    /// (`[contraction] cuda_mma_operand`); empty where `card_asm` is false.
+    pub mma_operand: &'static str,
 }
 
 impl Target {
@@ -72,6 +76,7 @@ impl Target {
         bf16_header: "cuda_bf16.h",
         bfloat_type: "__nv_bfloat16",
         card_asm: true,
+        mma_operand: crate::sized::CUDA_MMA_OPERAND,
     };
 
     /// AMD HIP C++ at the CDNA wavefront width.
@@ -82,6 +87,7 @@ impl Target {
         bf16_header: "hip/hip_bf16.h",
         bfloat_type: "__hip_bfloat16",
         card_asm: false,
+        mma_operand: "",
     };
 
     /// HIP at an explicit wavefront width: [`HIP_WAVE64`] for CDNA, 32 for
@@ -102,6 +108,11 @@ impl Target {
             KernelLanguage::Metal => "metal",
             KernelLanguage::Wgsl => "wgsl",
         }
+    }
+
+    /// The codec of [`Self::mma_operand`], the format a plain float operand is split into for the tensor-core tile.
+    pub fn mma_operand_codec(&self) -> Option<Codec> {
+        Codec::from_name(self.mma_operand)
     }
 
     /// `warpSize - 1`, the mask that isolates a lane index inside its wave.

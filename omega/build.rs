@@ -405,6 +405,10 @@ fn emit_sizing_consts() {
         out.push_str(&format!(
             "pub const CUDA_GROUPED_CONTRACTION_MIN_TOKENS: u64 = {cuda_grouped_min_tokens};\n"
         ));
+        let cuda_mma_operand = resolve_str(&root, "contraction", "cuda_mma_operand");
+        out.push_str(&format!(
+            "pub const CUDA_MMA_OPERAND: &str = {cuda_mma_operand:?};\n"
+        ));
     }
 
     if env::var_os("CARGO_FEATURE_METAL_TILED_GEMM").is_some() {

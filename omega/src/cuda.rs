@@ -6752,6 +6752,15 @@ mod tests {
     }
 
     #[test]
+    fn an_activation_by_constant_product_under_the_exact_policy_keeps_the_generic_reduce() {
+        let bound = dense_expert_free_op(128, 512, 200);
+        let kernel = emit_cuda_with_policy(&bound, &PackedOperands::new(), NumericPolicy::bit_exact()).expect("emit succeeds");
+
+        assert!(!kernel.entry.contains("_mma"), "{}", kernel.entry);
+        assert!(!kernel.source.contains("mma"), "the exact policy never rounds an operand into a tensor-core tile");
+    }
+
+    #[test]
     fn a_gathered_product_below_the_grouped_minimum_keeps_the_cooperative_reduce() {
         let bound = stacked_expert_op(8, 128, 512, 8);
         for codec in grouped_codecs() {
