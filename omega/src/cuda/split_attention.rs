@@ -3,13 +3,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_numeric::codec::Codec;
-use proxima_tensor::{BoundOp, BoundOpKind, NodeId};
+use proxima_tensor::{BoundOp, BoundOpKind, NodeId, ScorePlanes};
 
 use super::{
     ATTENTION_BLOCK_WIDTH, Binding, CudaAttentionClass, CudaGridSpec, CudaKernel, EmitDevice,
     EmitError, cuda_cached_attention_class,
 };
 use crate::cuda_cached_attention::render_attention;
+use crate::cuda_cached_attention_tiled::ATTENTION_TILE_MIN_ROWS;
 use crate::lowering::dispatch_bindings;
 
 /// Blocks per multiprocessor the split pass should launch so the device stays fed.
@@ -17,27 +18,47 @@ const SPLIT_WAVES: u64 = 4;
 
 const MAX_SPLIT_CHUNKS: u64 = 32;
 
+/// Keys one chunk holds at least, so a chunk is never split finer than a block's four warps can use.
+const MIN_CHUNK_KEYS: u64 = 16;
+
+const ODD_GUARD_TOKEN: &str = "@ODD_GUARD@";
+
+const MIN_CHUNK_KEYS_TOKEN: &str = "@MIN_CHUNK_KEYS@";
+
 /// Chunks of the key range a decode vector is split across, or `None` when the
-/// kernel keeps one block per vector. Only a single-row, runtime-length query on a
-/// known device splits: the grid is then too small to fill the multiprocessors.
+/// kernel keeps one block per vector. Only a runtime-length single-row query, or a
+/// whole-plane op below the row-tiling threshold, on a known device splits: the
+/// grid is then too small to fill the multiprocessors. A whole plane has no cached
+/// range, so its chunks are bounded by how many [`MIN_CHUNK_KEYS`] its keys fill.
 pub(super) fn split_chunks(kind: &BoundOpKind, device: EmitDevice) -> Option<u64> {
     let BoundOpKind::CachedAttention {
         query_rows,
+        new_key_rows,
         kv_heads,
         query_groups,
+        planes,
         ..
     } = kind
     else {
         return None;
     };
-    let splittable = *query_rows == 1
-        && device.multiprocessors > 0
-        && cuda_cached_attention_class(kind) == Some(CudaAttentionClass::CachedBound);
-    let vectors = kv_heads * query_groups;
+    let ceiling = match cuda_cached_attention_class(kind) {
+        Some(CudaAttentionClass::CachedBound) if *query_rows == 1 => MAX_SPLIT_CHUNKS,
+        Some(CudaAttentionClass::Static)
+            if *planes == ScorePlanes::Whole && *query_rows < ATTENTION_TILE_MIN_ROWS =>
+        {
+            new_key_rows.div_ceil(MIN_CHUNK_KEYS).min(MAX_SPLIT_CHUNKS)
+        }
+        _ => return None,
+    };
+    if device.multiprocessors == 0 {
+        return None;
+    }
+    let vectors = query_rows * kv_heads * query_groups;
     let chunks = (u64::from(device.multiprocessors) * SPLIT_WAVES)
         .div_ceil(vectors.max(1))
-        .min(MAX_SPLIT_CHUNKS);
-    (splittable && chunks >= 2).then_some(chunks)
+        .min(ceiling);
+    (chunks >= 2).then_some(chunks)
 }
 
 pub(super) fn split_scratch_node(node: NodeId) -> NodeId {
@@ -51,11 +72,12 @@ fn partial_record_len(head_dim: u64) -> u64 {
 pub(super) fn split_scratch_len(kind: &BoundOpKind, chunks: u64) -> usize {
     match kind {
         BoundOpKind::CachedAttention {
+            query_rows,
             kv_heads,
             query_groups,
             head_dim,
             ..
-        } => (kv_heads * query_groups * chunks * partial_record_len(*head_dim)) as usize,
+        } => (query_rows * kv_heads * query_groups * chunks * partial_record_len(*head_dim)) as usize,
         _ => 0,
     }
 }
@@ -84,7 +106,7 @@ pub(super) fn split_pass(
     quantized: &[Option<Codec>],
 ) -> Result<CudaKernel, EmitError> {
     let split_entry = format!("{entry}_split");
-    let tail = format!("    constexpr long long chunks = {chunks}LL;\n{SPLIT_BODY}");
+    let tail = format!("    constexpr long long chunks = {chunks}LL;\n{}", split_body(&resolved.kind));
     let source = render_attention(resolved, &split_entry, "", &tail, "", quantized)?;
     let scratch = split_scratch_node(resolved.node);
     let bindings: Vec<Binding> = dispatch_bindings(resolved)
@@ -123,8 +145,23 @@ fn split_vector_count(kind: &BoundOpKind) -> u64 {
     }
 }
 
+/// The partial pass text for one op: a paired op keeps the template with its markers cleared; a
+/// whole plane drops every line that reads the odd half plane or the pass triple.
+fn split_body(kind: &BoundOpKind) -> String {
+    let whole = matches!(kind, BoundOpKind::CachedAttention { planes: ScorePlanes::Whole, .. });
+    let body: String = if whole {
+        SPLIT_BODY
+            .split_inclusive('\n')
+            .filter(|line| !line.contains(ODD_GUARD_TOKEN))
+            .collect()
+    } else {
+        SPLIT_BODY.replace(ODD_GUARD_TOKEN, "")
+    };
+    body.replace(MIN_CHUNK_KEYS_TOKEN, &MIN_CHUNK_KEYS.to_string())
+}
+
 const SPLIT_BODY: &str = "\
-    constexpr long long min_chunk_keys = 16LL;
+    constexpr long long min_chunk_keys = @MIN_CHUNK_KEYS@LL;
     const float negative_infinity = -__int_as_float(0x7f800000);
     constexpr int warps = 4;
     constexpr long long record = head_dim + 2;
@@ -159,11 +196,11 @@ const SPLIT_BODY: &str = "\
         float partial = 0.0f;
         for (long long pair = (long long)lane; pair < pair_dim; pair += 32LL) {
             partial += in0[qbase + pair] * (cached ? cached_key_at(in2, kbase + pair) : in4[kbase + pair]);
-            partial += in1[qbase + pair] * (cached ? cached_key_at(in3, kbase + pair) : in5[kbase + pair]);
+            partial += in1[qbase + pair] * (cached ? cached_key_at(in3, kbase + pair) : in5[kbase + pair]);@ODD_GUARD@
         }
-        for (long long column = (long long)lane; column < pass_dim; column += 32LL) {
-            partial += pass_query[qpass + column] * (cached ? pass_cached_key[kpass + column] : pass_new_key[kpass + column]);
-        }
+        for (long long column = (long long)lane; column < pass_dim; column += 32LL) {@ODD_GUARD@
+            partial += pass_query[qpass + column] * (cached ? pass_cached_key[kpass + column] : pass_new_key[kpass + column]);@ODD_GUARD@
+        }@ODD_GUARD@
         for (int offset = 16; offset > 0; offset >>= 1) { partial += __shfl_xor_sync(PROXIMA_ALL_LANES, partial, offset); }
         const float score = partial * scale;
         const float next_max = fmaxf(maximum, score);
