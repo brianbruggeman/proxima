@@ -79,6 +79,7 @@ matrix=(
     "proxima-model-interop:std"
     "proxima-model-interop:std,metal,instrument"
     "proxima-model-interop:std,cuda"
+    "proxima-model-interop:std,proxima-autograd"
     "proxima-omega:"
     "proxima-omega:@nodefault:std,cuda"
     "proxima-omega:cuda,wgpu-backend"
