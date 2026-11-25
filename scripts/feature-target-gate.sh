@@ -195,11 +195,21 @@ dependency_edges() {
     printf '%s\n' "$edges"
 }
 
+changed_files() {
+    git diff --name-only "$base"...HEAD
+    git diff --name-only HEAD
+    git ls-files --others --exclude-standard
+}
+
+# an unresolvable base makes the committed diff fail, and a failed diff reads as "nothing changed"
+if [ "$all" = 0 ] && ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
+    printf 'feature-target-gate: base %s does not resolve; cannot tell what changed (pass a base or --all)\n' "$base" >&2
+    exit 3
+fi
+
 directly_changed_crates() {
     local dir
-    { git diff --name-only "$base"...HEAD 2>/dev/null
-      git diff --name-only HEAD 2>/dev/null
-      git ls-files --others --exclude-standard 2>/dev/null; } \
+    changed_files \
         | cut -d/ -f1 \
         | sort -u \
         | while IFS= read -r dir; do package_name "$dir"; done \
@@ -243,6 +253,12 @@ if [ -n "$(git status --porcelain)" ]; then
     dirty="dirty (uncommitted changes are part of what this measures)"
 fi
 printf 'feature-target-gate: %s %s\n' "$(git rev-parse --short HEAD)" "$dirty"
+
+# the script is not a crate, so its edit selects nothing by directory; it changes every row, so select every crate
+if [ "$all" = 0 ] && changed_files | grep -Fx 'scripts/feature-target-gate.sh' >/dev/null; then
+    echo 'feature-target-gate: gate script changed; selecting every crate'
+    all=1
+fi
 
 selection="$(select_crates)" || exit 3
 crates="$(printf '%s\n' "$selection" | cut -f1 | tr '\n' ' ')"
