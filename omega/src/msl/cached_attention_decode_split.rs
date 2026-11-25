@@ -2,6 +2,7 @@ use super::cached_attention_render::decode_index_tokens;
 use super::layout_render::{block_unpack_msl, readable_block_layout, scalar_cache_read};
 use super::*;
 use proxima_numeric::block_layout::BlockLayout;
+use proxima_tensor::bind::ScorePlanes;
 
 /// The split-KV partial for [`CachedAttentionForm::TwoRangeDecodeSplit`]: one
 /// threadgroup per `(query_row, query_head, split)` with `chunks` simdgroups,
@@ -46,6 +47,7 @@ pub(super) fn render_cached_attention_decode_split(
         new_upper_inclusive,
         new_key_rows,
         attention_sink,
+        planes,
         ..
     } = &resolved.kind
     else {
@@ -55,6 +57,13 @@ pub(super) fn render_cached_attention_decode_split(
             found: resolved.kind.name(),
         });
     };
+    let whole = *planes == ScorePlanes::Whole;
+    if whole && (cached_key_codec.is_some() || cached_kv_codec.is_some()) {
+        return Err(EmitError::CachedAttentionKvCodecNotSupported {
+            node: resolved.node,
+            reason: "a whole plane has no cached range, so there is no cache codec to read",
+        });
+    }
     validate_attention_split_limit(resolved.node, crate::sized::ATTENTION_SPLIT_MAX)?;
     let element_type = type_token(resolved.node, resolved.dtype)?;
     let (index_type, literal_suffix) = decode_index_tokens(&resolved.kind);
@@ -177,12 +186,22 @@ pub(super) fn render_cached_attention_decode_split(
     };
     // a sink operand follows the ninth in operand order, so it takes buffer 9 and pushes `out` and
     // the uniforms up one; without one every token below renders the pre-sink text byte for byte
-    let (sink_param, sink_merge, sink_scale, out_buffer, uniforms_buffer) = if *attention_sink {
-        (SINK_PARAM, SINK_MERGE, SINK_SCALE, "10", "11")
-    } else {
-        ("", "", "", "9", "10")
-    };
+    let (sink_param, sink_merge, sink_scale, out_buffer, uniforms_buffer) =
+        match (*attention_sink, whole) {
+            (true, _) => (SINK_PARAM, SINK_MERGE, SINK_SCALE, "10", "11"),
+            (false, false) => ("", "", "", "9", "10"),
+            (false, true) => ("", "", "", "8", "9"),
+        };
+    let plane = if whole { WHOLE_PLANE } else { PAIRED_PLANE };
     let substitutions = [
+        ("@CACHED_ROWS_PARAM@", plane.cached_rows_param.to_string()),
+        ("@CACHED_ROWS_INIT@", plane.cached_rows_init.to_string()),
+        ("@PLANE_WIDTH@", plane.width.to_string()),
+        ("@PLANE_VECTOR_DIV@", plane.vector_div.to_string()),
+        ("@VALUE_BASE@", plane.value_base.to_string()),
+        (ODD_GUARD_TOKEN, String::new()),
+        (ODD_OPEN_TOKEN, String::new()),
+        (ODD_CLOSE_TOKEN, String::new()),
         ("@SINK_PARAM@", sink_param.to_string()),
         ("@SINK_MERGE@", sink_merge.to_string()),
         ("@SINK_SCALE@", sink_scale.to_string()),
@@ -230,11 +249,65 @@ pub(super) fn render_cached_attention_decode_split(
     source.push_str(&scalar_helper);
     let mut body = DECODE_SPLIT_KERNEL.replace("@BATCH_LOOPS@", &batch_loops);
     body.push_str(DECODE_SPLIT_TAIL);
+    if whole {
+        body = without_odd_plane(&body);
+    }
     for (token, value) in &substitutions {
         body = body.replace(token, value);
     }
     source.push_str(&body);
     Ok(source)
+}
+
+/// The plane-layout text the kernel template takes: the paired layout is the text the kernel had
+/// before a whole plane existed; a whole plane drops every odd-plane statement and the ninth operand.
+struct PlaneText {
+    cached_rows_param: &'static str,
+    cached_rows_init: &'static str,
+    width: &'static str,
+    vector_div: &'static str,
+    value_base: &'static str,
+}
+
+const PAIRED_PLANE: PlaneText = PlaneText {
+    cached_rows_param: "device const @T@* in8 [[buffer(8)]], ",
+    cached_rows_init: "@INDEX@ cached_key_rows = (@INDEX@)in8[0];",
+    width: "head_dim / 2",
+    vector_div: "8",
+    value_base: "kbase * 2",
+};
+
+// a whole bind has eight operands and no cached range, so the cached row count is the constant 0
+const WHOLE_PLANE: PlaneText = PlaneText {
+    cached_rows_param: "",
+    cached_rows_init: "constexpr @INDEX@ cached_key_rows = 0@L@;",
+    width: "head_dim",
+    vector_div: "4",
+    value_base: "kbase",
+};
+
+const ODD_GUARD_TOKEN: &str = "@ODD_GUARD@";
+const ODD_OPEN_TOKEN: &str = "@ODD_OPEN@";
+const ODD_CLOSE_TOKEN: &str = "@ODD_CLOSE@";
+
+/// The kernel text for one whole plane: each line guarded by `@ODD_GUARD@` and each span between
+/// `@ODD_OPEN@` and `@ODD_CLOSE@` reads or declares the odd half plane, so they are removed and the
+/// text holds no statement that cannot run. The paired text replaces the markers with nothing.
+fn without_odd_plane(template: &str) -> String {
+    let kept: String = template
+        .split_inclusive('\n')
+        .filter(|line| !line.contains(ODD_GUARD_TOKEN))
+        .collect();
+    let mut text = String::with_capacity(kept.len());
+    let mut rest = kept.as_str();
+    while let Some((before, after_open)) = rest.split_once(ODD_OPEN_TOKEN) {
+        text.push_str(before);
+        rest = after_open
+            .split_once(ODD_CLOSE_TOKEN)
+            .map_or("", |(_, after_close)| after_close);
+    }
+    text.push_str(rest);
+    text
 }
 
 /// `value` as a literal of the kernel's index type: `i64::MIN`, the
@@ -261,7 +334,7 @@ const NEW_ONLY_STEP_SETUP: &str = "@INDEX@ local_index = batch_start + (@INDEX@)
                 bool live = local_index < num_local_keys;
                 if (live && new_index - query_row > new_upper) { live = false; }
                 valid[step] = live;
-                @INDEX@ kbase = new_index * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);
+                @INDEX@ kbase = new_index * (kv_heads * (@PLANE_WIDTH@)) + kv_head * (@PLANE_WIDTH@);
                 @KV_POINTERS@";
 
 const CACHED_ONLY_STEP_SETUP: &str = "@INDEX@ local_index = batch_start + (@INDEX@)step * (@INDEX@)keys_in_flight + (@INDEX@)ty;
@@ -269,7 +342,7 @@ const CACHED_ONLY_STEP_SETUP: &str = "@INDEX@ local_index = batch_start + (@INDE
                 bool live = local_index < num_local_keys;
                 if (live && key - cached_key_rows - query_row < cached_lower) { live = false; }
                 valid[step] = live;
-                @INDEX@ kbase = key * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);
+                @INDEX@ kbase = key * (kv_heads * (@PLANE_WIDTH@)) + kv_head * (@PLANE_WIDTH@);
                 @KV_POINTERS@";
 
 const GENERIC_STEP_SETUP: &str = "@INDEX@ local_index = batch_start + (@INDEX@)step * (@INDEX@)keys_in_flight + (@INDEX@)ty;
@@ -282,7 +355,7 @@ const GENERIC_STEP_SETUP: &str = "@INDEX@ local_index = batch_start + (@INDEX@)s
                     if (!cached && relative > new_upper) { live = false; }
                 }
                 valid[step] = live;
-                @INDEX@ kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);
+                @INDEX@ kbase = (cached ? key : new_index) * (kv_heads * (@PLANE_WIDTH@)) + kv_head * (@PLANE_WIDTH@);
                 @KV_POINTERS@";
 
 /// A cache format's declaration or load as `(cached format, float new)`: the branchy loop joins both,
@@ -314,11 +387,11 @@ fn branchy_load((cached, new): Parts) -> String {
 
 const PLAIN_KV_POINTERS: &str =
     "device const @T@4* kr4 = (device const @T@4*)((cached ? in2 : in4) + kbase);
-                device const @T@4* ki4 = (device const @T@4*)((cached ? in3 : in5) + kbase);
-                device const @T@4* v4 = (device const @T@4*)((cached ? in6 : in7) + kbase * 2);";
+                device const @T@4* ki4 = (device const @T@4*)((cached ? in3 : in5) + kbase);@ODD_GUARD@
+                device const @T@4* v4 = (device const @T@4*)((cached ? in6 : in7) + @VALUE_BASE@);";
 
 const PLAIN_KEY_LOAD: &str =
-    "key_real[step][slot] = float4(kr4[index]); key_imag[step][slot] = float4(ki4[index]);";
+    "key_real[step][slot] = float4(kr4[index]);@ODD_OPEN@ key_imag[step][slot] = float4(ki4[index]);@ODD_CLOSE@";
 
 const PLAIN_VALUE_LOAD: &str = "value_row[step][slot] = float4(v4[index]);";
 
@@ -403,14 +476,14 @@ const DECODE_SPLIT_KERNEL: &str = r#"struct Uniforms { long total_elements; long
 
 #define OMEGA_UNROLL _Pragma("clang loop unroll(full)")
 
-kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [[buffer(1)]], device const @KEY_STORE@* in2 [[buffer(2)]], device const @KEY_STORE@* in3 [[buffer(3)]], device const @T@* in4 [[buffer(4)]], device const @T@* in5 [[buffer(5)]], device const @KV@* in6 [[buffer(6)]], device const @T@* in7 [[buffer(7)]], device const @T@* in8 [[buffer(8)]], @SINK_PARAM@device @T@* out [[buffer(@OUT_BUFFER@)]], constant Uniforms& u [[buffer(@UNIFORMS_BUFFER@)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
+kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [[buffer(1)]], device const @KEY_STORE@* in2 [[buffer(2)]], device const @KEY_STORE@* in3 [[buffer(3)]], device const @T@* in4 [[buffer(4)]], device const @T@* in5 [[buffer(5)]], device const @KV@* in6 [[buffer(6)]], device const @T@* in7 [[buffer(7)]], @CACHED_ROWS_PARAM@@SINK_PARAM@device @T@* out [[buffer(@OUT_BUFFER@)]], constant Uniforms& u [[buffer(@UNIFORMS_BUFFER@)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
     @INDEX@ splits = (@INDEX@)u.splits;
     if ((@INDEX@)tgid >= (@INDEX@)u.total_elements * splits) { return; }
     constexpr @INDEX@ kv_heads = @KV_HEADS@; constexpr @INDEX@ query_groups = @QUERY_GROUPS@; constexpr @INDEX@ head_dim = @HEAD_DIM@; constexpr float scale = @SCALE@; constexpr @INDEX@ cached_lower = @CACHED_LOWER@; constexpr @INDEX@ new_upper = @NEW_UPPER@; constexpr @INDEX@ new_key_rows = @NEW_KEY_ROWS@; constexpr @INDEX@ cap = @CAP@;
     constexpr short lanes_per_key = @LANES_PER_KEY@; constexpr short keys_in_flight = 32 / lanes_per_key; constexpr short batch = @KEYS_PER_BATCH@;
-    constexpr short plane_vectors = head_dim / 8; constexpr short row_vectors = head_dim / 4;
+    constexpr short plane_vectors = head_dim / @PLANE_VECTOR_DIV@; constexpr short row_vectors = head_dim / 4;
     constexpr short plane_slots = (plane_vectors + lanes_per_key - 1) / lanes_per_key; constexpr short row_slots = (row_vectors + lanes_per_key - 1) / lanes_per_key;
-    @INDEX@ cached_key_rows = (@INDEX@)in8[0];
+    @CACHED_ROWS_INIT@
     @INDEX@ chunks = (@INDEX@)u.context_chunks;
     @INDEX@ chunk = (@INDEX@)simdgroup_slot;
     @INDEX@ split = (@INDEX@)tgid % splits;
@@ -418,7 +491,7 @@ kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [
     @INDEX@ query_row = (@INDEX@)tgid / (splits * kv_heads * query_groups);
     @INDEX@ kv_head = query_head / query_groups;
     @INDEX@ query_index = query_row * (kv_heads * query_groups) + query_head;
-    @INDEX@ qbase = query_index * (head_dim / 2);
+    @INDEX@ qbase = query_index * (@PLANE_WIDTH@);
     @INDEX@ last_key = cached_key_rows + new_key_rows - 1@L@;
     @INDEX@ first_key = max(0@L@, cached_key_rows + cached_lower + query_row);
     @INDEX@ band = last_key + 1@L@ - first_key;
@@ -432,12 +505,12 @@ kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [
     OMEGA_UNROLL for (short slot = 0; slot < row_slots; slot++) { weighted[slot] = float4(0.0f); }
     if (chunk < chunks) {
         device const @T@4* qr4 = (device const @T@4*)(in0 + qbase);
-        device const @T@4* qi4 = (device const @T@4*)(in1 + qbase);
-        float4 query_real[plane_slots]; float4 query_imag[plane_slots];
+        device const @T@4* qi4 = (device const @T@4*)(in1 + qbase);@ODD_GUARD@
+        float4 query_real[plane_slots];@ODD_OPEN@ float4 query_imag[plane_slots];@ODD_CLOSE@
         OMEGA_UNROLL for (short slot = 0; slot < plane_slots; slot++) {
             short index = tx + slot * lanes_per_key;
-            query_real[slot] = float4(0.0f); query_imag[slot] = float4(0.0f);
-            if (index < plane_vectors) { query_real[slot] = float4(qr4[index]); query_imag[slot] = float4(qi4[index]); }
+            query_real[slot] = float4(0.0f);@ODD_OPEN@ query_imag[slot] = float4(0.0f);@ODD_CLOSE@
+            if (index < plane_vectors) { query_real[slot] = float4(qr4[index]);@ODD_OPEN@ query_imag[slot] = float4(qi4[index]);@ODD_CLOSE@ }
         }
         @INDEX@ slice_start = lo + chunk;
         @INDEX@ num_local_keys = (slice_start < hi) ? ((hi - 1@L@ - slice_start) / chunks) + 1@L@ : 0@L@;
@@ -446,13 +519,13 @@ kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [
 "#;
 
 const BATCH_LOOP: &str = r#"        for (; @BATCH_CONDITION@; batch_start += (@INDEX@)batch * (@INDEX@)keys_in_flight) {
-            float4 key_real[batch][plane_slots]; float4 key_imag[batch][plane_slots]; float4 value_row[batch][row_slots];
+            float4 key_real[batch][plane_slots];@ODD_OPEN@ float4 key_imag[batch][plane_slots];@ODD_CLOSE@ float4 value_row[batch][row_slots];
             bool valid[batch];
             OMEGA_UNROLL for (short step = 0; step < batch; step++) {
                 @STEP_SETUP@
                 OMEGA_UNROLL for (short slot = 0; slot < plane_slots; slot++) {
                     short index = tx + slot * lanes_per_key;
-                    key_real[step][slot] = float4(0.0f); key_imag[step][slot] = float4(0.0f);
+                    key_real[step][slot] = float4(0.0f);@ODD_OPEN@ key_imag[step][slot] = float4(0.0f);@ODD_CLOSE@
                     if (live && index < plane_vectors) { @KEY_LOAD@ }
                 }
                 OMEGA_UNROLL for (short slot = 0; slot < row_slots; slot++) {
@@ -466,7 +539,7 @@ const BATCH_LOOP: &str = r#"        for (; @BATCH_CONDITION@; batch_start += (@I
                 float partial_score = 0.0f;
                 OMEGA_UNROLL for (short slot = 0; slot < plane_slots; slot++) {
                     partial_score += dot(key_real[step][slot], query_real[slot]);
-                    partial_score += dot(key_imag[step][slot], query_imag[slot]);
+                    partial_score += dot(key_imag[step][slot], query_imag[slot]);@ODD_GUARD@
                 }
                 if (16 < lanes_per_key) { partial_score += simd_shuffle_xor(partial_score, (ushort)16); }
                 if (8 < lanes_per_key) { partial_score += simd_shuffle_xor(partial_score, (ushort)8); }

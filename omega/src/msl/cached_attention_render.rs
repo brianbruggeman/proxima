@@ -285,7 +285,13 @@ pub(super) fn render_cached_attention_with_mma_selection(
     let row_tiled_whole = matches!(form, CachedAttentionForm::TwoRangeRowTiled { .. });
     #[cfg(not(feature = "metal-attn-split-rows"))]
     let row_tiled_whole = false;
-    if planes == ScorePlanes::Whole && !((per_row_form && !pass_present) || row_tiled_whole) {
+    #[cfg(feature = "metal-attn-split-decode")]
+    let decode_whole = matches!(form, CachedAttentionForm::TwoRangeDecodeSplit { .. });
+    #[cfg(not(feature = "metal-attn-split-decode"))]
+    let decode_whole = false;
+    if planes == ScorePlanes::Whole
+        && !((per_row_form && !pass_present) || row_tiled_whole || decode_whole)
+    {
         return Err(EmitError::CachedAttentionWholePlanesNotSupported {
             node: resolved.node,
         });
@@ -1432,6 +1438,119 @@ mod whole_plane_tests {
                 !source.contains(token),
                 "`{token}` leaked into the paired kernel"
             );
+        }
+    }
+
+    #[cfg(feature = "metal-attn-split-decode")]
+    fn whole_op_of(rows: u64, keys: u64, heads: u64, head_dim: u64) -> BoundOp {
+        let mut op = attention_op(8, 1, head_dim, 0, keys, i64::MIN);
+        op.extents = vec![rows, heads, 1, head_dim];
+        let BoundOpKind::CachedAttention {
+            query_rows,
+            kv_heads,
+            new_upper_inclusive,
+            planes,
+            ..
+        } = &mut op.kind
+        else {
+            unreachable!("attention_op always builds a CachedAttention kind");
+        };
+        *query_rows = rows;
+        *kv_heads = heads;
+        *new_upper_inclusive = i64::try_from(keys).expect("the key count fits");
+        *planes = ScorePlanes::Whole;
+        op
+    }
+
+    #[cfg(feature = "metal-attn-split-decode")]
+    const WHOLE_DECODE_SHAPES: [(&str, u64, u64, u64, u64); 2] = [
+        ("one_decode_row_over_the_encoder_keys", 1, 1500, 6, 64),
+        ("three_ragged_rows_over_a_short_key_run", 3, 211, 3, 40),
+    ];
+
+    #[cfg(feature = "metal-attn-split-decode")]
+    #[test]
+    fn whole_op_with_few_rows_and_many_keys_selects_the_decode_split_form() {
+        for (name, rows, keys, heads, head_dim) in WHOLE_DECODE_SHAPES {
+            let op = whole_op_of(rows, keys, heads, head_dim);
+
+            let form = cached_attention_form_with_schedule(
+                &op.kind,
+                NumericPolicy::llama_relaxed(),
+                AttentionRowSchedule::legacy(),
+            );
+
+            let Some(CachedAttentionForm::TwoRangeDecodeSplit { splits, chunks }) = form else {
+                panic!("{name}: a few-row whole op over many keys is the decode split, got {form:?}");
+            };
+            assert_eq!(splits, decode_splits_for(keys), "{name}: splits follow the key count");
+            assert!(splits > 1 || chunks > 1, "{name}: the keys are spread over workers");
+        }
+    }
+
+    #[cfg(feature = "metal-attn-split-decode")]
+    #[test]
+    fn whole_decode_split_entry_name_carries_the_whole_plane_token() {
+        let policy = NumericPolicy::llama_relaxed();
+        let whole = whole_op_of(1, 1500, 6, 64);
+
+        let name = super::super::signature_tokens_prelude::entry_name(&whole, policy);
+
+        assert!(name.contains("_ds"), "{name}");
+        assert!(name.ends_with("_wp"), "{name}");
+    }
+
+    #[cfg(feature = "metal-attn-split-decode")]
+    #[test]
+    fn whole_decode_split_kernel_reads_one_head_dim_plane_with_no_odd_plane_and_no_ninth_operand() {
+        for (name, rows, keys, heads, head_dim) in WHOLE_DECODE_SHAPES {
+            let source = render(&whole_op_of(rows, keys, heads, head_dim))
+                .unwrap_or_else(|error| panic!("{name}: the whole decode split renders: {error:?}"));
+
+            let pinned = [
+                "out [[buffer(8)]], constant Uniforms& u [[buffer(9)]]",
+                "cached_key_rows = 0",
+                "qbase = query_index * (head_dim);",
+                "plane_vectors = head_dim / 4;",
+                "* (kv_heads * (head_dim)) + kv_head * (head_dim);",
+            ];
+            for line in pinned {
+                assert!(source.contains(line), "{name}: missing `{line}` in:\n{source}");
+            }
+            for absent in ["in8", "qi4", "ki4", "key_imag", "query_imag", "kbase * 2", "@"] {
+                assert!(
+                    !source.contains(absent),
+                    "{name}: `{absent}` is dead text in a whole kernel, in:\n{source}"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "metal-attn-split-decode")]
+    #[test]
+    fn paired_decode_split_kernel_text_is_unchanged_by_the_whole_plane_tokens() {
+        let paired = attention_op(9, 8, 256, 512, 1, i64::MIN);
+
+        let source = render(&paired).expect("the paired decode split renders");
+
+        let pinned = [
+            "in7 [[buffer(7)]], device const",
+            "in8 [[buffer(8)]], device",
+            "out [[buffer(9)]], constant Uniforms& u [[buffer(10)]]",
+            "cached_key_rows = (",
+            ")in8[0];",
+            "qbase = query_index * (head_dim / 2);",
+            "plane_vectors = head_dim / 8;",
+            "key_imag[batch][plane_slots]; ",
+            "partial_score += dot(key_imag[step][slot], query_imag[slot]);",
+            "qi4 = (device const ",
+            "+ kbase * 2);",
+        ];
+        for line in pinned {
+            assert!(source.contains(line), "missing `{line}` in:\n{source}");
+        }
+        for token in ["@ODD_", "@PLANE_", "@CACHED_ROWS", "@VALUE_BASE@"] {
+            assert!(!source.contains(token), "`{token}` leaked into the paired kernel");
         }
     }
 

@@ -2673,6 +2673,7 @@ fn decode_split_entry_name(
         scale,
         cached_lower_inclusive,
         attention_sink,
+        planes,
         ..
     } = kind
     else {
@@ -2681,8 +2682,9 @@ fn decode_split_entry_name(
     let Some(CachedAttentionForm::TwoRangeDecodeSplit { .. }) = form else {
         return None;
     };
+    let plane_token = if *planes == ScorePlanes::Whole { "_wp" } else { "" };
     Some(format!(
-        "omega_cached_attention_q{query_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{}_e{}_k{}_ds{}",
+        "omega_cached_attention_q{query_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{}_e{}_k{}_ds{}{plane_token}",
         scale.to_bits(),
         signed_name_part(*cached_lower_inclusive),
         decode_simdgroup_cap(*head_dim),
@@ -2811,6 +2813,13 @@ pub(crate) fn cached_attention_form_with_schedule(
     }
     #[cfg(not(feature = "metal-attn-split-rows"))]
     let _ = planes;
+    // below the row-tiling threshold a whole-plane op with many keys is the decode split over an empty cached range
+    #[cfg(feature = "metal-attn-split-decode")]
+    if *planes == ScorePlanes::Whole
+        && let Some(split) = decode_split_form(kind, policy)
+    {
+        return Some(split);
+    }
     let base_operand_len = if rotary_dim < head_dim { 11 } else { 8 };
     // the sink, when bound, is the one operand after the ninth and the pass triple
     if operands.len().saturating_sub(usize::from(*attention_sink)) != base_operand_len + 1 {
@@ -3039,6 +3048,12 @@ pub(crate) fn validate_decomposition_selection(
 /// V accumulate), and a policy granting both the cross-threadgroup merge and
 /// the in-block tree reduce. Anything else stays
 /// [`CachedAttentionForm::TwoRangeCachedBound`].
+///
+/// A [`ScorePlanes::Whole`] op (eight operands, no cache, no sink, `head_dim` a
+/// whole number of 8-wide merge lanes) is admitted over its empty cached range
+/// at any row count [`decode_split_serves_rows`] admits, once its keys span more
+/// than one split or one simdgroup's share; the split count is
+/// [`decode_splits_for`] of its key count.
 #[cfg(feature = "metal-attn-split-decode")]
 #[must_use]
 fn decode_split_form(kind: &BoundOpKind, policy: NumericPolicy) -> Option<CachedAttentionForm> {
@@ -3048,6 +3063,9 @@ fn decode_split_form(kind: &BoundOpKind, policy: NumericPolicy) -> Option<Cached
         new_key_rows,
         head_dim,
         rotary_dim,
+        planes,
+        attention_sink,
+        operands,
         ..
     } = kind
     else {
@@ -3055,16 +3073,23 @@ fn decode_split_form(kind: &BoundOpKind, policy: NumericPolicy) -> Option<Cached
     };
     let admitted = admit(policy, NumericRewrite::ContextSplitMerge).is_ok()
         && admit(policy, NumericRewrite::TreeReduce).is_ok();
-    let shape_fits = proxima_tensor::decode_split_shape_fits(
-        *query_rows,
-        *new_key_rows,
-        *rotary_dim,
-        *head_dim,
-    ) && decode_split_serves_rows(*query_rows);
+    let capacity = cached_key_rows + new_key_rows;
+    let shape_fits = if *planes == ScorePlanes::Whole {
+        // a whole bind has no ninth operand, no cache and no sink; its keys are all "new", one head_dim plane wide, and the split only pays once the keys span more than one simdgroup's share
+        *cached_key_rows == 0
+            && !*attention_sink
+            && operands.len() == 8
+            && rotary_dim == head_dim
+            && head_dim.is_multiple_of(8)
+            && decode_split_serves_rows(*query_rows)
+            && (decode_splits_for(capacity) > 1 || decode_chunks_for(capacity, *head_dim) > 1)
+    } else {
+        proxima_tensor::decode_split_shape_fits(*query_rows, *new_key_rows, *rotary_dim, *head_dim)
+            && decode_split_serves_rows(*query_rows)
+    };
     if !admitted || !shape_fits {
         return None;
     }
-    let capacity = cached_key_rows + new_key_rows;
     Some(CachedAttentionForm::TwoRangeDecodeSplit {
         splits: decode_splits_for(capacity),
         chunks: decode_chunks_for(capacity, *head_dim),
