@@ -7804,26 +7804,11 @@ pub fn emit_hip(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
 ) -> Result<HipKernel, EmitError> {
-    emit_hip_with_policy(resolved, packed_operands, NumericPolicy::default())
-}
-
-/// [`emit_hip`] under an explicit numeric policy. A policy that admits no
-/// rewrite renders the serial fold; the cooperative wave fold is selected
-/// only when [`proxima_numeric::admit`] grants `NumericRewrite::TreeReduce`,
-/// the same gate the CUDA lane applies.
-///
-/// # Errors
-/// As [`emit_hip`].
-pub fn emit_hip_with_policy(
-    resolved: &BoundOp,
-    packed_operands: &PackedOperands,
-    numeric_policy: NumericPolicy,
-) -> Result<HipKernel, EmitError> {
     emit_hip_at_wave(
         HipWave::Wave64,
         resolved,
         packed_operands,
-        numeric_policy,
+        NumericPolicy::default(),
         EmitDevice::default(),
         &OperandDtypes::new(),
     )
@@ -7832,8 +7817,9 @@ pub fn emit_hip_with_policy(
 /// [`emit_hip`] for an explicit wavefront width and the operand-dtype table of the program the op
 /// came from ([`crate::operand_dtypes`]): an op that reads a node another op narrowed to half must
 /// see that node's dtype, or it reads two-byte values as four-byte ones. Plans emit through the
-/// shared executor, which always passes the table; [`emit_hip`] and [`emit_hip_with_policy`] are
-/// the table-free single-op forms.
+/// shared executor, which always passes the table; [`emit_hip`] is the table-free wave-64 single-op
+/// form. A policy that admits no rewrite renders the serial fold; the cooperative wave fold is
+/// selected only when [`proxima_numeric::admit`] grants `NumericRewrite::TreeReduce`.
 ///
 /// # Errors
 /// As [`emit_hip`].
@@ -7931,6 +7917,10 @@ mod rocm_tests {
         PackedOperands::new()
     }
 
+    fn emit_hip_under(bound: &BoundOp, numeric_policy: NumericPolicy) -> Result<HipKernel, EmitError> {
+        emit_hip_at_wave(HipWave::Wave64, bound, &no_packed(), numeric_policy, EmitDevice::default(), &OperandDtypes::new())
+    }
+
     #[test]
     fn emits_hip_headers_and_never_a_nvidia_header() {
         let kernel = emit_hip(&elementwise_tanh(), &no_packed()).expect("elementwise hip emits");
@@ -7991,12 +7981,8 @@ mod rocm_tests {
 
     #[test]
     fn wave64_reduce_folds_the_full_wavefront() {
-        let kernel = emit_hip_with_policy(
-            &matmul_reduce(4, 4096),
-            &no_packed(),
-            NumericPolicy::llama_relaxed(),
-        )
-        .expect("reduce hip emits");
+        let kernel = emit_hip_under(&matmul_reduce(4, 4096), NumericPolicy::llama_relaxed())
+            .expect("reduce hip emits");
 
         assert!(kernel.source.contains("#define PROXIMA_ALL_LANES 0xffffffffffffffffull"));
         assert!(kernel.source.contains("__shfl_down_sync(PROXIMA_ALL_LANES,"));
@@ -8081,7 +8067,7 @@ mod rocm_tests {
     #[test]
     fn bit_exact_policy_keeps_the_serial_fold() {
         let bound = matmul_reduce(4, 8);
-        let kernel = emit_hip_with_policy(&bound, &no_packed(), NumericPolicy::bit_exact())
+        let kernel = emit_hip_under(&bound, NumericPolicy::bit_exact())
             .expect("hip emits under bit-exact");
 
         assert!(!kernel.source.contains("__shfl_down_sync"));
@@ -8091,10 +8077,8 @@ mod rocm_tests {
     #[test]
     fn different_extents_with_the_same_structure_emit_identical_source() {
         let policy = NumericPolicy::llama_relaxed();
-        let small =
-            emit_hip_with_policy(&matmul_reduce(4, 512), &no_packed(), policy).expect("small emits");
-        let large = emit_hip_with_policy(&matmul_reduce(4, 4096), &no_packed(), policy)
-            .expect("large emits");
+        let small = emit_hip_under(&matmul_reduce(4, 512), policy).expect("small emits");
+        let large = emit_hip_under(&matmul_reduce(4, 4096), policy).expect("large emits");
 
         assert_eq!(
             small.source, large.source,

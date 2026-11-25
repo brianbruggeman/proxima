@@ -31,9 +31,15 @@ use proxima_tensor::{
 use serde::{Deserialize, Serialize};
 
 use omega::cuda::{
-    check_uniform_abi, emit_cuda_with_policy, emit_hip_with_policy, pack_cuda_uniforms,
+    EmitDevice, HipKernel, HipWave, check_uniform_abi, emit_cuda_with_policy, emit_hip_at_wave,
+    pack_cuda_uniforms,
 };
-use omega::PackedOperands;
+use omega::{OperandDtypes, PackedOperands};
+
+fn emit_hip_wave64(op: &BoundOp, empty: &PackedOperands, policy: NumericPolicy) -> HipKernel {
+    emit_hip_at_wave(HipWave::Wave64, op, empty, policy, EmitDevice::default(), &OperandDtypes::new())
+        .expect("the real matvec emits")
+}
 
 /// llama-server's flags plus the flint checkpoint's own matvec widths. Every
 /// default here is a value llama.cpp or the GGUF metadata already names; an
@@ -169,7 +175,7 @@ fn hip_uniform_abi(criterion: &mut Criterion) {
             ),
             (
                 "hip",
-                emit_hip_with_policy(op, &empty, policy).expect("the real matvec emits"),
+                emit_hip_wave64(op, &empty, policy),
             ),
         ] {
             let host = pack_cuda_uniforms(op).expect("the real matvec packs");
@@ -193,7 +199,7 @@ fn hip_uniform_abi(criterion: &mut Criterion) {
         bencher.iter(|| {
             for (_, op) in &ops {
                 let empty = PackedOperands::new();
-                let hip = emit_hip_with_policy(op, &empty, policy).expect("the real matvec emits");
+                let hip = emit_hip_wave64(op, &empty, policy);
                 let host = pack_cuda_uniforms(op).expect("the real matvec packs");
                 let words = check_uniform_abi(&hip, &host).expect("the real matvec keeps the contract");
                 std::hint::black_box((hip.source.len(), words, host.len()));
