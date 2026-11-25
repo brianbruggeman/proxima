@@ -21,9 +21,11 @@ use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
+#[cfg(feature = "toml")]
+use proxima_tensor::spec::DECODER_ONLY_TOML;
 use proxima_tensor::spec::{
-    Activation, DECODER_ONLY_TOML, EmbeddingScale, ExpertGatingFunc, FfnCombination, ParallelDenseMoeConfig,
-    RecurrenceProfile, RopeLayout, ScheduleSource, expert_gating_func,
+    Activation, EmbeddingScale, ExpertGatingFunc, FfnCombination, ParallelDenseMoeConfig, RecurrenceProfile,
+    RopeLayout, ScheduleSource, expert_gating_func,
 };
 use serde::Deserialize;
 use serde_json::{Value as Json, json};
