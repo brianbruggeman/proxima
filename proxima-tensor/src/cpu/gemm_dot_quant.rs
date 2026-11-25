@@ -302,8 +302,9 @@ pub(super) fn neon_tile_plan(
         leading_output_axes,
     );
     #[cfg(feature = "instrument")]
-    if let Err(reason) = &decided {
-        instrument::record_dot_tile_decline(resolved.node, *reason);
+    match &decided {
+        Ok(_) => instrument::record_dot_tile_decline(resolved.node, "taken"),
+        Err(reason) => instrument::record_dot_tile_decline(resolved.node, reason),
     }
     decided.ok()
 }

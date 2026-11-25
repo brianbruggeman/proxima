@@ -1410,10 +1410,18 @@ pub(super) fn run_reduce<B: Deref<Target = [f32]>>(
     output: &mut [f32],
     packed_width: Option<&PackedWidthPanels>,
 ) -> Result<(), TensorError> {
-    match coalesce_dims(resolved).filter(|_| packed_width.is_none()) {
+    #[cfg(feature = "instrument")]
+    let node_started = instrument::read_ticks();
+    let outcome = match coalesce_dims(resolved).filter(|_| packed_width.is_none()) {
         Some(coalesced) => run_reduce_planned(&coalesced, buffers, output, None),
         None => run_reduce_planned(resolved, buffers, output, packed_width),
-    }
+    };
+    #[cfg(feature = "instrument")]
+    instrument::record_reduce_node_ticks(
+        resolved.node.0,
+        instrument::elapsed_ticks(node_started),
+    );
+    outcome
 }
 
 /// [`run_reduce`] on the axes exactly as bound, with no dimension

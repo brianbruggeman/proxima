@@ -1520,15 +1520,30 @@ mod route_census {
         instrument::reset_reduce_route();
         instrument::reset_width_tile_decline();
         instrument::reset_dot_tile_decline();
+        let encode_started = std::time::Instant::now();
         let _ = bound.run(&[encoded]);
+        let encode_ns = u64::try_from(encode_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
         let rows = instrument::reduce_route_snapshot();
         let measured_declines = instrument::width_tile_decline_snapshot();
         let dot_declines = instrument::dot_tile_decline_snapshot();
-        let dot_reason_of = |node: u32| {
-            dot_declines
+        let node_nanos = instrument::reduce_node_nanos_snapshot();
+        let ns_of = |node: u32| {
+            node_nanos
                 .iter()
-                .find(|(declined, _, _)| *declined == node)
-                .map_or("dot-tile:taken-or-not-asked", |(_, reason, _)| *reason)
+                .find(|(timed, _)| *timed == node)
+                .map_or(0, |(_, nanos)| *nanos)
+        };
+        let dot_reason_of = |node: u32| {
+            let reasons: Vec<String> = dot_declines
+                .iter()
+                .filter(|(asked, _, _)| *asked == node)
+                .map(|(_, reason, calls)| format!("{reason}x{calls}"))
+                .collect();
+            if reasons.is_empty() {
+                "dot-tile:not_asked".to_string()
+            } else {
+                format!("dot-tile:{}", reasons.join("+"))
+            }
         };
 
         println!(
@@ -1537,16 +1552,23 @@ mod route_census {
             cfg!(target_arch = "aarch64")
         );
         println!(
-            "node calls gemm path extents lead_axes red_dims lead_total red_total width macs dot_gate width_gate"
+            "node calls gemm path extents lead_axes red_dims lead_total red_total width macs dot_gate width_gate ns"
         );
-        let mut per_path: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
-        let mut per_gate: BTreeMap<&str, u64> = BTreeMap::new();
+        let mut per_path: BTreeMap<&str, (u64, u64, u64)> = BTreeMap::new();
+        let mut per_gate: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+        let mut reduce_ns_total = 0_u64;
         for row in &rows {
             let (path, macs) = (path_of(row), work_of(row));
             let (derived_gate, width_gate) = (contiguous_tile_verdict(row), width_tile_verdict(row));
-            let dot_gate = if row.dot_fast { dot_reason_of(row.node) } else { derived_gate };
+            let dot_gate = if row.dot_fast {
+                dot_reason_of(row.node)
+            } else {
+                derived_gate.to_string()
+            };
+            let nanos = ns_of(row.node);
+            reduce_ns_total += nanos;
             println!(
-                "{} {} {} {} {:?} {} {} {} {} {} {} {} {}",
+                "{} {} {} {} {:?} {} {} {} {} {} {} {} {} ns={}",
                 row.node,
                 row.calls,
                 row.gemm_shaped,
@@ -1559,22 +1581,32 @@ mod route_census {
                 row.width,
                 macs,
                 dot_gate,
-                width_gate
+                width_gate,
+                nanos
             );
             let entry = per_path.entry(path).or_default();
             entry.0 += 1;
             entry.1 += macs * row.calls;
+            entry.2 += nanos;
             if row.gemm_shaped {
-                *per_gate.entry(dot_gate).or_default() += macs * row.calls;
-                *per_gate.entry(width_gate).or_default() += macs * row.calls;
+                for gate in [dot_gate, width_gate.to_string()] {
+                    let slot = per_gate.entry(gate).or_default();
+                    slot.0 += macs * row.calls;
+                    slot.1 += nanos;
+                }
             }
         }
-        for (path, (nodes, macs)) in &per_path {
-            println!("PATH {path} nodes={nodes} macs={macs}");
+        for (path, (nodes, macs, nanos)) in &per_path {
+            println!("PATH {path} nodes={nodes} macs={macs} ns={nanos}");
         }
-        for (gate, macs) in &per_gate {
-            println!("GATE {gate} gemm_macs_declined={macs}");
+        for (gate, (macs, nanos)) in &per_gate {
+            println!("GATE {gate} gemm_macs_declined={macs} ns={nanos}");
         }
+        println!(
+            "ENCODE total_ns={encode_ns} reduce_ns={reduce_ns_total} reduce_share_permille={} non_reduce_ns={}",
+            reduce_ns_total.saturating_mul(1000) / encode_ns.max(1),
+            encode_ns.saturating_sub(reduce_ns_total)
+        );
         for (node, reason, calls, m, k, n, stride_a, stride_b) in &measured_declines {
             println!(
                 "MEASURED width_decline node={node} {reason:?} calls={calls} m={m} k={k} n={n} sa={stride_a} sb={stride_b}"

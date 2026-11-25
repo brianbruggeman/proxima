@@ -1020,8 +1020,9 @@ pub fn reset_width_tile_decline() {
 
 static DOT_TILE_DECLINE: Mutex<BTreeMap<(u32, &'static str), u64>> = Mutex::new(BTreeMap::new());
 
-/// Records one `neon_tile_plan` decline for `node`, `reason` naming the first
-/// gate check that returned `None`.
+/// Records one `neon_tile_plan` outcome for `node`: `reason` names the first
+/// gate check that returned `None`, or is `"taken"` when the plan was built.
+/// A node with no entry was never asked.
 pub fn record_dot_tile_decline(node: NodeId, reason: &'static str) {
     let mut buckets = DOT_TILE_DECLINE.lock();
     *buckets.entry((node.0, reason)).or_insert(0) += 1;
@@ -1086,6 +1087,27 @@ pub fn reduce_route_snapshot() -> Vec<ReduceRouteRow> {
 pub fn reset_reduce_route() {
     let mut rows = REDUCE_ROUTE.lock();
     rows.clear();
+    REDUCE_NODE_TICKS.lock().clear();
+}
+
+static REDUCE_NODE_TICKS: Mutex<BTreeMap<u32, u64>> = Mutex::new(BTreeMap::new());
+
+/// Adds one `run_reduce` call's elapsed ticks to `node`'s running total
+/// (PROXNUM-683 per-node CPU time); one lock per call, never per element.
+pub fn record_reduce_node_ticks(node: u32, ticks: u64) {
+    let mut totals = REDUCE_NODE_TICKS.lock();
+    *totals.entry(node).or_insert(0) += ticks;
+}
+
+/// Every `(node, nanoseconds)` accumulated since [`reset_reduce_route`],
+/// converted once here, sorted by node.
+#[must_use]
+pub fn reduce_node_nanos_snapshot() -> Vec<(u32, u64)> {
+    let totals = REDUCE_NODE_TICKS.lock();
+    totals
+        .iter()
+        .map(|(&node, &ticks)| (node, ticks_to_nanos(ticks)))
+        .collect()
 }
 
 // rule-census task (2026-09-02): the elementwise-into-elementwise and
