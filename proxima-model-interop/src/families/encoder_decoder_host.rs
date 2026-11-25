@@ -1075,6 +1075,8 @@ impl Model {
         // declared before every bound program so it drops after their weight leases are back in the model
         let mut guard = self.session_guard()?;
         let runtime = guard.runtime()?;
+        #[cfg(feature = "instrument")]
+        let session_us = start.elapsed().as_micros() as u64;
         let mut gpu_peak = None;
         let padded = pad(wav)?;
         let front = front_end(&self.dir)?;
@@ -1124,6 +1126,12 @@ impl Model {
             .insert(STFT_SIN_INPUT.into(), decode(&tables.sin));
         #[cfg(all(feature = "instrument", any(feature = "cuda", all(feature = "metal", target_os = "macos"))))]
         self.arm_op_timings(&mut mel_bound, "mel");
+        #[cfg(feature = "instrument")]
+        proxima_telemetry::debug!(
+            session_us = session_us,
+            pre_mel_us = start.elapsed().as_micros() as u64,
+            "transcribe setup before the mel stage: policy and session, then front end and mel graph"
+        );
         let mel_start = std::time::Instant::now();
         let mel_values = mel_bound.run("mel", &[mel], &[], runtime)?.remove(0);
         let mel = mel_start.elapsed();
@@ -1207,6 +1215,8 @@ impl Model {
         self.take_op_timings(&mut bound, "encode");
         sample_peak(&mut gpu_peak, runtime);
 
+        #[cfg(feature = "instrument")]
+        let decoder_started = Instant::now();
         let mut decoder = Bound::new(self.shape.clone());
         let step_outputs = decoder.decoder_graph()?;
         let carried = decoder.carried_inputs.clone();
@@ -1218,9 +1228,18 @@ impl Model {
             let name = decoder.carry(input)?;
             decoder.named.insert(name, value);
         }
+        #[cfg(feature = "instrument")]
+        let decoder_bind_started = Instant::now();
         decoder.bind(self)?;
         let program_hash = program_hash(&decoder.program);
         runtime.set_kv_carry(decoder.kv_carry_pairs(&step_outputs), 0);
+        #[cfg(feature = "instrument")]
+        proxima_telemetry::debug!(
+            decoder_graph_us = decoder_bind_started.duration_since(decoder_started).as_micros() as u64,
+            decoder_bind_us = decoder_bind_started.elapsed().as_micros() as u64,
+            before_decode_us = start.elapsed().as_micros() as u64,
+            "decoder graph built and weights bound, outside decode_us"
+        );
 
         let mut tokens: Vec<u32> = policy.prompt().to_vec();
         let mut cached = 0;
