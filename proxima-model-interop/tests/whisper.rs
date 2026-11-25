@@ -1400,6 +1400,43 @@ mod transcript {
     }
 
     #[test]
+    fn a_second_transcription_reuses_the_mel_and_encode_plans_the_first_built() -> anyhow::Result<()> {
+        let model = Model::load(&super::fixture_dir()?)?;
+        let audio = wav::read(&wav_path())?;
+        let expected: Vec<u32> = read_i32("tokens.i32")?
+            .into_iter()
+            .map(|id| id as u32)
+            .collect();
+        let mel_and_encode_plans = 2;
+
+        let first = model.transcribe(&audio.samples, "en")?;
+        let (hits_after_first, misses_after_first) = model
+            .plan_counts()
+            .expect("a successful call keeps its runtime");
+        let second = model.transcribe(&audio.samples, "en")?;
+        let (hits_after_second, misses_after_second) = model
+            .plan_counts()
+            .expect("a successful call keeps its runtime");
+
+        assert_eq!(first.tokens, expected);
+        assert_eq!(second.tokens, expected);
+        assert!(
+            misses_after_first >= mel_and_encode_plans,
+            "the first call builds at least the mel and encode plans: {misses_after_first}"
+        );
+        assert_eq!(
+            misses_after_second - misses_after_first,
+            misses_after_first - mel_and_encode_plans,
+            "the second call misses only on the decoder plans, whose cross-attention inputs are per call"
+        );
+        assert!(
+            hits_after_second - hits_after_first >= mel_and_encode_plans,
+            "the mel and encode plans are hits on the second call"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn a_second_transcription_under_a_precision_rule_returns_the_same_ids() -> anyhow::Result<()> {
         let ids = transcribe_repeatedly(
             settings_from(include_str!("fixtures/whisper_narrow_every_weight.toml"))?,

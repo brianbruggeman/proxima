@@ -3780,12 +3780,36 @@ impl BackendRuntime {
     /// the partition plans too, so the next call rebuilds them. Declare with
     /// `evaluate_segment`'s `resident_names`; release when the sequence ends,
     /// on the error path as well.
-    #[cfg(any(test, all(feature = "std", feature = "proxima-autograd")))]
+    #[cfg(test)]
     pub(crate) fn release_call_residents(&mut self, names: &[&str]) {
         omega::backend::release_resident_names(names.iter().copied());
+        self.drop_segment_plans();
+    }
+
+    /// [`Self::release_call_residents`] for a caller whose other programs' plans hold only weights: it
+    /// drops just the plans of `program_key` (the program that read the released names), so the rest
+    /// survive to the next call.
+    #[cfg(any(test, all(feature = "std", feature = "proxima-autograd")))]
+    pub(crate) fn release_call_residents_of(&mut self, names: &[&str], program_key: usize) {
+        omega::backend::release_resident_names(names.iter().copied());
+        self.segment_plans.retain(|key, _| key.0 != program_key);
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        self.placed_segment_plans
+            .retain(|key, _| key.0 != program_key);
+    }
+
+    /// Drops every cached segment plan.
+    #[cfg(any(test, all(feature = "std", feature = "proxima-autograd")))]
+    pub(crate) fn drop_segment_plans(&mut self) {
         self.segment_plans.clear();
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         self.placed_segment_plans.clear();
+    }
+
+    /// Plan-cache `(hits, misses)` since this runtime was built.
+    #[cfg(any(test, all(feature = "std", feature = "proxima-autograd")))]
+    pub(crate) fn plan_counts(&self) -> (usize, usize) {
+        (self.plan_hits, self.plan_misses)
     }
 
     /// Bytes the selected device has allocated; `None` when this runtime runs on
@@ -4401,7 +4425,6 @@ impl BackendRuntime {
     /// shape-only decode-plan cache to alias a different partition having
     /// the same `(new_count, kv_bound_extent)` pair. Routed execution uses
     /// this for the router and gather programs surrounding one layer.
-    #[cfg_attr(feature = "instrument", proxima_telemetry::instrument(level = "debug"))]
     pub(crate) fn evaluate_segment(
         &mut self,
         program: &[Op],
@@ -4413,10 +4436,36 @@ impl BackendRuntime {
             &alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
         >,
     ) -> Result<Evaluated, InteropError> {
+        self.evaluate_segment_keyed(
+            (program.as_ptr() as usize, program),
+            symbols,
+            named,
+            outputs,
+            resident_names,
+            expert_sources,
+        )
+    }
+
+    /// [`Self::evaluate_segment`] with the plan-cache program identity named by
+    /// the caller. The address default suits a program that lives as long as the
+    /// runtime (the llm's partitions); a caller that rebuilds an identical
+    /// program per call passes a structural key (`program_hash`) so its plans
+    /// survive the rebuild.
+    #[cfg_attr(feature = "instrument", proxima_telemetry::instrument(level = "debug"))]
+    pub(crate) fn evaluate_segment_keyed(
+        &mut self,
+        (program_key, program): (usize, &[Op]),
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        resident_names: &BTreeSet<&str>,
+        expert_sources: Option<
+            &alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
+        >,
+    ) -> Result<Evaluated, InteropError> {
         self.settle_warm();
         let host_timing = event_enabled(module_path!(), Level::DEBUG);
         let resolve_started = std::time::Instant::now();
-        let program_key = program.as_ptr() as usize;
         let new_count = symbols.first().copied().unwrap_or_default() as usize;
         let kv_bound_extent = symbols.get(1).copied().unwrap_or_default() as usize;
         let exact_activations = self.exact_activations;

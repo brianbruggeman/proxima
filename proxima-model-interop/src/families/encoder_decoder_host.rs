@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use proxima_primitives::sync::blocking::Mutex;
 use proxima_safetensors::{Manifest, SafetensorsParser};
 use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
@@ -154,6 +153,8 @@ struct Bound<'a> {
     /// leaves an earlier segment's outputs fill, in the order those outputs arrive
     carried_inputs: Vec<NodeId>,
     shape: Shape,
+    /// the plan-cache key of `program`, hashed on first run once the program is complete
+    key: std::cell::OnceCell<usize>,
     /// `Some` asks the next run for per-op GPU time; the run fills the cell
     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
     op_timings: Option<std::sync::OnceLock<Vec<omega::metal::OpGpuTiming>>>,
@@ -171,6 +172,7 @@ impl<'a> Bound<'a> {
             call_resident: Vec::new(),
             carried_inputs: Vec::new(),
             shape,
+            key: std::cell::OnceCell::new(),
         }
     }
 
@@ -186,6 +188,14 @@ impl<'a> Bound<'a> {
         };
         self.call_resident.push(name.clone());
         Ok(name.clone())
+    }
+
+    /// What identifies this program's plans: its structure, not the address of this call's allocation,
+    /// so the next call's identical program finds the plans this one built.
+    fn program_key(&self) -> usize {
+        *self
+            .key
+            .get_or_init(|| program_hash(&self.program) as usize)
     }
 
     fn leaf(&mut self, name: &str, shape: &[u32]) -> NodeId {
@@ -549,7 +559,14 @@ impl<'a> Bound<'a> {
         #[cfg(feature = "instrument")]
         let evaluate_started = Instant::now();
         let evaluated = runtime
-            .evaluate_segment(&self.program, symbols, &named, outputs, &resident, None)
+            .evaluate_segment_keyed(
+                (self.program_key(), &self.program),
+                symbols,
+                &named,
+                outputs,
+                &resident,
+                None,
+            )
             .map_err(|error| anyhow::anyhow!("{stage} segment does not evaluate: {error:?}"))?;
         #[cfg(feature = "instrument")]
         let evaluate = evaluate_started.elapsed();
@@ -619,6 +636,40 @@ fn sample_peak(peak: &mut Option<u64>, runtime: &BackendRuntime) {
     *peak = (*peak).max(runtime.allocated_bytes());
 }
 
+/// One call's hold on the model's [`Session`]. On drop it records the weight-allocation count (the call's
+/// leases are back in the model by then) and returns the session to the model only if the call succeeded.
+struct SessionGuard<'model> {
+    model: &'model Model,
+    session: Option<Session>,
+    succeeded: bool,
+}
+
+impl SessionGuard<'_> {
+    fn runtime(&mut self) -> Result<&mut BackendRuntime> {
+        self.session
+            .as_mut()
+            .map(|session| &mut session.runtime)
+            .context("the call's session was already returned")
+    }
+}
+
+impl Drop for SessionGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(mut session) = self.session.take() {
+            session.weights_epoch = self.model.weights.allocation_epoch();
+            if self.succeeded {
+                *self.model.session.lock() = Some(session);
+            }
+        }
+    }
+}
+
+/// The backend runtime a model keeps between calls, with the weight-allocation count its plans were built under.
+struct Session {
+    runtime: BackendRuntime,
+    weights_epoch: u64,
+}
+
 /// A loaded checkpoint ready to transcribe.
 pub struct Model {
     /// the mapped checkpoint file; every bound weight borrows from it in place
@@ -638,6 +689,8 @@ pub struct Model {
     store_miss: Option<(PathBuf, u128)>,
     /// set by the first publish attempt that succeeds, so later calls skip it
     store_published: AtomicBool,
+    /// the runtime and its segment plans, kept so a repeat call reuses them; taken for the span of a call
+    session: Mutex<Option<Session>>,
     /// set by [`Model::with_encode_op_timings`]: the encode program then runs one command buffer per op
     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
     profile_encode: bool,
@@ -691,6 +744,7 @@ impl Model {
             source_identity,
             store_miss: None,
             store_published: AtomicBool::new(false),
+            session: Mutex::new(None),
             #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
             profile_encode: false,
             #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -818,6 +872,36 @@ impl Model {
         Ok(BackendRuntime::new(&config))
     }
 
+    /// Takes the held session, or builds one when none is held (first call, or another call is in flight).
+    /// A weight buffer new to the model since the session's plans were built may sit at an address a
+    /// plan still trusts, so those plans are dropped.
+    fn session_guard(&self) -> Result<SessionGuard<'_>> {
+        let held = self.session.lock().take();
+        let mut session = match held {
+            Some(session) => session,
+            None => Session {
+                runtime: self.runtime()?,
+                weights_epoch: self.weights.allocation_epoch(),
+            },
+        };
+        if session.weights_epoch != self.weights.allocation_epoch() {
+            session.runtime.drop_segment_plans();
+        }
+        Ok(SessionGuard {
+            model: self,
+            session: Some(session),
+            succeeded: false,
+        })
+    }
+
+    /// Plan-cache `(hits, misses)` of the held runtime; `None` before the first successful call.
+    pub fn plan_counts(&self) -> Option<(usize, usize)> {
+        self.session
+            .lock()
+            .as_ref()
+            .map(|session| session.runtime.plan_counts())
+    }
+
     pub fn shape(&self) -> &Shape {
         &self.shape
     }
@@ -845,14 +929,9 @@ impl Model {
             },
         )?;
 
-        #[cfg(feature = "instrument")]
-        let runtime_started = Instant::now();
-        let mut runtime = self.runtime()?;
-        #[cfg(feature = "instrument")]
-        proxima_telemetry::debug!(
-            runtime_us = runtime_started.elapsed().as_micros() as u64,
-            "transcribe fresh backend runtime built"
-        );
+        // declared before every bound program so it drops after their weight leases are back in the model
+        let mut guard = self.session_guard()?;
+        let runtime = guard.runtime()?;
         let mut gpu_peak = None;
         let padded = pad(wav)?;
         let front = front_end(&self.dir)?;
@@ -901,9 +980,9 @@ impl Model {
             .named
             .insert(STFT_SIN_INPUT.into(), decode(&tables.sin));
         let mel_start = std::time::Instant::now();
-        let mel_values = mel_bound.run("mel", &[mel], &[], &mut runtime)?.remove(0);
+        let mel_values = mel_bound.run("mel", &[mel], &[], runtime)?.remove(0);
         let mel = mel_start.elapsed();
-        sample_peak(&mut gpu_peak, &runtime);
+        sample_peak(&mut gpu_peak, runtime);
         // The encoder consumes the first 2*source_positions frames.
         let needed = (self.shape.source_positions * 2) as usize;
         let mut mel_input = vec![0.0; (self.shape.mels as usize) * needed];
@@ -967,7 +1046,7 @@ impl Model {
             bound.op_timings = self.profile_encode.then(std::sync::OnceLock::new);
         }
         let encode_start = std::time::Instant::now();
-        let mut values = bound.run("encode", &outputs, &[], &mut runtime)?;
+        let mut values = bound.run("encode", &outputs, &[], runtime)?;
         let encode = encode_start.elapsed();
         #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
         if let Some(timings) = bound
@@ -977,7 +1056,7 @@ impl Model {
         {
             self.encode_timings.lock().push(timings);
         }
-        sample_peak(&mut gpu_peak, &runtime);
+        sample_peak(&mut gpu_peak, runtime);
 
         let mut decoder = Bound::new(self.shape.clone());
         let step_outputs = decoder.decoder_graph()?;
@@ -1002,14 +1081,14 @@ impl Model {
                 let fresh = &tokens[cached..];
                 decoder.stage_step(fresh, cached);
                 let extent = self.cache_extent(
-                    &mut runtime,
+                    runtime,
                     &decoder,
                     &step_outputs,
                     (program_hash, cached, fresh.len()),
                 );
                 decoder.fit_cache(extent);
                 let symbols = [fresh.len() as u64, extent as u64];
-                let mut rows = decoder.run("decode", &step_outputs, &symbols, &mut runtime)?;
+                let mut rows = decoder.run("decode", &step_outputs, &symbols, runtime)?;
                 let flat = rows.remove(0);
                 decoder.trim_cache(cached);
                 for (name, added) in cache_names(self.shape.decoder_layers).zip(rows) {
@@ -1022,7 +1101,7 @@ impl Model {
                 let mut row = flat[flat.len() - vocab..].to_vec();
                 let chosen = policy.pick(&mut row, step)?;
                 tokens.push(chosen);
-                sample_peak(&mut gpu_peak, &runtime);
+                sample_peak(&mut gpu_peak, runtime);
                 step_times.push(step_start.elapsed());
                 last_token = start.elapsed();
                 if step == 0 {
@@ -1037,11 +1116,13 @@ impl Model {
         };
         let outcome = decode_steps();
         let held: Vec<&str> = decoder.call_resident.iter().map(String::as_str).collect();
-        runtime.release_call_residents(&held);
+        runtime.release_call_residents_of(&held, decoder.program_key());
         outcome?;
         let decode = decode_start.elapsed();
         let generated = &tokens[policy.prompt().len()..];
         let text = tokenizer_text(&self.dir, generated)?;
+        let gpu_allocated_bytes = runtime.allocated_bytes();
+        guard.succeeded = true;
         Ok(Transcript {
             tokens: generated.to_vec(),
             text,
@@ -1053,7 +1134,7 @@ impl Model {
             first_token,
             last_token,
             step_times,
-            gpu_allocated_bytes: runtime.allocated_bytes(),
+            gpu_allocated_bytes,
             gpu_allocated_peak_bytes: gpu_peak,
         })
     }

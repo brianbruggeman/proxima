@@ -67,6 +67,8 @@ pub(crate) struct Materialized {
     stores: BoundWeights<'static>,
     // name -> heap address last kept; a kept buffer at the same address is the same bytes.
     seen: BTreeMap<String, usize>,
+    // buffers kept at an address new to their name; a plan built before this moved may trust a recycled address
+    allocations: u64,
 }
 
 impl Materialized {
@@ -74,11 +76,13 @@ impl Materialized {
         Self {
             stores: BoundWeights::new(&[]),
             seen: BTreeMap::new(),
+            allocations: 0,
         }
     }
 
     fn note_allocation(&mut self, name: &str, address: usize) {
         if self.seen.get(name) != Some(&address) {
+            self.allocations += 1;
             self.seen.insert(name.to_string(), address);
             begin_owner_generation(name);
         }
@@ -165,6 +169,13 @@ impl Default for ModelWeights {
 }
 
 impl ModelWeights {
+    /// How many buffers this model has kept at an address new to their name.
+    #[must_use]
+    #[cfg(all(feature = "std", feature = "proxima-autograd"))]
+    pub(crate) fn allocation_epoch(&self) -> u64 {
+        self.held.lock().allocations
+    }
+
     #[must_use]
     pub fn new() -> Self {
         Self {
