@@ -130,13 +130,14 @@ pub(super) fn quantize_device(layout: &BlockLayout, arithmetic: ScaleArithmetic)
     let (scale_base, scale_stride) = (layout.run_scale_byte(0), layout.run_scale_byte(runs.min(2) - 1) - layout.run_scale_byte(0));
     let (code_base, code_stride) = (layout.run_code_byte(0), layout.run_code_byte(runs.min(2) - 1) - layout.run_code_byte(0));
     format!(
-        "__device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float *out, long long group, unsigned int lane) {{\n\
+        "__device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float *out, long long group, unsigned int lane, bool live) {{\n\
          \x20   float x = in[group * 32 + lane];\n\
          \x20   float amax = fabsf(x);\n\
          \x20   for (int offset = 16; offset > 0; offset >>= 1) {{ amax = fmaxf(amax, __shfl_xor_sync(PROXIMA_ALL_LANES, amax, offset)); }}\n\
          \x20   {scale_and_code}\
          \x20   int qsum = q;\n\
          \x20   for (int offset = 16; offset > 0; offset >>= 1) {{ qsum += __shfl_xor_sync(PROXIMA_ALL_LANES, qsum, offset); }}\n\
+         \x20   if (!live) {{ return; }}\n\
          \x20   unsigned char *bytes = (unsigned char *)out + (group / {runs}) * {block_bytes};\n\
          \x20   const long long run = group % {runs};\n\
          \x20   unsigned char *header = bytes + {scale_base} + run * {scale_stride};\n\
@@ -171,12 +172,14 @@ pub(super) fn render_block_quantize(
          \x20   const Uniforms* __restrict__ u_ptr\n\
          ) {{\n\
          \x20   const Uniforms u = *u_ptr;\n\
+{entry_wave_guard}\
          \x20   const long long gid = (long long)blockIdx.x * blockDim.x + threadIdx.x;\n\
          \x20   const long long group = gid / {GROUP_ELEMENTS};\n\
-         \x20   if (group >= u.groups) {{ return; }}\n\
-         \x20   omega_q8_1_quantize_block(in0, out, group, (unsigned int)(gid & {lane_mask}));\n\
+         \x20   const bool live = group < u.groups;\n\
+         \x20   omega_q8_1_quantize_block(in0, out, live ? group : u.groups - 1, (unsigned int)(gid & {lane_mask}), live);\n\
          }}\n",
         lane_mask = GROUP_ELEMENTS - 1,
+        entry_wave_guard = target.entry_wave_guard(),
         header = target.fp16_header,
     ))
 }

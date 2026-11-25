@@ -1,6 +1,6 @@
 #include <cuda_fp16.h>
 #define PROXIMA_ALL_LANES 0xffffffffu
-__device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float *out, long long group, unsigned int lane) {
+__device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float *out, long long group, unsigned int lane, bool live) {
     float x = in[group * 32 + lane];
     float amax = fabsf(x);
     for (int offset = 16; offset > 0; offset >>= 1) { amax = fmaxf(amax, __shfl_xor_sync(PROXIMA_ALL_LANES, amax, offset)); }
@@ -9,6 +9,7 @@ __device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float
     int q = (int)roundf(x * d_inv);
     int qsum = q;
     for (int offset = 16; offset > 0; offset >>= 1) { qsum += __shfl_xor_sync(PROXIMA_ALL_LANES, qsum, offset); }
+    if (!live) { return; }
     unsigned char *bytes = (unsigned char *)out + (group / 4) * 144;
     const long long run = group % 4;
     unsigned char *header = bytes + 0 + run * 4;
@@ -33,8 +34,8 @@ extern "C" __global__ void __launch_bounds__(256) omega_cuda_block_quantize_e128
     const Uniforms u = *u_ptr;
     const long long gid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     const long long group = gid / 32;
-    if (group >= u.groups) { return; }
-    omega_q8_1_quantize_block(in0, out, group, (unsigned int)(gid & 31));
+    const bool live = group < u.groups;
+    omega_q8_1_quantize_block(in0, out, live ? group : u.groups - 1, (unsigned int)(gid & 31), live);
 }
 #include <cuda_fp16.h>
 #define PROXIMA_ALL_LANES 0xffffffffu

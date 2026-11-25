@@ -374,12 +374,6 @@ pub(crate) fn emit_on_target(
             None => render_cached_attention_cuda(resolved, &entry, numeric_policy, &quantized)?,
         },
         BoundOpKind::MoeTopK { .. } => render_moe_topk(target, resolved, &entry)?,
-        BoundOpKind::BlockQuantize { .. } if !target.card_asm => {
-            return Err(EmitError::CudaUnsupportedOpKind {
-                node: resolved.node,
-                kind: "block_quantize_on_this_target",
-            });
-        }
         BoundOpKind::BlockQuantize { .. } => render_block_quantize(target, resolved, &entry)?,
         BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::TopFractionSelect { .. }
@@ -621,8 +615,8 @@ const Q8_1_QUANTIZE_ENTRY_TEXT: &str = r#"
 extern "C" __global__ void omega_cuda_q8_1_quantize(const float *in, float *out, const long long *u) {
     long long gid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
     long long block = gid / 32;
-    if (block >= u[0]) return;
-    omega_q8_1_quantize_block(in, out, block, (unsigned int)(gid & 31));
+    const bool live = block < u[0];
+    omega_q8_1_quantize_block(in, out, live ? block : u[0] - 1, (unsigned int)(gid & 31), live);
 }
 "#;
 
@@ -6151,12 +6145,11 @@ mod tests {
         assert!(kernel.prologue.is_empty());
     }
 
-    #[test]
-    fn a_block_quantize_kernel_binds_the_lane_mask_it_uses() {
+    fn q8_1_quantize_op() -> BoundOp {
         let layout = BlockLayout::Q8_1;
         let width = 512_usize;
         let bytes = (width / usize::from(layout.elements) * usize::from(layout.block_bytes)) as u64;
-        let bound = BoundOp {
+        BoundOp {
             node: NodeId(1),
             dtype: DType::UINT8,
             extents: vec![3, bytes],
@@ -6172,7 +6165,29 @@ mod tests {
                 layout: Box::new(layout),
                 arithmetic: ScaleArithmetic::Quotient,
             },
-        };
+        }
+    }
+
+    #[test]
+    fn a_block_quantize_kernel_returns_only_after_its_full_mask_shuffles_on_every_target() {
+        let bound = q8_1_quantize_op();
+        let cuda = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::default()).expect("cuda emits");
+        let hip32 = emit_hip_at_wave(HipWave::Wave32, &bound, &no_packed(), NumericPolicy::default(), EmitDevice::default(), &OperandDtypes::new())
+            .expect("a 32-lane hip target renders block quantize under the one lowering");
+        let hip64 = emit_hip_at_wave(HipWave::Wave64, &bound, &no_packed(), NumericPolicy::default(), EmitDevice::default(), &OperandDtypes::new())
+            .expect("a 64-lane hip target renders block quantize under the one lowering");
+
+        for (target, kernel) in [("cuda", cuda), ("hip32", hip32), ("hip64", hip64)] {
+            let first_return = kernel.source.find("return").expect("the dead-lane exit exists");
+            let last_shuffle = kernel.source.rfind("__shfl_xor_sync").expect("the shuffles exist");
+            assert!(first_return > last_shuffle, "{target}: a lane returns before the full-mask shuffles finish");
+            assert!(kernel.source.contains("live ? group : u.groups - 1"), "{target}: dead lanes still run the shuffles");
+        }
+    }
+
+    #[test]
+    fn a_block_quantize_kernel_binds_the_lane_mask_it_uses() {
+        let bound = q8_1_quantize_op();
 
         let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::default())
             .expect("a q8_1 run layout emits a quantize kernel");
