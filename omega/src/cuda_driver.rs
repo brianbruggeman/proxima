@@ -6588,4 +6588,206 @@ mod recording_runtime {
         let after: Vec<String> = plan.kernels.iter().map(|kernel| kernel.source.clone()).collect();
         assert_eq!(before, after, "refitting an unchanged op keeps its HIP text");
     }
+
+    use std::collections::HashSet;
+
+    use crate::device_owner::{
+        Completion, DeviceHandle, DeviceKey, DeviceOwner, Frame, RegisterRequest, ResidentRef,
+        StepOutcome, block_on_thread, launch_on_thread, run_device_owner,
+    };
+
+    /// An owned weight or activation block, generic over its element so the test spells no format.
+    struct Held<Value>(Arc<[Value]>);
+
+    impl<'block, Value> From<&'block Held<Value>> for QuantizedBlock<'block>
+    where
+        QuantizedBlock<'block>: From<&'block [Value]>,
+    {
+        fn from(held: &'block Held<Value>) -> Self {
+            QuantizedBlock::from(&*held.0)
+        }
+    }
+
+    impl RecordingRuntime {
+        fn event_threads(&self) -> Vec<thread::ThreadId> {
+            self.log.lock().iter().map(|(id, _)| *id).collect()
+        }
+
+        fn event_log(&self) -> Vec<Event> {
+            self.log.lock().iter().map(|(_, event)| event.clone()).collect()
+        }
+    }
+
+    fn held<Value: Clone>(values: &[Value]) -> Held<Value> {
+        Held(Arc::from(values))
+    }
+
+    /// Plans sharing one set of host buffers keep one resident identity per name, as the driver's ledger requires.
+    fn owner_request<Value>(
+        weight_first: &Arc<[Value]>,
+        weight_second: &Arc<[Value]>,
+        activation: &Arc<[Value]>,
+    ) -> RegisterRequest<Held<Value>> {
+        let (program, out) = two_layer_program();
+        RegisterRequest {
+            program,
+            symbols: Vec::new(),
+            outputs: vec![out],
+            blocks: vec![
+                ("w0".into(), Held(Arc::clone(weight_first))),
+                ("w1".into(), Held(Arc::clone(weight_second))),
+                ("x".into(), Held(Arc::clone(activation))),
+            ],
+            resident_names: vec!["w0".into(), "w1".into()],
+            config: RuntimeConfig::default(),
+        }
+    }
+
+    fn recording_owner<Block>(runtime: RecordingRuntime) -> DeviceOwner<RecordingRuntime, Block>
+    where
+        for<'block> QuantizedBlock<'block>: From<&'block Block>,
+    {
+        DeviceOwner::new(DeviceKey(0), CudaDriver::recording_on(runtime), 8)
+    }
+
+    async fn drive_plan<Value: Clone>(
+        handle: DeviceHandle<Held<Value>>,
+        request: RegisterRequest<Held<Value>>,
+        steps: usize,
+    ) -> usize {
+        let activation = Held(Arc::clone(&request.blocks[2].1.0));
+        let lease = handle.register(request).await.expect("the owner registers the plan");
+        let completion = Completion::new();
+        let mut frame = Frame::default();
+        let mut done = 0;
+        for _ in 0..steps {
+            frame.clear();
+            frame.residents.extend((0..2).map(|slot| ResidentRef { slot, address: 0, len: 0 }));
+            frame.dynamic.push(("x".into(), Held(Arc::clone(&activation.0))));
+            match handle.step(&lease, frame, &completion).await.expect("the owner steps the plan") {
+                StepOutcome::Done { frame: returned, .. } => {
+                    frame = returned;
+                    done += 1;
+                }
+                StepOutcome::NeedResident { .. } => panic!("registered weights are resident"),
+            }
+        }
+        handle.retire(&lease).await.expect("the plan retires");
+        done
+    }
+
+    #[test]
+    fn the_owner_runs_every_device_call_on_one_thread_that_is_not_a_caller() {
+        let runtime = RecordingRuntime::new();
+        let owner_runtime = runtime.clone();
+        let (handle, owner) = launch_on_thread(DeviceKey(0), 64, move || recording_owner(owner_runtime));
+        let weight_first = Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0));
+        let weight_second = Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0));
+        let activation = Arc::from(weight_values(INPUT as usize, 3.0));
+
+        let callers: Vec<_> = (0..4)
+            .map(|_| {
+                let handle = handle.clone();
+                let request = owner_request(&weight_first, &weight_second, &activation);
+                thread::spawn(move || {
+                    let done = block_on_thread(drive_plan(handle.clone(), request, 250));
+                    block_on_thread(handle.release_names(vec!["w0".into(), "w1".into()]))
+                        .expect("the owner releases the names");
+                    (thread::current().id(), done)
+                })
+            })
+            .collect();
+        let results: Vec<_> = callers.into_iter().map(|caller| caller.join().expect("caller ran")).collect();
+        block_on_thread(handle.shutdown()).expect("the owner shuts down");
+        owner.join().expect("the owner thread ends");
+
+        let steps: usize = results.iter().map(|(_, done)| done).sum();
+        let threads: HashSet<_> = runtime.event_threads().into_iter().collect();
+        assert_eq!(steps, 1000, "four callers step 250 times each");
+        assert_eq!(threads.len(), 1, "every device call ran on one thread");
+        assert!(
+            results.iter().all(|(caller, _)| !threads.contains(caller)),
+            "no caller thread made a device call"
+        );
+    }
+
+    #[test]
+    fn the_owner_replays_the_direct_driver_event_log() {
+        let steps = 20;
+        let weight_first = weight_values((HIDDEN * INPUT) as usize, 1.0);
+        let weight_second = weight_values((OUTPUT * HIDDEN) as usize, 7.0);
+        let activation = weight_values(INPUT as usize, 3.0);
+        let (program, out) = two_layer_program();
+        let named = named_blocks(&weight_first, &weight_second, &activation);
+        let direct = CudaDriver::<RecordingRuntime>::recording();
+        let mut plan = direct
+            .plan_with_config(&program, &[], &[out], &named, &RuntimeConfig::default())
+            .expect("the recording driver plans the two-layer program");
+        plan.mark_resident(&BTreeSet::from(["w0", "w1"]));
+        for _ in 0..steps {
+            plan.execute_named(&named, None).expect("the direct plan executes");
+        }
+
+        let runtime = RecordingRuntime::new();
+        let owner_runtime = runtime.clone();
+        let (handle, owner) = launch_on_thread(DeviceKey(0), 8, move || recording_owner(owner_runtime));
+        let request = owner_request(
+            &Arc::from(weight_first),
+            &Arc::from(weight_second),
+            &Arc::from(activation),
+        );
+        let done = block_on_thread(drive_plan(handle.clone(), request, steps));
+        block_on_thread(handle.shutdown()).expect("the owner shuts down");
+        owner.join().expect("the owner thread ends");
+
+        assert_eq!(done, steps);
+        assert_eq!(runtime.event_log(), direct.events(), "the owner issues the direct driver's device calls");
+    }
+
+    #[test]
+    fn release_and_step_racing_from_two_tasks_linearize() {
+        let runtime = RecordingRuntime::new();
+        let owner_runtime = runtime.clone();
+        let (handle, owner) = launch_on_thread(DeviceKey(0), 8, move || recording_owner(owner_runtime));
+        let request = owner_request(
+            &Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0)),
+            &Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0)),
+            &Arc::from(weight_values(INPUT as usize, 3.0)),
+        );
+
+        let stepper = {
+            let handle = handle.clone();
+            thread::spawn(move || block_on_thread(drive_plan(handle, request, 100)))
+        };
+        let releaser = {
+            let handle = handle.clone();
+            thread::spawn(move || {
+                (0..50)
+                    .map(|_| block_on_thread(handle.release_names(vec!["w0".into()])))
+                    .all(|released| released.is_ok())
+            })
+        };
+        let done = stepper.join().expect("stepper ran");
+        let released = releaser.join().expect("releaser ran");
+        block_on_thread(handle.shutdown()).expect("the owner shuts down");
+        owner.join().expect("the owner thread ends");
+
+        assert_eq!(done, 100, "every step succeeds whichever side of a release it lands on");
+        assert!(released, "every release is answered");
+        assert_eq!(runtime.event_threads().into_iter().collect::<HashSet<_>>().len(), 1);
+    }
+
+    #[test]
+    fn the_owner_future_is_send() {
+        fn assert_send<Subject: Send>(_: &Subject) {}
+        fn check<Block: Send + 'static>(_sample: &Block)
+        where
+            for<'block> QuantizedBlock<'block>: From<&'block Block>,
+        {
+            let (_commands, receiver) = proxima_primitives::sync::mpsc::channel(1);
+            let future = run_device_owner(recording_owner::<Block>(RecordingRuntime::new()), receiver);
+            assert_send(&future);
+        }
+        check(&held(&weight_values(1, 0.0)));
+    }
 }
