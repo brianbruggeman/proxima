@@ -164,3 +164,13 @@ fn whole_attention_three_rows_five_keys_three_heads_matches_the_unfused_cpu_chai
 fn whole_attention_at_whisper_encoder_shape_matches_the_unfused_cpu_chain() {
     assert_whole_attention_parity(1500, 1500, 6, 64);
 }
+
+#[test]
+fn whole_attention_with_rows_that_are_not_a_tile_multiple_matches_the_unfused_cpu_chain() {
+    assert_whole_attention_parity(1003, 1003, 6, 64);
+}
+
+#[test]
+fn whole_attention_with_a_short_ragged_row_tile_matches_the_unfused_cpu_chain() {
+    assert_whole_attention_parity(77, 77, 2, 64);
+}

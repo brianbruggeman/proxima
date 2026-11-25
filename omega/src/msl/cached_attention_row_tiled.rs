@@ -1,10 +1,11 @@
-use proxima_numeric::float_layout::FloatLayout;
 use super::cached_attention_flash_tiled::render_cached_attention_flash_tiled;
 use super::layout_render::{
     block_element_msl, hardware_type, layout_load_msl, readable_block_layout, readable_scalar_cache,
 };
 use super::signature_tokens_prelude::{QUERY_STAGE_PAD, query_tile_staged};
 use super::*;
+use proxima_numeric::float_layout::FloatLayout;
+use proxima_tensor::bind::ScorePlanes;
 
 /// `omega_cache_element(base, element)`: element `element` of the cache at `base`, as binary32,
 /// defined from the cache's own description: the layout load of a scalar of whole bytes, the block
@@ -176,6 +177,7 @@ pub(super) fn render_cached_attention_row_tiled_with(
         cached_lower_inclusive,
         new_upper_inclusive,
         attention_sink,
+        planes,
         ..
     } = &resolved.kind
     else {
@@ -185,6 +187,14 @@ pub(super) fn render_cached_attention_row_tiled_with(
             found: resolved.kind.name(),
         });
     };
+    let whole = *planes == ScorePlanes::Whole;
+    #[cfg(feature = "metal-attn-variants")]
+    if whole && !row_schedule.is_legacy() {
+        return Err(EmitError::CachedAttentionKvReuseNotSupported {
+            node: resolved.node,
+            reason: "a whole plane is read by the legacy row-tiled schedule only",
+        });
+    }
     validate_attention_split_limit(resolved.node, crate::sized::ATTENTION_SPLIT_MAX)?;
     if resolved.dtype != DType::FLOAT32 {
         return Err(EmitError::UnsupportedDType {
@@ -194,21 +204,28 @@ pub(super) fn render_cached_attention_row_tiled_with(
         });
     }
     if row_schedule.for_op(&resolved.kind).is_flash() {
-        return render_cached_attention_flash_tiled(resolved, entry, cached_kv_codec, flash_qk_operand);
+        return render_cached_attention_flash_tiled(
+            resolved,
+            entry,
+            cached_kv_codec,
+            flash_qk_operand,
+        );
     }
     let cached_lower = if *cached_lower_inclusive == i64::MIN {
         "-9223372036854775807L".to_string()
     } else {
         format!("{cached_lower_inclusive}L")
     };
-    let stages_query = query_tile_staged(
-        rows_per_threadgroup,
-        *query_groups,
-        *head_dim,
-        row_tiled_block(*head_dim),
-        crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES,
-        crate::sized::ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES,
-    );
+    // the staged query carries an even and an odd half plane; a whole plane reads the query from device
+    let stages_query = !whole
+        && query_tile_staged(
+            rows_per_threadgroup,
+            *query_groups,
+            *head_dim,
+            row_tiled_block(*head_dim),
+            crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES,
+            crate::sized::ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES,
+        );
     #[cfg(feature = "metal-attn-variants")]
     let shared_k = row_schedule.has_shared_k();
     #[cfg(feature = "metal-attn-variants")]
@@ -232,7 +249,8 @@ pub(super) fn render_cached_attention_row_tiled_with(
     #[cfg(not(feature = "metal-attn-variants"))]
     let _ = row_schedule;
     let block = row_tiled_block(*head_dim);
-    let half_dim = *head_dim / 2;
+    // the width of one score plane: half a head for the even and odd planes, a whole head for one plane
+    let half_dim = if whole { *head_dim } else { *head_dim / 2 };
     let depth_unroll = if (half_dim / 8).is_multiple_of(2) {
         2
     } else {
@@ -319,11 +337,12 @@ pub(super) fn render_cached_attention_row_tiled_with(
             reason: "shared K staging exceeds the configured threadgroup-memory budget",
         });
     }
-    let cached_type =
-        row_tiled_cached_type(cached_kv_codec).ok_or(EmitError::CachedAttentionKvCodecNotSupported {
+    let cached_type = row_tiled_cached_type(cached_kv_codec).ok_or(
+        EmitError::CachedAttentionKvCodecNotSupported {
             node: resolved.node,
             reason: ROW_TILED_KV_REASON,
-        })?;
+        },
+    )?;
     if let Some(format) = cached_kv_codec.as_ref() {
         cached_attention_row_tiled_reads(format, *head_dim).map_err(|reason| {
             EmitError::CachedAttentionKvCodecNotSupported {
@@ -342,12 +361,23 @@ pub(super) fn render_cached_attention_row_tiled_with(
     } else {
         Codec::Float32
     };
-    let (sink_param, sink_init, out_buffer, uniforms_buffer) = if *attention_sink {
-        (SINK_PARAM, SINK_INIT, "10", "11")
+    let (sink_param, sink_init, out_buffer, uniforms_buffer) = match (*attention_sink, whole) {
+        (true, _) => (SINK_PARAM, SINK_INIT, "10", "11"),
+        (false, false) => ("", "", "9", "10"),
+        (false, true) => ("", "", "8", "9"),
+    };
+    // a whole bind has eight operands and no cached range, so the ninth operand's live count is the constant 0 and its parameter is commented out
+    let (live_open, live_close, live_init, odd_guard, plane_width) = if whole {
+        ("/*", "*/", "0L", "if (false) ", "head_dim")
     } else {
-        ("", "", "9", "10")
+        ("", "", "(long)in8[0]", "", "head_dim / 2")
     };
     let substitutions = [
+        ("@LIVE_OPEN@", live_open.to_string()),
+        ("@LIVE_CLOSE@", live_close.to_string()),
+        ("@LIVE@", live_init.to_string()),
+        ("@ODD_GUARD@", odd_guard.to_string()),
+        ("@PLANE_WIDTH@", plane_width.to_string()),
         ("@SINK_PARAM@", sink_param.to_string()),
         ("@SINK_INIT@", sink_init.to_string()),
         ("@OUT_BUFFER@", out_buffer.to_string()),
@@ -399,10 +429,7 @@ pub(super) fn render_cached_attention_row_tiled_with(
             "@OPERAND_SCALAR@",
             fragment_scalar_type(operand_format).to_string(),
         ),
-        (
-            "@F16_CACHE@",
-            native_half_cache.to_string(),
-        ),
+        ("@F16_CACHE@", native_half_cache.to_string()),
         ("@KV_REUSE_SHARED_K@", shared_k.to_string()),
         ("@KV_REUSE_SHARED_V@", shared_v.to_string()),
         ("@QUERY_PARALLEL_ROWS@", query_parallel_rows.to_string()),
@@ -546,14 +573,18 @@ fn fold_step_mode(body: &str, cached_phase: bool) -> String {
 /// site carries a runtime `mode == 0L` test. Same math and step order as one loop
 /// that derives `mode` per step.
 pub(super) fn split_step_loop(node: NodeId, source: &str) -> Result<String, EmitError> {
-    let begin = source.find(STEP_BODY_BEGIN).ok_or(EmitError::KernelTemplateMarkerMissing {
-        node,
-        marker: "STEP_BODY_BEGIN",
-    })?;
-    let end = source.find(STEP_BODY_END).ok_or(EmitError::KernelTemplateMarkerMissing {
-        node,
-        marker: "STEP_BODY_END",
-    })?;
+    let begin = source
+        .find(STEP_BODY_BEGIN)
+        .ok_or(EmitError::KernelTemplateMarkerMissing {
+            node,
+            marker: "STEP_BODY_BEGIN",
+        })?;
+    let end = source
+        .find(STEP_BODY_END)
+        .ok_or(EmitError::KernelTemplateMarkerMissing {
+            node,
+            marker: "STEP_BODY_END",
+        })?;
     let body = &source[begin + STEP_BODY_BEGIN.len()..end];
     let mut out = String::with_capacity(source.len() + body.len());
     out.push_str(&source[..begin]);
@@ -572,8 +603,8 @@ const ROW_TILED_KERNEL: &str = r#"struct Uniforms { long total_elements; long sp
 
 #define FOR_UNROLL _Pragma("clang loop unroll(full)")
 
-kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]], device const @KV_TYPE@* in2 [[buffer(2)]], device const @KV_TYPE@* in3 [[buffer(3)]], device const float* in4 [[buffer(4)]], device const float* in5 [[buffer(5)]], device const @KV_TYPE@* in6 [[buffer(6)]], device const float* in7 [[buffer(7)]], device const float* in8 [[buffer(8)]], @SINK_PARAM@device float* out [[buffer(@OUT_BUFFER@)]], constant Uniforms& u [[buffer(@UNIFORMS_BUFFER@)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
-    constexpr long kv_heads = @KV_HEADS@; constexpr long query_groups = @QUERY_GROUPS@; constexpr long head_dim = @HEAD_DIM@; constexpr long half_dim = head_dim / 2; constexpr float scale = @SCALE@; constexpr long cached_lower = @CACHED_LOWER@; constexpr long new_upper = @NEW_UPPER@;
+kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]], device const @KV_TYPE@* in2 [[buffer(2)]], device const @KV_TYPE@* in3 [[buffer(3)]], device const float* in4 [[buffer(4)]], device const float* in5 [[buffer(5)]], device const @KV_TYPE@* in6 [[buffer(6)]], device const float* in7 [[buffer(7)]], @LIVE_OPEN@device const float* in8 [[buffer(8)]], @LIVE_CLOSE@@SINK_PARAM@device float* out [[buffer(@OUT_BUFFER@)]], constant Uniforms& u [[buffer(@UNIFORMS_BUFFER@)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
+    constexpr long kv_heads = @KV_HEADS@; constexpr long query_groups = @QUERY_GROUPS@; constexpr long head_dim = @HEAD_DIM@; constexpr long half_dim = @PLANE_WIDTH@; constexpr float scale = @SCALE@; constexpr long cached_lower = @CACHED_LOWER@; constexpr long new_upper = @NEW_UPPER@;
     constexpr long tile_rows = @TILE_ROWS@; constexpr long simdgroups = @SIMDGROUPS@; constexpr long block = @BLOCK@; constexpr long split_keys = @SPLIT_KEYS@;
     constexpr bool rows_in_fragment = (query_groups % 8) != 0;
     constexpr long groups_per_row = rows_in_fragment ? 1 : query_groups / 8;
@@ -597,7 +628,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
     long kv_head = (long)tgid / (splits * tiles);
     long row0 = tile * tile_rows;
     long rows_here = min(tile_rows, total_rows - row0);
-    long live = (long)in8[0];
+    long live = @LIVE@;
     long thread_id = (long)simdgroup_slot * 32L + (long)lane;
     short quad = (short)(lane / 4); short fragment_row = (short)((quad & 4) + ((lane / 2) % 4)); short fragment_column = (short)((quad & 2) * 2 + (lane % 2) * 2);
     threadgroup float score_tile[tile_vectors * block]; threadgroup float row_maximum[tile_vectors]; threadgroup float row_sum[tile_vectors]; threadgroup float rescale_tile[tile_vectors];
@@ -720,10 +751,10 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                             } else {
                                 if (key_rows_left >= 8L) {
                                     simdgroup_load(key_even_tile[group][step_index], key_even_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
-                                    simdgroup_load(key_odd_tile[group][step_index], key_odd_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+                                    @ODD_GUARD@simdgroup_load(key_odd_tile[group][step_index], key_odd_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
                                 } else {
                                     omega_load_key_matrix(key_even_tile[group][step_index], key_even_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), lane, key_rows_left);
-                                    omega_load_key_matrix(key_odd_tile[group][step_index], key_odd_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), lane, key_rows_left);
+                                    @ODD_GUARD@omega_load_key_matrix(key_odd_tile[group][step_index], key_odd_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), lane, key_rows_left);
                                 }
                             }
                         }
@@ -759,10 +790,10 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                                 if (stage_query) {
                                     threadgroup const float* stage_even = query_stage + (long)vector_block * 16L * query_stage_stride + depth + 8 * step_index;
                                     simdgroup_load(query_even[step_index], stage_even, (ulong)query_stage_stride);
-                                    simdgroup_load(query_odd[step_index], stage_even + 8L * query_stage_stride, (ulong)query_stage_stride);
+                                    @ODD_GUARD@simdgroup_load(query_odd[step_index], stage_even + 8L * query_stage_stride, (ulong)query_stage_stride);
                                 } else {
                                     simdgroup_load(query_even[step_index], in0 + query_offset + 8 * step_index, (ulong)query_stride);
-                                    simdgroup_load(query_odd[step_index], in1 + query_offset + 8 * step_index, (ulong)query_stride);
+                                    @ODD_GUARD@simdgroup_load(query_odd[step_index], in1 + query_offset + 8 * step_index, (ulong)query_stride);
                                 }
                                 simdgroup_multiply_accumulate(scores[key_tile][vector_slot], query_even[step_index], shared_even[step_index], scores[key_tile][vector_slot]);
                                 simdgroup_multiply_accumulate(scores[key_tile][vector_slot], query_odd[step_index], shared_odd[step_index], scores[key_tile][vector_slot]);
@@ -779,10 +810,10 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                             if (stage_query) {
                                 threadgroup const float* stage_even = query_stage + (long)vector_block * 16L * query_stage_stride + depth + 8 * step_index;
                                 simdgroup_load(query_even[step_index], stage_even, (ulong)query_stage_stride);
-                                simdgroup_load(query_odd[step_index], stage_even + 8L * query_stage_stride, (ulong)query_stage_stride);
+                                @ODD_GUARD@simdgroup_load(query_odd[step_index], stage_even + 8L * query_stage_stride, (ulong)query_stage_stride);
                             } else {
                                 simdgroup_load(query_even[step_index], in0 + query_offset + 8 * step_index, (ulong)query_stride);
-                                simdgroup_load(query_odd[step_index], in1 + query_offset + 8 * step_index, (ulong)query_stride);
+                                @ODD_GUARD@simdgroup_load(query_odd[step_index], in1 + query_offset + 8 * step_index, (ulong)query_stride);
                             }
                         }
                         FOR_UNROLL for (int group = 0; group < (int)score_key_tiles; group++) {
@@ -790,7 +821,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                             if (key_tile < fragments) {
                                 FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
                                     simdgroup_multiply_accumulate(scores[group][vector_slot], query_even[step_index], key_even_tile[group][step_index], scores[group][vector_slot]);
-                                    simdgroup_multiply_accumulate(scores[group][vector_slot], query_odd[step_index], key_odd_tile[group][step_index], scores[group][vector_slot]);
+                                    @ODD_GUARD@simdgroup_multiply_accumulate(scores[group][vector_slot], query_odd[step_index], key_odd_tile[group][step_index], scores[group][vector_slot]);
                                 }
                             }
                         }
@@ -840,7 +871,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                     device const float4* key_odd4 = (device const float4*)(in5 + key_offset);
                     for (short index = tx; index < (short)(half_dim / 4L); index += 8) {
                         partial_score += dot(key_even4[index], query_even4[index]);
-                        partial_score += dot(key_odd4[index], query_odd4[index]);
+                        @ODD_GUARD@partial_score += dot(key_odd4[index], query_odd4[index]);
                     }
                 }
                 partial_score += simd_shuffle_down(partial_score, 4);

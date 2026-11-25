@@ -76,7 +76,9 @@ pub(super) fn cached_attention_scalar_score_body(
     let odd_term = if whole {
         String::new()
     } else {
-        format!("\n            partial_score += in1[qbase + pair] * (cached ? {key_odd} : in5[kbase + pair]);")
+        format!(
+            "\n            partial_score += in1[qbase + pair] * (cached ? {key_odd} : in5[kbase + pair]);"
+        )
     };
     format!(
         "        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        {lower_guard}\n        if (!cached && relative > new_upper) {{ continue; }}\n        long kbase = (cached ? key : new_index) * (kv_heads * ({pair_expr})) + kv_head * ({pair_expr});\n        {value_base_decl}float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < {pair_expr}; pair += 32L) {{\n            partial_score += in0[qbase + pair] * (cached ? {key_even} : in4[kbase + pair]);{odd_term}\n        }}{pass_accum}\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? {value_read} : in7[{value_addr} + dimension]);\n        }}\n        maximum = next_max;\n"
@@ -279,7 +281,11 @@ pub(super) fn render_cached_attention_with_mma_selection(
         form,
         CachedAttentionForm::Static | CachedAttentionForm::SingleRangeDynamic { .. }
     );
-    if planes == ScorePlanes::Whole && !(per_row_form && !pass_present) {
+    #[cfg(feature = "metal-attn-split-rows")]
+    let row_tiled_whole = matches!(form, CachedAttentionForm::TwoRangeRowTiled { .. });
+    #[cfg(not(feature = "metal-attn-split-rows"))]
+    let row_tiled_whole = false;
+    if planes == ScorePlanes::Whole && !((per_row_form && !pass_present) || row_tiled_whole) {
         return Err(EmitError::CachedAttentionWholePlanesNotSupported {
             node: resolved.node,
         });
@@ -324,7 +330,9 @@ pub(super) fn render_cached_attention_with_mma_selection(
     let _ = mma_selection;
     let codec_supported_by_form = {
         let generic = form_reads_generic_scalar_kv(form)
-            && cached_kv_codec.as_ref().is_some_and(|codec| readable_scalar_cache(codec).is_some());
+            && cached_kv_codec
+                .as_ref()
+                .is_some_and(|codec| readable_scalar_cache(codec).is_some());
         let decode = {
             #[cfg(feature = "metal-attn-split-decode")]
             {
@@ -786,7 +794,12 @@ pub(super) fn render_cached_attention_with_mma_selection(
         // reduces the per-lane partial dot product within this simdgroup.
         source.push_str(&format!(
             "    for (long key = 0; key <= last_key; key++) {{\n{}    }}\n",
-            cached_attention_scalar_score_body(pass_present, planes, new_range_windowed, cached_load),
+            cached_attention_scalar_score_body(
+                pass_present,
+                planes,
+                new_range_windowed,
+                cached_load
+            ),
         ));
         source.push_str(&format!("    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; out[query_index * head_dim + dimension] = ({element_type})(sum == 0.0f ? 0.0f : weighted[local_dimension] / sum); }}\n}}\n"));
     } else {
@@ -811,7 +824,12 @@ pub(super) fn render_cached_attention_with_mma_selection(
         source.push_str(&format!("    {last_key_decl}"));
         source.push_str(&format!(
             "    for (long key = chunk; key <= last_key; key += context_chunks) {{\n{}    }}\n",
-            cached_attention_scalar_score_body(pass_present, planes, new_range_windowed, cached_load),
+            cached_attention_scalar_score_body(
+                pass_present,
+                planes,
+                new_range_windowed,
+                cached_load
+            ),
         ));
         // Single cross-simdgroup merge: each chunk's own (max, sum,
         // weighted) is the same online-softmax state the `chunks<=1` body
@@ -848,7 +866,11 @@ pub(super) fn render_cached_attention_with_mma_selection(
 /// `u.splits == 1` this reduces to exactly the prior forced-`split = 0`
 /// copy-and-normalize, since the single live lane's rescale weight is
 /// always `1.0` (or `0.0` under the all-`-INFINITY`/empty-context corner).
-#[cfg(any(test, feature = "test-support", all(feature = "metal", target_os = "macos")))]
+#[cfg(any(
+    test,
+    feature = "test-support",
+    all(feature = "metal", target_os = "macos")
+))]
 pub(super) fn render_cached_attention_merge(
     resolved: &BoundOp,
     entry: &str,
@@ -910,7 +932,11 @@ pub(super) fn render_cached_attention_merge(
 /// dependent steps instead of `head_dim / 32 * splits`. The partial for
 /// `(row, dim4, split)` sits at float4 index `(row * head_dim/4 + dim4) *
 /// splits + split`, which the lane-contiguous read here coalesces.
-#[cfg(any(test, feature = "test-support", all(feature = "metal", target_os = "macos")))]
+#[cfg(any(
+    test,
+    feature = "test-support",
+    all(feature = "metal", target_os = "macos")
+))]
 fn interleaved_merge_body(
     entry: &str,
     element_type: &str,
@@ -1004,7 +1030,11 @@ pub(crate) fn emit_cached_attention_merge(
     )
 }
 
-#[cfg(any(test, feature = "test-support", all(feature = "metal", target_os = "macos")))]
+#[cfg(any(
+    test,
+    feature = "test-support",
+    all(feature = "metal", target_os = "macos")
+))]
 pub(crate) fn emit_cached_attention_merge_with_schedule(
     resolved: &BoundOp,
     numeric_policy: NumericPolicy,
@@ -1041,7 +1071,11 @@ pub(crate) fn emit_cached_attention_merge_with_schedule(
 /// with a simdgroup per potential split (llama.cpp's `32 * nwg` threads,
 /// `ggml-metal-ops.cpp:3712`), a pinned width `flat_grid2d` launches exactly;
 /// the row-major reduce is one simdgroup per row at the driver's width.
-#[cfg(any(test, feature = "test-support", all(feature = "metal", target_os = "macos")))]
+#[cfg(any(
+    test,
+    feature = "test-support",
+    all(feature = "metal", target_os = "macos")
+))]
 fn merge_grid(node: NodeId, total_elements: u64) -> Result<GridSpec, EmitError> {
     let threadgroup_width =
         INTERLEAVED_SPLIT_SCRATCH.then_some(SIMD_WIDTH * crate::sized::ATTENTION_SPLIT_MAX);
@@ -1060,8 +1094,7 @@ fn merge_grid(node: NodeId, total_elements: u64) -> Result<GridSpec, EmitError> 
     })
 }
 
-pub(super) const ROW_TILED_KV_REASON: &str =
-    "row-tiled attention reads cached K/V as binary32, one scalar layout of whole bytes, or one readable block layout";
+pub(super) const ROW_TILED_KV_REASON: &str = "row-tiled attention reads cached K/V as binary32, one scalar layout of whole bytes, or one readable block layout";
 
 /// The storage element type the row-tiled kernel (`cached_attention_row_tiled`) reads a cache of
 /// `codec` through, `None` when it has no read path for it. The row-tiled renderer and
@@ -1110,12 +1143,12 @@ pub fn cached_attention_row_tiled_reads(format: &Codec, head_dim: u64) -> Result
 /// [`EmitError::CachedAttentionKvCodecNotSupported`] for a format the row-tiled kernel cannot read.
 pub fn cached_attention_row_tiled_kv_codec_for(format: &Codec) -> Result<Option<Codec>, EmitError> {
     let codec = cached_attention_kv_codec_for(format)?;
-    row_tiled_cached_type(codec)
-        .map(|_| codec)
-        .ok_or(EmitError::CachedAttentionKvCodecNotSupported {
+    row_tiled_cached_type(codec).map(|_| codec).ok_or(
+        EmitError::CachedAttentionKvCodecNotSupported {
             node: NodeId(0),
             reason: ROW_TILED_KV_REASON,
-        })
+        },
+    )
 }
 
 /// The codec the cached-attention emitter reads a K/V cache stored as `format` with: `Ok(None)`
@@ -1216,9 +1249,15 @@ mod whole_plane_tests {
         render_cached_attention(op, "entry", NumericPolicy::llama_relaxed(), None)
     }
 
+    /// bit-exact grants no split-merge rewrite, so the whole op stays the per-row form
+    fn render_per_row(op: &BoundOp) -> Result<String, EmitError> {
+        render_cached_attention(op, "entry", NumericPolicy::bit_exact(), None)
+    }
+
     #[test]
     fn whole_kernel_at_h6_g1_d64_scores_one_head_dim_plane_with_no_odd_reads() {
-        let source = render(&whole_encoder_op()).expect("the whole-plane encoder kernel renders");
+        let source =
+            render_per_row(&whole_encoder_op()).expect("the whole-plane encoder kernel renders");
 
         let pinned = [
             "constexpr long kv_heads = 6; constexpr long query_groups = 1; constexpr long head_dim = 64;",
@@ -1233,14 +1272,17 @@ mod whole_plane_tests {
             assert!(source.contains(line), "missing `{line}` in:\n{source}");
         }
         for absent in ["in1[qbase", "in3[kbase", "in5[kbase", "kbase * 2"] {
-            assert!(!source.contains(absent), "`{absent}` is a paired read, in:\n{source}");
+            assert!(
+                !source.contains(absent),
+                "`{absent}` is a paired read, in:\n{source}"
+            );
         }
     }
 
     #[test]
     fn whole_kernel_keeps_the_online_softmax_and_value_accumulation_of_the_paired_kernel() {
-        let whole = render(&whole_encoder_op()).expect("the whole-plane kernel renders");
-        let paired = render(&with_planes(whole_encoder_op(), ScorePlanes::Paired))
+        let whole = render_per_row(&whole_encoder_op()).expect("the whole-plane kernel renders");
+        let paired = render_per_row(&with_planes(whole_encoder_op(), ScorePlanes::Paired))
             .expect("the paired kernel renders");
 
         for shared in [
@@ -1249,7 +1291,10 @@ mod whole_plane_tests {
             "sum = sum * rescale + weight;",
             "maximum = next_max;",
         ] {
-            assert!(whole.contains(shared) && paired.contains(shared), "`{shared}` differs");
+            assert!(
+                whole.contains(shared) && paired.contains(shared),
+                "`{shared}` differs"
+            );
         }
         assert_ne!(whole, paired, "the two plane layouts are different kernels");
     }
@@ -1268,6 +1313,127 @@ mod whole_plane_tests {
         assert!(!paired_name.ends_with("_wp"), "{paired_name}");
     }
 
+    #[cfg(feature = "metal-attn-split-rows")]
+    #[test]
+    fn whole_encoder_op_above_the_row_threshold_selects_the_row_tiled_form_with_one_split() {
+        let form = cached_attention_form_with_schedule(
+            &whole_encoder_op().kind,
+            NumericPolicy::llama_relaxed(),
+            AttentionRowSchedule::legacy(),
+        );
+
+        let Some(CachedAttentionForm::TwoRangeRowTiled { splits, .. }) = form else {
+            panic!("a whole op at 1500 rows is the row-tiled form, got {form:?}");
+        };
+        assert_eq!(splits, 1, "a whole bind has no merge dispatch");
+    }
+
+    #[cfg(feature = "metal-attn-split-rows")]
+    #[test]
+    fn whole_op_below_the_row_threshold_keeps_the_per_row_form() {
+        let mut op = whole_encoder_op();
+        let BoundOpKind::CachedAttention {
+            query_rows,
+            new_key_rows,
+            ..
+        } = &mut op.kind
+        else {
+            unreachable!("whole_encoder_op always builds a CachedAttention kind");
+        };
+        *query_rows = 1;
+        *new_key_rows = 1;
+
+        let form = cached_attention_form_with_schedule(
+            &op.kind,
+            NumericPolicy::llama_relaxed(),
+            AttentionRowSchedule::legacy(),
+        );
+
+        assert!(
+            matches!(form, Some(CachedAttentionForm::Static)),
+            "{form:?}"
+        );
+    }
+
+    #[cfg(feature = "metal-attn-split-rows")]
+    #[test]
+    fn whole_row_tiled_kernel_reads_one_head_dim_plane_with_no_odd_plane_and_no_ninth_operand() {
+        let source = render(&whole_encoder_op()).expect("the whole-plane row-tiled kernel renders");
+
+        let pinned = [
+            "constexpr long half_dim = head_dim;",
+            "/*device const",
+            "in8 [[buffer(8)]], */",
+            "out [[buffer(8)]], constant Uniforms& u [[buffer(9)]]",
+            "long live = 0L;",
+            "if (false) simdgroup_multiply_accumulate(scores[group][vector_slot], query_odd[step_index], key_odd_tile[group][step_index]",
+            "constexpr bool stage_query = false;",
+        ];
+        for line in pinned {
+            assert!(source.contains(line), "missing `{line}` in:\n{source}");
+        }
+        assert!(
+            !source.contains("in8[0]"),
+            "a whole bind reads no ninth operand"
+        );
+    }
+
+    #[cfg(feature = "metal-attn-split-rows")]
+    #[test]
+    fn whole_and_paired_row_tiled_kernels_never_share_a_pipeline_name() {
+        let policy = NumericPolicy::llama_relaxed();
+        let whole = whole_encoder_op();
+        let mut paired = with_planes(whole_encoder_op(), ScorePlanes::Paired);
+        paired.kind = super::super::attn_golden_tests::attention_rows_op(
+            9,
+            1,
+            ENCODER_HEAD_DIM,
+            512,
+            64,
+            i64::MIN,
+        )
+        .kind;
+
+        let whole_name = super::super::signature_tokens_prelude::entry_name(&whole, policy);
+        let paired_name = super::super::signature_tokens_prelude::entry_name(&paired, policy);
+
+        assert!(whole_name.ends_with("_wp"), "{whole_name}");
+        assert!(!paired_name.ends_with("_wp"), "{paired_name}");
+    }
+
+    #[cfg(feature = "metal-attn-split-rows")]
+    #[test]
+    fn paired_row_tiled_kernel_text_is_unchanged_by_the_whole_plane_tokens() {
+        let paired =
+            super::super::attn_golden_tests::attention_rows_op(9, 2, 64, 512, 64, i64::MIN);
+
+        let source = render(&paired).expect("the paired row-tiled kernel renders");
+
+        let pinned = [
+            "constexpr long half_dim = head_dim / 2;",
+            "in7 [[buffer(7)]], device const",
+            "in8 [[buffer(8)]], device",
+            "out [[buffer(9)]], constant Uniforms& u [[buffer(10)]]",
+            "long live = (long)in8[0];",
+            "simdgroup_multiply_accumulate(scores[group][vector_slot], query_odd[step_index], key_odd_tile[group][step_index]",
+        ];
+        for line in pinned {
+            assert!(source.contains(line), "missing `{line}` in:\n{source}");
+        }
+        for token in [
+            "@LIVE",
+            "@ODD_GUARD@",
+            "@PLANE_WIDTH@",
+            "if (false)",
+            "/*device",
+        ] {
+            assert!(
+                !source.contains(token),
+                "`{token}` leaked into the paired kernel"
+            );
+        }
+    }
+
     #[test]
     fn whole_planes_with_a_pass_triple_refuse_with_a_typed_error() {
         let mut op = whole_encoder_op();
@@ -1279,7 +1445,10 @@ mod whole_plane_tests {
         let refusal = render(&op).expect_err("a whole bind has no pass triple");
 
         assert!(
-            matches!(refusal, EmitError::CachedAttentionWholePlanesNotSupported { .. }),
+            matches!(
+                refusal,
+                EmitError::CachedAttentionWholePlanesNotSupported { .. }
+            ),
             "{refusal:?}"
         );
     }
@@ -1294,7 +1463,10 @@ mod whole_plane_tests {
         let refusal = render(&op).expect_err("a cached range is not a whole-plane form");
 
         assert!(
-            matches!(refusal, EmitError::CachedAttentionWholePlanesNotSupported { .. }),
+            matches!(
+                refusal,
+                EmitError::CachedAttentionWholePlanesNotSupported { .. }
+            ),
             "{refusal:?}"
         );
     }

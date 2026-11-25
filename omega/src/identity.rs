@@ -712,6 +712,7 @@ mod gated {
                 cached_lower_inclusive,
                 new_upper_inclusive,
                 attention_sink,
+                planes,
                 ..
             } => {
                 // `operand_count == 9` names a runtime ninth operand, but two
@@ -779,6 +780,7 @@ mod gated {
                     format!("_r{rotary_dim}")
                 };
                 let sink_token = if *attention_sink { "_sk" } else { "" };
+                let plane_token = if *planes == proxima_tensor::bind::ScorePlanes::Whole { "_wp" } else { "" };
                 // the row-tiled source reads its row count from `u.total_elements`
                 // and the cached bound from `in8`, so the key names the tile class
                 // (rows per threadgroup, simdgroups, block) instead of `q`/`c`/`n`/`x`:
@@ -796,7 +798,7 @@ mod gated {
                 let row_tile_class: Option<(u64, u64, u64)> = None;
                 if let Some((rows_per_threadgroup, simdgroups, block)) = row_tile_class {
                     format!(
-                        "{prefix}_cached_attention_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}_s{:08x}_l{}_u{upper_token}_r{rows_per_threadgroup}_n{simdgroups}_b{block}{cached_bound_token}{sink_token}",
+                        "{prefix}_cached_attention_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}_s{:08x}_l{}_u{upper_token}_r{rows_per_threadgroup}_n{simdgroups}_b{block}{cached_bound_token}{sink_token}{plane_token}",
                         scale.to_bits(),
                         signed_name_part(*cached_lower_inclusive),
                     )

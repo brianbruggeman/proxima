@@ -2710,11 +2710,13 @@ fn row_tiled_entry_name(
         scale,
         cached_lower_inclusive,
         attention_sink,
+        planes,
         ..
     } = kind
     else {
         return None;
     };
+    let plane_token = if *planes == ScorePlanes::Whole { "_wp" } else { "" };
     let alignment = if flash {
         format!("_a{}", flash_row_alignment(kind))
     } else {
@@ -2729,7 +2731,7 @@ fn row_tiled_entry_name(
         return None;
     };
     Some(format!(
-        "omega_cached_attention_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_r{rows_per_threadgroup}{alignment}_n{simdgroups}_b{}_rt{}",
+        "omega_cached_attention_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_r{rows_per_threadgroup}{alignment}_n{simdgroups}_b{}_rt{}{plane_token}",
         scale.to_bits(),
         signed_name_part(*cached_lower_inclusive),
         row_tiled_block(*head_dim),
@@ -2789,6 +2791,7 @@ pub(crate) fn cached_attention_form_with_schedule(
         head_dim,
         rotary_dim,
         attention_sink,
+        planes,
         ..
     } = kind
     else {
@@ -2799,6 +2802,15 @@ pub(crate) fn cached_attention_form_with_schedule(
     let schedule = schedule.for_op(kind);
     #[cfg(not(feature = "metal-attn-split-rows"))]
     let _ = schedule;
+    // a whole-plane op is one range of eight operands with no ninth; above the per-row threshold it is the row-tiled form over an empty cached range
+    #[cfg(feature = "metal-attn-split-rows")]
+    if *planes == ScorePlanes::Whole {
+        if let Some(tiled) = row_tiled_form(kind, policy, schedule) {
+            return Some(tiled);
+        }
+    }
+    #[cfg(not(feature = "metal-attn-split-rows"))]
+    let _ = planes;
     let base_operand_len = if rotary_dim < head_dim { 11 } else { 8 };
     // the sink, when bound, is the one operand after the ninth and the pass triple
     if operands.len().saturating_sub(usize::from(*attention_sink)) != base_operand_len + 1 {
@@ -3154,11 +3166,28 @@ fn row_tiled_form(
         query_groups,
         head_dim,
         rotary_dim,
+        planes,
+        attention_sink,
+        operands,
         ..
     } = kind
     else {
         return None;
     };
+    let whole = *planes == ScorePlanes::Whole;
+    // a whole bind has no ninth operand, no cache and no sink; only the legacy schedule reads a whole plane, so flash and the variants keep the per-row form
+    #[cfg(feature = "metal-attn-variants")]
+    let whole_schedule_refused = !schedule.is_legacy() || schedule.is_flash();
+    #[cfg(not(feature = "metal-attn-variants"))]
+    let whole_schedule_refused = schedule.is_flash();
+    if whole
+        && (*cached_key_rows != 0
+            || *attention_sink
+            || operands.len() != 8
+            || whole_schedule_refused)
+    {
+        return None;
+    }
     let admitted = admit(policy, NumericRewrite::ContextSplitMerge).is_ok()
         && admit(policy, NumericRewrite::TreeReduce).is_ok();
     let simdgroups = schedule.resolved_simdgroup_count(*head_dim);
@@ -3209,7 +3238,7 @@ fn row_tiled_form(
     });
     let tiles = query_rows.div_ceil(rows_per_threadgroup);
     Some(CachedAttentionForm::TwoRangeRowTiled {
-        splits: if flash {
+        splits: if flash || whole {
             1
         } else {
             row_tiled_splits(capacity, *kv_heads, tiles, simdgroups)
