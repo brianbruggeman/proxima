@@ -854,12 +854,16 @@ impl Model {
         }
     }
 
-    /// Replaces the serving settings every stage lowers into its runtime. With
-    /// `weight_store` set this is also where the store is consulted, because
-    /// the key needs the `weight_precision` rules and `load` has none: a hit
-    /// swaps the mapped checkpoint for the stored one and emits
-    /// `weight_store_hit`; a miss changes nothing and arms the publish after
-    /// the first transcription.
+    /// Replaces the serving settings every stage lowers into its runtime.
+    ///
+    /// The backend runtime is built first and held, so its gpu context is created while the store is read. A refused
+    /// setting holds no runtime and the first call surfaces the same error. The held runtime has not declared the
+    /// mapping yet: that is per thread, so the first call does it, after a store hit may have swapped the mapping.
+    ///
+    /// Unless `weight_store` is empty (off), this is also where the store is consulted, because the key needs the
+    /// `weight_precision` rules and `load` has none: a hit swaps the mapped checkpoint for the stored one, touches the
+    /// entry as recently used and emits `weight_store_hit`; a miss changes nothing and arms the publish after the first
+    /// transcription. A source with no file handle (a DAX mapping) keeps the store off.
     #[must_use]
     pub fn with_settings(mut self, settings: ServingSettings) -> Self {
         self.settings = settings;
@@ -1109,7 +1113,10 @@ impl Model {
         })
     }
 
-    /// Plan-cache `(hits, misses)` of the held runtime; `None` when no runtime is held (a refused setting, or a call in flight). A runtime built at load holds `(0, 0)` until the first call.
+    /// Plan-cache `(hits, misses)` of the held runtime.
+    ///
+    /// `None` when no runtime is held: a refused setting, or a call in flight. A runtime built at load holds `(0, 0)`
+    /// until the first call.
     pub fn plan_counts(&self) -> Option<(usize, usize)> {
         self.session
             .lock()

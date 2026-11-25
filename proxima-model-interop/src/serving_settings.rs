@@ -1399,7 +1399,7 @@ target = "q8_0"
     }
 
     #[test]
-    fn weight_store_directory_agrees_across_toml_env_and_builder_and_defaults_to_off() {
+    fn weight_store_directory_agrees_across_toml_env_and_builder_and_is_unset_by_default() {
         const STORE: &str = "/var/cache/proxima/weights";
 
         let from_toml: ServingSettings =
