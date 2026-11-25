@@ -120,7 +120,7 @@ mod imp {
                     cached_lower_inclusive: self.lower,
                     new_upper_inclusive: 0,
                     arithmetic: CachedAttentionArithmetic::OnlineF32,
-                    attention_sink: false,
+                    attention_sink: false, planes: proxima_tensor::bind::ScorePlanes::Paired,
                 },
             }
         }

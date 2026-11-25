@@ -212,6 +212,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
         cached_lower_inclusive,
         new_upper_inclusive,
         attention_sink,
+        planes,
         ..
     } = &resolved.kind
     else {
@@ -221,6 +222,11 @@ pub(super) fn render_cached_attention_with_mma_selection(
             found: resolved.kind.name(),
         });
     };
+    if *planes == proxima_tensor::bind::ScorePlanes::Whole {
+        return Err(EmitError::CachedAttentionWholePlanesNotSupported {
+            node: resolved.node,
+        });
+    }
     // `rotary_dim < head_dim` (`BoundOpKind::CachedAttention`'s own doc) is
     // the recurrent-interval family's partial-rotary shape: the trailing `pass_query`/
     // `pass_cached_key`/`pass_new_key` operands carry one un-rotated plane

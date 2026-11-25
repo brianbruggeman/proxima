@@ -138,6 +138,7 @@ fn bench_cached_attention(c: &mut Criterion) {
             CachedAttentionRotary {
                 rotary_dim: HEAD_DIM as u64,
                 pass: None,
+                planes: proxima_tensor::bind::ScorePlanes::Paired,
             },
             CachedAttentionScore {
                 scale: SCALE,
@@ -195,6 +196,7 @@ fn bench_cached_attention(c: &mut Criterion) {
                         CachedAttentionRotary {
                             rotary_dim: HEAD_DIM as u64,
                             pass: None,
+                            planes: proxima_tensor::bind::ScorePlanes::Paired,
                         },
                         CachedAttentionScore {
                             scale: SCALE,

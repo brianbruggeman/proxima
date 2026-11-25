@@ -501,6 +501,7 @@ fn run(
     let new_rows = extents.new_key_rows as usize;
     if head_dim == 0
         || pair_dim == 0
+        || rotary.planes != crate::bind::ScorePlanes::Paired
         || kv_heads == 0
         || groups == 0
         || rotary.rotary_dim > extents.head_dim
@@ -839,7 +840,7 @@ mod threading_tests {
             query_groups: groups as u64,
             head_dim: head_dim as u64,
         };
-        let rotary = CachedAttentionRotary { rotary_dim: head_dim as u64, pass: None };
+        let rotary = CachedAttentionRotary { rotary_dim: head_dim as u64, pass: None, planes: crate::bind::ScorePlanes::Paired };
         let score = CachedAttentionScore {
             scale: 0.125,
             sinks: None,
@@ -1040,7 +1041,7 @@ mod pairing_order_tests {
             query_groups: 1,
             head_dim: head_dim as u64,
         };
-        let rotary = CachedAttentionRotary { rotary_dim: head_dim as u64, pass: None };
+        let rotary = CachedAttentionRotary { rotary_dim: head_dim as u64, pass: None, planes: crate::bind::ScorePlanes::Paired };
         let score = CachedAttentionScore {
             scale: 0.125,
             sinks: None,
@@ -1162,7 +1163,7 @@ mod amplification_tests {
                 query_groups: 1,
                 head_dim: HEAD_DIM as u64,
             };
-            let rotary = CachedAttentionRotary { rotary_dim: HEAD_DIM as u64, pass: None };
+            let rotary = CachedAttentionRotary { rotary_dim: HEAD_DIM as u64, pass: None, planes: crate::bind::ScorePlanes::Paired };
             let score = CachedAttentionScore {
                 scale: 0.125,
                 sinks: None,

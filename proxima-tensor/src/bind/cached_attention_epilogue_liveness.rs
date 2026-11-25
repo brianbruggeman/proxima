@@ -100,6 +100,15 @@ pub(super) fn bind_cached_attention_fusion_with_packed_leaves(
             numeric_policy,
             discovery,
         ));
+        initial_candidates.extend(cached_attention_non_causal_candidates(
+            program,
+            shapes,
+            discovery_resolved,
+            outputs,
+            numeric_policy,
+            executes,
+            discovery,
+        ));
         if initial_candidates.is_empty() {
             return match built {
                 Some(built) => Ok(built),
@@ -206,6 +215,15 @@ pub(super) fn bind_cached_attention_fusion_with_packed_leaves(
             &rebuilt,
             outputs,
             numeric_policy,
+            false,
+        ));
+        candidates.extend(cached_attention_non_causal_candidates(
+            program,
+            shapes,
+            &rebuilt,
+            outputs,
+            numeric_policy,
+            executes,
             false,
         ));
         if candidates.is_empty() {

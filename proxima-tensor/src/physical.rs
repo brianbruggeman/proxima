@@ -5,6 +5,8 @@
 //! describe the operands and scalar domain needed when one bound step absorbs
 //! the attention subgraph.
 
+use crate::bind::ScorePlanes;
+
 mod llama_flash;
 pub use llama_flash::stream_cached_attention_llama_flash;
 
@@ -304,6 +306,11 @@ pub struct CachedAttentionPassPlane<'buffer> {
 pub struct CachedAttentionRotary<'buffer> {
     pub rotary_dim: u64,
     pub pass: Option<CachedAttentionPassPlane<'buffer>>,
+    /// [`ScorePlanes::Paired`] reads `queries`/`keys` as RoPE even/odd planes of `rotary_dim / 2`
+    /// columns. [`ScorePlanes::Whole`] reads `queries[0]`, `keys[1][0]` and `values[1]` as whole
+    /// `head_dim` vectors (the odd planes alias them), needs `rotary_dim == head_dim`, no pass
+    /// plane and no cached range.
+    pub planes: ScorePlanes,
 }
 
 /// The scalar attention domain [`stream_cached_attention_split_gqa`] scores
@@ -354,22 +361,35 @@ pub fn stream_cached_attention_split_gqa(
     rotary: CachedAttentionRotary<'_>,
     score: CachedAttentionScore<'_>,
 ) -> bool {
-    let CachedAttentionRotary { rotary_dim, pass } = rotary;
+    let CachedAttentionRotary {
+        rotary_dim,
+        pass,
+        planes,
+    } = rotary;
     if !score.sinks_fit(&extents) {
         return false;
     }
     let sinks = score.sinks;
     let CachedAttentionScore { scale, bands, .. } = score;
+    let planes_fit = match planes {
+        ScorePlanes::Paired => rotary_dim.is_multiple_of(2),
+        ScorePlanes::Whole => {
+            rotary_dim == extents.head_dim && pass.is_none() && extents.cached_key_rows == 0
+        }
+    };
     if extents.head_dim == 0
         || rotary_dim == 0
         || rotary_dim > extents.head_dim
-        || !rotary_dim.is_multiple_of(2)
+        || !planes_fit
         || extents.kv_heads == 0
         || extents.query_groups == 0
     {
         return false;
     }
-    let pair_dim = rotary_dim / 2;
+    let pair_dim = match planes {
+        ScorePlanes::Paired => rotary_dim / 2,
+        ScorePlanes::Whole => extents.head_dim,
+    };
     let pass_dim = extents.head_dim - rotary_dim;
     let query_count = extents
         .query_rows
@@ -502,11 +522,21 @@ pub fn stream_cached_attention_split_gqa(
                         }
                         let key_start = (key_row * kv_heads + kv_head) * pair_dim;
                         let mut score = 0.0;
-                        for dimension in 0..pair_dim {
-                            score += queries[0][query_start + dimension]
-                                * keys_even[key_start + dimension]
-                                + queries[1][query_start + dimension]
-                                    * keys_odd[key_start + dimension];
+                        match planes {
+                            ScorePlanes::Paired => {
+                                for dimension in 0..pair_dim {
+                                    score += queries[0][query_start + dimension]
+                                        * keys_even[key_start + dimension]
+                                        + queries[1][query_start + dimension]
+                                            * keys_odd[key_start + dimension];
+                                }
+                            }
+                            ScorePlanes::Whole => {
+                                for dimension in 0..pair_dim {
+                                    score += queries[0][query_start + dimension]
+                                        * keys_even[key_start + dimension];
+                                }
+                            }
                         }
                         if let (Some(pass_query), Some(pass_key)) = (&pass, pass_key) {
                             let pass_key_start = (key_row * kv_heads + kv_head) * pass_dim;
@@ -723,6 +753,7 @@ mod tests {
             CachedAttentionRotary {
                 rotary_dim: 2,
                 pass: None,
+                planes: ScorePlanes::Paired,
             },
             CachedAttentionScore {
                 scale: 1.0,
@@ -788,6 +819,7 @@ mod tests {
                     cached_key: &[1.0, 0.0, 1.0, 0.0],
                     new_key: &[0.0, 1.0, 0.0, 1.0],
                 }),
+                planes: ScorePlanes::Paired,
             },
             CachedAttentionScore {
                 scale: 1.0,
@@ -871,6 +903,7 @@ mod tests {
                     cached_key: &[1.0, 0.0, 0.0, 2.0],
                     new_key: &[0.0, 1.0, 1.0, 0.0],
                 }),
+                planes: ScorePlanes::Paired,
             },
             CachedAttentionScore {
                 scale: 1.0,
@@ -959,6 +992,7 @@ mod tests {
                     cached_key: &[1.0, 0.0],
                     new_key: &[0.0, 1.0],
                 }),
+                planes: ScorePlanes::Paired,
             },
             CachedAttentionScore {
                 scale: 1.0,
@@ -1060,6 +1094,7 @@ mod tests {
             CachedAttentionRotary {
                 rotary_dim: 2,
                 pass: None,
+                planes: ScorePlanes::Paired,
             },
             CachedAttentionScore {
                 scale: 1.0,
@@ -1076,6 +1111,7 @@ mod tests {
             CachedAttentionRotary {
                 rotary_dim: 2,
                 pass: None,
+                planes: ScorePlanes::Paired,
             },
             CachedAttentionScore {
                 scale: 1.0,

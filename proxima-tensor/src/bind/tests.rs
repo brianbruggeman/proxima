@@ -276,7 +276,7 @@ fn name_reports_the_variant_backends_render_error_messages_with() {
         cached_lower_inclusive: 0,
         new_upper_inclusive: 0,
         arithmetic: CachedAttentionArithmetic::OnlineF32,
-        attention_sink: false,
+        attention_sink: false, planes: crate::bind::ScorePlanes::Paired,
     };
     let elementwise = BoundOpKind::Elementwise {
         body: ComposedBody::leaf(ScalarOp::Identity),
@@ -8184,7 +8184,9 @@ mod bound_graph_golden {
     /// no addresses and no hash-map order; FNV-1a is a fixed function, unlike
     /// `DefaultHasher`, whose algorithm std does not pin.
     fn fingerprint(bound: &[BoundOp], outputs: &[NodeId]) -> u64 {
-        let text = alloc::format!("{bound:?}|{outputs:?}");
+        // the `Paired` plane field is the default every recorded graph has, so its Debug text is
+        // dropped: a golden stays byte-identical to its recording, and a `Whole` bind still shows
+        let text = alloc::format!("{bound:?}|{outputs:?}").replace(", planes: Paired", "");
         text.bytes().fold(FNV_OFFSET, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
         })

@@ -4990,7 +4990,7 @@ mod tests {
             cached_lower_inclusive: i64::MIN,
             new_upper_inclusive: 0,
                 arithmetic: proxima_tensor::CachedAttentionArithmetic::OnlineF32,
-            attention_sink: false,
+            attention_sink: false, planes: proxima_tensor::bind::ScorePlanes::Paired,
         }
     }
 
@@ -7854,7 +7854,7 @@ mod rocm_tests {
             cached_lower_inclusive: 0,
             new_upper_inclusive: 0,
             arithmetic: Default::default(),
-            attention_sink: false,
+            attention_sink: false, planes: proxima_tensor::bind::ScorePlanes::Paired,
         };
 
         let error = emit_hip(&attention, &no_packed()).expect_err("attention is refused");
@@ -7882,7 +7882,7 @@ mod rocm_tests {
             cached_lower_inclusive: i64::MIN,
             new_upper_inclusive: 0,
             arithmetic: Default::default(),
-            attention_sink: true,
+            attention_sink: true, planes: proxima_tensor::bind::ScorePlanes::Paired,
         };
         let kind = attention.kind.clone();
         assert!(cuda_cached_attention_class(&kind).is_none());

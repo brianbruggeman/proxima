@@ -118,6 +118,22 @@ impl ComposedBody {
     }
 }
 
+/// How a [`BoundOpKind::CachedAttention`]'s score reads its query and key operands. Part of the
+/// bound op, so a backend admits it by data ([`crate::Form::WholeAttention`]), never by a branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ScorePlanes {
+    /// RoPE's even and odd halves: slots 0/1 are the query planes, 2/3 and 4/5 the key planes,
+    /// and `score = q_even . k_even + q_odd . k_odd` (every decoder caller).
+    #[default]
+    Paired,
+    /// One whole `head_dim` vector per head, no mask and no rotation (an encoder's
+    /// self-attention, [`crate::spec::non_causal_attention_heads`]): the query is in slot 0, the
+    /// key in slots 2 and 4, the value in slots 6 and 7, and the odd slots alias the even
+    /// operands. `rotary_dim == head_dim`, `cached_key_rows == 0`, and there is no pass triple,
+    /// so the operand count is the same eight.
+    Whole,
+}
+
 /// The arithmetic a [`BoundOpKind::CachedAttention`] computes. Part of the bound op, so the plan
 /// that executes it is keyed on it and it is never a runtime switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -283,6 +299,9 @@ pub enum BoundOpKind {
         new_upper_inclusive: i64,
         arithmetic: CachedAttentionArithmetic,
         attention_sink: bool,
+        /// Whether the score reads RoPE planes ([`ScorePlanes::Paired`], every existing caller)
+        /// or one whole head vector ([`ScorePlanes::Whole`]); see [`ScorePlanes`].
+        planes: ScorePlanes,
     },
     /// One backend-neutral gated-delta-net recurrence step
     /// ([`crate::spec::append_delta_net_step`]'s own ~12-op chain,
@@ -1048,6 +1067,7 @@ impl BoundOp {
                 new_upper_inclusive,
                 arithmetic,
                 attention_sink,
+                planes,
             } => BoundOpKind::CachedAttention {
                 operands: rebase_operands(operands, split_axis, chunk_start),
                 query_rows: *query_rows,
@@ -1062,6 +1082,7 @@ impl BoundOp {
                 new_upper_inclusive: *new_upper_inclusive,
                 arithmetic: *arithmetic,
                 attention_sink: *attention_sink,
+                planes: *planes,
             },
             BoundOpKind::Elementwise { body, operands } => BoundOpKind::Elementwise {
                 body: body.clone(),
@@ -1333,6 +1354,7 @@ mod output_len_tests {
                 operands: Vec::new(), query_rows: 2, cached_key_rows: 5, new_key_rows: 2, kv_heads: 3, query_groups: 4,
                 head_dim: 8, rotary_dim: 8, scale: 1.0, cached_lower_inclusive: i64::MIN, new_upper_inclusive: 0,
                 arithmetic: crate::bind::CachedAttentionArithmetic::OnlineF32, attention_sink: false,
+                planes: crate::bind::ScorePlanes::Paired,
             },
         };
         assert_eq!(attention.output_len(), 2 * 3 * 4 * 8);

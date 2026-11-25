@@ -2299,6 +2299,7 @@ pub(super) fn cached_attention_candidates(
                 new_upper_inclusive: end_offset,
                 arithmetic: cached_attention_arithmetic(numeric_policy, program, query_even),
                 attention_sink: attention_sink.is_some(),
+                planes: ScorePlanes::Paired,
             },
         };
         #[cfg(feature = "instrument")]
@@ -2347,51 +2348,10 @@ pub(super) fn cached_attention_single_range_candidates(
     let first_readers = core::cell::OnceCell::new();
     for output_position in (0..program.len()).rev() {
         let output = NodeId(output_position as u32);
-        let Some(attended_product) =
-            reduced_source(program, output, ScalarOp::Add, ReduceInit::Zero)
-        else {
+        let Some(tail) = softmax_tail(program, output) else {
             continue;
         };
-        let Some(attended_parts) =
-            binary_elementwise(program, attended_product, ScalarOp::Multiply)
-        else {
-            continue;
-        };
-        let Some(probabilities_parts) =
-            binary_elementwise(program, attended_parts[0], ScalarOp::Multiply)
-        else {
-            continue;
-        };
-        let Some(weight_sum) =
-            unary_elementwise(program, probabilities_parts[1], ScalarOp::Reciprocal)
-        else {
-            continue;
-        };
-        let Some(weights) = reduced_source(program, weight_sum, ScalarOp::Add, ReduceInit::Zero)
-        else {
-            continue;
-        };
-        if weights != probabilities_parts[0] {
-            continue;
-        }
-        let Some(shifted) = unary_elementwise(program, weights, ScalarOp::Exponential) else {
-            continue;
-        };
-        let Some(shifted_parts) = binary_elementwise(program, shifted, ScalarOp::Subtract) else {
-            continue;
-        };
-        let Some(scores_masked_from_max) = reduced_source(
-            program,
-            shifted_parts[1],
-            ScalarOp::Maximum,
-            ReduceInit::NegativeInfinity,
-        ) else {
-            continue;
-        };
-        if scores_masked_from_max != shifted_parts[0] {
-            continue;
-        }
-        let scores_masked = shifted_parts[0];
+        let scores_masked = tail.scores;
         let Some(mask_parts) = elementwise_operands(program, scores_masked, ScalarOp::Select)
         else {
             continue;
@@ -2433,7 +2393,7 @@ pub(super) fn cached_attention_single_range_candidates(
         }
         let query_even = query_even_parts[0];
         let query_odd = query_odd_parts[0];
-        let value = attended_parts[1];
+        let value = tail.value;
         let source_nodes = [
             query_even, query_odd, key_even, key_odd, key_even, key_odd, value, value,
         ];
@@ -2634,6 +2594,221 @@ pub(super) fn cached_attention_single_range_candidates(
                 new_upper_inclusive: 0,
                 arithmetic: cached_attention_arithmetic(numeric_policy, program, query_even),
                 attention_sink: false,
+                planes: ScorePlanes::Paired,
+            },
+        };
+        candidates.push((fused, absorbed));
+    }
+    candidates
+}
+
+/// What [`softmax_tail`] finds under an attended reduce: the value node the probabilities weight,
+/// and the score node the softmax normalizes.
+#[cfg(feature = "cached-attention-streaming")]
+struct SoftmaxTail {
+    value: NodeId,
+    scores: NodeId,
+}
+
+/// The softmax-and-weight walk both single-range matchers share, from the attended reduce down:
+/// `attended = sum(probabilities * value)`, `probabilities = weights * reciprocal(sum(weights))`,
+/// `weights = exp(scores - max(scores))`. Everything above `scores` (mask, scale, the score
+/// product) is the caller's own shape, so this stops there.
+#[cfg(feature = "cached-attention-streaming")]
+fn softmax_tail(program: &[Op], attended: NodeId) -> Option<SoftmaxTail> {
+    let attended_product = reduced_source(program, attended, ScalarOp::Add, ReduceInit::Zero)?;
+    let attended_parts = binary_elementwise(program, attended_product, ScalarOp::Multiply)?;
+    let probabilities_parts = binary_elementwise(program, attended_parts[0], ScalarOp::Multiply)?;
+    let weight_sum = unary_elementwise(program, probabilities_parts[1], ScalarOp::Reciprocal)?;
+    let weights = reduced_source(program, weight_sum, ScalarOp::Add, ReduceInit::Zero)?;
+    if weights != probabilities_parts[0] {
+        return None;
+    }
+    let shifted = unary_elementwise(program, weights, ScalarOp::Exponential)?;
+    let shifted_parts = binary_elementwise(program, shifted, ScalarOp::Subtract)?;
+    let scores_from_max = reduced_source(
+        program,
+        shifted_parts[1],
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+    )?;
+    (scores_from_max == shifted_parts[0]).then_some(SoftmaxTail {
+        value: attended_parts[1],
+        scores: shifted_parts[0],
+    })
+}
+
+/// Whether `layout` reads a `[rows, heads, width]` plane either as that natural row-major tensor
+/// (`natural`) or through the `[heads, query rows, key rows, width]` iteration space the fused
+/// score reduce declares (`iteration`), starting at element zero.
+#[cfg(feature = "cached-attention-streaming")]
+fn reads_whole_plane(layout: &Layout, natural: [i64; 3], iteration: [i64; 4]) -> bool {
+    layout.base == 0
+        && (layout.strides.as_slice() == natural || layout.strides.as_slice() == iteration)
+}
+
+/// [`cached_attention_single_range_candidates`]'s counterpart for
+/// [`crate::spec::non_causal_attention_heads`] with one `(q, k)` term: an encoder's
+/// self-attention, no mask and no rotation. The anchor is the trailing `Identity` permute that
+/// restores `[s, heads, d]`; under it sits the shared [`softmax_tail`] and a bare
+/// `Reduce(Add)` of `(q * inv) * k`, whose `inv` constant becomes the op's `scale`.
+///
+/// Binds as one [`BoundOpKind::CachedAttention`] with [`ScorePlanes::Whole`]: the query, key and
+/// value each appear twice (slots 0/1, 2..6, 6/7), `cached_key_rows` is `0` and every one of the
+/// `t` keys is in the new range. `new_upper_inclusive` is `t`, never `i64::MAX`, because a
+/// row-tiled kernel computes `last_row + new_upper + 1`.
+///
+/// Three data gates, no model or backend branch: the policy must grant `flash_narrowing`, the
+/// backend's [`Executes`] must hold [`Form::WholeAttention`], and every non-constant node of the
+/// chain must be absorbable. A chain whose scores or probabilities have a reader outside it
+/// (what a backward pass keeps) is declined whole, so a training-shaped program stays unfused.
+#[cfg(feature = "cached-attention-streaming")]
+pub(super) fn cached_attention_non_causal_candidates(
+    program: &[Op],
+    shapes: &Shapes,
+    resolved: &[BoundOp],
+    effective_outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
+    executes: &Executes,
+    discovery: bool,
+) -> Vec<(BoundOp, BTreeSet<NodeId>)> {
+    let mut candidates = Vec::new();
+    if !numeric_policy.flash_narrowing || !executes.forms.contains(Form::WholeAttention) {
+        return candidates;
+    }
+    let consumers = core::cell::OnceCell::new();
+    let first_readers = core::cell::OnceCell::new();
+    for output_position in (0..program.len()).rev() {
+        let output = NodeId(output_position as u32);
+        let Some(attended) = unary_elementwise(program, output, ScalarOp::Identity) else {
+            continue;
+        };
+        let Some(tail) = softmax_tail(program, attended) else {
+            continue;
+        };
+        let Some(product) = reduced_source(program, tail.scores, ScalarOp::Add, ReduceInit::Zero)
+        else {
+            continue;
+        };
+        let Some([scaled_query, key]) = binary_elementwise(program, product, ScalarOp::Multiply)
+        else {
+            continue;
+        };
+        let Some([query, inverse]) = binary_elementwise(program, scaled_query, ScalarOp::Multiply)
+        else {
+            continue;
+        };
+        let Some(scale_value) = constant_value(program, inverse) else {
+            continue;
+        };
+        let value = tail.value;
+        let (query_shape, key_shape, value_shape) =
+            (shapes.of(query), shapes.of(key), shapes.of(value));
+        let [rows, heads, head_dim] = *query_shape else {
+            continue;
+        };
+        let [key_rows, key_heads, key_dim] = *key_shape else {
+            continue;
+        };
+        let [value_rows, value_heads, value_dim] = *value_shape else {
+            continue;
+        };
+        if key_heads != heads
+            || value_heads != heads
+            || key_dim != head_dim
+            || value_dim != head_dim
+            || value_rows != key_rows
+            || head_dim == 0
+            || shapes.of(attended) != [heads, rows, head_dim]
+            || shapes.of(output) != [rows, heads, head_dim]
+        {
+            continue;
+        }
+        let Ok(new_upper) = i64::try_from(key_rows) else {
+            continue;
+        };
+        let source_nodes = [query, query, key, key, key, key, value, value];
+        let width = (heads * head_dim) as i64;
+        let unit = head_dim as i64;
+        let natural = [width, unit, 1];
+        let query_iteration = [unit, width, 0, 1];
+        let key_iteration = [unit, 0, width, 1];
+        let mut operands = Vec::with_capacity(source_nodes.len());
+        for (slot, source) in source_nodes.into_iter().enumerate() {
+            let layout = if discovery {
+                Layout {
+                    base: 0,
+                    strides: SmallVec::new(),
+                }
+            } else {
+                let entry = match slot {
+                    0 | 1 => first_readers
+                        .get_or_init(|| first_reader_operands(resolved))
+                        .get(&source)
+                        .copied(),
+                    2..=5 => term_operand(resolved, program, tail.scores, source),
+                    _ => term_operand(resolved, program, attended, source),
+                };
+                let iteration = if slot < 2 { query_iteration } else { key_iteration };
+                match entry {
+                    Some((_, layout, None)) if reads_whole_plane(layout, natural, iteration) => {
+                        layout.clone()
+                    }
+                    _ => break,
+                }
+            };
+            operands.push((source, layout, None));
+        }
+        if operands.len() != source_nodes.len() {
+            continue;
+        }
+        let dependencies = attention_dependencies(program, output, &source_nodes);
+        let dependencies = dependencies
+            .difference(&source_nodes.into_iter().collect())
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if dependencies
+            .iter()
+            .any(|node| effective_outputs.contains(node))
+        {
+            continue;
+        }
+        let absorbed = removable_attention_dependencies(
+            program,
+            consumers.get_or_init(|| program_consumers(program)),
+            &dependencies,
+            output,
+        );
+        // a shared constant (the scale every layer reads) may stay; any other reader outside the
+        // chain means the intermediates are needed elsewhere, so fusing would only duplicate them
+        let kept_by_others = dependencies.iter().any(|node| {
+            !absorbed.contains(node) && !matches!(program.get(node.0 as usize), Some(Op::Constant { .. }))
+        });
+        if absorbed.is_empty() || kept_by_others {
+            continue;
+        }
+        if !discovery && !resolved.iter().any(|bound| bound.node == output) {
+            continue;
+        }
+        let fused = BoundOp {
+            node: output,
+            dtype: program[output_position].dtype(),
+            extents: shapes.of(output).to_vec(),
+            kind: BoundOpKind::CachedAttention {
+                operands,
+                query_rows: rows,
+                cached_key_rows: 0,
+                new_key_rows: key_rows,
+                kv_heads: heads,
+                query_groups: 1,
+                head_dim,
+                rotary_dim: head_dim,
+                scale: scale_value,
+                cached_lower_inclusive: i64::MIN,
+                new_upper_inclusive: new_upper,
+                arithmetic: CachedAttentionArithmetic::default(),
+                attention_sink: false,
+                planes: ScorePlanes::Whole,
             },
         };
         candidates.push((fused, absorbed));
@@ -2967,6 +3142,7 @@ mod kv_padding_tests {
                 new_upper_inclusive: 0,
                 arithmetic: CachedAttentionArithmetic::OnlineF32,
                 attention_sink: false,
+                planes: ScorePlanes::Paired,
             },
             node,
         )

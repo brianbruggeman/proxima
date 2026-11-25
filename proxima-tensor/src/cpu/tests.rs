@@ -2049,7 +2049,7 @@ fn cached_attention_bound_step_runs_online_softmax() {
             cached_lower_inclusive: -1,
             new_upper_inclusive: 0,
             arithmetic: crate::bind::CachedAttentionArithmetic::OnlineF32,
-            attention_sink: false,
+            attention_sink: false, planes: crate::bind::ScorePlanes::Paired,
         },
     };
     let mut output = vec![0.0; 2];
@@ -2109,7 +2109,7 @@ fn cached_attention_reads_each_key_half_through_its_own_base_of_a_one_row_key() 
             cached_lower_inclusive: -1,
             new_upper_inclusive: 0,
             arithmetic: crate::bind::CachedAttentionArithmetic::OnlineF32,
-            attention_sink: false,
+            attention_sink: false, planes: crate::bind::ScorePlanes::Paired,
         },
     };
     let mut output = vec![0.0; 2];
@@ -2167,7 +2167,7 @@ fn cached_attention_window_bounds_the_new_range_too() {
             cached_lower_inclusive,
             new_upper_inclusive: 0,
             arithmetic: crate::bind::CachedAttentionArithmetic::OnlineF32,
-            attention_sink: false,
+            attention_sink: false, planes: crate::bind::ScorePlanes::Paired,
         },
     };
 
@@ -2581,7 +2581,7 @@ fn cached_attention_bound_step_scores_the_partial_rotary_pass_plane() {
             cached_lower_inclusive: -1,
             new_upper_inclusive: 0,
             arithmetic: crate::bind::CachedAttentionArithmetic::OnlineF32,
-            attention_sink: false,
+            attention_sink: false, planes: crate::bind::ScorePlanes::Paired,
         },
     };
     let mut output = vec![0.0; 4];
@@ -15666,7 +15666,7 @@ fn end_aligned_attention_output(
             cached_lower_inclusive: lower,
             new_upper_inclusive: upper,
             arithmetic: crate::bind::CachedAttentionArithmetic::OnlineF32,
-            attention_sink: false,
+            attention_sink: false, planes: crate::bind::ScorePlanes::Paired,
         },
     };
     let mut output = vec![0.0; (query_rows * groups * head_dim) as usize];
@@ -15919,5 +15919,175 @@ mod bf16_input_rounding {
             !close(&actual, &fold(&weight, &activation, true)),
             "bit_exact must not round"
         );
+    }
+}
+
+mod whole_attention_tests {
+    use super::*;
+    use crate::bind::{Executes, Form, ScorePlanes, bind_with_fusion_for};
+    use crate::op::ScalarOp;
+    use proxima_numeric::NumericFormat;
+
+    struct Attention {
+        program: Vec<Op>,
+        query: NodeId,
+        key: NodeId,
+        value: NodeId,
+    }
+
+    /// A real `non_causal_attention_heads` program: queries `[rows, heads, head_dim]`, keys and
+    /// values `[keys, heads, head_dim]`, the scale `1 / sqrt(head_dim)` as a constant.
+    fn attention(rows: u32, keys: u32, heads: u32, head_dim: u32) -> Attention {
+        let dtype = NumericFormat::host_element()
+            .to_dtype()
+            .expect("the host element is a scalar dtype");
+        let leaf = |program: &mut Vec<Op>, name: &str, extent: [u32; 3]| {
+            let extents = extent.iter().map(|&size| Extent::Static(size)).collect();
+            input_leaf(program, dtype, extents, name)
+        };
+        let mut program = Vec::new();
+        let query = leaf(&mut program, "q", [rows, heads, head_dim]);
+        let key = leaf(&mut program, "k", [keys, heads, head_dim]);
+        let value = leaf(&mut program, "v", [keys, heads, head_dim]);
+        let inv = crate::spec::scalar_constant_like(&mut program, 0.5, query)
+            .expect("the scale builds");
+        crate::spec::non_causal_attention_heads(
+            &mut program,
+            &[(query, key)],
+            value,
+            inv,
+            "u",
+            "i",
+            "d",
+        )
+        .expect("the attention builds");
+        Attention { program, query, key, value }
+    }
+
+    fn flash_policy() -> NumericPolicy {
+        NumericPolicy::bit_exact().with_flash_narrowing(true)
+    }
+
+    fn bound(case: &Attention, outputs: &[NodeId], policy: NumericPolicy, executes: &Executes) -> Vec<BoundOp> {
+        let shapes = crate::shape::infer(&case.program, &[]).expect("the attention infers");
+        bind_with_fusion_for(&case.program, &shapes, outputs, true, policy, executes)
+            .expect("the attention binds")
+    }
+
+    fn root(case: &Attention) -> NodeId {
+        NodeId((case.program.len() - 1) as u32)
+    }
+
+    fn fused_ops(resolved: &[BoundOp]) -> Vec<&BoundOp> {
+        resolved
+            .iter()
+            .filter(|op| matches!(op.kind, BoundOpKind::CachedAttention { .. }))
+            .collect()
+    }
+
+    fn assert_binds_one_whole_attention(rows: u32, keys: u32, heads: u32, head_dim: u32) {
+        let case = attention(rows, keys, heads, head_dim);
+        let resolved = bound(&case, &[root(&case)], flash_policy(), &Executes::CPU);
+        let fused = fused_ops(&resolved);
+        assert_eq!(fused.len(), 1, "the chain binds as one cached attention: {resolved:?}");
+        let BoundOpKind::CachedAttention {
+            operands,
+            query_rows,
+            cached_key_rows,
+            new_key_rows,
+            kv_heads,
+            query_groups,
+            head_dim: bound_head_dim,
+            rotary_dim,
+            new_upper_inclusive,
+            cached_lower_inclusive,
+            attention_sink,
+            planes,
+            ..
+        } = &fused[0].kind
+        else {
+            unreachable!("filtered to cached attention");
+        };
+        assert_eq!(*planes, ScorePlanes::Whole);
+        assert_eq!(
+            (*query_rows, *cached_key_rows, *new_key_rows, *kv_heads, *query_groups, *bound_head_dim, *rotary_dim),
+            (rows as u64, 0, keys as u64, heads as u64, 1, head_dim as u64, head_dim as u64)
+        );
+        assert_eq!((*cached_lower_inclusive, *new_upper_inclusive, *attention_sink), (i64::MIN, keys as i64, false));
+        let sources: Vec<NodeId> = operands.iter().map(|operand| operand.0).collect();
+        assert_eq!(
+            sources,
+            [case.query, case.query, case.key, case.key, case.key, case.key, case.value, case.value],
+            "the odd slots alias the even operands"
+        );
+        assert!(
+            !resolved.iter().any(|op| matches!(op.kind, BoundOpKind::Reduce { .. })),
+            "the score, softmax and value reduces are absorbed: {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn non_causal_attention_three_queries_five_keys_binds_one_whole_cached_attention() {
+        assert_binds_one_whole_attention(3, 5, 3, 4);
+    }
+
+    #[test]
+    fn whisper_shaped_encoder_attention_binds_one_whole_cached_attention() {
+        assert_binds_one_whole_attention(1500, 1500, 6, 64);
+    }
+
+    #[test]
+    fn whole_attention_matches_the_unfused_chain_on_real_valued_inputs() {
+        let (rows, keys, heads, head_dim) = (3, 5, 3, 4);
+        let case = attention(rows, keys, heads, head_dim);
+        let mut lcg = Lcg(0x5eed);
+        let mut draw = |len: u32| (0..len).map(|_| lcg.next_unit()).collect::<Vec<_>>();
+        let query = draw(rows * heads * head_dim);
+        let key = draw(keys * heads * head_dim);
+        let value = draw(keys * heads * head_dim);
+        let named = [("q", query.as_slice()), ("k", key.as_slice()), ("v", value.as_slice())];
+        let unfused = evaluate_named(&case.program, &[], &named, &[])
+            .expect("the unfused chain evaluates");
+
+        let resolved = bound(&case, &[root(&case)], flash_policy(), &Executes::CPU);
+        let fused = fused_ops(&resolved);
+        assert_eq!(fused.len(), 1, "the chain binds as one cached attention");
+        let mut buffers: Vec<Option<&[_]>> = vec![None; case.program.len()];
+        buffers[case.query.0 as usize] = Some(query.as_slice());
+        buffers[case.key.0 as usize] = Some(key.as_slice());
+        buffers[case.value.0 as usize] = Some(value.as_slice());
+        let mut output = vec![0.0; unfused.root().len()];
+        run_node_into(fused[0], &buffers, None, None, None, false, &mut output)
+            .expect("the whole-plane step runs");
+
+        let worst = output
+            .iter()
+            .zip(unfused.root())
+            .map(|(fused, reference)| (fused - reference).abs())
+            .fold(0.0, |worst, gap| if gap > worst { gap } else { worst });
+        assert!(worst < 1e-5, "fused and unfused differ by {worst}");
+    }
+
+    #[test]
+    fn attention_whose_softmax_intermediate_is_a_requested_output_stays_unfused() {
+        let case = attention(3, 5, 3, 4);
+        let peak = case
+            .program
+            .iter()
+            .position(|op| matches!(op, Op::Reduce(reduce) if reduce.body == ScalarOp::Maximum))
+            .map(|position| NodeId(position as u32))
+            .expect("the softmax has a row maximum");
+        let resolved = bound(&case, &[root(&case), peak], flash_policy(), &Executes::CPU);
+        assert!(fused_ops(&resolved).is_empty(), "a training-shaped read keeps the chain: {resolved:?}");
+    }
+
+    #[test]
+    fn attention_stays_unfused_without_flash_narrowing_or_without_the_whole_form() {
+        let case = attention(3, 5, 3, 4);
+        let exact = bound(&case, &[root(&case)], NumericPolicy::bit_exact(), &Executes::CPU);
+        assert!(fused_ops(&exact).is_empty(), "no flash grant, no fusion");
+        let paired_only = Executes::CPU.without(Form::WholeAttention);
+        let refused = bound(&case, &[root(&case)], flash_policy(), &paired_only);
+        assert!(fused_ops(&refused).is_empty(), "a backend without the form never binds it");
     }
 }

@@ -38,6 +38,11 @@ pub enum Form {
     /// The same product over a gathered expert weight whose route follows the token axes,
     /// executed as one tiled kernel per expert over the tokens routed to it.
     GroupedContraction,
+    /// A [`BoundOpKind::CachedAttention`] with [`ScorePlanes::Whole`](super::ScorePlanes::Whole):
+    /// non-causal self-attention over one whole head vector, no mask and no rotation. A backend
+    /// grants it only when its renderer executes that score; [`Self::CachedAttention`] alone
+    /// says only that the RoPE-paired decoder form renders.
+    WholeAttention,
 }
 
 impl Form {
@@ -258,7 +263,8 @@ impl Executes {
             .with(Form::AttentionSink)
             .with(Form::GatedDeltaNet)
             .with(Form::MoeTopK)
-            .with(Form::TopFractionSelect),
+            .with(Form::TopFractionSelect)
+            .with(Form::WholeAttention),
         limits: DeviceLimits::UNIFIED,
         activation: None,
         contraction: None,
@@ -366,6 +372,10 @@ fn form_of(kind: &BoundOpKind) -> Form {
             attention_sink: true,
             ..
         } => Form::AttentionSink,
+        BoundOpKind::CachedAttention {
+            planes: super::ScorePlanes::Whole,
+            ..
+        } => Form::WholeAttention,
         BoundOpKind::CachedAttention { .. } => Form::CachedAttention,
         BoundOpKind::CachedSoftmaxWeights { .. } => Form::CachedSoftmaxWeights,
         BoundOpKind::GatedDeltaNet { .. } => Form::GatedDeltaNet,
@@ -475,7 +485,39 @@ mod tests {
             new_upper_inclusive: 0,
             arithmetic: crate::bind::CachedAttentionArithmetic::OnlineF32,
             attention_sink: false,
+            planes: crate::bind::ScorePlanes::Paired,
         })
+    }
+
+    fn whole_attention() -> BoundOp {
+        scalar_op(BoundOpKind::CachedAttention {
+            operands: Vec::new(),
+            query_rows: 3,
+            cached_key_rows: 0,
+            new_key_rows: 5,
+            kv_heads: 6,
+            query_groups: 1,
+            head_dim: 64,
+            rotary_dim: 64,
+            scale: 0.125,
+            cached_lower_inclusive: i64::MIN,
+            new_upper_inclusive: 5,
+            arithmetic: crate::bind::CachedAttentionArithmetic::default(),
+            attention_sink: false,
+            planes: crate::bind::ScorePlanes::Whole,
+        })
+    }
+
+    #[test]
+    fn whole_attention_is_its_own_form_that_paired_only_backends_refuse() {
+        assert_eq!(form_of(&whole_attention().kind), Form::WholeAttention);
+        assert_eq!(Executes::CPU.admit(&whole_attention()), Ok(()));
+        let paired_only = Executes::CPU.without(Form::WholeAttention);
+        assert_eq!(
+            paired_only.admit(&whole_attention()),
+            Err(Refusal::Form(Form::WholeAttention))
+        );
+        assert_eq!(paired_only.admit(&cached_attention()), Ok(()));
     }
 
     fn constructible_ops() -> Vec<(Form, BoundOp)> {

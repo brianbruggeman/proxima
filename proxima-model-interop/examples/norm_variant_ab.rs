@@ -168,7 +168,7 @@ fn granite_dispatch_manifest(
             cached_lower_inclusive: -511,
             new_upper_inclusive: 0,
                 arithmetic: proxima_tensor::CachedAttentionArithmetic::OnlineF32,
-                attention_sink: false,
+                attention_sink: false, planes: proxima_tensor::bind::ScorePlanes::Paired,
         },
     };
     let mut packed_operands = PackedOperands::new();

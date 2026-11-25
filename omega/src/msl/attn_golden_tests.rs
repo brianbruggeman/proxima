@@ -57,7 +57,7 @@ pub fn attention_op(
             cached_lower_inclusive,
             new_upper_inclusive: 0,
                 arithmetic: proxima_tensor::CachedAttentionArithmetic::OnlineF32,
-                attention_sink: false,
+                attention_sink: false, planes: proxima_tensor::bind::ScorePlanes::Paired,
         },
     }
 }

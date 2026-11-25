@@ -564,6 +564,7 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
         new_upper_inclusive,
         arithmetic,
         attention_sink,
+        planes,
     } = &resolved.kind
     else {
         return Err(TensorError::NotLowerable {
@@ -571,6 +572,66 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
             reason: "cached attention runner received another bound operation",
         });
     };
+    // `ScorePlanes::Whole`: the query, key and value are each ONE whole-head buffer (slots 0, 2
+    // and 6; the odd slots alias them), streamed with no rotation and no cached range, so the
+    // paired-plane staging below never applies.
+    if *planes == crate::bind::ScorePlanes::Whole {
+        let refused = |reason: &'static str| TensorError::NotLowerable {
+            node: resolved.node,
+            reason,
+        };
+        if operands.len() != 8
+            || *attention_sink
+            || *cached_key_rows != 0
+            || rotary_dim != head_dim
+            || matches!(arithmetic, crate::bind::CachedAttentionArithmetic::LlamaFlash { .. })
+            || operands.iter().any(|(_, layout, lookup)| {
+                lookup.is_some() || layout.base != 0 || layout.strides.last().copied() != Some(1)
+            })
+        {
+            return Err(refused(
+                "whole attention needs eight zero-based operands, no cached range, no sink, full width and the online arithmetic",
+            ));
+        }
+        let query = buffer_of(buffers, operands[0].0)?;
+        let key = buffer_of(buffers, operands[2].0)?;
+        let value = buffer_of(buffers, operands[6].0)?;
+        let band = crate::physical::CausalBand {
+            lower_inclusive: *cached_lower_inclusive,
+            upper_inclusive: *new_upper_inclusive,
+        };
+        let streamed = crate::physical::stream_cached_attention_split_gqa(
+            [query, query],
+            [[key, key], [key, key]],
+            [value, value],
+            output,
+            crate::physical::AttentionExtents {
+                query_rows: *query_rows,
+                cached_key_rows: 0,
+                new_key_rows: *new_key_rows,
+                kv_heads: *kv_heads,
+                query_groups: *query_groups,
+                head_dim: *head_dim,
+            },
+            crate::physical::CachedAttentionRotary {
+                rotary_dim: *rotary_dim,
+                pass: None,
+                planes: *planes,
+            },
+            crate::physical::CachedAttentionScore {
+                sinks: None,
+                scale: *scale,
+                bands: [band, band],
+            },
+        );
+        return if streamed {
+            Ok(())
+        } else {
+            Err(refused(
+                "whole attention source or output extents do not match its bound domain",
+            ))
+        };
+    }
     // `rotary_dim < head_dim` (`BoundOpKind::CachedAttention`'s own doc) is
     // the discriminator for the trailing three-operand pass plane -- never
     // the operand count alone, since the optional ninth `cached_len` slot
@@ -839,6 +900,7 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
     let rotary = crate::physical::CachedAttentionRotary {
         rotary_dim: *rotary_dim,
         pass,
+        planes: *planes,
     };
     let sinks = match sink_operand {
         Some((node, layout, _)) => {

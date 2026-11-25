@@ -66,7 +66,7 @@ mod imp {
                 cached_lower_inclusive: shape.lower,
                 new_upper_inclusive: 0,
                 arithmetic: CachedAttentionArithmetic::OnlineF32,
-                attention_sink: true,
+                attention_sink: true, planes: proxima_tensor::bind::ScorePlanes::Paired,
             },
         }
     }
