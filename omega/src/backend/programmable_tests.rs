@@ -1218,3 +1218,30 @@ fn config_cuda_same_shape_execution_resource_census() {
         })
     ));
 }
+
+#[test]
+fn a_gpu_upload_of_named_blocks_moves_the_shared_copied_bytes_by_their_byte_length() {
+    if GpuDriver::for_target().is_none() {
+        return;
+    }
+    let (program, outputs) = fixture();
+    let input = [1.0, -2.0, 3.0, -4.0];
+    let bias = [10.0, 20.0, 30.0, 40.0];
+    let named = named(&input, &bias);
+    let config = RuntimeConfig::builder()
+        .with_engine("gpu")
+        .build()
+        .expect("a gpu engine config with the target driver must validate");
+    let expected = (core::mem::size_of_val(&input) + core::mem::size_of_val(&bias)) as u64;
+
+    let (mut plan, _report) = plan_named_with_config(&config, &program, &[], &named, &outputs)
+        .expect("the gpu fixture must plan");
+    let _ = stage_totals();
+    execute_plan_named(&mut plan, &named).expect("the gpu fixture must evaluate");
+    let after = stage_totals();
+
+    assert_eq!(
+        after.block_copied_bytes, expected,
+        "two named blocks of four elements each upload exactly their byte length"
+    );
+}

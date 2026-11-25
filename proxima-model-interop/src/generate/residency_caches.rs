@@ -4379,22 +4379,28 @@ impl BackendRuntime {
                 plan_misses = self.plan_misses as u64,
                 "recurrent segment host timing after plan execute"
             );
-            #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+            #[cfg(feature = "instrument")]
             {
-                let stage = metal_stage_totals();
+                let stage = omega::backend::stage_totals();
                 proxima_telemetry::debug!(
-                    prepare_ms = ticks_to_nanos(stage.prepare_ticks) as f64 / 1_000_000.0,
-                    emit_ms = ticks_to_nanos(stage.emit_ticks) as f64 / 1_000_000.0,
-                    pipeline_lookup_ms = ticks_to_nanos(stage.pipeline_lookup_ticks) as f64 / 1_000_000.0,
-                    op_setup_ms = ticks_to_nanos(stage.op_setup_ticks) as f64 / 1_000_000.0,
-                    gpu_exec_ms = ticks_to_nanos(stage.gpu_exec_ticks) as f64 / 1_000_000.0,
-                    encode_dispatch_ms = ticks_to_nanos(stage.encode_dispatch_ticks) as f64 / 1_000_000.0,
-                    readback_ms = ticks_to_nanos(stage.readback_ticks) as f64 / 1_000_000.0,
-                    block_upload_ms = ticks_to_nanos(stage.block_upload_ticks) as f64 / 1_000_000.0,
-                    pipeline_compile_us = ticks_to_nanos(stage.pipeline_compile_ticks) / 1_000,
-                    resolve_steps_us = ticks_to_nanos(stage.resolve_steps_ticks) / 1_000,
+                    prepare_ms = stage.prepare_nanos as f64 / 1_000_000.0,
+                    emit_ms = stage.emit_nanos as f64 / 1_000_000.0,
+                    pipeline_lookup_ms = stage.pipeline_lookup_nanos as f64 / 1_000_000.0,
+                    op_setup_ms = stage.op_setup_nanos as f64 / 1_000_000.0,
+                    gpu_exec_ms = stage.gpu_exec_nanos as f64 / 1_000_000.0,
+                    encode_dispatch_ms = stage.encode_dispatch_nanos as f64 / 1_000_000.0,
+                    readback_ms = stage.readback_nanos as f64 / 1_000_000.0,
+                    block_upload_ms = stage.block_upload_nanos as f64 / 1_000_000.0,
+                    pipeline_compile_us = stage.pipeline_compile_nanos / 1_000,
+                    resolve_steps_us = stage.resolve_steps_nanos / 1_000,
                     pipeline_misses = stage.pipeline_misses,
                     block_copied_bytes = stage.block_copied_bytes,
+                    "recurrent segment stage totals after plan execute"
+                );
+            }
+            #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+            {
+                proxima_telemetry::debug!(
                     device_before,
                     device_after = omega::metal::current_allocated_size().unwrap_or_default(),
                     device_delta = omega::metal::current_allocated_size()

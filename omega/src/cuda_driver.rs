@@ -1007,6 +1007,7 @@ impl CudaDriver {
         self.compile_counters
             .load_micros
             .fetch_add(load_us, Ordering::Relaxed);
+        crate::backend::record_pipeline_compile((nvrtc_us + load_us) * 1_000);
         proxima_telemetry::debug!(
             entry = %entry,
             source_bytes = source_bytes,
@@ -1312,6 +1313,7 @@ impl CudaDriver {
         node: NodeId,
         values: &[f32],
     ) -> Result<(), CudaDriverError> {
+        crate::backend::record_block_copied(core::mem::size_of_val(values) as u64);
         if let Some(CudaGraphBuffer::F32(buffer)) = arena.buffers.get_mut(&node)
             && buffer.len() == values.len()
         {
@@ -1334,6 +1336,7 @@ impl CudaDriver {
     ) -> Result<(), CudaDriverError> {
         self.packed_upload_bytes
             .fetch_add(values.len() as u64, Ordering::Relaxed);
+        crate::backend::record_block_copied(values.len() as u64);
         // a buffer shared with the resident cache is never overwritten in place
         if let Some(CudaGraphBuffer::Bytes(shared)) = arena.buffers.get_mut(&node)
             && shared.len() == values.len()
@@ -1369,6 +1372,7 @@ impl CudaDriver {
         };
         self.packed_upload_bytes
             .fetch_add(total as u64, Ordering::Relaxed);
+        crate::backend::record_block_copied(total as u64);
         let mut buffer = self.stream.alloc_zeros::<u8>(total)?;
         let mut offset = 0;
         for run in runs {

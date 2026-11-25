@@ -1231,6 +1231,37 @@ pub fn metal_stage_totals() -> MetalStageTotals {
     }
 }
 
+/// Maps this backend's own counters into the backend-neutral
+/// [`crate::backend::StageTotals`], snapshot-and-reset. Without `instrument`
+/// only the copied-bytes counter exists, so only that field is filled.
+#[cfg(feature = "instrument")]
+pub fn shared_stage_totals() -> crate::backend::StageTotals {
+    let stage = metal_stage_totals();
+    let nanos = proxima_tensor::instrument::ticks_to_nanos;
+    crate::backend::StageTotals {
+        block_copied_bytes: stage.block_copied_bytes,
+        pipeline_misses: stage.pipeline_misses,
+        pipeline_compile_nanos: nanos(stage.pipeline_compile_ticks),
+        prepare_nanos: nanos(stage.prepare_ticks),
+        emit_nanos: nanos(stage.emit_ticks),
+        pipeline_lookup_nanos: nanos(stage.pipeline_lookup_ticks),
+        op_setup_nanos: nanos(stage.op_setup_ticks),
+        gpu_exec_nanos: nanos(stage.gpu_exec_ticks),
+        encode_dispatch_nanos: nanos(stage.encode_dispatch_ticks),
+        readback_nanos: nanos(stage.readback_ticks),
+        block_upload_nanos: nanos(stage.block_upload_ticks),
+        resolve_steps_nanos: nanos(stage.resolve_steps_ticks),
+    }
+}
+
+#[cfg(not(feature = "instrument"))]
+pub fn shared_stage_totals() -> crate::backend::StageTotals {
+    crate::backend::StageTotals {
+        block_copied_bytes: BLOCK_COPIED_BYTES.snapshot_and_reset(),
+        ..crate::backend::StageTotals::default()
+    }
+}
+
 #[cfg(all(test, feature = "instrument"))]
 pub(super) mod host_bookkeeping_instrument_tests {
     use proxima_telemetry::counter;

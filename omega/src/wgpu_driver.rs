@@ -41,6 +41,7 @@ use core::mem::size_of;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::mpsc;
+use std::time::Instant;
 
 use proxima_telemetry::counter;
 use proxima_telemetry::metric::Counter;
@@ -968,15 +969,18 @@ fn pipeline_for<'plan>(
         counter!(PIPELINE_MISSES, 1);
     }
     pipelines.entry(kernel.entry.clone()).or_insert_with(|| {
+        let started = Instant::now();
         let module = shader_module(device, kernel);
-        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some(kernel.entry.as_str()),
             layout: None,
             module: &module,
             entry_point: Some(kernel.entry.as_str()),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
-        })
+        });
+        crate::backend::record_pipeline_compile(started.elapsed().as_nanos() as u64);
+        pipeline
     })
 }
 
@@ -1514,6 +1518,7 @@ pub fn execute_plan(
             &mut upload_staging,
         )?;
         counter!(BLOCK_UPLOADED_BYTES, bytes.len() as u64);
+        crate::backend::record_block_copied(bytes.len() as u64);
         counter!(BLOCK_UPLOAD_CALLS, 1);
         device_buffers.insert(*node, buffer.clone());
     }

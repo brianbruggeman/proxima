@@ -66,6 +66,9 @@
 //! so a wrapper would relocate the impl without enabling any composition. The
 //! free-function pair stays.
 
+mod stage_totals;
+pub use stage_totals::{StageTotals, record_block_copied, record_pipeline_compile, stage_totals};
+
 use crate::config::{KvPaddingPolicy, RuntimeConfig, SelectionMode};
 use conflaguration::Validate;
 use core::ops::Range;
