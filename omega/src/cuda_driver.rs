@@ -612,6 +612,9 @@ pub struct DevicePlan<R: GpuRuntime = CudarcRuntime> {
 /// The plan the CUDA executor builds, on the cudarc runtime. External callers name this alias.
 pub type CudaPlan = DevicePlan<CudarcRuntime>;
 
+/// The plan the same executor builds on the HIP runtime.
+pub type HipPlan = DevicePlan<rocm::HipRuntime>;
+
 /// Device-carried state between calls. Both machines are sans-IO: [`StateSwap`] decides which recurrent
 /// state buffers swap and park, [`KvCarry`] every cache-input row append, growth, truncation and handover;
 /// `host_bytes` counts every carried byte that crossed PCIe in either direction.
@@ -3376,6 +3379,12 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
             .map(|kernel| format!("{}\n{}", kernel.entry, kernel.source))
             .collect()
     }
+    /// The operations this plan's runtime executes: the grant its graph was bound under.
+    #[must_use]
+    pub fn executes(&self) -> Executes {
+        self.driver.runtime.executes()
+    }
+
     /// Whether every reader of the named K/V cache inputs is a fused `CachedAttention`, whose
     /// runtime bound excludes the pad rows of a bucketed range. A plan with no such input, no
     /// fused reader, a reader of another kind, or a K/V input that is itself an output must
@@ -5423,20 +5432,16 @@ pub mod rocm {
     //! The device path is only reachable when `libamdhip64` resolves and a GPU is
     //! present. This host has neither, so what is exercised here is: the
     //! symbol-resolution contract (an absent runtime is a typed error naming the
-    //! sonames tried), the launch-geometry arithmetic, and the binding contract
-    //! that rejects a kernel whose parameters are not `inputs, output, uniforms`.
+    //! sonames tried), the element-window arithmetic and the kernel-parameter
+    //! order.
     //! Numerical parity on a real device is a separate gate that needs the
-    //! hardware; [`HipDevice::smoke_add_one`] is that gate's entry point.
+    //! hardware; [`HipRuntime::smoke_add_one`] is that gate's entry point.
     //!
     //! # Scope
     //!
-    //! [`HipDevice::launch_f32`] runs any [`HipKernel`] whose bindings are
-    //! `Input.., Output, Uniforms` — the same contract
-    //! [`crate::cuda_driver::CudaDriver::launch_f32`] enforces — so an emitted
-    //! elementwise/reduce/scan op can be checked against the CPU oracle on a
-    //! device. A module cache keyed on the kernel's `entry`, multi-kernel graph
-    //! planning, and KV residency are the plan layer's, exactly as they are for
-    //! the CUDA lane; this module is the device boundary beneath them.
+    //! [`HipRuntime`] is the second [`GpuRuntime`] of the one CUDA executor: a `DevicePlan<HipRuntime>`
+    //! lowers and launches exactly as a `CudaPlan` does, with the kernels rendered as HIP C++. This
+    //! module is the device boundary beneath it: library loading, hipRTC, allocation, copies and launch.
 
     use alloc::format;
     use alloc::string::String;
@@ -5450,12 +5455,10 @@ pub mod rocm {
     use std::collections::BTreeMap;
 
     use crate::config::RuntimeConfig;
-    use crate::cuda::{EmitDevice, HipKernel, HipWave, emit_hip_at_wave};
+    use crate::cuda::{EmitDevice, HipKernel, HipWave};
     use crate::kernel_params::{KernelArgument, KernelParams};
-    use crate::lowering::PackedOperands;
     use proxima_numeric::NumericPolicy;
-    use proxima_tensor::bind::kv_read_only_by_fused_attention;
-    use proxima_tensor::{BoundOp, Evaluated, NodeId, Op, QuantizedBlock, Shapes, block_node_ids, infer, resolve_named_blocks};
+    use proxima_tensor::{NodeId, Op, QuantizedBlock};
     use crate::lowering::Binding;
     use crate::cuda::CudaKernel;
     use crate::gpu_runtime::{DeviceElement, EventMillis, GpuRuntime, LaunchArguments, LaunchShape};
@@ -6010,53 +6013,6 @@ pub mod rocm {
         }
     }
 
-    /// A compiled kernel: the loaded code object and the entry point resolved from
-    /// it. The function handle is only valid while `module` is alive, which this
-    /// pairing guarantees.
-    pub struct CompiledKernel {
-        module: HipModule,
-        function: *mut c_void,
-    }
-
-    impl core::fmt::Debug for CompiledKernel {
-        fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            formatter.write_str("CompiledKernel")
-        }
-    }
-
-    // SAFETY: a HIP code object and its function handle are process-wide runtime
-    // state, usable from any thread that has selected the owning device.
-    unsafe impl Send for CompiledKernel {}
-
-    impl CompiledKernel {
-        /// The loaded code object the entry point belongs to.
-        #[must_use]
-        pub fn module(&self) -> &HipModule {
-            &self.module
-        }
-    }
-
-    /// Fills `slot` with `build()` on first use and counts each build in
-    /// `compiles`, so a kernel launched repeatedly compiles once.
-    ///
-    /// # Errors
-    /// Whatever `build` returns; a failed build leaves the slot empty.
-    fn cached<'slot, T, E>(
-        slot: &'slot mut Option<T>,
-        compiles: &mut u64,
-        build: impl FnOnce() -> Result<T, E>,
-    ) -> Result<&'slot T, E> {
-        let value = match slot.take() {
-            Some(value) => value,
-            None => {
-                let built = build()?;
-                *compiles += 1;
-                built
-            }
-        };
-        Ok(slot.insert(value))
-    }
-
     /// The options hipRTC receives: one `--offload-arch` naming the opened device
     /// unless the caller already supplied an arch, so a code object never targets
     /// a device other than the one the plan selected.
@@ -6263,14 +6219,6 @@ pub mod rocm {
                 .into_owned()
         }
 
-        /// Uploads `values` as an `f32` device buffer.
-        ///
-        /// # Errors
-        /// [`HipDriverError::Runtime`] when the allocation or copy fails.
-        pub fn upload_f32(&self, values: &[f32]) -> Result<HipBuffer, HipDriverError> {
-            self.upload_bytes(f32_as_bytes(values))
-        }
-
         /// Uploads raw bytes (uniforms, packed weight blocks).
         ///
         /// # Errors
@@ -6362,50 +6310,6 @@ pub mod rocm {
             Ok(())
         }
 
-        /// Allocates a zeroed `f32` buffer of `elements`.
-        ///
-        /// # Errors
-        /// [`HipDriverError::Runtime`] when the allocation fails.
-        pub fn allocate_f32(&self, elements: usize) -> Result<HipBuffer, HipDriverError> {
-            let bytes = elements
-                .checked_mul(core::mem::size_of::<f32>())
-                .ok_or(HipDriverError::InputTooLarge(elements))?;
-            self.allocate_zeroed_bytes(bytes)
-        }
-
-        /// Reads `elements` `f32` values back from `buffer`.
-        ///
-        /// # Errors
-        /// [`HipDriverError::InputTooLarge`] when the request exceeds the
-        /// allocation, [`HipDriverError::Runtime`] when the copy fails.
-        pub fn download_f32(
-            &self,
-            buffer: &HipBuffer,
-            elements: usize,
-        ) -> Result<Vec<f32>, HipDriverError> {
-            let bytes = elements
-                .checked_mul(core::mem::size_of::<f32>())
-                .ok_or(HipDriverError::InputTooLarge(elements))?;
-            if bytes > buffer.bytes {
-                return Err(HipDriverError::InputTooLarge(elements));
-            }
-            let mut values = vec![0f32; elements];
-            // SAFETY: the destination holds `bytes`, and the source allocation is
-            // at least `bytes` by the check above.
-            let status = unsafe {
-                (self.api.hip_memcpy)(
-                    values.as_mut_ptr().cast::<c_void>(),
-                    buffer.pointer,
-                    bytes,
-                    MEMCPY_DEVICE_TO_HOST,
-                )
-            };
-            if status != HIP_SUCCESS {
-                return Err(self.api.runtime_error("hipMemcpy", status));
-            }
-            Ok(values)
-        }
-
         /// Blocks until every queued launch on this device has completed.
         ///
         /// # Errors
@@ -6418,190 +6322,6 @@ pub mod rocm {
             }
             Ok(())
         }
-
-        /// Launches one emitted kernel over `inputs`, returning the output.
-        ///
-        /// The parameter order comes from [`HipKernel::bindings`], never from
-        /// parsing source text: `Input` count must equal `inputs.len()`, followed
-        /// by exactly one `Output` and one `Uniforms`. The output length is
-        /// [`HipKernel::grid`]'s thread count, the same contract the CUDA lane's
-        /// `launch_f32` applies.
-        ///
-        /// # Errors
-        /// [`HipDriverError::BindingContract`] for a kernel outside that contract,
-        /// [`HipDriverError::GridTooLarge`] past the launch index,
-        /// [`HipDriverError::CompileLog`] when the emitted source does not compile,
-        /// and [`HipDriverError::Runtime`] for any device call.
-        pub fn launch_f32(
-            &self,
-            kernel: &HipKernel,
-            inputs: &[&[f32]],
-            uniforms: &[u8],
-        ) -> Result<Vec<f32>, HipDriverError> {
-            check_binding_contract(kernel, inputs.len())?;
-            if kernel.bindings.len() != inputs.len() + 2 {
-                return Err(HipDriverError::ArgumentCountMismatch);
-            }
-            let compiled = self.compile_kernel(kernel)?;
-            self.launch_compiled(kernel, &compiled, inputs, uniforms)
-        }
-
-        /// Compiles `kernel`'s source and resolves its entry point, so a caller that
-        /// launches the same kernel repeatedly pays for hipRTC once.
-        ///
-        /// # Errors
-        /// [`HipDriverError::CompileLog`], [`HipDriverError::Rtc`] or [`HipDriverError::Runtime`].
-        pub fn compile_kernel(&self, kernel: &HipKernel) -> Result<CompiledKernel, HipDriverError> {
-            let module = self.compile(&kernel.source, &[])?;
-            let function = module.function(&kernel.entry)?;
-            Ok(CompiledKernel { module, function })
-        }
-
-        /// Launches an already compiled `kernel` over `inputs`; see [`HipDevice::launch_f32`].
-        ///
-        /// # Errors
-        /// As [`HipDevice::launch_f32`], minus the compile errors.
-        pub fn launch_compiled(
-            &self,
-            kernel: &HipKernel,
-            compiled: &CompiledKernel,
-            inputs: &[&[f32]],
-            uniforms: &[u8],
-        ) -> Result<Vec<f32>, HipDriverError> {
-            if kernel.grid.is_idle() {
-                return Err(HipDriverError::IdleLaunch);
-            }
-            check_binding_contract(kernel, inputs.len())?;
-            if kernel.bindings.len() != inputs.len() + 2 {
-                return Err(HipDriverError::ArgumentCountMismatch);
-            }
-            let output_len = usize::try_from(kernel.grid.threads())
-                .map_err(|_| HipDriverError::InputTooLarge(usize::MAX))?;
-            let (blocks, block_width) = launch_geometry(kernel)?;
-            let function = compiled.function;
-
-            let device_inputs = inputs
-                .iter()
-                .map(|input| self.upload_f32(input))
-                .collect::<Result<Vec<_>, _>>()?;
-            let device_output = self.allocate_f32(output_len)?;
-            let device_uniforms = self.upload_bytes(uniforms)?;
-
-            let mut parameters = KernelParams::with_capacity(device_inputs.len() + 2);
-            for input in &device_inputs {
-                parameters.push(input);
-            }
-            parameters.push(&device_output).push(&device_uniforms);
-
-            // SAFETY: every parameter points at a live `*mut c_void` holding a
-            // device allocation of the size the emitted kernel expects, and the
-            // block/grid values were derived from the same `grid` the kernel was
-            // emitted for. `blocks` and `block_width` fit `u32` by
-            // `launch_geometry`'s checks.
-            let status = unsafe {
-                (self.api.hip_module_launch_kernel)(
-                    function,
-                    u32::try_from(blocks).unwrap_or(u32::MAX),
-                    1,
-                    1,
-                    u32::try_from(block_width).unwrap_or(u32::MAX),
-                    1,
-                    1,
-                    0,
-                    ptr::null_mut(),
-                    parameters.as_mut_ptr(),
-                    ptr::null_mut(),
-                )
-            };
-            if status != HIP_SUCCESS {
-                return Err(self.api.runtime_error("hipModuleLaunchKernel", status));
-            }
-            self.synchronize()?;
-            self.download_f32(&device_output, output_len)
-        }
-
-        /// The driver-boundary smoke: one add-one kernel through compile, upload,
-        /// launch, synchronize and readback.
-        ///
-        /// # Errors
-        /// As [`HipDevice::launch_f32`], plus [`HipDriverError::InputTooLarge`].
-        pub fn smoke_add_one(&self, input: &[f32]) -> Result<Vec<f32>, HipDriverError> {
-            if input.is_empty() {
-                return Ok(Vec::new());
-            }
-            let kernel = add_one_kernel(input.len())?;
-            let count =
-                u32::try_from(input.len()).map_err(|_| HipDriverError::InputTooLarge(input.len()))?;
-            let mut uniforms = vec![0u8; core::mem::size_of::<u32>()];
-            uniforms.copy_from_slice(&count.to_ne_bytes());
-            self.launch_f32(&kernel, &[input], &uniforms)
-        }
-    }
-
-    /// The `f32 -> u8` view an upload needs without a `bytemuck` dependency:
-    /// `f32` has no padding and no invalid bit patterns, and the slice is only
-    /// read.
-    fn f32_as_bytes(values: &[f32]) -> &[u8] {
-        // SAFETY: reinterpreting `&[f32]` as `&[u8]` is sound for reads; the
-        // length is scaled by the element size.
-        unsafe { core::slice::from_raw_parts(values.as_ptr().cast::<u8>(), core::mem::size_of_val(values)) }
-    }
-
-    /// The node a kernel writes: its `Binding::Output`.
-    fn output_target(kernel: &HipKernel) -> Result<NodeId, HipDriverError> {
-        kernel
-            .bindings
-            .iter()
-            .find_map(|binding| match binding {
-                Binding::Output(node) => Some(*node),
-                _ => None,
-            })
-            .ok_or(HipDriverError::BindingContract)
-    }
-
-    /// What a kernel the emitter marked [`CudaGridSpec::Idle`] yields instead
-    /// of a launch: its output node and a zero-length buffer.
-    fn empty_launch(kernel: &HipKernel) -> Result<Option<(NodeId, Vec<f32>)>, HipDriverError> {
-        if !kernel.grid.is_idle() {
-            return Ok(None);
-        }
-        Ok(Some((output_target(kernel)?, Vec::new())))
-    }
-
-    /// (blocks, block width) for one launch, refusing an idle grid and a grid
-    /// past the launch index. HIP's `gridDim.x` ceiling is `2^31 - 1`, the same
-    /// value the CUDA lane's emit-time check uses.
-    fn launch_geometry(kernel: &HipKernel) -> Result<(u64, u64), HipDriverError> {
-        if kernel.grid.is_idle() {
-            return Err(HipDriverError::IdleLaunch);
-        }
-        let blocks = kernel.grid.blocks();
-        if blocks > u64::from(i32::MAX as u32) {
-            return Err(HipDriverError::GridTooLarge {
-                threads: kernel.grid.threads(),
-            });
-        }
-        Ok((blocks, kernel.grid.block_width_or_default()))
-    }
-
-    /// The launch contract, separated from the device so it is checkable without
-    /// hardware.
-    fn check_binding_contract(kernel: &HipKernel, inputs: usize) -> Result<(), HipDriverError> {
-        let input_count = kernel
-            .bindings
-            .iter()
-            .take_while(|binding| matches!(binding, Binding::Input(_)))
-            .count();
-        let contract = input_count == inputs
-            && matches!(kernel.bindings.get(input_count), Some(Binding::Output(_)))
-            && matches!(
-                kernel.bindings.get(input_count + 1),
-                Some(Binding::Uniforms)
-            );
-        if !contract {
-            return Err(HipDriverError::BindingContract);
-        }
-        Ok(())
     }
 
     /// A hand-authored add-one kernel: the driver-boundary oracle, deliberately
@@ -6642,8 +6362,8 @@ pub mod rocm {
     fn warp_size_kernel() -> Result<HipKernel, HipDriverError> {
         Ok(HipKernel {
             source: String::from(
-                "extern \"C\" __global__ void proxima_warp_size(float *out, const unsigned int *u) {\n\
-                 \x20   if (threadIdx.x == 0) out[0] = (float)warpSize;\n\
+                "extern \"C\" __global__ void proxima_warp_size(unsigned int *out, const unsigned int *u) {\n\
+                 \x20   if (threadIdx.x == 0) out[0] = warpSize;\n\
                  }\n",
             ),
             entry: String::from("proxima_warp_size"),
@@ -6664,18 +6384,6 @@ pub mod rocm {
         })
     }
 
-    impl HipDevice {
-        /// The device's wavefront width, read by launching a one-thread kernel
-        /// that stores `warpSize`.
-        ///
-        /// # Errors
-        /// As [`HipDevice::launch_f32`].
-        pub fn warp_size(&self) -> Result<u32, HipDriverError> {
-            let lanes = self.launch_f32(&warp_size_kernel()?, &[], &[0u8; 4])?;
-            Ok(lanes.first().map_or(0, |value| *value as u32))
-        }
-    }
-
     /// The wave `RuntimeConfig::hip_wave` selects: `None` for 0, which means the
     /// device reports it. The one place the config value becomes a [`HipWave`].
     #[must_use]
@@ -6683,19 +6391,21 @@ pub mod rocm {
         HipWave::from_lanes(u64::from(config.hip_wave))
     }
 
-    /// The wavefront width a plan is emitted for: the configured override when
-    /// it is non-zero, otherwise what the device reports.
+    /// Opens the configured ROCm device and plans `program` on the shared executor: the same
+    /// `plan_with_config` path a CUDA device takes, under the HIP grant of the resolved wave.
     ///
     /// # Errors
-    /// [`HipDriverError::UnsupportedWaveWidth`] for a width other than 32 or 64.
-    pub fn resolve_wave(configured: Option<HipWave>, device: &HipDevice) -> Result<HipWave, HipDriverError> {
-        match configured {
-            Some(wave) => Ok(wave),
-            None => {
-                let lanes = device.warp_size()?;
-                HipWave::from_lanes(u64::from(lanes)).ok_or(HipDriverError::UnsupportedWaveWidth(lanes))
-            }
-        }
+    /// The refusals of [`HipRuntime::open`] and of `plan_with_config`.
+    pub fn plan(
+        config: &RuntimeConfig,
+        wave: Option<HipWave>,
+        program: &[Op],
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+    ) -> Result<super::HipPlan, super::CudaDriverError> {
+        let driver = super::CudaDriver::<HipRuntime>::open(config, wave)?;
+        driver.plan_with_config(program, symbols, outputs, named, config)
     }
 
     // SAFETY (the four impls below): a HIP allocation, code object and function handle are process-wide
@@ -6864,6 +6574,68 @@ pub mod rocm {
             &self.device
         }
 
+        /// Opens `ordinal` and emits for `configured`, or for the width the device reports
+        /// (the `warpSize` probe launched through this runtime's own launch path) when `None`.
+        ///
+        /// # Errors
+        /// The ROCm refusals of [`HipDevice::open`], and [`HipDriverError::UnsupportedWaveWidth`]
+        /// for a reported width other than 32 or 64.
+        pub fn open(ordinal: c_int, configured: Option<HipWave>) -> Result<Self, HipDriverError> {
+            let probe = Self::new(HipDevice::open(ordinal)?, HipWave::Wave64);
+            let wave = match configured {
+                Some(wave) => wave,
+                None => {
+                    let lanes = probe.warp_size()?;
+                    HipWave::from_lanes(u64::from(lanes)).ok_or(HipDriverError::UnsupportedWaveWidth(lanes))?
+                }
+            };
+            Ok(Self { wave, ..probe })
+        }
+
+        /// The device's wavefront width, read by launching a one-thread kernel that stores `warpSize`.
+        ///
+        /// # Errors
+        /// Any build, launch or copy error.
+        pub fn warp_size(&self) -> Result<u32, HipDriverError> {
+            let function = self.build_function(&warp_size_kernel()?)?;
+            let mut lanes = self.alloc_zeros::<u32>(1)?;
+            let uniforms = self.upload::<u8>(&[0u8; 4])?;
+            let mut arguments = self.launch_arguments(&function);
+            arguments.push_mut(&mut lanes).push(&uniforms);
+            let shape = LaunchShape { grid_dim: (1, 1, 1), block_dim: (1, 1, 1), shared_mem_bytes: 0 };
+            // SAFETY: the probe kernel's parameters are its output buffer then its uniforms, as pushed.
+            unsafe { self.launch(arguments, shape) }?;
+            self.synchronize()?;
+            Ok(self.download(&lanes)?.first().copied().unwrap_or(0))
+        }
+
+        /// The driver-boundary smoke: the hand-authored add-one kernel (a float kernel, so call it with
+        /// four-byte floats) through build, upload, launch, synchronize and readback on this runtime.
+        ///
+        /// # Errors
+        /// [`HipDriverError::InputTooLarge`] past the launch ABI, and any build, launch or copy error.
+        pub fn smoke_add_one<Element: DeviceElement>(&self, input: &[Element]) -> Result<Vec<Element>, HipDriverError> {
+            if input.is_empty() {
+                return Ok(Vec::new());
+            }
+            let kernel = add_one_kernel(input.len())?;
+            let count = u32::try_from(input.len()).map_err(|_| HipDriverError::InputTooLarge(input.len()))?;
+            let function = self.build_function(&kernel)?;
+            let device_input = self.upload(input)?;
+            let mut device_output = self.alloc_zeros::<Element>(input.len())?;
+            let uniforms = self.upload(&count.to_ne_bytes())?;
+            let too_large = HipDriverError::GridTooLarge { threads: kernel.grid.threads() };
+            let grid = u32::try_from(kernel.grid.blocks()).map_err(|_| too_large)?;
+            let width = u32::try_from(kernel.grid.block_width_or_default()).unwrap_or(u32::MAX);
+            let mut arguments = self.launch_arguments(&function);
+            arguments.push(&device_input).push_mut(&mut device_output).push(&uniforms);
+            let shape = LaunchShape { grid_dim: (grid, 1, 1), block_dim: (width, 1, 1), shared_mem_bytes: 0 };
+            // SAFETY: the add-one kernel's parameters are input, output, uniforms, as pushed.
+            unsafe { self.launch(arguments, shape) }?;
+            self.synchronize()?;
+            self.download(&device_output)
+        }
+
         fn slice_from<Element: DeviceElement>(buffer: HipBuffer, len: usize) -> HipSlice<Element> {
             HipSlice { buffer: Arc::new(buffer), len, element: core::marker::PhantomData }
         }
@@ -6883,6 +6655,34 @@ pub mod rocm {
 
         fn sub_view<'any>(pointer: *mut c_void, offset: usize, len: usize) -> HipView<'any> {
             HipView { pointer: offset_pointer(pointer, offset), len, owner: core::marker::PhantomData }
+        }
+    }
+
+    impl super::CudaDriver<HipRuntime> {
+        /// Opens the configured ROCm device and builds the shared executor's driver over it: the same
+        /// [`super::CudaDriver`] a CUDA device gets, so `plan_with_config` lowers and runs HIP plans.
+        ///
+        /// # Errors
+        /// The refusals of [`HipRuntime::open`].
+        pub fn open(config: &RuntimeConfig, wave: Option<HipWave>) -> Result<Self, HipDriverError> {
+            let runtime = HipRuntime::open(open_ordinal(config.hip_device)?, wave)?;
+            let baseline_used_bytes = runtime.memory_info().map_or(0, |(free, total)| total.saturating_sub(free) as u64);
+            Ok(Self {
+                runtime,
+                resident_buffers: Arc::new(super::Mutex::new(super::ResidentLedger::default())),
+                packed_upload_bytes: Arc::new(core::sync::atomic::AtomicU64::new(0)),
+                graph_uploads: Arc::new(core::sync::atomic::AtomicU64::new(0)),
+                graph_launches: Arc::new(core::sync::atomic::AtomicU64::new(0)),
+                parked_state: Arc::default(),
+                parked_appends: Arc::default(),
+                baseline_used_bytes,
+            })
+        }
+
+        /// The device name this driver runs on.
+        #[must_use]
+        pub fn device_name(&self) -> &str {
+            self.runtime.device().name()
         }
     }
 
@@ -7114,185 +6914,12 @@ pub mod rocm {
         }
     }
 
-    /// A planned HIP graph: every op bound and emitted through the shared card-C
-    /// renderer at the device's wave width, launched one kernel at a time.
-    ///
-    /// This is the ROCm counterpart of [`super::CudaPlan`] for float32 graphs of
-    /// ops the generic (non-inline-assembly) renderer covers. Anything else is
-    /// refused with a typed error naming the node, never run elsewhere.
-    #[derive(Debug)]
-    pub struct RocmPlan {
-        device: HipDevice,
-        wave: HipWave,
-        program: Vec<Op>,
-        shapes: Shapes,
-        resolved: Vec<BoundOp>,
-        block_nodes: Vec<NodeId>,
-        kernels: Vec<HipKernel>,
-        uniforms: Vec<Vec<u8>>,
-        outputs: Vec<NodeId>,
-        compiled: BTreeMap<String, Option<CompiledKernel>>,
-        compilations: u64,
-    }
-
-    impl RocmPlan {
-        /// Opens the selected ordinal, resolves the wave width and emits every op.
-        ///
-        /// # Errors
-        /// [`HipDriverError::RuntimeNotInstalled`] (or `RtcNotInstalled`) on a host
-        /// without ROCm, and the typed refusals documented on [`HipDriverError`].
-        pub fn plan(
-            config: &RuntimeConfig,
-            wave: Option<HipWave>,
-            program: &[Op],
-            symbols: &[u64],
-            named: &[(&str, QuantizedBlock<'_>)],
-            outputs: &[NodeId],
-        ) -> Result<Self, HipDriverError> {
-            let device = HipDevice::open(open_ordinal(config.hip_device)?)?;
-            let wave = resolve_wave(wave, &device)?;
-            let blocks = resolve_named_blocks(program, named)
-                .map_err(|_| HipDriverError::UnsupportedGraph { reason: "named input resolution failed" })?;
-            if blocks.iter().any(|block| !matches!(block, QuantizedBlock::Float32(_))) {
-                return Err(HipDriverError::UnsupportedGraph { reason: "only float32 inputs run on hip so far" });
-            }
-            let shapes = infer(program, symbols)
-                .map_err(|_| HipDriverError::UnsupportedGraph { reason: "shape inference failed" })?;
-            let root = program
-                .len()
-                .checked_sub(1)
-                .map(|last| NodeId(last as u32))
-                .ok_or(HipDriverError::UnsupportedGraph { reason: "empty program" })?;
-            let outputs = if outputs.is_empty() { vec![root] } else { outputs.to_vec() };
-            let policy = numeric_policy(config.numeric);
-            let packed = PackedOperands::new();
-            let bind_config = crate::bind_plan::BindConfig::new(config.numeric, false, &packed);
-            let hip_grant = crate::cuda::executes(&crate::cuda::target::Target::hip_wave(wave.lanes()));
-            let resolved = crate::bind_plan::bind_plan(program, &shapes, &outputs, &bind_config, &hip_grant)
-                .map_err(|_| HipDriverError::UnsupportedGraph { reason: "graph binding failed" })?
-                .resolved;
-            let kernels = resolved
-                .iter()
-                .map(|bound| {
-                    emit_hip_at_wave(wave, bound, &packed, policy, EmitDevice::default())
-                        .map_err(|error| HipDriverError::Emit { node: bound.node, error: error.to_string() })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let uniforms = resolved
-                .iter()
-                .map(|bound| {
-                    crate::cuda::pack_cuda_uniforms(bound)
-                        .map_err(|error| HipDriverError::Emit { node: bound.node, error: error.to_string() })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(Self {
-                device,
-                wave,
-                program: program.to_vec(),
-                shapes,
-                resolved,
-                block_nodes: block_node_ids(program),
-                kernels,
-                uniforms,
-                outputs,
-                compiled: BTreeMap::new(),
-                compilations: 0,
-            })
-        }
-
-        /// The device name the plan runs on.
-        #[must_use]
-        pub fn device_name(&self) -> &str {
-            self.device.name()
-        }
-
-        /// The wavefront width this plan was emitted for.
-        #[must_use]
-        pub fn wave(&self) -> HipWave {
-            self.wave
-        }
-
-        /// How many hipRTC compiles this plan has run: one per distinct kernel entry.
-        #[must_use]
-        pub fn compilations(&self) -> u64 {
-            self.compilations
-        }
-
-        /// The emitted kernels in launch order.
-        #[must_use]
-        pub fn kernels(&self) -> &[HipKernel] {
-            &self.kernels
-        }
-
-        /// Whether every reader of the named K/V cache inputs is a fused `CachedAttention`.
-        /// The HIP target does not grant that form, so its unfused bound graph answers
-        /// `false`; the answer is read off this plan's own graph, never a variant literal.
-        #[must_use]
-        pub fn pads_kv_safely(&self, is_kv_input: impl Fn(&str) -> bool) -> bool {
-            kv_read_only_by_fused_attention(
-                &self.program,
-                &self.resolved,
-                &self.outputs,
-                is_kv_input,
-            )
-        }
-
-        /// Runs every kernel in order over `named` float32 inputs.
-        ///
-        /// # Errors
-        /// [`HipDriverError::UnsupportedGraph`] for inputs that are not float32 or
-        /// kernels with prologues or extra outputs, and any [`HipDevice::launch_f32`] error.
-        pub fn execute_named(&mut self, named: &[(&str, QuantizedBlock<'_>)]) -> Result<Evaluated, HipDriverError> {
-            let blocks = resolve_named_blocks(&self.program, named)
-                .map_err(|_| HipDriverError::UnsupportedGraph { reason: "named input resolution failed" })?;
-            let mut buffers: BTreeMap<NodeId, Vec<f32>> = BTreeMap::new();
-            for (node, block) in self.block_nodes.iter().zip(&blocks) {
-                let QuantizedBlock::Float32(values) = block else {
-                    return Err(HipDriverError::UnsupportedGraph { reason: "only float32 inputs run on hip so far" });
-                };
-                buffers.insert(*node, values.to_vec());
-            }
-            for (kernel, uniforms) in self.kernels.iter().zip(&self.uniforms) {
-                if let Some((node, empty)) = empty_launch(kernel)? {
-                    buffers.insert(node, empty);
-                    continue;
-                }
-                if !kernel.prologue.is_empty() || !kernel.extra_outputs.is_empty() {
-                    return Err(HipDriverError::UnsupportedGraph { reason: "kernel prologues and extra outputs are not launched on hip yet" });
-                }
-                let inputs = kernel
-                    .bindings
-                    .iter()
-                    .filter_map(|binding| match binding {
-                        Binding::Input(node) => Some(buffers.get(node).map(Vec::as_slice).ok_or(HipDriverError::MissingBuffer(*node))),
-                        _ => None,
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let slot = self.compiled.entry(kernel.entry.clone()).or_default();
-                let compiled = cached(slot, &mut self.compilations, || self.device.compile_kernel(kernel))?;
-                let output = self.device.launch_compiled(kernel, compiled, &inputs, uniforms)?;
-                buffers.insert(output_target(kernel)?, output);
-            }
-            let results = self
-                .outputs
-                .iter()
-                .map(|node| {
-                    buffers
-                        .remove(node)
-                        .map(|values| (*node, self.shapes.of(*node).to_vec(), values))
-                        .ok_or(HipDriverError::MissingBuffer(*node))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let root = self.program.len().checked_sub(1).map_or(NodeId(0), |index| NodeId(index as u32));
-            Ok(Evaluated::from_parts(root, results, None))
-        }
-    }
-
-
     #[cfg(test)]
     mod rocm_tests {
         use super::*;
 
+        use crate::OperandDtypes;
+        use crate::cuda::emit_hip_at_wave;
         use proxima_numeric::{DType, NumericPolicy};
         use proxima_tensor::{
             Extent, IndexMap, Keep, Reduce, ReduceInit, ScalarOp, append, bind, infer, map,
@@ -7417,102 +7044,12 @@ pub mod rocm {
         }
 
         #[test]
-        fn a_kernel_launched_repeatedly_compiles_once_and_a_failed_compile_is_retried() {
-            let mut slot: Option<u32> = None;
-            let mut compiles = 0_u64;
-
-            let failed: Result<&u32, &str> = cached(&mut slot, &mut compiles, || Err("hiprtc rejected the source"));
-            assert!(failed.is_err());
-            assert_eq!(compiles, 0, "a failed compile is not counted and leaves the slot empty");
-
-            for _ in 0..3 {
-                let value: Result<&u32, &str> = cached(&mut slot, &mut compiles, || Ok(7));
-                assert_eq!(value, Ok(&7));
-            }
-            assert_eq!(compiles, 1, "three launches share one compile");
-        }
-
-        #[test]
-        fn an_idle_grid_yields_an_empty_output_and_is_refused_before_any_device_call() {
-            let mut kernel = add_one_kernel(64).expect("nonzero add-one");
-            kernel.grid = crate::cuda::HipGridSpec::idle();
-            assert!(matches!(launch_geometry(&kernel), Err(HipDriverError::IdleLaunch)));
-            let skipped = empty_launch(&kernel).expect("binding contract");
-            assert_eq!(skipped, Some((proxima_tensor::NodeId(1), Vec::new())));
-            assert_eq!(empty_launch(&add_one_kernel(64).expect("nonzero add-one")).expect("binding contract"), None);
-        }
-
-        #[test]
-        fn the_add_one_skeleton_is_inside_the_launch_contract() {
-            let kernel = add_one_kernel(64).expect("nonzero add-one");
-            check_binding_contract(&kernel, 1).expect("one input, one output, uniforms");
-        }
-
-        #[test]
-        fn a_kernel_without_a_uniforms_slot_is_refused() {
-            let mut kernel = add_one_kernel(64).expect("nonzero add-one");
-            kernel.bindings.pop();
-            assert!(matches!(
-                check_binding_contract(&kernel, 1),
-                Err(HipDriverError::BindingContract)
-            ));
-        }
-
-        #[test]
-        fn a_kernel_with_the_wrong_input_count_is_refused() {
-            let kernel = add_one_kernel(64).expect("nonzero add-one");
-            assert!(matches!(
-                check_binding_contract(&kernel, 0),
-                Err(HipDriverError::BindingContract)
-            ));
-            assert!(matches!(
-                check_binding_contract(&kernel, 2),
-                Err(HipDriverError::BindingContract)
-            ));
-        }
-
-        #[test]
-        fn launch_geometry_covers_every_thread_at_the_default_block_width() {
-            let mut kernel = add_one_kernel(1000).expect("nonzero add-one");
-            let (blocks, width) = launch_geometry(&kernel).expect("a 1000-thread launch fits");
-            assert_eq!(width, crate::cuda::DEFAULT_BLOCK_WIDTH);
-            assert_eq!(blocks, 1000u64.div_ceil(crate::cuda::DEFAULT_BLOCK_WIDTH));
-
-            kernel.grid = crate::cuda::HipGridSpec::launch(
-                proxima_tensor::NodeId(1),
-                1000,
-                Some(64),
-                "test",
-            )
-            .expect("nonzero threads");
-            let (blocks, width) = launch_geometry(&kernel).expect("a pinned-width launch fits");
-            assert_eq!(width, 64);
-            assert_eq!(blocks, 16);
-        }
-
-        #[test]
-        fn a_launch_past_the_grid_index_is_refused_before_any_device_call() {
-            let mut kernel = add_one_kernel(1).expect("nonzero add-one");
-            kernel.grid = crate::cuda::HipGridSpec::launch(
-                proxima_tensor::NodeId(1),
-                (u64::from(i32::MAX as u32) + 1) * crate::cuda::DEFAULT_BLOCK_WIDTH,
-                None,
-                "test",
-            )
-            .expect("nonzero threads");
-            assert!(matches!(
-                launch_geometry(&kernel),
-                Err(HipDriverError::GridTooLarge { .. })
-            ));
-        }
-
-        #[test]
         fn the_smoke_matches_the_host_oracle_when_a_device_is_present() {
-            let Ok(device) = HipDevice::open(0) else {
+            let Ok(runtime) = HipRuntime::open(0, None) else {
                 return;
             };
             let input = [0.0f32, 1.0, -2.5, 42.0, 1e6];
-            let output = device.smoke_add_one(&input).expect("the smoke kernel runs");
+            let output = runtime.smoke_add_one(&input).expect("the smoke kernel runs");
             assert_eq!(output.len(), input.len());
             for (index, (found, expected)) in output.iter().zip(input.iter()).enumerate() {
                 assert!(
@@ -7569,10 +7106,11 @@ pub mod rocm {
                     &packed,
                     NumericPolicy::llama_relaxed(),
                     EmitDevice::default(),
+                    &OperandDtypes::new(),
                 )
                 .expect("the reduce emits");
                 device
-                    .compile_kernel(&kernel)
+                    .compile(&kernel.source, &[])
                     .unwrap_or_else(|error| panic!("{wave:?} mask did not compile: {error}"));
             }
         }

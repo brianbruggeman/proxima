@@ -387,7 +387,7 @@ enum RegisteredPlan {
     // boxed: the plan is 352 bytes against the fake variant's few words, which trips clippy's large_enum_variant.
     Cuda(Box<omega::CudaPlan>),
     // boxed for the same reason as the cuda plan.
-    Rocm(Box<omega::cuda_driver::rocm::RocmPlan>),
+    Rocm(Box<omega::cuda_driver::HipPlan>),
     #[cfg(test)]
     Fake {
         program: Vec<Op>,
@@ -567,7 +567,10 @@ fn execute_cuda_plan(
         .map(AsRef::as_ref)
         .collect::<BTreeSet<&str>>();
     match plan {
-        RegisteredPlan::Rocm(plan) => plan.execute_named(&named).map_err(omega::CudaDriverError::from),
+        RegisteredPlan::Rocm(plan) => plan.execute_named(
+            &named,
+            (!resident_names.is_empty()).then_some(&resident_names),
+        ),
         RegisteredPlan::Cuda(plan) => plan.execute_named(
             &named,
             (!resident_names.is_empty()).then_some(&resident_names),
@@ -953,15 +956,14 @@ impl CudaGpuService<()> {
                                 })
                                 .collect::<Vec<_>>();
                             if let Some(config) = graph.omega_runtime.as_ref().filter(|config| selects_hip(config)) {
-                                let plan = omega::cuda_driver::rocm::RocmPlan::plan(
+                                let plan = omega::cuda_driver::rocm::plan(
                                     config,
                                     omega::cuda_driver::rocm::hip_wave_of(config),
                                     &graph.program,
                                     &graph.symbols,
                                     &named,
                                     &graph.outputs,
-                                )
-                                .map_err(omega::CudaDriverError::from)?;
+                                )?;
                                 return plans
                                     .register(RegisteredPlan::Rocm(Box::new(plan)))
                                     .map_err(CudaPlanRegistrationError::from);

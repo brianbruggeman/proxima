@@ -4,7 +4,7 @@
 //! is 4 bytes, so every HIP kernel emitted at every configured wave must carry an 8-byte all-lanes
 //! value. The two rows are the two wavefront widths llama.cpp's ROCm build distinguishes — 64-lane
 //! CDNA (the default) and 32-lane RDNA — both loaded through `RuntimeConfig` (the conflaguration
-//! surface) and both bound and emitted with the same `config.numeric` transform `RocmPlan::plan`
+//! surface) and both bound and emitted with the same `config.numeric` transform `rocm::plan`
 //! applies, never a bench-only policy.
 //!
 //! This is an emission bench because the host has no ROCm device; the device compile is
@@ -26,6 +26,7 @@ use criterion::{BenchmarkId, Criterion};
 #[cfg(feature = "cuda")]
 use omega::config::RuntimeConfig;
 #[cfg(feature = "cuda")]
+use omega::OperandDtypes;
 use omega::cuda::{EmitDevice, HipWave, emit_hip_at_wave};
 #[cfg(feature = "cuda")]
 use proxima_numeric::DType;
@@ -95,6 +96,7 @@ fn bench_hip_reduce_emission(criterion: &mut Criterion) {
             &packed,
             policy,
             EmitDevice::default(),
+            &OperandDtypes::new(),
         )
         .expect("the reduce emits");
         let mask = kernel
@@ -128,6 +130,7 @@ fn bench_hip_reduce_emission(criterion: &mut Criterion) {
                         &packed,
                         policy,
                         EmitDevice::default(),
+                        &OperandDtypes::new(),
                     )
                     .expect("the reduce emits");
                     black_box(emitted.source.len());

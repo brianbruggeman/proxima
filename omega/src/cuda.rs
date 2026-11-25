@@ -7790,10 +7790,15 @@ pub fn emit_hip_with_policy(
         packed_operands,
         numeric_policy,
         EmitDevice::default(),
+        &OperandDtypes::new(),
     )
 }
 
-/// [`emit_hip`] for an explicit wavefront width.
+/// [`emit_hip`] for an explicit wavefront width and the operand-dtype table of the program the op
+/// came from ([`crate::operand_dtypes`]): an op that reads a node another op narrowed to half must
+/// see that node's dtype, or it reads two-byte values as four-byte ones. Plans emit through the
+/// shared executor, which always passes the table; [`emit_hip`] and [`emit_hip_with_policy`] are
+/// the table-free single-op forms.
 ///
 /// # Errors
 /// As [`emit_hip`].
@@ -7803,6 +7808,7 @@ pub fn emit_hip_at_wave(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
     device: EmitDevice,
+    operand_dtypes: &OperandDtypes,
 ) -> Result<HipKernel, EmitError> {
     emit_on_target(
         wave.target(),
@@ -7810,85 +7816,7 @@ pub fn emit_hip_at_wave(
         packed_operands,
         numeric_policy,
         device,
-        &OperandDtypes::new(),
-    )
-}
-
-/// Emits a whole bound program, moving a previous HIP kernel across when the
-/// op for the same node renders the same text — the ROCm counterpart of
-/// [`crate::cuda::emit_cuda_reusing`]. Returns the kernels in `resolved` order
-/// and how many were reused.
-///
-/// # Errors
-/// The failing op's node together with its emit error.
-pub fn emit_hip_reusing(
-    wave: HipWave,
-    previous_bound: &[BoundOp],
-    previous_kernels: Vec<HipKernel>,
-    resolved: &[BoundOp],
-    packed_operands: &PackedOperands,
-    numeric_policy: NumericPolicy,
-    device: EmitDevice,
-) -> Result<(Vec<HipKernel>, usize), (NodeId, EmitError)> {
-    emit_reusing_on_target(
-        wave.target(),
-        previous_bound,
-        previous_kernels,
-        resolved,
-        packed_operands,
-        numeric_policy,
-        device,
-        &OperandDtypes::new(),
-    )
-}
-
-/// Moves one HIP kernel from `old` to `new` in place: the text is kept when
-/// the two ops render identical source, and the grid always follows `new`'s
-/// extents. Returns whether the text was kept.
-///
-/// # Errors
-/// The emit error of `new` when the text has to be regenerated.
-pub fn refit_hip_kernel(
-    wave: HipWave,
-    old: &BoundOp,
-    new: &BoundOp,
-    kernel: &mut HipKernel,
-    packed_operands: &PackedOperands,
-    numeric_policy: NumericPolicy,
-    device: EmitDevice,
-) -> Result<bool, EmitError> {
-    refit_kernel_on_target(
-        wave.target(),
-        old,
-        new,
-        kernel,
-        packed_operands,
-        numeric_policy,
-        device,
-        &OperandDtypes::new(),
-    )
-}
-
-/// [`refit_hip_kernel`] for an op already known to render the same text: only
-/// the launch grid and extra outputs follow the new extents.
-///
-/// # Errors
-/// The emit error of `new` when its grid cannot be derived.
-pub fn refit_hip_grid(
-    wave: HipWave,
-    kernel: &mut HipKernel,
-    new: &BoundOp,
-    packed_operands: &PackedOperands,
-    numeric_policy: NumericPolicy,
-    device: EmitDevice,
-) -> Result<(), EmitError> {
-    refit_grid_on_target(
-        wave.target(),
-        kernel,
-        new,
-        packed_operands,
-        numeric_policy,
-        device,
+        operand_dtypes,
     )
 }
 
@@ -8019,6 +7947,7 @@ mod rocm_tests {
             &no_packed(),
             NumericPolicy::llama_relaxed(),
             EmitDevice::default(),
+            &OperandDtypes::new(),
         )
         .expect("wave32 hip emits");
 
@@ -8050,6 +7979,7 @@ mod rocm_tests {
                 &no_packed(),
                 NumericPolicy::llama_relaxed(),
                 EmitDevice::default(),
+                &OperandDtypes::new(),
             )
             .expect("hip reduce emits");
             let expected = match wave {

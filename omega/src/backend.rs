@@ -570,7 +570,7 @@ pub enum Plan {
     #[cfg(feature = "cuda-driver")]
     Cuda(Box<crate::cuda_driver::CudaPlan>),
     #[cfg(feature = "cuda-driver")]
-    Rocm(Box<crate::cuda_driver::rocm::RocmPlan>),
+    Rocm(Box<crate::cuda_driver::HipPlan>),
 }
 
 /// Raw cold and synchronized execution observations for one candidate.
@@ -1019,11 +1019,7 @@ fn plan_configured_gpu(
                 .map_err(map_cuda_configuration_error)?,
         ))),
         #[cfg(feature = "cuda-driver")]
-        GpuDriver::Hip { wave, .. } => Ok(Plan::Rocm(Box::new(
-            crate::cuda_driver::rocm::RocmPlan::plan(
-                config, wave, program, symbols, named, outputs,
-            )?,
-        ))),
+        GpuDriver::Hip { wave, .. } => Ok(Plan::Rocm(plan_hip(config, wave, program, symbols, named, outputs)?)),
     }
 }
 
@@ -1128,7 +1124,7 @@ fn plan_executes(plan: &Plan) -> Executes {
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(_) => crate::cuda::executes(&crate::cuda::target::Target::CUDA),
         #[cfg(feature = "cuda-driver")]
-        Plan::Rocm(rocm) => crate::cuda::executes(&crate::cuda::target::Target::hip_wave(rocm.wave().lanes())),
+        Plan::Rocm(rocm) => rocm.executes(),
         #[cfg(not(any(
             feature = "cpu",
             all(feature = "metal", target_os = "macos"),
@@ -1217,9 +1213,9 @@ fn fill_candidate_identity(
         }
         #[cfg(feature = "cuda-driver")]
         Plan::Rocm(rocm) => {
-            measurement.device_identity = rocm.device_name().to_string();
-            measurement.resolved_op_count = rocm.kernels().len();
-            measurement.kernel_identities = rocm.kernels().iter().map(|kernel| kernel.entry.clone()).collect();
+            measurement.device_identity = rocm.device_identity()?;
+            measurement.resolved_op_count = rocm.resolved_op_count();
+            measurement.kernel_identities = rocm.kernel_identities();
         }
     }
     let _ = (plan, named);
@@ -1489,7 +1485,9 @@ pub fn execute_plan_named_with_resident_names(
         #[cfg(feature = "cuda-driver")]
         Plan::Rocm(rocm_plan) => {
             reject_gpu_expert_sources("hip", _expert_sources)?;
-            Ok(rocm_plan.execute_named(_named)?)
+            Ok(rocm_plan
+                .execute_named(_named, _resident_names)
+                .map_err(map_cuda_configuration_error)?)
         }
         // `Plan` is uninhabited with every backend feature off; `*plan {}`
         // is the never-pattern proof of that rather than a runtime `todo!`.
@@ -1552,7 +1550,7 @@ pub fn mark_resident(plan: &mut Plan, resident_names: &std::collections::BTreeSe
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(cuda_plan) => cuda_plan.mark_resident(resident_names),
         #[cfg(feature = "cuda-driver")]
-        Plan::Rocm(_) => {}
+        Plan::Rocm(rocm_plan) => rocm_plan.mark_resident(resident_names),
         // `Plan` is uninhabited with every backend feature off; `*plan {}`
         // is the never-pattern proof of that rather than a runtime `todo!`.
         #[cfg(not(any(
@@ -1717,7 +1715,7 @@ pub fn cuda_refit_counters(plan: &Plan) -> Option<[u64; 5]> {
     match plan {
         Plan::Cuda(cuda_plan) => Some(cuda_plan.refit_counters()),
         #[cfg(feature = "cuda-driver")]
-        Plan::Rocm(_) => None,
+        Plan::Rocm(rocm_plan) => Some(rocm_plan.refit_counters()),
         // only reachable while a variant this arm is not naming exists
         #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cpu", feature = "wgpu-backend"))]
         _ => None,
@@ -1734,7 +1732,7 @@ pub fn cuda_replace_kernel_source(plan: &mut Plan, position: usize, source: Stri
     match plan {
         Plan::Cuda(cuda_plan) => cuda_plan.replace_kernel_source(position, source),
         #[cfg(feature = "cuda-driver")]
-        Plan::Rocm(_) => false,
+        Plan::Rocm(rocm_plan) => rocm_plan.replace_kernel_source(position, source),
         // only reachable while a variant this arm is not naming exists
         #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cpu", feature = "wgpu-backend"))]
         _ => false,
@@ -1747,7 +1745,7 @@ pub fn cuda_kernel_launches(plan: &Plan) -> Option<Vec<String>> {
     match plan {
         Plan::Cuda(cuda_plan) => Some(cuda_plan.kernel_launches()),
         #[cfg(feature = "cuda-driver")]
-        Plan::Rocm(_) => None,
+        Plan::Rocm(rocm_plan) => Some(rocm_plan.kernel_launches()),
         // only reachable while a variant this arm is not naming exists
         #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cpu", feature = "wgpu-backend"))]
         _ => None,
@@ -1760,7 +1758,7 @@ pub fn cuda_kernel_identities(plan: &Plan) -> Option<Vec<String>> {
     match plan {
         Plan::Cuda(cuda_plan) => Some(cuda_plan.kernel_identities()),
         #[cfg(feature = "cuda-driver")]
-        Plan::Rocm(_) => None,
+        Plan::Rocm(rocm_plan) => Some(rocm_plan.kernel_identities()),
         // only reachable while a variant this arm is not naming exists
         #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cpu", feature = "wgpu-backend"))]
         _ => None,
@@ -2275,6 +2273,23 @@ fn execute_plan_named_wgpu(
     Ok(evaluated)
 }
 
+/// Opens the ROCm device (a missing runtime stays the typed `Hip` error) and plans on the shared executor.
+#[cfg(feature = "cuda-driver")]
+fn plan_hip(
+    config: &RuntimeConfig,
+    wave: Option<crate::cuda::HipWave>,
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'_>)],
+    outputs: &[NodeId],
+) -> Result<Box<crate::cuda_driver::HipPlan>, BackendError> {
+    let driver = CudaDriver::<crate::cuda_driver::rocm::HipRuntime>::open(config, wave)?;
+    let plan = driver
+        .plan_with_config(program, symbols, outputs, named, config)
+        .map_err(map_cuda_configuration_error)?;
+    Ok(Box::new(plan))
+}
+
 #[cfg(feature = "cuda-driver")]
 fn plan_named_hip(
     wave: Option<crate::cuda::HipWave>,
@@ -2290,9 +2305,7 @@ fn plan_named_hip(
         hip_device: device,
         ..RuntimeConfig::default()
     };
-    Ok(Plan::Rocm(Box::new(crate::cuda_driver::rocm::RocmPlan::plan(
-        &config, wave, program, symbols, named, outputs,
-    )?)))
+    Ok(Plan::Rocm(plan_hip(&config, wave, program, symbols, named, outputs)?))
 }
 
 #[cfg(feature = "cuda-driver")]
@@ -2439,6 +2452,8 @@ pub fn carry_cuda_state(plan: &mut Plan, pairs: &[(NodeId, NodeId)]) -> bool {
 pub fn carry_cuda_rows(plan: &mut Plan, pairs: &[(NodeId, NodeId, NumericFormat)], cached_rows: u64) -> bool {
     match plan {
         Plan::Cuda(cuda_plan) => cuda_plan.carry_rows(pairs, cached_rows),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Rocm(rocm_plan) => rocm_plan.carry_rows(pairs, cached_rows),
         #[allow(unreachable_patterns)]
         _ => false,
     }
@@ -2454,7 +2469,7 @@ pub fn drain_cuda_appended_rows(plan: &mut Plan) -> Result<Vec<(NodeId, Vec<f32>
     match plan {
         Plan::Cuda(cuda_plan) => Ok(cuda_plan.drain_appended_rows()?),
         #[cfg(feature = "cuda-driver")]
-        Plan::Rocm(_) => Ok(Vec::new()),
+        Plan::Rocm(rocm_plan) => Ok(rocm_plan.drain_appended_rows()?),
         // only reachable while a variant this arm is not naming exists
         #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cpu", feature = "wgpu-backend"))]
         _ => Ok(Vec::new()),
@@ -2471,7 +2486,7 @@ pub fn accept_cuda_rows(plan: &mut Plan, kept: u64) -> Result<(), BackendError> 
     match plan {
         Plan::Cuda(cuda_plan) => cuda_plan.accept_rows(kept)?,
         #[cfg(feature = "cuda-driver")]
-        Plan::Rocm(_) => {}
+        Plan::Rocm(rocm_plan) => rocm_plan.accept_rows(kept)?,
         // only reachable while a variant this arm is not naming exists
         #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cpu", feature = "wgpu-backend"))]
         _ => {}
@@ -2486,7 +2501,7 @@ pub fn park_cuda_carried(plan: &mut Plan) {
     match plan {
         Plan::Cuda(cuda_plan) => cuda_plan.park_carried(),
         #[cfg(feature = "cuda-driver")]
-        Plan::Rocm(_) => {}
+        Plan::Rocm(rocm_plan) => rocm_plan.park_carried(),
         // only reachable while a variant this arm is not naming exists
         #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cpu", feature = "wgpu-backend"))]
         _ => {}
