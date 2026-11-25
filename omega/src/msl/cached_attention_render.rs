@@ -1,4 +1,5 @@
 use proxima_numeric::float_layout::FloatLayout;
+use proxima_tensor::bind::ScorePlanes;
 
 use super::layout_render::{readable_block_layout, readable_scalar_cache, scalar_cache_read};
 use super::*;
@@ -35,6 +36,7 @@ use super::*;
 /// `value_start`/`key_start` addressing.
 pub(super) fn cached_attention_scalar_score_body(
     pass_present: bool,
+    planes: ScorePlanes,
     new_range_windowed: bool,
     cached_load: Option<&str>,
 ) -> String {
@@ -43,13 +45,18 @@ pub(super) fn cached_attention_scalar_score_body(
     } else {
         "if (cached && relative < cached_lower) { continue; }"
     };
+    let whole = planes == ScorePlanes::Whole;
     let pair_expr = if pass_present {
         "pair_dim"
+    } else if whole {
+        "head_dim"
     } else {
         "head_dim / 2"
     };
     let value_addr = if pass_present {
         "value_base"
+    } else if whole {
+        "kbase"
     } else {
         "kbase * 2"
     };
@@ -66,8 +73,13 @@ pub(super) fn cached_attention_scalar_score_body(
     let key_even = cached_read(cached_load, "in2", "kbase + pair");
     let key_odd = cached_read(cached_load, "in3", "kbase + pair");
     let value_read = cached_read(cached_load, "in6", &format!("{value_addr} + dimension"));
+    let odd_term = if whole {
+        String::new()
+    } else {
+        format!("\n            partial_score += in1[qbase + pair] * (cached ? {key_odd} : in5[kbase + pair]);")
+    };
     format!(
-        "        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        {lower_guard}\n        if (!cached && relative > new_upper) {{ continue; }}\n        long kbase = (cached ? key : new_index) * (kv_heads * ({pair_expr})) + kv_head * ({pair_expr});\n        {value_base_decl}float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < {pair_expr}; pair += 32L) {{\n            partial_score += in0[qbase + pair] * (cached ? {key_even} : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? {key_odd} : in5[kbase + pair]);\n        }}{pass_accum}\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? {value_read} : in7[{value_addr} + dimension]);\n        }}\n        maximum = next_max;\n"
+        "        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        {lower_guard}\n        if (!cached && relative > new_upper) {{ continue; }}\n        long kbase = (cached ? key : new_index) * (kv_heads * ({pair_expr})) + kv_head * ({pair_expr});\n        {value_base_decl}float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < {pair_expr}; pair += 32L) {{\n            partial_score += in0[qbase + pair] * (cached ? {key_even} : in4[kbase + pair]);{odd_term}\n        }}{pass_accum}\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? {value_read} : in7[{value_addr} + dimension]);\n        }}\n        maximum = next_max;\n"
     )
 }
 
@@ -222,11 +234,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
             found: resolved.kind.name(),
         });
     };
-    if *planes == proxima_tensor::bind::ScorePlanes::Whole {
-        return Err(EmitError::CachedAttentionWholePlanesNotSupported {
-            node: resolved.node,
-        });
-    }
+    let planes = *planes;
     // `rotary_dim < head_dim` (`BoundOpKind::CachedAttention`'s own doc) is
     // the recurrent-interval family's partial-rotary shape: the trailing `pass_query`/
     // `pass_cached_key`/`pass_new_key` operands carry one un-rotated plane
@@ -267,6 +275,15 @@ pub(super) fn render_cached_attention_with_mma_selection(
             found: resolved.kind.name(),
         });
     };
+    let per_row_form = matches!(
+        form,
+        CachedAttentionForm::Static | CachedAttentionForm::SingleRangeDynamic { .. }
+    );
+    if planes == ScorePlanes::Whole && !(per_row_form && !pass_present) {
+        return Err(EmitError::CachedAttentionWholePlanesNotSupported {
+            node: resolved.node,
+        });
+    }
     #[cfg(feature = "metal-attn-split-decode")]
     let decode_draws_sink = matches!(form, CachedAttentionForm::TwoRangeDecodeSplit { .. });
     #[cfg(not(feature = "metal-attn-split-decode"))]
@@ -524,6 +541,8 @@ pub(super) fn render_cached_attention_with_mma_selection(
     // byte-identical while partial rotary addresses only its rotated width.
     let pair_expr = if pass_present {
         "pair_dim"
+    } else if planes == ScorePlanes::Whole {
+        "head_dim"
     } else {
         "head_dim / 2"
     };
@@ -568,7 +587,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
     // `head_dim / 2`), and vectorizing the extra pass-plane dot term is
     // unimplemented -- correctness first, the TreeReduce speed rewrite for
     // this shape is a follow-up, not a blocker for landing the plane itself.
-    let block_width = if pass_present {
+    let block_width = if pass_present || planes == ScorePlanes::Whole {
         1
     } else {
         block_width_for(numeric_policy)
@@ -677,7 +696,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
         if block_width <= 1 {
             source.push_str(&format!(
                 "    if (chunk < chunks) {{\n    for (long key = lo + chunk; key < hi; key += chunks) {{\n{}    }}\n    }}\n",
-                cached_attention_scalar_score_body(pass_present, new_range_windowed, cached_load),
+                cached_attention_scalar_score_body(pass_present, planes, new_range_windowed, cached_load),
             ));
         } else {
             // The float4/ty-group V accumulate (llama.cpp's `kernel_flash_attn_
@@ -767,7 +786,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
         // reduces the per-lane partial dot product within this simdgroup.
         source.push_str(&format!(
             "    for (long key = 0; key <= last_key; key++) {{\n{}    }}\n",
-            cached_attention_scalar_score_body(pass_present, new_range_windowed, cached_load),
+            cached_attention_scalar_score_body(pass_present, planes, new_range_windowed, cached_load),
         ));
         source.push_str(&format!("    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; out[query_index * head_dim + dimension] = ({element_type})(sum == 0.0f ? 0.0f : weighted[local_dimension] / sum); }}\n}}\n"));
     } else {
@@ -792,7 +811,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
         source.push_str(&format!("    {last_key_decl}"));
         source.push_str(&format!(
             "    for (long key = chunk; key <= last_key; key += context_chunks) {{\n{}    }}\n",
-            cached_attention_scalar_score_body(pass_present, new_range_windowed, cached_load),
+            cached_attention_scalar_score_body(pass_present, planes, new_range_windowed, cached_load),
         ));
         // Single cross-simdgroup merge: each chunk's own (max, sum,
         // weighted) is the same online-softmax state the `chunks<=1` body
@@ -1151,4 +1170,132 @@ pub fn cached_attention_kv_codecs_for(
     quantized[3] = as_operand(key);
     quantized[6] = as_operand(value);
     cached_attention_kv_codecs(NodeId(0), &quantized)
+}
+
+#[cfg(test)]
+mod whole_plane_tests {
+    use super::super::attn_golden_tests::attention_op;
+    use super::*;
+
+    const ENCODER_ROWS: u64 = 1500;
+    const ENCODER_HEADS: u64 = 6;
+    const ENCODER_HEAD_DIM: u64 = 64;
+
+    /// whisper's encoder self-attention as the binder emits it
+    /// (`BoundOpKind::CachedAttention` with `ScorePlanes::Whole`): one range of `t` keys, no
+    /// cache, `new_upper = t`, eight operands whose odd slots alias the even ones.
+    fn whole_encoder_op() -> BoundOp {
+        let mut op = attention_op(8, 1, ENCODER_HEAD_DIM, 0, ENCODER_ROWS, i64::MIN);
+        op.extents = vec![ENCODER_ROWS, ENCODER_HEADS, 1, ENCODER_HEAD_DIM];
+        let BoundOpKind::CachedAttention {
+            query_rows,
+            kv_heads,
+            new_upper_inclusive,
+            planes,
+            ..
+        } = &mut op.kind
+        else {
+            unreachable!("attention_op always builds a CachedAttention kind");
+        };
+        *query_rows = ENCODER_ROWS;
+        *kv_heads = ENCODER_HEADS;
+        *new_upper_inclusive = i64::try_from(ENCODER_ROWS).expect("the encoder row count fits");
+        *planes = ScorePlanes::Whole;
+        op
+    }
+
+    fn with_planes(mut op: BoundOp, wanted: ScorePlanes) -> BoundOp {
+        let BoundOpKind::CachedAttention { planes, .. } = &mut op.kind else {
+            unreachable!("the fixtures always build a CachedAttention kind");
+        };
+        *planes = wanted;
+        op
+    }
+
+    fn render(op: &BoundOp) -> Result<String, EmitError> {
+        render_cached_attention(op, "entry", NumericPolicy::llama_relaxed(), None)
+    }
+
+    #[test]
+    fn whole_kernel_at_h6_g1_d64_scores_one_head_dim_plane_with_no_odd_reads() {
+        let source = render(&whole_encoder_op()).expect("the whole-plane encoder kernel renders");
+
+        let pinned = [
+            "constexpr long kv_heads = 6; constexpr long query_groups = 1; constexpr long head_dim = 64;",
+            "constexpr long new_upper = 1500L;",
+            "long qbase = query_row * (kv_heads * query_groups * (head_dim)) + query_head * (head_dim);",
+            "long kbase = (cached ? key : new_index) * (kv_heads * (head_dim)) + kv_head * (head_dim);",
+            "for (long pair = (long)lane; pair < head_dim; pair += 32L) {\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n        }",
+            "score = simd_broadcast_first(simd_sum(partial_score)) * scale;",
+            "weight * (cached ? in6[kbase + dimension] : in7[kbase + dimension])",
+        ];
+        for line in pinned {
+            assert!(source.contains(line), "missing `{line}` in:\n{source}");
+        }
+        for absent in ["in1[qbase", "in3[kbase", "in5[kbase", "kbase * 2"] {
+            assert!(!source.contains(absent), "`{absent}` is a paired read, in:\n{source}");
+        }
+    }
+
+    #[test]
+    fn whole_kernel_keeps_the_online_softmax_and_value_accumulation_of_the_paired_kernel() {
+        let whole = render(&whole_encoder_op()).expect("the whole-plane kernel renders");
+        let paired = render(&with_planes(whole_encoder_op(), ScorePlanes::Paired))
+            .expect("the paired kernel renders");
+
+        for shared in [
+            "next_max = max(maximum, score);",
+            "weight = exp(score - next_max);",
+            "sum = sum * rescale + weight;",
+            "maximum = next_max;",
+        ] {
+            assert!(whole.contains(shared) && paired.contains(shared), "`{shared}` differs");
+        }
+        assert_ne!(whole, paired, "the two plane layouts are different kernels");
+    }
+
+    #[test]
+    fn whole_and_paired_kernels_never_share_a_pipeline_name() {
+        let policy = NumericPolicy::llama_relaxed();
+        let whole = whole_encoder_op();
+        let paired = with_planes(whole_encoder_op(), ScorePlanes::Paired);
+
+        let whole_name = super::super::signature_tokens_prelude::entry_name(&whole, policy);
+        let paired_name = super::super::signature_tokens_prelude::entry_name(&paired, policy);
+
+        assert_ne!(whole_name, paired_name);
+        assert!(whole_name.ends_with("_wp"), "{whole_name}");
+        assert!(!paired_name.ends_with("_wp"), "{paired_name}");
+    }
+
+    #[test]
+    fn whole_planes_with_a_pass_triple_refuse_with_a_typed_error() {
+        let mut op = whole_encoder_op();
+        let BoundOpKind::CachedAttention { rotary_dim, .. } = &mut op.kind else {
+            unreachable!("whole_encoder_op always builds a CachedAttention kind");
+        };
+        *rotary_dim = ENCODER_HEAD_DIM / 2;
+
+        let refusal = render(&op).expect_err("a whole bind has no pass triple");
+
+        assert!(
+            matches!(refusal, EmitError::CachedAttentionWholePlanesNotSupported { .. }),
+            "{refusal:?}"
+        );
+    }
+
+    #[test]
+    fn whole_planes_in_a_two_range_form_refuse_with_a_typed_error() {
+        let op = with_planes(
+            attention_op(9, 1, ENCODER_HEAD_DIM, 512, 1, i64::MIN),
+            ScorePlanes::Whole,
+        );
+
+        let refusal = render(&op).expect_err("a cached range is not a whole-plane form");
+
+        assert!(
+            matches!(refusal, EmitError::CachedAttentionWholePlanesNotSupported { .. }),
+            "{refusal:?}"
+        );
+    }
 }

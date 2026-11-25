@@ -153,13 +153,13 @@ pub enum EmitError {
     CachedAttentionPartialRotaryNotSupported { node: NodeId },
 
     /// A cached-attention bind with `ScorePlanes::Whole` (non-causal self-attention over one
-    /// whole head vector). The Metal renderer reads every cached attention as RoPE-paired
-    /// planes, so it refuses rather than render the wrong score; the CPU executor is the only
-    /// one with the arm until the Metal slice lands, and `executes()` does not grant
-    /// `Form::WholeAttention` so the binder never produces one for this backend.
+    /// whole head vector) in a form the Metal renderer does not read whole: it renders `Whole`
+    /// in the per-row `Static` and `SingleRangeDynamic` kernels only, with no pass triple.
+    /// The row-tiled, decode-split and two-range forms read RoPE-paired planes, so they refuse
+    /// rather than render the wrong score.
     #[error(
-        "node {node} is a whole-plane (non-causal) cached attention bind, which this metal \
-         backend does not render yet"
+        "node {node} is a whole-plane (non-causal) cached attention bind in a form this metal \
+         backend does not render (only the per-row static and single-range kernels read whole planes)"
     )]
     CachedAttentionWholePlanesNotSupported { node: NodeId },
 

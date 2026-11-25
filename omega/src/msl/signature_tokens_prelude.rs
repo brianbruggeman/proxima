@@ -5,6 +5,7 @@ use super::cached_attention_flash_tiled::{
 use super::*;
 use proxima_numeric::block_layout::BlockLayout;
 use proxima_numeric::float_layout::FloatLayout;
+use proxima_tensor::bind::ScorePlanes;
 
 pub(super) const SELECTION_THREADGROUP_WIDTH: u64 = 1024;
 
@@ -379,6 +380,7 @@ pub(super) fn entry_name_with_schedule(
             scale,
             cached_lower_inclusive,
             new_upper_inclusive,
+            planes,
             ..
         } => {
             // `operand_count == 9` names a runtime ninth operand, but that
@@ -468,9 +470,10 @@ pub(super) fn entry_name_with_schedule(
                 )
             } else {
                 format!(
-                    "omega_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}",
+                    "omega_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}{}",
                     scale.to_bits(),
                     signed_name_part(*cached_lower_inclusive),
+                    if *planes == ScorePlanes::Whole { "_wp" } else { "" },
                 )
             }
         }

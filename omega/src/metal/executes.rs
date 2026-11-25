@@ -8,7 +8,9 @@ use crate::msl::with_contraction_grants;
 /// Composes [`proxima_tensor::Executes`], the same value `crate::cuda::executes`
 /// builds for CUDA, so the binder reads one shape for every backend. Each grant
 /// mirrors an arm of `crate::msl::emit_and_classify`'s kind match:
-/// `CachedAttention`, `CachedSoftmaxWeights`, `ElementwiseTwin`,
+/// `CachedAttention`, `WholeAttention` (the per-row static and single-range
+/// forms; `CachedAttentionWholePlanesNotSupported` refuses the rest),
+/// `CachedSoftmaxWeights`, `ElementwiseTwin`,
 /// `GatedDeltaNet`, `MoeTopK` and `TopFractionSelect` have renderers
 /// unconditionally; `RoundBatchedReduce` renders only with
 /// `metal-moe-mul-mat-id` (the other arm returns `EpilogueNotSupported`);
@@ -21,6 +23,7 @@ pub fn executes() -> Executes {
         .with(Form::ReduceEpilogue)
         .with(Form::ReduceBroadcastEpilogue)
         .with(Form::CachedAttention)
+        .with(Form::WholeAttention)
         .with(Form::CachedSoftmaxWeights)
         .with(Form::AttentionSink)
         .with(Form::GatedDeltaNet)
@@ -48,6 +51,11 @@ mod tests {
     #[test]
     fn metal_grants_the_moe_top_k_form_it_fused_before_admission_was_a_value() {
         assert!(executes().forms.contains(Form::MoeTopK));
+    }
+
+    #[test]
+    fn metal_grants_whole_attention_because_its_per_row_kernels_read_whole_planes() {
+        assert!(executes().forms.contains(Form::WholeAttention));
     }
 
     #[test]
