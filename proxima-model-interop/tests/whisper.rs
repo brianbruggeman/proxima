@@ -1147,6 +1147,95 @@ mod encoder {
         Ok(())
     }
 
+    fn bind_encoder_only(
+        policy: proxima_numeric::NumericPolicy,
+        executes: &proxima_tensor::Executes,
+    ) -> anyhow::Result<Vec<proxima_tensor::BoundOp>> {
+        let tensors = Tensors::load()?;
+        let mut bound = Bound::new();
+        let mel = bound.leaf("mel", &[1, MELS, FRAMES]);
+        let stem = bound.stem(&tensors);
+        let layers: Vec<_> = (0..LAYERS as usize)
+            .map(|layer| bound.layer(layer, &tensors))
+            .collect();
+        let encoded = encoder_decoder::encoder(
+            &mut bound.program,
+            mel,
+            &stem,
+            &layers,
+            HEADS,
+            HEAD_DIM,
+            1e-5,
+            MELS,
+            FRAMES,
+        )?;
+        let shapes = proxima_tensor::infer(&bound.program, &[])?;
+        Ok(proxima_tensor::bind_with_fusion_for(
+            &bound.program,
+            &shapes,
+            &[encoded],
+            true,
+            policy,
+            executes,
+        )?)
+    }
+
+    fn assert_four_whole_attentions_and_no_score_plane(
+        resolved: &[proxima_tensor::BoundOp],
+    ) {
+        use proxima_tensor::BoundOpKind;
+        use proxima_tensor::bind::ScorePlanes;
+        let tokens = u64::from(FRAMES / 2);
+        let heads = u64::from(HEADS);
+        let whole = resolved
+            .iter()
+            .filter(|op| {
+                matches!(
+                    op.kind,
+                    BoundOpKind::CachedAttention {
+                        planes: ScorePlanes::Whole,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(whole, LAYERS as usize, "one whole attention per encoder layer");
+        let score_planes: Vec<_> = resolved
+            .iter()
+            .filter(|op| {
+                matches!(op.kind, BoundOpKind::Reduce { .. })
+                    && op.extents.iter().filter(|&&extent| extent == tokens).count() >= 2
+                    && op.extents.contains(&heads)
+            })
+            .map(|op| (op.node, op.extents.clone()))
+            .collect();
+        assert!(
+            score_planes.is_empty(),
+            "no heads x tokens x tokens score reduce remains: {score_planes:?}"
+        );
+    }
+
+    #[test]
+    fn encoder_binds_four_whole_attentions_on_the_cpu() -> anyhow::Result<()> {
+        let policy = proxima_numeric::NumericPolicy::bit_exact().with_flash_narrowing(true);
+        let resolved = bind_encoder_only(policy, &proxima_tensor::Executes::CPU)?;
+        assert_four_whole_attentions_and_no_score_plane(&resolved);
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn encoder_binds_four_whole_attentions_under_metals_grants() -> anyhow::Result<()> {
+        let executes = omega::metal::executes();
+        let policy = omega::bind_plan::binding_policy(
+            proxima_numeric::NumericPolicy::bit_exact().with_flash_narrowing(true),
+            &executes,
+        );
+        let resolved = bind_encoder_only(policy, &executes)?;
+        assert_four_whole_attentions_and_no_score_plane(&resolved);
+        Ok(())
+    }
+
     fn transpose_ref(source: &[f32], rows: usize, columns: usize) -> Vec<f32> {
         assert_eq!(source.len(), rows * columns);
         let mut out = vec![0.0_f32; source.len()];

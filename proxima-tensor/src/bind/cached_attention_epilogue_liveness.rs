@@ -100,6 +100,9 @@ pub(super) fn bind_cached_attention_fusion_with_packed_leaves(
             numeric_policy,
             discovery,
         ));
+        // the whole-attention anchor feeds the out-projection, so plain binding folds it, and its
+        // q/k/v sources, into their readers; only a layout-free candidate can name them for the
+        // rebuild's `planning_outputs`, whose own pass reads the real layouts back
         initial_candidates.extend(cached_attention_non_causal_candidates(
             program,
             shapes,
@@ -107,7 +110,7 @@ pub(super) fn bind_cached_attention_fusion_with_packed_leaves(
             outputs,
             numeric_policy,
             executes,
-            discovery,
+            true,
         ));
         if initial_candidates.is_empty() {
             return match built {
