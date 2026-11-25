@@ -32,7 +32,6 @@ pub type EventMillis = f32;
 /// ABI accepts stays an explicit list.
 pub trait DeviceElement: DeviceRepr + ValidAsZeroBits + Copy + core::fmt::Debug + 'static {}
 
-impl DeviceElement for f32 {}
 impl DeviceElement for u32 {}
 impl DeviceElement for u8 {}
 
