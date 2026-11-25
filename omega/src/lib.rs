@@ -133,6 +133,7 @@ pub use cuda_driver::CudaPlan;
 #[cfg(feature = "cuda-driver")]
 pub use cuda_driver::{CudaDeviceSnapshot, CudaDriver, CudaDriverError};
 pub use error::EmitError;
+#[cfg(feature = "alloc")]
 pub use lowering::{OperandDtypes, operand_dtype, operand_dtypes};
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 pub use metal::{
