@@ -17,7 +17,10 @@ use cudarc::nvrtc::Ptx;
 use proxima_tensor::Executes;
 
 use crate::cuda::target::Target;
-use crate::cuda::{EmitDevice, executes as cuda_executes};
+use crate::cuda::{CudaKernel, EmitDevice, executes as cuda_executes};
+use crate::cuda_driver::{CachedCudaModule, CompileCounters, CudaDriverError};
+use proxima_primitives::sync::blocking::Mutex;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// An element a runtime moves between host and device.
@@ -59,6 +62,8 @@ pub trait LaunchArguments<'a, Runtime: GpuRuntime + ?Sized> {
 pub trait GpuRuntime: core::fmt::Debug {
     /// What a failed device call reports.
     type Error;
+    /// What a failed kernel build reports: compile and cache failures as well as driver ones.
+    type BuildError;
     /// A device allocation of `Element`s.
     type Buffer<Element: DeviceElement>: core::fmt::Debug + Clone;
     /// A shared window onto part of a buffer.
@@ -130,6 +135,12 @@ pub trait GpuRuntime: core::fmt::Debug {
         offset: usize,
     ) -> Result<(), Self::Error>;
 
+    /// The loaded function for `kernel`, compiled or read from a cache on first use.
+    ///
+    /// # Errors
+    /// The kernel failed to compile or load.
+    fn build_function(&self, kernel: &CudaKernel) -> Result<Self::Function, Self::BuildError>;
+
     /// Wraps source text (PTX) as a loadable image.
     fn image_from_source(source: &str) -> Self::Image;
 
@@ -197,9 +208,12 @@ pub trait GpuRuntime: core::fmt::Debug {
 /// The cudarc stream the CUDA executor always ran on, behind [`GpuRuntime`].
 #[derive(Debug, Clone)]
 pub struct CudarcRuntime {
-    context: Arc<CudaContext>,
+    pub(crate) context: Arc<CudaContext>,
     stream: Arc<CudaStream>,
     device: EmitDevice,
+    // synchronous ffi callers share these short cache mutations; compilation and dispatch happen outside the guard.
+    pub(crate) modules: Arc<Mutex<BTreeMap<String, Vec<CachedCudaModule>>>>,
+    pub(crate) compile_counters: Arc<CompileCounters>,
 }
 
 impl CudarcRuntime {
@@ -210,8 +224,8 @@ impl CudarcRuntime {
     }
 
     #[must_use]
-    pub fn new(context: Arc<CudaContext>, stream: Arc<CudaStream>, device: EmitDevice) -> Self {
-        Self { context, stream, device }
+    pub(crate) fn new(context: Arc<CudaContext>, stream: Arc<CudaStream>, device: EmitDevice, compile_counters: Arc<CompileCounters>) -> Self {
+        Self { context, stream, device, modules: Arc::new(Mutex::new(BTreeMap::new())), compile_counters }
     }
 
     /// The grant CUDA kernels bind under; the pure function [`GpuRuntime::executes`] returns.
@@ -229,6 +243,7 @@ impl CudarcRuntime {
 
 impl GpuRuntime for CudarcRuntime {
     type Error = DriverError;
+    type BuildError = CudaDriverError;
     type Buffer<Element: DeviceElement> = CudaSlice<Element>;
     type View<'a, Element: DeviceElement> = CudaView<'a, Element>;
     type ViewMut<'a, Element: DeviceElement> = CudaViewMut<'a, Element>;
@@ -272,6 +287,10 @@ impl GpuRuntime for CudarcRuntime {
     ) -> Result<(), DriverError> {
         let window_end = offset + range.len();
         self.stream.memcpy_dtod(&source.slice(range), &mut destination.slice_mut(offset..window_end))
+    }
+
+    fn build_function(&self, kernel: &CudaKernel) -> Result<CudaFunction, CudaDriverError> {
+        self.function_for(kernel)
     }
 
     fn image_from_source(source: &str) -> Ptx {

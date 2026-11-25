@@ -198,7 +198,7 @@ fn cuda_input_contract(
 }
 
 #[derive(Debug)]
-struct CompileCounters {
+pub(crate) struct CompileCounters {
     compilations: AtomicU64,
     nvrtc_micros: AtomicU64,
     load_micros: AtomicU64,
@@ -261,12 +261,8 @@ type ParkedAppends<R> = Arc<Mutex<BTreeMap<NodeId, (u64, CudaGraphBuffer<R>)>>>;
 /// One CUDA context and stream owned by a caller's inference runtime.
 #[derive(Debug, Clone)]
 pub struct CudaDriver<R: GpuRuntime = CudarcRuntime> {
-    context: Arc<CudaContext>,
     runtime: R,
-    // synchronous ffi callers share these short cache mutations; compilation and dispatch happen outside the guard.
-    modules: Arc<Mutex<BTreeMap<String, Vec<CachedCudaModule>>>>,
     resident_buffers: Arc<Mutex<ResidentBuffers<R>>>,
-    compile_counters: Arc<CompileCounters>,
     packed_upload_bytes: Arc<AtomicU64>,
     graph_uploads: Arc<AtomicU64>,
     graph_launches: Arc<AtomicU64>,
@@ -299,10 +295,10 @@ pub struct CudaDeviceSnapshot {
 }
 
 #[derive(Debug)]
-struct CachedCudaModule {
-    source: String,
-    module: Arc<CudaModule>,
-    functions: BTreeMap<String, CudaFunction>,
+pub(crate) struct CachedCudaModule {
+    pub(crate) source: String,
+    pub(crate) module: Arc<CudaModule>,
+    pub(crate) functions: BTreeMap<String, CudaFunction>,
 }
 
 /// Persistent f32 storage for a graph's named inputs and intermediate nodes.
@@ -712,11 +708,8 @@ impl CudaDriver {
             "cuda driver created"
         );
         Ok(Self {
-            runtime: CudarcRuntime::new(Arc::clone(&context), Arc::clone(&stream), device),
-            context,
-            modules: Arc::new(Mutex::new(BTreeMap::new())),
+            runtime: CudarcRuntime::new(context, stream, device, compile_counters),
             resident_buffers: Arc::new(Mutex::new(ResidentLedger::default())),
-            compile_counters,
             packed_upload_bytes: Arc::new(AtomicU64::new(0)),
             graph_uploads: Arc::new(AtomicU64::new(0)),
             graph_launches: Arc::new(AtomicU64::new(0)),
@@ -729,8 +722,8 @@ impl CudaDriver {
     /// Reads the selected CUDA device and the driver's graph activity counters.
     pub fn device_snapshot(&self) -> Result<CudaDeviceSnapshot, CudaDriverError> {
         Ok(CudaDeviceSnapshot {
-            ordinal: self.context.ordinal(),
-            name: self.context.name()?,
+            ordinal: self.runtime.context.ordinal(),
+            name: self.runtime.context.name()?,
             graph_uploads: self.graph_uploads.load(Ordering::Relaxed),
             graph_launches: self.graph_launches.load(Ordering::Relaxed),
         })
@@ -747,7 +740,7 @@ impl CudaDriver {
     /// of each distinct kernel identity.
     #[must_use]
     pub fn kernel_compilations(&self) -> u64 {
-        self.compile_counters.compilations.load(Ordering::Relaxed)
+        self.runtime.compile_counters.compilations.load(Ordering::Relaxed)
     }
 
     /// Kernels whose PTX was loaded from the on-disk cache instead of NVRTC.
@@ -755,7 +748,7 @@ impl CudaDriver {
     /// and grows this instead.
     #[must_use]
     pub fn disk_cache_hits(&self) -> u64 {
-        self.compile_counters
+        self.runtime.compile_counters
             .disk_cache_hits
             .load(Ordering::Relaxed)
     }
@@ -764,7 +757,7 @@ impl CudaDriver {
     /// compilation across this driver's `kernel_compilations`.
     #[must_use]
     pub fn nvrtc_micros(&self) -> u64 {
-        self.compile_counters.nvrtc_micros.load(Ordering::Relaxed)
+        self.runtime.compile_counters.nvrtc_micros.load(Ordering::Relaxed)
     }
 
     /// Cumulative wall-clock microseconds spent in `cuModuleLoadData` (PTX to
@@ -772,7 +765,7 @@ impl CudaDriver {
     /// `kernel_compilations`.
     #[must_use]
     pub fn load_micros(&self) -> u64 {
-        self.compile_counters.load_micros.load(Ordering::Relaxed)
+        self.runtime.compile_counters.load_micros.load(Ordering::Relaxed)
     }
 
     /// Host-to-device bytes of packed weights uploaded by this driver. A
@@ -809,7 +802,7 @@ impl CudaDriver {
     /// This is the authoritative device-memory measurement used by a tier
     /// fit check; host RSS and checkpoint file size are only proxies.
     pub fn memory_info(&self) -> Result<(usize, usize), CudaDriverError> {
-        Ok(self.context.mem_get_info()?)
+        Ok(self.runtime.context.mem_get_info()?)
     }
 
     /// Device bytes in use now beyond what was in use when this driver was created, `None` when the driver cannot report.
@@ -860,7 +853,7 @@ impl CudaDriver {
         }
         let count = u32::try_from(threads).map_err(|_| CudaDriverError::InputTooLarge(threads))?;
         let kernel = encode_kernel(rendered, threads)?;
-        let function = self.function_for(&kernel)?;
+        let function = self.runtime.build_function(&kernel)?;
         let mut window = destination.slice_mut(range);
         let mut args = self.runtime.launch_arguments(&function);
         args.push(source);
@@ -891,7 +884,10 @@ impl CudaDriver {
         self.encode_rows_into(&encode.rendered, &encode.format, source, &mut window, EncodeRows { element_count: count, byte_offset })
     }
 
-    fn function_for(&self, kernel: &CudaKernel) -> Result<CudaFunction, CudaDriverError> {
+}
+
+impl CudarcRuntime {
+    pub(crate) fn function_for(&self, kernel: &CudaKernel) -> Result<CudaFunction, CudaDriverError> {
         self.cached_function(&kernel.entry, &kernel.entry, &kernel.source, || {
             self.build_kernel_module(kernel)
         })
@@ -930,7 +926,7 @@ impl CudaDriver {
         let nvrtc_us = elapsed_micros(nvrtc_started);
         store_ptx(&self.compile_counters.disk_store, &key, &ptx);
         let load_started = Instant::now();
-        let module = self.runtime.load_module(ptx)?;
+        let module = self.load_module(ptx)?;
         let load_us = elapsed_micros(load_started);
         self.record_compile(&kernel.entry, kernel.source.len(), nvrtc_us, load_us);
         Ok(module)
@@ -951,7 +947,7 @@ impl CudaDriver {
 
     fn timed_load_module(&self, image: Ptx) -> Result<Arc<CudaModule>, CudaDriverError> {
         let started = Instant::now();
-        let module = self.runtime.load_module(image);
+        let module = self.load_module(image);
         CompileCounters::add(&self.compile_counters.module_load_micros, started);
         Ok(module?)
     }
@@ -1086,7 +1082,7 @@ impl CudaDriver {
             None => build_module()?,
         };
         let load_started = Instant::now();
-        let function = self.runtime.load_function(&module, entry);
+        let function = self.load_function(&module, entry);
         CompileCounters::add(&self.compile_counters.function_load_micros, load_started);
         let function = function?;
         proxima_telemetry::debug!(
@@ -1129,7 +1125,7 @@ impl CudaDriver {
     /// not ship NVRTC.  Graph kernels may use it once their PTX artifact has
     /// been produced by the build/release toolchain; the runtime does not
     /// need a CUDA toolkit in that configuration.
-    pub fn precompiled_function(
+    pub(crate) fn precompiled_function(
         &self,
         module_key: &str,
         entry: &str,
@@ -1137,12 +1133,23 @@ impl CudaDriver {
     ) -> Result<CudaFunction, CudaDriverError> {
         let cache_key = format!("ptx:{module_key}");
         self.cached_function(&cache_key, entry, ptx_source, || {
-            let module = self.runtime.load_module(CudarcRuntime::image_from_source(ptx_source))?;
+            let module = self.load_module(CudarcRuntime::image_from_source(ptx_source))?;
             self.compile_counters
                 .compilations
                 .fetch_add(1, Ordering::Relaxed);
             Ok(module)
         })
+    }
+
+}
+
+impl CudaDriver {
+    /// Loads a precompiled PTX module and returns one of its entry points; see [`CudarcRuntime::precompiled_function`].
+    ///
+    /// # Errors
+    /// The module failed to load or the entry is missing.
+    pub fn precompiled_function(&self, module_key: &str, entry: &str, ptx_source: &str) -> Result<CudaFunction, CudaDriverError> {
+        self.runtime.precompiled_function(module_key, entry, ptx_source)
     }
 
     /// Resolves a dense/reduction graph into a persistent CUDA plan.
@@ -1358,7 +1365,7 @@ impl CudaDriver {
         if config.is_some() {
             plan.validate_resources(&blocks, None)?;
             for kernel in &plan.kernels {
-                self.function_for(kernel)?;
+                self.runtime.build_function(kernel)?;
             }
         } else {
             plan.learn_rows_at_build(symbols, numeric_policy);
@@ -1628,7 +1635,7 @@ impl CudaDriver {
         }
         let output_len = usize::try_from(kernel.grid.threads())
             .map_err(|_| CudaDriverError::InputTooLarge(usize::MAX))?;
-        let function = self.function_for(kernel)?;
+        let function = self.runtime.build_function(kernel)?;
         let device_inputs = inputs
             .iter()
             .map(|input| self.runtime.upload(input))
@@ -1814,7 +1821,7 @@ impl CudaDriver {
             Some(function) => function,
             None => {
                 arena.launch_profile.function_lookups += 1;
-                looked_up = self.function_for(kernel)?;
+                looked_up = self.runtime.build_function(kernel)?;
                 &looked_up
             }
         };
@@ -1994,7 +2001,7 @@ impl CudaDriver {
         let [prepass] = kernel.prologue.as_slice() else {
             return Err(CudaDriverError::BindingContract);
         };
-        let function = self.function_for(prepass)?;
+        let function = self.runtime.build_function(prepass)?;
         let config = LaunchShape {
             grid_dim: (launch_blocks(&prepass.grid)?, 1, 1),
             block_dim: (prepass.grid.block_width_or_default() as u32, 1, 1),
@@ -3359,8 +3366,8 @@ impl DevicePlan {
     pub fn device_identity(&self) -> Result<String, CudaDriverError> {
         Ok(format!(
             "cuda:{}:{}",
-            self.driver.context.ordinal(),
-            self.driver.context.name()?
+            self.driver.runtime.context.ordinal(),
+            self.driver.runtime.context.name()?
         ))
     }
 
@@ -3822,7 +3829,7 @@ impl DevicePlan {
         let compilations_before = self.driver.kernel_compilations();
         let nvrtc_before = self.driver.nvrtc_micros();
         let load_before = self.driver.load_micros();
-        let lookup_before = self.driver.compile_counters.lookup_micros();
+        let lookup_before = self.driver.runtime.compile_counters.lookup_micros();
         let mut upload_call_us = 0u64;
         let mut resident_hits = 0usize;
         let mut resident_misses = 0usize;
@@ -4083,7 +4090,7 @@ impl DevicePlan {
                 });
                 if self.functions[position].is_none() && !timing {
                     let lookup_started = host_timing.then(Instant::now);
-                    self.functions[position] = Some(self.driver.function_for(kernel)?);
+                    self.functions[position] = Some(self.driver.runtime.build_function(kernel)?);
                     function_lookups += 1;
                     function_lookup_us += lookup_started.map_or(0, elapsed_micros);
                 }
@@ -4179,7 +4186,7 @@ impl DevicePlan {
                 (self.driver.nvrtc_micros() - nvrtc_before) as f64 / 1_000.0,
                 (self.driver.load_micros() - load_before) as f64 / 1_000.0
             );
-            let lookup_after = self.driver.compile_counters.lookup_micros();
+            let lookup_after = self.driver.runtime.compile_counters.lookup_micros();
             eprintln!(
                 "cuda_host_timing: phase=lookup_split build_ms={:.3} key_ms={:.3} disk_read_ms={:.3} module_load_ms={:.3} function_load_ms={:.3}",
                 (lookup_after[0] - lookup_before[0]) as f64 / 1_000.0,
@@ -4952,12 +4959,12 @@ mod tests {
             .expect("the add-one probe has three elements");
 
         let first = runtime();
-        let first_function = first.function_for(&kernel).expect("first runtime build");
+        let first_function = first.runtime.build_function(&kernel).expect("first runtime build");
         assert_eq!(first.kernel_compilations(), 1, "the first runtime compiles the kernel once");
         assert_eq!(first.disk_cache_hits(), 0, "the first runtime finds an empty cache");
 
         let second = runtime();
-        let second_function = second.function_for(&kernel).expect("second runtime build");
+        let second_function = second.runtime.build_function(&kernel).expect("second runtime build");
         assert_eq!(
             second.kernel_compilations(),
             0,
