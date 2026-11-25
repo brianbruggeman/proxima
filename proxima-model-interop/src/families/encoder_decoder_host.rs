@@ -34,8 +34,8 @@ use crate::serving::apply_serving_config;
 use crate::serving_settings::ServingSettings;
 use crate::source::CheckpointMapping;
 use crate::weight_store::{
-    device_alignment, emit_weight_store_hit, emit_weight_store_publish, header_prefix, lookup,
-    modified_nanos, publish, register_mapping, store_key, unregister_mapping,
+    FileIdentity, device_alignment, emit_weight_store_hit, emit_weight_store_publish, header_prefix,
+    lookup, publish, register_mapping, store_key, unregister_mapping,
 };
 
 const CHECKPOINT_FILE: &str = "model.safetensors";
@@ -768,8 +768,8 @@ pub struct Model {
     settings: ServingSettings,
     /// owned weight buffers, materialized once and offered identically on every call
     weights: ModelWeights,
-    /// the source checkpoint's header bytes, length and modification time: what a store key is made of
-    source_identity: (Vec<u8>, u64, u128),
+    /// the source checkpoint's header bytes and the identity of the file that is mapped: what a store key is made of; `None` when the mapping has no file handle, which keeps the store off
+    source_identity: Option<(Vec<u8>, FileIdentity)>,
     /// where the first call publishes its weights, and under which key; `None` when the store is off or this load hit it
     store_miss: Option<(PathBuf, u128)>,
     /// set by the first publish attempt that succeeds, so later calls skip it
@@ -822,11 +822,12 @@ impl Model {
         config: Value,
         dir: &Path,
     ) -> Self {
-        let source_identity = (
-            header_prefix(mapping.bytes()).unwrap_or_default().to_vec(),
-            mapping.bytes().len() as u64,
-            modified_nanos(&dir.join(CHECKPOINT_FILE)),
-        );
+        let source_identity = mapping.identity().map(|identity| {
+            (
+                header_prefix(mapping.bytes()).unwrap_or_default().to_vec(),
+                identity,
+            )
+        });
         Self {
             mapping,
             manifest,
@@ -947,8 +948,10 @@ impl Model {
         let Ok(rules) = self.settings.weight_precision_rules() else {
             return;
         };
-        let (header, len, modified) = &self.source_identity;
-        let key = store_key(header, *len, *modified, &rules, device_alignment());
+        let Some((header, identity)) = &self.source_identity else {
+            return;
+        };
+        let key = store_key(header, identity, &rules, device_alignment());
         match lookup(&store_dir, key).and_then(|path| read_checkpoint(&path).ok()) {
             Some((mapping, manifest, data_start)) => {
                 emit_weight_store_hit(key, mapping.bytes().len());

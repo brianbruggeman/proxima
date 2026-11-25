@@ -14,17 +14,21 @@
 //!
 //! # Staleness
 //!
-//! The key covers the source's header bytes, length and modification time, not
-//! its tensor bytes. An in-place edit that keeps the header, the length and the
-//! mtime serves the old store. Replacing a checkpoint changes its mtime, which
-//! is the case this key is built for.
+//! The key covers the open source file's device, inode, length, mtime and
+//! ctime (nanoseconds, one `fstat` on the handle that is mapped), its header
+//! bytes, the rules, the alignment and [`STORE_LAYOUT_VERSION`]. It does not
+//! cover tensor bytes. Two distinct files never share a key, and an in-place
+//! edit changes ctime. A copy to a new inode, or a device renumbered after a
+//! reboot, is a new key and costs one cold recode. Only a rewrite that also
+//! forges ctime serves a stale entry.
 
 use std::fs::{self, File};
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::UNIX_EPOCH;
 
 use xxhash_rust::xxh3::Xxh3;
 
@@ -44,26 +48,54 @@ const TORN_EXTENSION: &str = "tmp";
 /// Distinguishes the temp files of threads in one process publishing the same key.
 static NEXT_TORN: AtomicU64 = AtomicU64::new(0);
 
+/// What one open file is, read with `fstat` on the handle that is mapped: its
+/// device, inode, length, and its mtime and ctime in nanoseconds since the epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub length: u64,
+    pub mtime_nanos: i128,
+    pub ctime_nanos: i128,
+}
+
+impl FileIdentity {
+    /// `fstat` on `file`, so the identity is of the same file a mapping of it reads.
+    #[cfg(unix)]
+    pub fn of(file: &File) -> std::io::Result<Self> {
+        let metadata = file.metadata()?;
+        let nanos = |seconds: i64, sub: i64| i128::from(seconds) * 1_000_000_000 + i128::from(sub);
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            length: metadata.size(),
+            mtime_nanos: nanos(metadata.mtime(), metadata.mtime_nsec()),
+            ctime_nanos: nanos(metadata.ctime(), metadata.ctime_nsec()),
+        })
+    }
+}
+
 /// The `xxh3` digest naming the store entry for one source checkpoint under one
-/// ordered rule list at one alignment. Inputs: the source's header bytes (the
-/// length prefix and the JSON), its file length, its modification time in
-/// nanoseconds since the epoch, every rule in order (pattern kind, pattern,
-/// target), the alignment the store is written at, and [`STORE_LAYOUT_VERSION`].
-/// Every variable-length input is length-prefixed, so no two input sets share a
-/// byte stream.
+/// ordered rule list at one alignment. Inputs: the source file's
+/// [`FileIdentity`], its header bytes (the length prefix and the JSON), every
+/// rule in order (pattern kind, pattern, target), the alignment the store is
+/// written at, and [`STORE_LAYOUT_VERSION`]. Every variable-length input is
+/// length-prefixed, so no two input sets share a byte stream.
 #[must_use]
 pub fn store_key(
     header: &[u8],
-    file_len: u64,
-    modified_nanos: u128,
+    identity: &FileIdentity,
     rules: &[WeightPrecisionRule<'_>],
     alignment: usize,
 ) -> u128 {
     let mut hasher = Xxh3::new();
     hasher.update(&STORE_LAYOUT_VERSION.to_le_bytes());
     hasher.update(&(alignment as u64).to_le_bytes());
-    hasher.update(&file_len.to_le_bytes());
-    hasher.update(&modified_nanos.to_le_bytes());
+    hasher.update(&identity.device.to_le_bytes());
+    hasher.update(&identity.inode.to_le_bytes());
+    hasher.update(&identity.length.to_le_bytes());
+    hasher.update(&identity.mtime_nanos.to_le_bytes());
+    hasher.update(&identity.ctime_nanos.to_le_bytes());
     hasher.update(&(header.len() as u64).to_le_bytes());
     hasher.update(header);
     hasher.update(&(rules.len() as u64).to_le_bytes());
@@ -90,17 +122,6 @@ pub fn header_prefix(bytes: &[u8]) -> Option<&[u8]> {
     let length: [u8; 8] = bytes.get(..8)?.try_into().ok()?;
     let header_len = usize::try_from(u64::from_le_bytes(length)).ok()?;
     bytes.get(..header_len.checked_add(8)?)
-}
-
-/// `path`'s modification time in nanoseconds since the epoch; `0` when the
-/// filesystem reports none, which still keys on length and header.
-#[must_use]
-pub fn modified_nanos(path: &Path) -> u128 {
-    fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
-        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |elapsed| elapsed.as_nanos())
 }
 
 /// Where the published entry for `key` lives in `dir`.
@@ -248,9 +269,52 @@ mod tests {
         ]
     }
 
-    fn key_of(bytes: &[u8], modified: u128, rules: &[WeightPrecisionRule<'_>]) -> u128 {
+    fn identity_of(bytes: &[u8], modified: i128) -> FileIdentity {
+        FileIdentity {
+            device: 1,
+            inode: 10,
+            length: bytes.len() as u64,
+            mtime_nanos: modified,
+            ctime_nanos: 5,
+        }
+    }
+
+    fn key_of(bytes: &[u8], modified: i128, rules: &[WeightPrecisionRule<'_>]) -> u128 {
         let header = header_prefix(bytes).expect("fixture has a header");
-        store_key(header, bytes.len() as u64, modified, rules, ALIGNMENT)
+        store_key(header, &identity_of(bytes, modified), rules, ALIGNMENT)
+    }
+
+    #[test]
+    fn two_files_with_the_same_header_length_and_mtime_never_share_a_key() {
+        let bytes = source_checkpoint();
+        let header = header_prefix(&bytes).expect("fixture has a header");
+        let base = identity_of(&bytes, 7);
+        let key = |identity: FileIdentity| store_key(header, &identity, &rules(), ALIGNMENT);
+
+        assert_ne!(key(base), key(FileIdentity { inode: 11, ..base }), "inode");
+        assert_ne!(key(base), key(FileIdentity { ctime_nanos: 6, ..base }), "ctime");
+        assert_ne!(key(base), key(FileIdentity { device: 2, ..base }), "device");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_in_place_edit_changes_the_ctime_of_the_open_file() {
+        let directory = tempdir().expect("scratch directory");
+        let path = directory.path().join("model.safetensors");
+        fs::write(&path, source_checkpoint()).expect("writes the checkpoint");
+        let file = File::open(&path).expect("opens the checkpoint");
+        let before = FileIdentity::of(&file).expect("fstat on the open file");
+        let mut edit = fs::OpenOptions::new().write(true).open(&path).expect("reopens for write");
+
+        let mut after = before;
+        while after.ctime_nanos == before.ctime_nanos {
+            edit.write_all(&[1]).expect("edits in place");
+            edit.sync_all().expect("syncs the edit");
+            after = FileIdentity::of(&file).expect("fstat on the open file");
+        }
+
+        assert_eq!(after.inode, before.inode, "the same file");
+        assert_ne!(after.ctime_nanos, before.ctime_nanos);
     }
 
     #[test]
@@ -286,15 +350,15 @@ mod tests {
         let header = header_prefix(&bytes).expect("fixture has a header");
 
         assert_ne!(base, key_of(&edited_header, 7, &rules()), "header byte");
-        assert_ne!(
-            base,
-            store_key(header, bytes.len() as u64 + 1, 7, &rules(), ALIGNMENT),
-            "file length"
-        );
+        let longer = FileIdentity {
+            length: bytes.len() as u64 + 1,
+            ..identity_of(&bytes, 7)
+        };
+        assert_ne!(base, store_key(header, &longer, &rules(), ALIGNMENT), "file length");
         assert_ne!(base, key_of(&bytes, 8, &rules()), "modification time");
         assert_ne!(
             base,
-            store_key(header, bytes.len() as u64, 7, &rules(), ALIGNMENT * 2),
+            store_key(header, &identity_of(&bytes, 7), &rules(), ALIGNMENT * 2),
             "alignment"
         );
     }

@@ -12,6 +12,7 @@ use thiserror::Error;
 use crate::mapped_residency::MappedResidency;
 use crate::memory_reclaim::{monotonic_now, release_mapping};
 use crate::serving_settings::ServingSettings;
+use crate::weight_store::FileIdentity;
 use crate::{InteropError, LoadedModel};
 
 /// Errors opening a checkpoint through the configured storage source.
@@ -69,6 +70,19 @@ impl CheckpointMapping {
     pub fn file_mapping(&self) -> Option<&memmap2::Mmap> {
         match self {
             Self::File { mapping, .. } => Some(mapping),
+            #[cfg(target_os = "linux")]
+            Self::Pmem(_) => None,
+        }
+    }
+
+    /// The identity of the open file this mapping reads, from `fstat` on the mapped handle; `None` for a DAX mapping, which has no handle, and off unix.
+    #[must_use]
+    pub fn identity(&self) -> Option<FileIdentity> {
+        match self {
+            #[cfg(unix)]
+            Self::File { file, .. } => FileIdentity::of(file).ok(),
+            #[cfg(not(unix))]
+            Self::File { .. } => None,
             #[cfg(target_os = "linux")]
             Self::Pmem(_) => None,
         }

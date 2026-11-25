@@ -345,8 +345,8 @@ pub struct ServingSettings {
     pub weight_precision: Vec<WeightPrecisionRuleSettings>,
     /// Directory of recoded, page-aligned checkpoints a host keeps between processes, e.g. `/var/cache/proxima/weights`.
     /// Unset resolves to `~/.cache/proxima/weights` through [`ServingSettings::weight_store_dir`]; an empty value turns the
-    /// store off. Entries are keyed on the source checkpoint's header, length and mtime plus the `weight_precision`
-    /// rules, so a replaced checkpoint or a changed rule never reads a stale entry.
+    /// store off. Entries are keyed on the mapped source file's device, inode, length, mtime and ctime, its header and the
+    /// `weight_precision` rules, so a replaced or edited checkpoint or a changed rule never reads a stale entry.
     pub weight_store: Option<String>,
     /// `ServingConfig::gdn_prefill_backend`: where the gated delta net prefill runs.
     #[setting(resolve_with = "from_name", default_str = "cpu")]
