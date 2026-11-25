@@ -17,10 +17,5 @@ pub use dialect::{Dialect, Intrinsic};
 pub(crate) use hardware::HARDWARE;
 pub(crate) use hardware::HARDWARE_COUNT;
 pub use hardware::HardwareScalar;
-#[cfg(feature = "wgpu-backend")]
-pub(crate) use layout::{
-    exponent_ones, infinity_code, mantissa_mask, max_normal_code, overflow_code, quiet_bit,
-    reserves_all_ones, sign_shift,
-};
 pub use layout::{load, store, store_nan_branch, unpack};
 pub use refusal::Refusal;

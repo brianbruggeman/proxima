@@ -21,15 +21,6 @@ use crate::render::{self, HARDWARE_COUNT, HardwareScalar, Refusal};
 
 use super::dialect::Msl;
 
-#[cfg(feature = "wgpu-backend")]
-pub(crate) const F32_FRACTION_BITS: u32 = 23;
-#[cfg(feature = "wgpu-backend")]
-pub(crate) const F32_INFINITY_BITS: u32 = 0x7f80_0000;
-#[cfg(feature = "wgpu-backend")]
-pub(crate) const F32_QUIET_BIT: u32 = 1 << 22;
-#[cfg(feature = "wgpu-backend")]
-pub(crate) const F32_ABS_MASK: u32 = 0x7fff_ffff;
-
 /// The Metal spelling of each row of the hardware table, in table order: the type name and, when
 /// Metal gives it one, the literal suffix; a row Metal does not spell is `None`. [`Msl`] reads this
 /// table.

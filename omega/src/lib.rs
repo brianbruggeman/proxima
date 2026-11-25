@@ -133,8 +133,6 @@ pub mod train;
 pub mod wgpu_driver;
 #[cfg(feature = "wgpu-backend")]
 pub mod wgsl;
-#[cfg(feature = "wgpu-backend")]
-pub mod wgsl_layout;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{

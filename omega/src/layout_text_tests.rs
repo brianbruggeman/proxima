@@ -1,13 +1,16 @@
 use alloc::collections::BTreeMap;
 
-use proxima_numeric::float_layout::{FloatLayout, NanPolicy, SignEncoding, Specials};
+use proxima_numeric::float_layout::{
+    FloatLayout, NAMED_LAYOUTS, NanPolicy, SignEncoding, Specials,
+};
 use proxima_tensor::{BoundOp, Extent, IndexMap, NodeId, Op, ScalarOp, append, bind, infer, map};
 use proxima_numeric::{DType, NumericPolicy};
 
 use crate::cuda::emit_cuda;
 use crate::cuda_layout::{layout_load_cuda, layout_store_cuda};
 use crate::wgsl::{WgslCaps, emit_wgsl};
-use crate::wgsl_layout::{layout_load_wgsl, layout_store_wgsl};
+use crate::backend::wgpu::dialect::{WORD_BITS, Wgsl};
+use crate::render::{self, HardwareScalar, Refusal};
 
 const E4M3_FROM_FIELDS: FloatLayout = FloatLayout {
     exponent_bits: 4,
@@ -71,6 +74,18 @@ fn cuda_source(layout: FloatLayout) -> String {
         .source
 }
 
+fn wgsl_wide() -> HardwareScalar {
+    HardwareScalar::widest(&Wgsl).expect("the wgsl dialect spells one wide row")
+}
+
+fn wgsl_load(layout: FloatLayout, name: &str) -> String {
+    render::load(&Wgsl, wgsl_wide(), layout, name).expect("the layout renders a wgsl load")
+}
+
+fn wgsl_store(layout: FloatLayout, name: &str) -> String {
+    render::store(&Wgsl, wgsl_wide(), layout, name).expect("the layout renders a wgsl store")
+}
+
 fn wgsl_source(layout: FloatLayout) -> String {
     let caps = WgslCaps {
         shader_f16: true,
@@ -85,8 +100,8 @@ fn wgsl_source(layout: FloatLayout) -> String {
 fn e4m3fn_lowerers_reserve_only_the_top_nan_code() {
     let msl_load = crate::msl::layout_render::layout_load_msl(FloatLayout::E4M3FN, "load");
     let msl_store = crate::msl::layout_render::layout_store_msl(FloatLayout::E4M3FN, "store");
-    let wgsl_load = layout_load_wgsl(FloatLayout::E4M3FN, "load");
-    let wgsl_store = layout_store_wgsl(FloatLayout::E4M3FN, "store");
+    let wgsl_load = wgsl_load(FloatLayout::E4M3FN, "load");
+    let wgsl_store = wgsl_store(FloatLayout::E4M3FN, "store");
 
     assert!(
         msl_load.contains("exponent == 0xfu && mantissa == 0x7u"),
@@ -114,6 +129,42 @@ fn cuda_and_wgsl_refuse_layouts_wider_than_the_generic_codec() {
 
     assert!(emit_cuda(&wide, &BTreeMap::new()).is_err());
     assert!(emit_wgsl(&wide, WgslCaps::default(), &BTreeMap::new()).is_err());
+}
+
+#[test]
+fn wgsl_render_refuses_a_code_wider_than_its_word_and_an_integer_needing_a_wider_one() {
+    let too_wide: Vec<_> = NAMED_LAYOUTS
+        .iter()
+        .filter(|(layout, _)| layout.width() > WORD_BITS)
+        .collect();
+    let word_wide: Vec<_> = NAMED_LAYOUTS
+        .iter()
+        .filter(|(layout, _)| {
+            layout.is_integer()
+                && layout.sign == SignEncoding::TwosComplement
+                && layout.width() == WORD_BITS
+        })
+        .collect();
+
+    assert!(
+        !too_wide.is_empty(),
+        "no named layout is wider than the word"
+    );
+    assert_eq!(word_wide.len(), 1, "the word-wide two's-complement layout");
+    for (layout, name) in too_wide {
+        let expected = Err(Refusal::CodeWiderThanWord {
+            width: layout.width(),
+        });
+        let loaded = render::load(&Wgsl, wgsl_wide(), *layout, "probe");
+        let stored = render::store(&Wgsl, wgsl_wide(), *layout, "probe");
+        assert_eq!(loaded, expected, "{name}");
+        assert_eq!(stored, expected, "{name}");
+    }
+    let refused = render::load(&Wgsl, wgsl_wide(), word_wide[0].0, "probe");
+    assert!(
+        matches!(refused, Err(Refusal::NoIntegerOfWidth { .. })),
+        "{refused:?}"
+    );
 }
 
 fn assert_wgsl_validates(load: &str, store: &str) {
@@ -182,8 +233,8 @@ async fn float_layout_wgsl_emits_text_for_layout(
     #[case] native: bool,
 ) {
     let source = wgsl_source(layout);
-    let load = layout_load_wgsl(layout, "probe_load");
-    let store = layout_store_wgsl(layout, "probe_store");
+    let load = wgsl_load(layout, "probe_load");
+    let store = wgsl_store(layout, "probe_store");
 
     assert_eq!(source.starts_with("enable f16;\n"), native, "{source}");
     assert!(load.contains("fn probe_load(code: u32) -> f32"));
@@ -239,8 +290,16 @@ fn float_layout_wgsl_nan_policy_alone_decides_whether_the_payload_is_kept() {
         ..canonical
     };
 
-    let dropped = [layout_load_wgsl(canonical, "probe_load"), layout_store_wgsl(canonical, "probe_store")].concat();
-    let kept = [layout_load_wgsl(quiet, "probe_load"), layout_store_wgsl(quiet, "probe_store")].concat();
+    let dropped = [
+        wgsl_load(canonical, "probe_load"),
+        wgsl_store(canonical, "probe_store"),
+    ]
+    .concat();
+    let kept = [
+        wgsl_load(quiet, "probe_load"),
+        wgsl_store(quiet, "probe_store"),
+    ]
+    .concat();
 
     assert!(
         !dropped.contains("(mantissa << 21u)"),
@@ -269,8 +328,8 @@ fn float_layout_cuda_wgsl_control_changed_bias_changes_constants() {
 
     let cuda = layout_load_cuda(FloatLayout::E3M2, "probe_load");
     let cuda_shifted = layout_load_cuda(shifted, "probe_load");
-    let wgsl = layout_load_wgsl(FloatLayout::E3M2, "probe_load");
-    let wgsl_shifted = layout_load_wgsl(shifted, "probe_load");
+    let wgsl = wgsl_load(FloatLayout::E3M2, "probe_load");
+    let wgsl_shifted = wgsl_load(shifted, "probe_load");
 
     assert_ne!(cuda, cuda_shifted);
     assert_ne!(wgsl, wgsl_shifted);
@@ -288,8 +347,8 @@ fn integer_wgsl_text_validates_in_naga() {
         FloatLayout::SIGN_MAGNITUDE_INT8,
     ] {
         assert_wgsl_validates(
-            &layout_load_wgsl(layout, "probe_load"),
-            &layout_store_wgsl(layout, "probe_store"),
+            &wgsl_load(layout, "probe_load"),
+            &wgsl_store(layout, "probe_store"),
         );
     }
 }

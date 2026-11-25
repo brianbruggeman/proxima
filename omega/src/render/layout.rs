@@ -21,23 +21,23 @@ use super::dialect::{Dialect, Intrinsic};
 use super::hardware::HardwareScalar;
 use super::refusal::Refusal;
 
-pub(crate) const fn exponent_ones(layout: &FloatLayout) -> u32 {
+const fn exponent_ones(layout: &FloatLayout) -> u32 {
     (1u32 << layout.exponent_bits) - 1
 }
 
-pub(crate) const fn mantissa_mask(layout: &FloatLayout) -> u32 {
+const fn mantissa_mask(layout: &FloatLayout) -> u32 {
     ((1u64 << layout.mantissa_bits) - 1) as u32
 }
 
-pub(crate) const fn sign_shift(layout: &FloatLayout) -> u32 {
+const fn sign_shift(layout: &FloatLayout) -> u32 {
     layout.exponent_bits as u32 + layout.mantissa_bits as u32
 }
 
-pub(crate) const fn infinity_code(layout: &FloatLayout) -> u32 {
+const fn infinity_code(layout: &FloatLayout) -> u32 {
     exponent_ones(layout) << layout.mantissa_bits
 }
 
-pub(crate) const fn max_normal_code(layout: &FloatLayout) -> u32 {
+const fn max_normal_code(layout: &FloatLayout) -> u32 {
     if matches!(layout.specials, Specials::NanOnly) {
         // the NaN is the all-ones code, so the largest finite one is the code below it, whatever the
         // mantissa width (a layout with no mantissa has the exponent byte alone)
@@ -52,7 +52,7 @@ pub(crate) const fn max_normal_code(layout: &FloatLayout) -> u32 {
     top | mantissa_mask(layout)
 }
 
-pub(crate) const fn overflow_code(layout: &FloatLayout) -> u32 {
+const fn overflow_code(layout: &FloatLayout) -> u32 {
     match layout.specials {
         Specials::InfinityOnOverflow => infinity_code(layout),
         Specials::None | Specials::NanOnly | Specials::SaturateOnOverflow => {
@@ -61,11 +61,11 @@ pub(crate) const fn overflow_code(layout: &FloatLayout) -> u32 {
     }
 }
 
-pub(crate) const fn quiet_bit(layout: &FloatLayout) -> u32 {
+const fn quiet_bit(layout: &FloatLayout) -> u32 {
     (1u32 << layout.mantissa_bits) >> 1
 }
 
-pub(crate) const fn reserves_all_ones(layout: &FloatLayout) -> bool {
+const fn reserves_all_ones(layout: &FloatLayout) -> bool {
     matches!(
         layout.specials,
         Specials::SaturateOnOverflow | Specials::InfinityOnOverflow
