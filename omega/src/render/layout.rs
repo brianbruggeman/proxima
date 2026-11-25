@@ -201,7 +201,7 @@ fn integer_load<D: Dialect>(
             dialect.cast(&tokens.ty, &format!("({low} - {high})"))
         }
     };
-    let head = tokens.wide_head(name, &format!("{} code", tokens.word));
+    let head = tokens.wide_head(name, &dialect.parameter(&tokens.word, "code"));
     let declaration = dialect.declare(
         &tokens.word,
         "mantissa",
@@ -267,7 +267,7 @@ fn integer_store<D: Dialect>(
             )
         }
     };
-    let head = tokens.word_head(name, &format!("{} value", tokens.ty));
+    let head = tokens.word_head(name, &dialect.parameter(&tokens.ty, "value"));
     Ok(format!("\n{head} {{\n    {scaled}\n{body}\n}}\n"))
 }
 
@@ -299,7 +299,7 @@ pub fn load<D: Dialect>(
         }
         None => return field_load(&tokens, &layout, name),
     };
-    let head = tokens.wide_head(name, &format!("{} code", tokens.word));
+    let head = tokens.wide_head(name, &dialect.parameter(&tokens.word, "code"));
     Ok(format!("\n{head} {{\n    return {value};\n}}\n"))
 }
 
@@ -346,11 +346,13 @@ fn field_load<D: Dialect>(
     let fraction_lead = dialect.cast(word, &format!("({fraction} - lead)"));
     let shift_word = dialect.cast(word, "shift");
     let negative_shift_word = dialect.cast(word, "(-shift)");
-    let scaled_head = tokens.word_head(
-        &format!("{name}_scaled_bits"),
-        &format!("{word} significand, {signed} scale"),
-    );
-    let load_head = tokens.wide_head(name, &format!("{word} code"));
+    let scaled_parameters = [
+        dialect.parameter(word, "significand"),
+        dialect.parameter(signed, "scale"),
+    ]
+    .join(", ");
+    let scaled_head = tokens.word_head(&format!("{name}_scaled_bits"), &scaled_parameters);
+    let load_head = tokens.wide_head(name, &dialect.parameter(word, "code"));
     let mantissa_declaration =
         dialect.declare(word, "mantissa", &format!("code & {field_mask:#x}{suffix}"));
     let exponent_declaration = dialect.declare(
@@ -384,6 +386,14 @@ fn field_load<D: Dialect>(
             ),
         ),
     );
+    let biased_declaration =
+        dialect.declare(signed, "biased", &format!("lead + scale + {wide_bias}"));
+    let shift_declaration = dialect.declare(signed, "shift", &format!("scale + {subnormal}"));
+    let underflow = dialect.select(
+        &format!("-shift >= {word_bits}"),
+        &format!("0{suffix}"),
+        &format!("significand >> {negative_shift_word}"),
+    );
     let result = dialect.bitcast(
         &tokens.ty,
         &format!("sign | {name}_scaled_bits(significand, scale)"),
@@ -395,18 +405,18 @@ fn field_load<D: Dialect>(
         return 0{suffix};
     }}
     {lead}
-    {signed} biased = lead + scale + {wide_bias};
+    {biased_declaration}
     if (biased >= {wide_ones}) {{
         return {wide_infinity:#010x}{suffix};
     }}
     if (biased >= 1) {{
         return ({biased_word} << {fraction}{suffix}) | ((significand << {fraction_lead}) & {wide_fraction_mask:#x}{suffix});
     }}
-    {signed} shift = scale + {subnormal};
+    {shift_declaration}
     if (shift >= 0) {{
         return significand << {shift_word};
     }}
-    return -shift >= {word_bits} ? 0{suffix} : significand >> {negative_shift_word};
+    return {underflow};
 }}
 
 {load_head} {{
@@ -447,11 +457,14 @@ fn field_load_reserved<D: Dialect>(
     if !reserves_all_ones(layout) {
         return String::new();
     }
+    let nan_bits = tokens.dialect.select(
+        &format!("mantissa == 0{suffix}"),
+        &format!("0{suffix}"),
+        &format!("({quiet:#x}{suffix}{payload})"),
+    );
     let value = tokens.dialect.bitcast(
         &tokens.ty,
-        &format!(
-            "sign | {infinity:#010x}{suffix} | (mantissa == 0{suffix} ? 0{suffix} : ({quiet:#x}{suffix}{payload}))"
-        ),
+        &format!("sign | {infinity:#010x}{suffix} | ({nan_bits})"),
     );
     format!("    if (exponent == {field_ones:#x}{suffix}) {{\n        return {value};\n    }}\n")
 }
@@ -484,7 +497,7 @@ pub fn store<D: Dialect>(
         }
         None => return field_store(&tokens, &layout, name),
     };
-    let head = tokens.word_head(name, &format!("{} value", tokens.ty));
+    let head = tokens.word_head(name, &dialect.parameter(&tokens.ty, "value"));
     Ok(format!("\n{head} {{\n    return {value};\n}}\n"))
 }
 
@@ -573,11 +586,13 @@ fn field_store<D: Dialect>(
     let implicit = 1u64 << fraction;
     let top = tokens.top_bit();
     let abs_mask = tokens.abs_mask();
-    let round_head = tokens.word_head(
-        &format!("{name}_round_shift"),
-        &format!("{word} value, {word} shift"),
-    );
-    let store_head = tokens.word_head(name, &format!("{} value", tokens.ty));
+    let round_parameters = [
+        dialect.parameter(word, "value"),
+        dialect.parameter(word, "shift"),
+    ]
+    .join(", ");
+    let round_head = tokens.word_head(&format!("{name}_round_shift"), &round_parameters);
+    let store_head = tokens.word_head(name, &dialect.parameter(&tokens.ty, "value"));
     let quotient = dialect.declare(word, "quotient", "value >> shift");
     let remainder = dialect.declare(
         word,
@@ -652,6 +667,13 @@ fn field_store<D: Dialect>(
         "code",
         &format!("(base_exponent << {mantissa_bits}{suffix}) + {name}_round_shift(significand, {value_shift}{suffix} + extra_shift)"),
     );
+    let rounded = dialect.select(
+        &format!(
+            "(remainder > halfway || (remainder == halfway && (quotient & 1{suffix}) == 1{suffix}))"
+        ),
+        &format!("quotient + 1{suffix}"),
+        "quotient",
+    );
     let limit = format!("{overflow:#x}{suffix}");
     let bounded = dialect.intrinsic(Intrinsic::Min, &["code", limit.as_str()]);
     Ok(format!(
@@ -666,7 +688,7 @@ fn field_store<D: Dialect>(
     {quotient}
     {remainder}
     {halfway}
-    return (remainder > halfway || (remainder == halfway && (quotient & 1{suffix}) == 1{suffix})) ? quotient + 1{suffix} : quotient;
+    return {rounded};
 }}
 
 {store_head} {{
@@ -717,7 +739,8 @@ pub fn unpack<D: Dialect>(
         let bytes = width / 8;
         let gathered = (0..bytes)
             .map(|byte| {
-                let read = dialect.cast(word, &format!("payload[offset + {byte}{suffix}]"));
+                let byte_read = dialect.byte_at("payload", &format!("offset + {byte}{suffix}"));
+                let read = dialect.cast(word, &byte_read);
                 format!("({read} << {}{suffix})", byte * 8)
             })
             .collect::<Vec<_>>()
@@ -728,7 +751,8 @@ pub fn unpack<D: Dialect>(
     } else if 8 % width == 0 {
         let mask = (1u32 << width) - 1;
         let bit = dialect.declare(word, "bit", &format!("index * {width}{suffix}"));
-        let read = dialect.cast(word, &format!("payload[bit / 8{suffix}]"));
+        let byte_read = dialect.byte_at("payload", &format!("bit / 8{suffix}"));
+        let read = dialect.cast(word, &byte_read);
         let code = dialect.declare(
             word,
             "code",
@@ -743,10 +767,13 @@ pub fn unpack<D: Dialect>(
         });
     };
     let value = load(dialect, wide, layout, &value_name)?;
-    let head = tokens.wide_head(
-        name,
-        &format!("{}, {} index", dialect.byte_pointer("payload"), tokens.word),
-    );
+    let parameters = dialect
+        .byte_buffer("payload")
+        .into_iter()
+        .chain([dialect.parameter(word, "index")])
+        .collect::<Vec<_>>()
+        .join(", ");
+    let head = tokens.wide_head(name, &parameters);
     Ok(format!(
         "{value}\n{head} {{\n{code}    return {value_name}(code);\n}}\n"
     ))
@@ -762,18 +789,20 @@ fn straddling_unpack<D: Dialect>(tokens: &Tokens<'_, D>, width: u32) -> String {
     let spans = (7 + width).div_ceil(8);
     let joined = (1..spans)
         .map(|byte| {
-            let read = dialect.cast(word, &format!("payload[first + {byte}{suffix}]"));
-            format!(
-                " | (shift + {width}{suffix} > {}{suffix} ? {read} << {}{suffix} : 0{suffix})",
-                byte * 8,
-                byte * 8
-            )
+            let byte_read = dialect.byte_at("payload", &format!("first + {byte}{suffix}"));
+            let read = dialect.cast(word, &byte_read);
+            let reaches = dialect.select(
+                &format!("shift + {width}{suffix} > {}{suffix}", byte * 8),
+                &format!("{read} << {}{suffix}", byte * 8),
+                &format!("0{suffix}"),
+            );
+            format!(" | ({reaches})")
         })
         .collect::<String>();
     let bit = dialect.declare(word, "bit", &format!("index * {width}{suffix}"));
     let first = dialect.declare(word, "first", &format!("bit / 8{suffix}"));
     let shift = dialect.declare(word, "shift", &format!("bit % 8{suffix}"));
-    let first_read = dialect.cast(word, "payload[first]");
+    let first_read = dialect.cast(word, &dialect.byte_at("payload", "first"));
     let joined_word = dialect.declare(word, "word", &format!("{first_read}{joined}"));
     let code = dialect.declare(
         word,

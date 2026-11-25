@@ -77,8 +77,17 @@ impl Dialect for Msl {
         format!("static inline {returns} {name}({parameters})")
     }
 
-    fn byte_pointer(&self, name: &str) -> String {
-        format!("device const uchar *{name}")
+    fn parameter(&self, ty: &str, name: &str) -> String {
+        format!("{ty} {name}")
+    }
+
+    fn byte_buffer(&self, name: &str) -> Option<String> {
+        let byte = self.unsigned(1)?;
+        Some(format!("device const {byte} *{name}"))
+    }
+
+    fn byte_at(&self, buffer: &str, index: &str) -> String {
+        format!("{buffer}[{index}]")
     }
 
     fn declare(&self, ty: &str, name: &str, value: &str) -> String {

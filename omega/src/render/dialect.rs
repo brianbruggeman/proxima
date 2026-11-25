@@ -40,8 +40,12 @@ pub trait Dialect {
     fn intrinsic(&self, op: Intrinsic, args: &[&str]) -> String;
     /// The head of a device function, without its body.
     fn function(&self, returns: &str, name: &str, parameters: &str) -> String;
-    /// A read-only byte-pointer parameter named `name`.
-    fn byte_pointer(&self, name: &str) -> String;
+    /// One function parameter of type `ty` named `name`.
+    fn parameter(&self, ty: &str, name: &str) -> String;
+    /// A read-only byte-buffer parameter named `name`, or `None` when the dialect cannot spell one.
+    fn byte_buffer(&self, name: &str) -> Option<String>;
+    /// The byte at `index` of the byte buffer `buffer`.
+    fn byte_at(&self, buffer: &str, index: &str) -> String;
     /// A local declaration statement.
     fn declare(&self, ty: &str, name: &str, value: &str) -> String;
     /// A conditional value.
