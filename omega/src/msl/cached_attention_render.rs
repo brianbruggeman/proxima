@@ -1362,20 +1362,28 @@ mod whole_plane_tests {
 
         let pinned = [
             "constexpr long half_dim = head_dim;",
-            "/*device const",
-            "in8 [[buffer(8)]], */",
             "out [[buffer(8)]], constant Uniforms& u [[buffer(9)]]",
             "long live = 0L;",
-            "if (false) simdgroup_multiply_accumulate(scores[group][vector_slot], query_odd[step_index], key_odd_tile[group][step_index]",
             "constexpr bool stage_query = false;",
         ];
         for line in pinned {
             assert!(source.contains(line), "missing `{line}` in:\n{source}");
         }
-        assert!(
-            !source.contains("in8[0]"),
-            "a whole bind reads no ninth operand"
-        );
+        for absent in [
+            "in8",
+            "if (false)",
+            "/*",
+            "@",
+            "query_odd[step_index], key_odd_tile",
+            "in1 + query_offset",
+            "key_odd4",
+            "for (long step = 0L; step < cached_blocks; step++)",
+        ] {
+            assert!(
+                !source.contains(absent),
+                "`{absent}` is dead text in a whole kernel, in:\n{source}"
+            );
+        }
     }
 
     #[cfg(feature = "metal-attn-split-rows")]

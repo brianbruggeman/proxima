@@ -366,17 +366,17 @@ pub(super) fn render_cached_attention_row_tiled_with(
         (false, false) => ("", "", "9", "10"),
         (false, true) => ("", "", "8", "9"),
     };
-    // a whole bind has eight operands and no cached range, so the ninth operand's live count is the constant 0 and its parameter is commented out
-    let (live_open, live_close, live_init, odd_guard, plane_width) = if whole {
-        ("/*", "*/", "0L", "if (false) ", "head_dim")
+    // a whole bind has eight operands and no cached range, so the ninth operand's live count is the constant 0
+    let (live_init, plane_width) = if whole {
+        ("0L", "head_dim")
     } else {
-        ("", "", "(long)in8[0]", "", "head_dim / 2")
+        ("(long)in8[0]", "head_dim / 2")
     };
     let substitutions = [
-        ("@LIVE_OPEN@", live_open.to_string()),
-        ("@LIVE_CLOSE@", live_close.to_string()),
+        ("@LIVE_OPEN@", String::new()),
+        ("@LIVE_CLOSE@", String::new()),
         ("@LIVE@", live_init.to_string()),
-        ("@ODD_GUARD@", odd_guard.to_string()),
+        ("@ODD_GUARD@", String::new()),
         ("@PLANE_WIDTH@", plane_width.to_string()),
         ("@SINK_PARAM@", sink_param.to_string()),
         ("@SINK_INIT@", sink_init.to_string()),
@@ -519,12 +519,38 @@ pub(super) fn render_cached_attention_row_tiled_with(
     if !half_operands {
         source.push_str(SHARED_K_FLOAT_HELPER);
     }
-    let mut body = ROW_TILED_KERNEL.to_string();
+    let mut body = if whole {
+        without_odd_plane(ROW_TILED_KERNEL)
+    } else {
+        ROW_TILED_KERNEL.to_string()
+    };
     for (token, value) in &substitutions {
         body = body.replace(token, value);
     }
-    source.push_str(&split_step_loop(resolved.node, &body)?);
+    source.push_str(&split_step_loop_with(resolved.node, &body, !whole)?);
     Ok(source)
+}
+
+const ODD_GUARD_TOKEN: &str = "@ODD_GUARD@";
+const LIVE_OPEN_TOKEN: &str = "@LIVE_OPEN@";
+const LIVE_CLOSE_TOKEN: &str = "@LIVE_CLOSE@";
+
+/// The kernel text for one whole plane: every line guarded by `@ODD_GUARD@` (a read of the odd
+/// half plane) and the ninth-operand parameter between the `@LIVE_*@` markers are removed, so the
+/// text holds no statement that cannot run. The paired text replaces the markers with nothing.
+fn without_odd_plane(template: &str) -> String {
+    let kept: String = template
+        .split_inclusive('\n')
+        .filter(|line| !line.contains(ODD_GUARD_TOKEN))
+        .collect();
+    match (kept.find(LIVE_OPEN_TOKEN), kept.find(LIVE_CLOSE_TOKEN)) {
+        (Some(open), Some(close)) if open < close => format!(
+            "{}{}",
+            &kept[..open],
+            &kept[close + LIVE_CLOSE_TOKEN.len()..]
+        ),
+        _ => kept,
+    }
 }
 
 pub(super) const HALF_OPERAND_HELPERS: &str = r#"
@@ -572,7 +598,18 @@ fn fold_step_mode(body: &str, cached_phase: bool) -> String {
 /// `0..cached_blocks` and a new-rows phase over `cached_blocks..`, so no load
 /// site carries a runtime `mode == 0L` test. Same math and step order as one loop
 /// that derives `mode` per step.
+#[cfg(test)]
 pub(super) fn split_step_loop(node: NodeId, source: &str) -> Result<String, EmitError> {
+    split_step_loop_with(node, source, true)
+}
+
+/// [`split_step_loop`], with the cached phase left out when `cached_phase` is false: a bind with
+/// no cached range never runs it, so its text is not rendered.
+fn split_step_loop_with(
+    node: NodeId,
+    source: &str,
+    cached_phase: bool,
+) -> Result<String, EmitError> {
     let begin = source
         .find(STEP_BODY_BEGIN)
         .ok_or(EmitError::KernelTemplateMarkerMissing {
@@ -588,9 +625,11 @@ pub(super) fn split_step_loop(node: NodeId, source: &str) -> Result<String, Emit
     let body = &source[begin + STEP_BODY_BEGIN.len()..end];
     let mut out = String::with_capacity(source.len() + body.len());
     out.push_str(&source[..begin]);
-    out.push_str("    for (long step = 0L; step < cached_blocks; step++) {\n");
-    out.push_str(&fold_step_mode(body, true));
-    out.push_str("    }\n");
+    if cached_phase {
+        out.push_str("    for (long step = 0L; step < cached_blocks; step++) {\n");
+        out.push_str(&fold_step_mode(body, true));
+        out.push_str("    }\n");
+    }
     out.push_str("    for (long step = cached_blocks; step < cached_blocks + new_blocks + tail_steps; step++) {\n");
     out.push_str("        long mode = step < cached_blocks + new_blocks ? 1L : 2L;\n");
     out.push_str(&fold_step_mode(body, false));

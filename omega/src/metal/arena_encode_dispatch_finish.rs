@@ -875,11 +875,14 @@ pub(super) fn cached_attention_scratch_len_with_schedule(
         .product::<u64>()
         .checked_div(*head_dim)?;
     #[cfg(feature = "metal-attn-split-rows")]
-    let form_splits = match crate::msl::cached_attention_form_with_schedule(
-        &bound.kind,
-        numeric_policy,
-        schedule,
-    ) {
+    let form = crate::msl::cached_attention_form_with_schedule(&bound.kind, numeric_policy, schedule);
+    // a single-split row-tiled form writes the normalized rows straight to the output and has no merge dispatch, so it holds no scratch
+    #[cfg(feature = "metal-attn-split-rows")]
+    if matches!(form, Some(crate::msl::CachedAttentionForm::TwoRangeRowTiled { splits: 1, .. })) {
+        return None;
+    }
+    #[cfg(feature = "metal-attn-split-rows")]
+    let form_splits = match form {
         Some(
             crate::msl::CachedAttentionForm::TwoRangeRowTiled { splits, .. }
             | crate::msl::CachedAttentionForm::TwoRangeDecodeSplit { splits, .. },
