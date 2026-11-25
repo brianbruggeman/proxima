@@ -519,6 +519,8 @@ impl<'a> Bound<'a> {
         symbols: &[u64],
         runtime: &mut BackendRuntime,
     ) -> Result<Vec<Vec<f32>>> {
+        #[cfg(feature = "instrument")]
+        let run_started = Instant::now();
         let named: Vec<(&str, QuantizedBlock<'_>)> = self
             .named
             .iter()
@@ -527,6 +529,8 @@ impl<'a> Bound<'a> {
             .collect();
         let mut resident: BTreeSet<&str> = self.weights.names();
         resident.extend(self.call_resident.iter().map(String::as_str));
+        #[cfg(feature = "instrument")]
+        let prep = run_started.elapsed();
         #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
         if let Some(cell) = &self.op_timings {
             let (evaluated, timings) = runtime
@@ -542,10 +546,26 @@ impl<'a> Bound<'a> {
             let _ = cell.set(timings);
             return collect_outputs(&evaluated, outputs);
         }
+        #[cfg(feature = "instrument")]
+        let evaluate_started = Instant::now();
         let evaluated = runtime
             .evaluate_segment(&self.program, symbols, &named, outputs, &resident, None)
             .map_err(|error| anyhow::anyhow!("{stage} segment does not evaluate: {error:?}"))?;
-        collect_outputs(&evaluated, outputs)
+        #[cfg(feature = "instrument")]
+        let evaluate = evaluate_started.elapsed();
+        #[cfg(feature = "instrument")]
+        let collect_started = Instant::now();
+        let collected = collect_outputs(&evaluated, outputs);
+        #[cfg(feature = "instrument")]
+        proxima_telemetry::debug!(
+            stage = stage,
+            prep_us = prep.as_micros() as u64,
+            evaluate_us = evaluate.as_micros() as u64,
+            collect_us = collect_started.elapsed().as_micros() as u64,
+            run_us = run_started.elapsed().as_micros() as u64,
+            "encoder-decoder stage run breakdown"
+        );
+        collected
     }
 }
 
@@ -825,7 +845,14 @@ impl Model {
             },
         )?;
 
+        #[cfg(feature = "instrument")]
+        let runtime_started = Instant::now();
         let mut runtime = self.runtime()?;
+        #[cfg(feature = "instrument")]
+        proxima_telemetry::debug!(
+            runtime_us = runtime_started.elapsed().as_micros() as u64,
+            "transcribe fresh backend runtime built"
+        );
         let mut gpu_peak = None;
         let padded = pad(wav)?;
         let front = front_end(&self.dir)?;
@@ -886,6 +913,8 @@ impl Model {
             }
         }
 
+        #[cfg(feature = "instrument")]
+        let graph_started = Instant::now();
         let mut bound = Bound::new(self.shape.clone());
         let mel_leaf = bound.leaf("mel", &[1, self.shape.mels, needed as u32]);
         bound.named.insert("mel".into(), mel_input);
@@ -924,7 +953,15 @@ impl Model {
             outputs.push(*k);
             outputs.push(*v);
         }
+        #[cfg(feature = "instrument")]
+        let bind_started = Instant::now();
         bound.bind(self)?;
+        #[cfg(feature = "instrument")]
+        proxima_telemetry::debug!(
+            graph_us = bind_started.duration_since(graph_started).as_micros() as u64,
+            bind_us = bind_started.elapsed().as_micros() as u64,
+            "encoder graph built and weights bound, outside encode_us"
+        );
         #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
         {
             bound.op_timings = self.profile_encode.then(std::sync::OnceLock::new);
