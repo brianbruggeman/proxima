@@ -4,8 +4,6 @@ use core::fmt::{Debug, Formatter};
 use core::future::Future;
 #[cfg(test)]
 use core::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(test)]
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::string::String;
 use std::sync::Arc;
@@ -14,25 +12,23 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use conflaguration::Validate;
 use omega::config::{RuntimeConfig, SelectionMode};
-use omega::owner_config::OwnerConfig;
 use omega::device_owner::{
-    OwnerCommand as DeviceOwnerCommand, OwnerFlow, PlanLease, PlanRegistry, PlanRegistryError,
+    Command, Completion, DeviceHandle, DeviceKey, DeviceOwnerError, Frame, OwnerFlow, PlanLease,
+    PlanRegistry, PlanRegistryError, RegisterRequest, ResidentRef, StepOutcome, StepReply,
     execute_registered_plan, run_owner,
 };
+use omega::owner_config::OwnerConfig;
 use prime::os::background::ProximaBackgroundPool;
 use proxima_core::ProximaError;
+#[cfg(test)]
+use proxima_core::ring::Ring;
 use proxima_numeric::codec::Codec;
 use proxima_primitives::pipe::PipeExt;
 use proxima_primitives::pipe::{
     CreditAcquireError, CreditCapacityError, CreditGate, CreditLease, Pipe,
 };
-#[cfg(test)]
-use proxima_primitives::sync::blocking::Mutex;
-use proxima_primitives::sync::mpsc::{
-    Receiver as CommandReceiver, Sender as CommandSender, channel as command_channel,
-};
-use proxima_primitives::sync::oneshot;
-use proxima_tensor::cpu::QuantizedBlock;
+use proxima_primitives::sync::mpsc::{Receiver as CommandReceiver, channel as command_channel};
+use proxima_tensor::cpu::{Evaluated, QuantizedBlock};
 use proxima_tensor::{NodeId, Op};
 use proxima_numeric::{NumericPolicy};
 
@@ -42,24 +38,15 @@ mod owner_failure_tests;
 #[cfg(test)]
 mod prime_progress_tests;
 
-type OwnerCommand = DeviceOwnerCommand<
-    OwnedGraph,
-    omega::CudaPlan,
-    AdmittedGpuJob,
-    CompletedGpuJob,
-    CudaPlanRegistrationError,
->;
+#[cfg(test)]
+const FAKE_LOG_CAPACITY: usize = 256;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CudaPlanRegistrationError {
     #[error("async cuda planning does not support {mode}")]
     UnsupportedMode { mode: &'static str },
-    #[error("cuda service closed after execution failure")]
-    ServiceClosed,
     #[error(transparent)]
-    Registry(#[from] PlanRegistryError),
-    #[error(transparent)]
-    Driver(#[from] omega::CudaDriverError),
+    Owner(#[from] DeviceOwnerError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -74,6 +61,8 @@ pub enum CudaExecutionError {
     ServiceClosedWithInput(OwnedGpuJob),
     #[error("cuda owner stopped before returning the result")]
     OwnerStopped,
+    #[error("cuda owner does not hold resident slots {slots:?}")]
+    MissingResident { slots: Vec<u32> },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -127,16 +116,6 @@ impl Debug for AdmittedGpuJob {
             .field("job", &self.job)
             .finish_non_exhaustive()
     }
-}
-
-struct OwnedGraph {
-    program: Vec<Op>,
-    symbols: Vec<u64>,
-    outputs: Vec<NodeId>,
-    numeric_policy: NumericPolicy,
-    exact_activations: bool,
-    omega_runtime: Option<RuntimeConfig>,
-    inputs: OwnedGpuInputs,
 }
 
 /// The plan-shaping options that travel together into `register_graph`.
@@ -203,43 +182,83 @@ enum RegisteredPlan {
     },
 }
 
+/// A registered plan and the resident blocks the owner keeps for it, indexed by slot.
+struct OwnedRegistration {
+    plan: RegisteredPlan,
+    blocks: Vec<(Arc<str>, OwnedBlock)>,
+}
+
 struct OwnerState {
-    plans: PlanRegistry<RegisteredPlan>,
+    plans: PlanRegistry<OwnedRegistration>,
     driver: Option<omega::CudaDriver>,
     completed_jobs: u64,
     #[cfg(test)]
     fake_owner_hold: Option<(Sender<()>, Receiver<()>)>,
 }
 
-struct CompletedGpuJob {
-    result: Result<proxima_tensor::cpu::Evaluated, CudaExecutionError>,
-    completion_sequence: u64,
-    _credit: CreditLease,
+/// Answers a command the drained owner will not run, as the omega owner's `reject` does.
+fn reject_after_execution_failure(command: Command<OwnedBlock>) {
+    match command {
+        Command::Register { reply, .. } => {
+            let _ = reply.send(Err(DeviceOwnerError::Stopped));
+        }
+        Command::Step { completion, .. } => completion.complete(Err(DeviceOwnerError::Stopped)),
+        Command::Retire { reply, .. } => {
+            let _ = reply.send(Err(DeviceOwnerError::Stopped));
+        }
+        Command::Snapshot { reply } => {
+            let _ = reply.send(Err(DeviceOwnerError::Stopped));
+        }
+        Command::ReleaseNames { reply, .. }
+        | Command::ReleaseRanges { reply, .. }
+        | Command::Shutdown { reply } => {
+            let _ = reply.send(());
+        }
+    }
 }
 
-fn reject_after_execution_failure(command: OwnerCommand, completion_sequence: u64) {
-    match command {
-        OwnerCommand::ExecutePlan { job, reply } => {
-            let AdmittedGpuJob { job, credit } = job;
-            drop(job);
-            let _ = reply.send(CompletedGpuJob {
-                result: Err(CudaExecutionError::ServiceClosed),
-                completion_sequence,
-                _credit: credit,
-            });
-        }
-        OwnerCommand::RegisterGraph { reply, .. } => {
-            let _ = reply.send(Err(CudaPlanRegistrationError::ServiceClosed));
-        }
-        OwnerCommand::RegisterPlan { reply, .. } => {
-            let _ = reply.send(Err(PlanRegistryError::ServiceClosed));
-        }
-        OwnerCommand::RetirePlan { reply, .. } => {
-            let _ = reply.send(Err(PlanRegistryError::ServiceClosed));
-        }
-        OwnerCommand::DeviceSnapshot { reply } => drop(reply),
-        OwnerCommand::InvalidateResidents { reply, .. } => drop(reply),
+fn execution_error(error: DeviceOwnerError) -> CudaExecutionError {
+    match error {
+        DeviceOwnerError::Driver(inner) => CudaExecutionError::Driver(inner),
+        DeviceOwnerError::Registry(inner) => CudaExecutionError::Plan(inner),
+        DeviceOwnerError::Stopped | DeviceOwnerError::Closed => CudaExecutionError::ServiceClosed,
     }
+}
+
+fn registry_error(error: DeviceOwnerError) -> PlanRegistryError {
+    match error {
+        DeviceOwnerError::Registry(inner) => inner,
+        DeviceOwnerError::Stopped => PlanRegistryError::ServiceClosed,
+        DeviceOwnerError::Closed | DeviceOwnerError::Driver(_) => PlanRegistryError::OwnerStopped,
+    }
+}
+
+/// Splits one job's inputs into resident refs by slot and dynamic blocks by name.
+///
+/// A slot is the block's position among the resident blocks in input order, the same rule the
+/// registration used to keep them. The device address is the owner's to know, so it is left zero.
+fn frame_for(inputs: &OwnedGpuInputs) -> Frame<OwnedBlock> {
+    let resident = inputs
+        .resident_names
+        .iter()
+        .map(AsRef::as_ref)
+        .collect::<BTreeSet<&str>>();
+    let mut frame = Frame::default();
+    for named in inputs.blocks.iter() {
+        if resident.contains(named.name.as_ref()) {
+            let slot = u32::try_from(frame.residents.len()).unwrap_or(u32::MAX);
+            frame.residents.push(ResidentRef {
+                slot,
+                address: 0,
+                len: block_byte_len(QuantizedBlock::from(&named.block)).unwrap_or(0),
+            });
+        } else {
+            frame
+                .dynamic
+                .push((Arc::clone(&named.name), named.block.clone()));
+        }
+    }
+    frame
 }
 
 /// An evaluated graph with its completion position on the CUDA owner.
@@ -269,11 +288,11 @@ impl Pipe for GpuCapacityGate<'_> {
 }
 
 struct CudaExecutionPipe {
-    commands: Arc<CommandSender<OwnerCommand>>,
+    commands: DeviceHandle<OwnedBlock>,
 }
 
 struct CudaExecutionReceiptPipe {
-    commands: Arc<CommandSender<OwnerCommand>>,
+    commands: DeviceHandle<OwnedBlock>,
 }
 
 impl Pipe for CudaExecutionPipe {
@@ -282,7 +301,7 @@ impl Pipe for CudaExecutionPipe {
     type Err = GpuPipeError;
 
     fn call(&self, job: AdmittedGpuJob) -> impl Future<Output = Result<Self::Out, Self::Err>> {
-        submit_cuda_job(Arc::clone(&self.commands), job)
+        submit_cuda_job(self.commands.clone(), job)
     }
 }
 
@@ -292,57 +311,58 @@ impl Pipe for CudaExecutionReceiptPipe {
     type Err = GpuPipeError;
 
     fn call(&self, job: AdmittedGpuJob) -> impl Future<Output = Result<Self::Out, Self::Err>> {
-        submit_cuda_job_recorded(Arc::clone(&self.commands), job)
+        submit_cuda_job_recorded(self.commands.clone(), job)
     }
 }
 
 async fn submit_cuda_job(
-    commands: Arc<CommandSender<OwnerCommand>>,
+    commands: DeviceHandle<OwnedBlock>,
     job: AdmittedGpuJob,
-) -> Result<proxima_tensor::cpu::Evaluated, GpuPipeError> {
+) -> Result<Evaluated, GpuPipeError> {
     Ok(submit_cuda_job_recorded(commands, job).await?.evaluated)
 }
 
 async fn submit_cuda_job_recorded(
-    commands: Arc<CommandSender<OwnerCommand>>,
-    job: AdmittedGpuJob,
+    commands: DeviceHandle<OwnedBlock>,
+    admitted: AdmittedGpuJob,
 ) -> Result<CudaExecutionReceipt, GpuPipeError> {
-    let (reply, response) = oneshot::channel();
-    let command = OwnerCommand::ExecutePlan { job, reply };
-    match commands.send(command).await {
-        Ok(()) => match response.await {
-            Ok(completed) => completed
-                .result
-                .map(|evaluated| CudaExecutionReceipt {
-                    evaluated,
-                    completion_sequence: completed.completion_sequence,
-                })
-                .map_err(GpuPipeError::Execution),
-            Err(_) => Err(GpuPipeError::Execution(CudaExecutionError::OwnerStopped)),
-        },
-        Err(error) => match error.into_inner() {
-            OwnerCommand::ExecutePlan { job, .. } => Err(GpuPipeError::Execution(
-                CudaExecutionError::ServiceClosedWithInput(job.job),
-            )),
-            OwnerCommand::DeviceSnapshot { .. }
-            | OwnerCommand::RegisterGraph { .. }
-            | OwnerCommand::RegisterPlan { .. }
-            | OwnerCommand::RetirePlan { .. }
-            | OwnerCommand::InvalidateResidents { .. } => {
-                unreachable!("execute send returns its execute command")
-            }
-        },
+    let AdmittedGpuJob {
+        job,
+        credit: _credit,
+    } = admitted;
+    let completion = Completion::new();
+    let reply = commands
+        .step(&job.lease, frame_for(&job.inputs), &completion)
+        .await;
+    match reply {
+        Ok(StepOutcome::Done {
+            evaluated,
+            sequence,
+            ..
+        }) => Ok(CudaExecutionReceipt {
+            evaluated,
+            completion_sequence: sequence,
+        }),
+        Ok(StepOutcome::NeedResident { slots, .. }) => Err(GpuPipeError::Execution(
+            CudaExecutionError::MissingResident { slots },
+        )),
+        Err(DeviceOwnerError::Closed) => Err(GpuPipeError::Execution(
+            CudaExecutionError::ServiceClosedWithInput(job),
+        )),
+        Err(error) => Err(GpuPipeError::Execution(execution_error(error))),
     }
 }
 
-fn borrow_owned_block(block: &OwnedBlock) -> QuantizedBlock<'_> {
-    match block {
-        OwnedBlock::Float32(values) => QuantizedBlock::Float32(values),
-        OwnedBlock::Int32(values) => QuantizedBlock::Int32(values),
-        OwnedBlock::Packed { codec, bytes } => QuantizedBlock::Packed {
-            codec: **codec,
-            bytes,
-        },
+impl<'block> From<&'block OwnedBlock> for QuantizedBlock<'block> {
+    fn from(block: &'block OwnedBlock) -> Self {
+        match block {
+            OwnedBlock::Float32(values) => QuantizedBlock::Float32(values),
+            OwnedBlock::Int32(values) => QuantizedBlock::Int32(values),
+            OwnedBlock::Packed { codec, bytes } => QuantizedBlock::Packed {
+                codec: **codec,
+                bytes,
+            },
+        }
     }
 }
 
@@ -351,28 +371,28 @@ fn selects_hip(runtime: &RuntimeConfig) -> bool {
 }
 
 fn execute_cuda_plan(
-    plan: &mut RegisteredPlan,
-    inputs: &OwnedGpuInputs,
-) -> Result<proxima_tensor::cpu::Evaluated, omega::CudaDriverError> {
-    let named = inputs
-        .blocks
+    registered: &mut OwnedRegistration,
+    frame: &Frame<OwnedBlock>,
+) -> Result<Result<Evaluated, Vec<u32>>, omega::CudaDriverError> {
+    let missing = frame
+        .residents
         .iter()
-        .map(|input| (input.name.as_ref(), borrow_owned_block(&input.block)))
+        .filter(|resident| registered.blocks.get(resident.slot as usize).is_none())
+        .map(|resident| resident.slot)
         .collect::<Vec<_>>();
-    let resident_names = inputs
-        .resident_names
+    if !missing.is_empty() {
+        return Ok(Err(missing));
+    }
+    let named = frame
+        .residents
         .iter()
-        .map(AsRef::as_ref)
-        .collect::<BTreeSet<&str>>();
-    match plan {
-        RegisteredPlan::Rocm(plan) => plan.execute_named(
-            &named,
-            (!resident_names.is_empty()).then_some(&resident_names),
-        ),
-        RegisteredPlan::Cuda(plan) => plan.execute_named(
-            &named,
-            (!resident_names.is_empty()).then_some(&resident_names),
-        ),
+        .filter_map(|resident| registered.blocks.get(resident.slot as usize))
+        .chain(frame.dynamic.iter())
+        .map(|(name, block)| (name.as_ref(), QuantizedBlock::from(block)))
+        .collect::<Vec<_>>();
+    let evaluated = match &mut registered.plan {
+        RegisteredPlan::Rocm(plan) => plan.execute_named(&named, None),
+        RegisteredPlan::Cuda(plan) => plan.execute_named(&named, None),
         #[cfg(test)]
         RegisteredPlan::Fake {
             program,
@@ -383,7 +403,129 @@ fn execute_cuda_plan(
                 node: outputs.last().copied().unwrap_or(NodeId(0)),
                 reason: "fake graph evaluation failed",
             }),
+    };
+    evaluated.map(Ok)
+}
+
+/// One step on the owner: counts it, runs the plan under a job lease, and hands the frame back.
+fn execute_step(
+    plans: &mut PlanRegistry<OwnedRegistration>,
+    completed_jobs: &mut u64,
+    lease: &PlanLease,
+    frame: Frame<OwnedBlock>,
+) -> StepReply<OwnedBlock> {
+    let sequence = *completed_jobs;
+    *completed_jobs += 1;
+    let outcome = execute_registered_plan(plans, lease, |registered| {
+        execute_cuda_plan(registered, &frame)
+    })??;
+    Ok(match outcome {
+        Ok(evaluated) => StepOutcome::Done {
+            evaluated,
+            frame,
+            sequence,
+        },
+        Err(slots) => StepOutcome::NeedResident { slots, frame },
+    })
+}
+
+/// Fake-owner logs: lock-free rings and an atomic, so a test reads what the owner did without a lock.
+#[cfg(test)]
+struct FakeLogs {
+    plan_inputs: Arc<Ring<FakePlanInputs>>,
+    released_names: Arc<Ring<Arc<str>>>,
+    execute_count: Arc<AtomicUsize>,
+}
+
+/// Plans and registers on the owner: HIP or CUDA by the runtime selection, or the test fake.
+fn register_on_owner(
+    plans: &mut PlanRegistry<OwnedRegistration>,
+    driver: &mut Option<omega::CudaDriver>,
+    request: RegisterRequest<OwnedBlock>,
+    #[cfg(test)] fake: Option<&FakeLogs>,
+) -> Result<PlanLease, DeviceOwnerError> {
+    let RegisterRequest {
+        program,
+        symbols,
+        outputs,
+        blocks,
+        resident_names,
+        numeric_policy,
+        exact_activations,
+        config,
+    } = request;
+    let resident = resident_names
+        .iter()
+        .map(AsRef::as_ref)
+        .collect::<BTreeSet<&str>>();
+    let mut plan = {
+        #[cfg(test)]
+        if let Some(logs) = fake {
+            let _ = logs.plan_inputs.push(FakePlanInputs {
+                numeric_policy,
+                exact_activations,
+                omega_runtime: config.clone(),
+            });
+            let plan = RegisteredPlan::Fake {
+                program,
+                outputs,
+                symbols,
+            };
+            return keep_resident(plans, plan, blocks, &resident);
+        }
+        let named = blocks
+            .iter()
+            .map(|(name, block)| (name.as_ref(), QuantizedBlock::from(block)))
+            .collect::<Vec<_>>();
+        if let Some(runtime) = config.as_ref().filter(|runtime| selects_hip(runtime)) {
+            let wave = omega::backend::hip::shared::hip_wave_of(runtime);
+            let plan = omega::backend::hip::shared::plan(
+                runtime, wave, &program, &symbols, &named, &outputs,
+            )?;
+            RegisteredPlan::Rocm(Box::new(plan))
+        } else {
+            if driver.is_none() {
+                *driver = Some(omega::CudaDriver::new(0)?);
+            }
+            let Some(driver) = driver.as_ref() else {
+                return Err(DeviceOwnerError::Stopped);
+            };
+            let plan = match &config {
+                Some(runtime) => {
+                    driver.plan_with_config(&program, &symbols, &outputs, &named, runtime)?
+                }
+                None => driver.plan_with_activation_policy(
+                    &program,
+                    &symbols,
+                    &outputs,
+                    numeric_policy,
+                    exact_activations,
+                    &named,
+                )?,
+            };
+            RegisteredPlan::Cuda(Box::new(plan))
+        }
+    };
+    match &mut plan {
+        RegisteredPlan::Cuda(device) => device.mark_resident(&resident),
+        RegisteredPlan::Rocm(device) => device.mark_resident(&resident),
+        #[cfg(test)]
+        RegisteredPlan::Fake { .. } => {}
     }
+    keep_resident(plans, plan, blocks, &resident)
+}
+
+fn keep_resident(
+    plans: &mut PlanRegistry<OwnedRegistration>,
+    plan: RegisteredPlan,
+    blocks: Vec<(Arc<str>, OwnedBlock)>,
+    resident: &BTreeSet<&str>,
+) -> Result<PlanLease, DeviceOwnerError> {
+    let blocks = blocks
+        .into_iter()
+        .filter(|(name, _)| resident.contains(name.as_ref()))
+        .collect();
+    Ok(plans.register(OwnedRegistration { plan, blocks })?)
 }
 
 struct ReservationSink;
@@ -606,16 +748,12 @@ impl OwnedByteBlock {
 /// Owns the dedicated worker pool until its shutdown future has completed.
 pub struct CudaGpuService<Owner> {
     pool: Option<ProximaBackgroundPool>,
-    commands: Arc<CommandSender<OwnerCommand>>,
+    commands: DeviceHandle<OwnedBlock>,
     job_gate: Arc<CreditGate<ReservationSink>>,
     byte_budget: Arc<OwnedByteBudget>,
     owner: Owner,
     #[cfg(test)]
-    fake_resident_sources: Arc<Mutex<BTreeMap<NodeId, usize>>>,
-    #[cfg(test)]
-    fake_plan_inputs: Arc<Mutex<Vec<FakePlanInputs>>>,
-    #[cfg(test)]
-    fake_execute_count: Arc<AtomicUsize>,
+    fake_logs: FakeLogs,
 }
 
 #[cfg(test)]
@@ -685,23 +823,23 @@ impl CudaGpuService<()> {
         let pool = ProximaBackgroundPool::with_threads(1)?;
         let (commands, owner_commands) = command_channel(config.queue_depth);
         let plan_capacity = config.plan_capacity;
-        let commands = Arc::new(commands);
+        let commands = DeviceHandle::new(DeviceKey(0), commands);
         let owner_job_gate = Arc::clone(&job_gate);
         let owner_byte_budget = Arc::clone(&byte_budget);
         let identity = Arc::new(());
         let owner_identity = Arc::clone(&identity);
         #[cfg(test)]
-        let fake_resident_sources = Arc::new(Mutex::new(BTreeMap::new()));
+        let fake_logs = FakeLogs {
+            plan_inputs: Arc::new(Ring::with_capacity(FAKE_LOG_CAPACITY)),
+            released_names: Arc::new(Ring::with_capacity(FAKE_LOG_CAPACITY)),
+            execute_count: Arc::new(AtomicUsize::new(0)),
+        };
         #[cfg(test)]
-        let owner_fake_resident_sources = Arc::clone(&fake_resident_sources);
-        #[cfg(test)]
-        let fake_plan_inputs = Arc::new(Mutex::new(Vec::new()));
-        #[cfg(test)]
-        let owner_fake_plan_inputs = Arc::clone(&fake_plan_inputs);
-        #[cfg(test)]
-        let fake_execute_count = Arc::new(AtomicUsize::new(0));
-        #[cfg(test)]
-        let owner_fake_execute_count = Arc::clone(&fake_execute_count);
+        let owner_fake_logs = FakeLogs {
+            plan_inputs: Arc::clone(&fake_logs.plan_inputs),
+            released_names: Arc::clone(&fake_logs.released_names),
+            execute_count: Arc::clone(&fake_logs.execute_count),
+        };
         let owner = pool.spawn_async(async move {
             let state = OwnerState {
                 plans: PlanRegistry::new(owner_identity, plan_capacity),
@@ -711,8 +849,8 @@ impl CudaGpuService<()> {
                 fake_owner_hold,
             };
             let handle = move |state: &mut OwnerState,
-                               owner_commands: &mut CommandReceiver<OwnerCommand>,
-                               command: OwnerCommand| {
+                               owner_commands: &mut CommandReceiver<Command<OwnedBlock>>,
+                               command: Command<OwnedBlock>| {
                 let OwnerState {
                     plans,
                     driver,
@@ -722,7 +860,7 @@ impl CudaGpuService<()> {
                 } = state;
                 let mut flow = OwnerFlow::Continue;
                 match command {
-                    OwnerCommand::DeviceSnapshot { reply } => {
+                    Command::Snapshot { reply } => {
                         let result =
                             match driver.take().map_or_else(|| omega::CudaDriver::new(0), Ok) {
                                 Ok(created) => {
@@ -732,104 +870,54 @@ impl CudaGpuService<()> {
                                 }
                                 Err(error) => Err(error),
                             };
-                        let _ = reply.send(result);
+                        let _ = reply.send(result.map_err(DeviceOwnerError::from));
                     }
-                    OwnerCommand::RegisterGraph { graph, reply } => {
-                        let result = (|graph: OwnedGraph| {
+                    Command::Register { request, reply } => {
+                        let result = register_on_owner(
+                            plans,
+                            driver,
+                            *request,
                             #[cfg(test)]
-                            if fake {
-                                owner_fake_plan_inputs.lock().push(FakePlanInputs {
-                                    numeric_policy: graph.numeric_policy,
-                                    exact_activations: graph.exact_activations,
-                                    omega_runtime: graph.omega_runtime.clone(),
-                                });
-                                return plans
-                                    .register(RegisteredPlan::Fake {
-                                        program: graph.program,
-                                        outputs: graph.outputs,
-                                        symbols: graph.symbols,
-                                    })
-                                    .map_err(CudaPlanRegistrationError::from);
-                            }
-                            let named = graph
-                                .inputs
-                                .blocks
-                                .iter()
-                                .map(|input| {
-                                    (input.name.as_ref(), borrow_owned_block(&input.block))
-                                })
-                                .collect::<Vec<_>>();
-                            if let Some(config) = graph.omega_runtime.as_ref().filter(|config| selects_hip(config)) {
-                                let plan = omega::backend::hip::shared::plan(
-                                    config,
-                                    omega::backend::hip::shared::hip_wave_of(config),
-                                    &graph.program,
-                                    &graph.symbols,
-                                    &named,
-                                    &graph.outputs,
-                                )?;
-                                return plans
-                                    .register(RegisteredPlan::Rocm(Box::new(plan)))
-                                    .map_err(CudaPlanRegistrationError::from);
-                            }
-                            if driver.is_none() {
-                                *driver = Some(omega::CudaDriver::new(0)?);
-                            }
-                            let Some(driver) = driver.as_ref() else {
-                                unreachable!("cuda driver was created above")
-                            };
-                            let plan = match &graph.omega_runtime {
-                                Some(config) => driver.plan_with_config(
-                                    &graph.program,
-                                    &graph.symbols,
-                                    &graph.outputs,
-                                    &named,
-                                    config,
-                                )?,
-                                None => driver.plan_with_activation_policy(
-                                    &graph.program,
-                                    &graph.symbols,
-                                    &graph.outputs,
-                                    graph.numeric_policy,
-                                    graph.exact_activations,
-                                    &named,
-                                )?,
-                            };
-                            plans
-                                .register(RegisteredPlan::Cuda(Box::new(plan)))
-                                .map_err(CudaPlanRegistrationError::from)
-                        })(*graph);
+                            fake.then_some(&owner_fake_logs),
+                        );
                         if let Err(Ok(lease)) = reply.send(result) {
                             let _ = plans.retire(&lease);
                         }
                     }
-                    OwnerCommand::RegisterPlan { plan, reply } => {
-                        let result = plans.register(RegisteredPlan::Cuda(plan));
-                        if let Err(Ok(lease)) = reply.send(result) {
-                            let _ = plans.retire(&lease);
-                        }
+                    Command::Retire { lease, reply } => {
+                        let _ = reply.send(plans.retire(&lease).map_err(DeviceOwnerError::from));
                     }
-                    OwnerCommand::RetirePlan { lease, reply } => {
-                        let _ = reply.send(plans.retire(&lease));
-                    }
-                    OwnerCommand::InvalidateResidents { nodes, reply } => {
+                    Command::ReleaseNames { names, reply } => {
                         #[cfg(test)]
                         if fake {
-                            let mut sources = owner_fake_resident_sources.lock();
-                            for node in &nodes {
-                                sources.remove(node);
+                            for name in &names {
+                                let _ = owner_fake_logs.released_names.push(Arc::clone(name));
                             }
                         }
-                        let result = match driver.as_ref() {
-                            Some(driver) => driver.invalidate_resident_buffers(&nodes),
-                            None => Ok(()),
-                        };
-                        let _ = reply.send(result);
+                        if let Some(driver) = driver.as_ref() {
+                            driver.release_resident_names(names.iter().map(AsRef::as_ref));
+                        }
+                        let _ = reply.send(());
                     }
-                    OwnerCommand::ExecutePlan { job, reply } => {
+                    Command::ReleaseRanges { ranges, reply } => {
+                        if let Some(driver) = driver.as_ref() {
+                            driver.release_resident_ranges(&ranges);
+                        }
+                        let _ = reply.send(());
+                    }
+                    Command::Shutdown { reply } => {
+                        owner_commands.close();
+                        let _ = reply.send(());
+                        flow = OwnerFlow::Drain;
+                    }
+                    Command::Step {
+                        lease,
+                        frame,
+                        completion,
+                    } => {
                         #[cfg(test)]
                         if fake {
-                            owner_fake_execute_count.fetch_add(1, Ordering::Relaxed);
+                            owner_fake_logs.execute_count.fetch_add(1, Ordering::Relaxed);
                             if let Some((accepted_sender, release_receiver)) =
                                 fake_owner_hold.take()
                             {
@@ -837,30 +925,14 @@ impl CudaGpuService<()> {
                                 let _ = release_receiver.recv();
                             }
                         }
-                        let AdmittedGpuJob {
-                            job: OwnedGpuJob { lease, inputs },
-                            credit,
-                        } = job;
-                        let result = execute_registered_plan(plans, &lease, |plan| {
-                            execute_cuda_plan(plan, &inputs)
-                        })
-                        .map_err(CudaExecutionError::Plan)
-                        .and_then(|result| result.map_err(CudaExecutionError::Driver));
-                        let execution_failed =
-                            matches!(&result, Err(CudaExecutionError::Driver(_)));
-                        drop(inputs);
-                        let completion_sequence = *completed_jobs;
-                        *completed_jobs += 1;
+                        let reply = execute_step(plans, completed_jobs, &lease, frame);
+                        let execution_failed = matches!(&reply, Err(DeviceOwnerError::Driver(_)));
                         if execution_failed {
                             owner_job_gate.close();
                             owner_byte_budget.gate.close();
                             owner_commands.close();
                         }
-                        let _ = reply.send(CompletedGpuJob {
-                            result,
-                            completion_sequence,
-                            _credit: credit,
-                        });
+                        completion.complete(reply);
                         if execution_failed {
                             flow = OwnerFlow::Drain;
                         }
@@ -868,8 +940,8 @@ impl CudaGpuService<()> {
                 }
                 flow
             };
-            let reject = |state: &mut OwnerState, command: OwnerCommand| {
-                reject_after_execution_failure(command, state.completed_jobs);
+            let reject = |_: &mut OwnerState, command: Command<OwnedBlock>| {
+                reject_after_execution_failure(command);
             };
             run_owner(owner_commands, state, handle, reject).await;
             Ok(())
@@ -882,11 +954,7 @@ impl CudaGpuService<()> {
             byte_budget,
             owner,
             #[cfg(test)]
-            fake_resident_sources,
-            #[cfg(test)]
-            fake_plan_inputs,
-            #[cfg(test)]
-            fake_execute_count,
+            fake_logs,
         })
     }
 }
@@ -899,14 +967,9 @@ where
     pub async fn device_snapshot(
         &self,
     ) -> Result<omega::CudaDeviceSnapshot, CudaPlanRegistrationError> {
-        let (reply, response) = oneshot::channel();
         self.commands
-            .send(OwnerCommand::DeviceSnapshot { reply })
+            .snapshot()
             .await
-            .map_err(|_| PlanRegistryError::OwnerStopped)?;
-        response
-            .await
-            .map_err(|_| PlanRegistryError::OwnerStopped)?
             .map_err(CudaPlanRegistrationError::from)
     }
 
@@ -939,66 +1002,50 @@ where
             omega_runtime,
         } = options;
         validate_cuda_plan_options(numeric_policy, exact_activations, omega_runtime)?;
-        let (reply, response) = oneshot::channel();
-        let graph = OwnedGraph {
+        let request = RegisterRequest {
             program: program.to_vec(),
             symbols: symbols.to_vec(),
             outputs: outputs.to_vec(),
+            blocks: inputs
+                .blocks
+                .iter()
+                .map(|named| (Arc::clone(&named.name), named.block.clone()))
+                .collect(),
+            resident_names: inputs.resident_names.to_vec(),
             numeric_policy,
             exact_activations,
-            omega_runtime: omega_runtime.cloned(),
-            inputs: inputs.clone(),
+            config: omega_runtime.cloned(),
         };
         self.commands
-            .send(OwnerCommand::RegisterGraph {
-                graph: Box::new(graph),
-                reply,
-            })
+            .register(request)
             .await
-            .map_err(|_| PlanRegistryError::OwnerStopped)?;
-        response
-            .await
-            .unwrap_or(Err(PlanRegistryError::OwnerStopped.into()))
+            .map_err(CudaPlanRegistrationError::from)
     }
 
     #[cfg(test)]
     pub(crate) fn fake_plan_inputs(&self) -> Vec<FakePlanInputs> {
-        self.fake_plan_inputs.lock().clone()
+        core::iter::from_fn(|| self.fake_logs.plan_inputs.dequeue()).collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fake_released_names(&self) -> Vec<Arc<str>> {
+        core::iter::from_fn(|| self.fake_logs.released_names.dequeue()).collect()
     }
 
     #[cfg(test)]
     pub(crate) fn fake_execute_count(&self) -> usize {
-        self.fake_execute_count.load(Ordering::Relaxed)
+        self.fake_logs.execute_count.load(Ordering::Relaxed)
     }
 
-    /// Clears changed resident device copies on the service owner.
-    pub async fn invalidate_resident_sources(
+    /// Evicts the named resident device copies on the service owner.
+    pub async fn release_resident_names(
         &self,
-        program: &[Op],
         names: &BTreeSet<&str>,
     ) -> Result<(), CudaPlanRegistrationError> {
-        let nodes = program
-            .iter()
-            .enumerate()
-            .filter_map(|(index, op)| match op {
-                Op::Input {
-                    name: Some(name), ..
-                } if names.contains(name.as_str()) => Some(
-                    u32::try_from(index)
-                        .map(NodeId)
-                        .map_err(|_| PlanRegistryError::ProgramTooLarge),
-                ),
-                _ => None,
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let (reply, response) = oneshot::channel();
+        let names = names.iter().map(|name| Arc::from(*name)).collect();
         self.commands
-            .send(OwnerCommand::InvalidateResidents { nodes, reply })
+            .release_names(names)
             .await
-            .map_err(|_| PlanRegistryError::OwnerStopped)?;
-        response
-            .await
-            .map_err(|_| PlanRegistryError::OwnerStopped)?
             .map_err(CudaPlanRegistrationError::from)
     }
 
@@ -1008,17 +1055,7 @@ where
     /// it is queued the owner retires it regardless, and a repeat call reports
     /// `Stale`.
     pub async fn retire_cuda_plan(&self, lease: &PlanLease) -> Result<(), PlanRegistryError> {
-        let (reply, response) = oneshot::channel();
-        self.commands
-            .send(OwnerCommand::RetirePlan {
-                lease: lease.clone(),
-                reply,
-            })
-            .await
-            .map_err(|_| PlanRegistryError::OwnerStopped)?;
-        response
-            .await
-            .unwrap_or(Err(PlanRegistryError::OwnerStopped))
+        self.commands.retire(lease).await.map_err(registry_error)
     }
 
     /// Await bounded owner execution through the composed admission and execution Pipes.
@@ -1031,7 +1068,7 @@ where
             gate: &self.job_gate,
         }
         .and_then(CudaExecutionPipe {
-            commands: Arc::clone(&self.commands),
+            commands: self.commands.clone(),
         });
         pipeline
             .call(OwnedGpuJob {
@@ -1051,7 +1088,7 @@ where
             gate: &self.job_gate,
         }
         .and_then(CudaExecutionReceiptPipe {
-            commands: Arc::clone(&self.commands),
+            commands: self.commands.clone(),
         });
         pipeline
             .call(OwnedGpuJob {
@@ -1070,7 +1107,7 @@ where
     /// Closes the owner loop, awaits its typed result, and then joins its pool.
     pub async fn shutdown(self) -> Result<(), ProximaError> {
         self.close_admission();
-        self.commands.close();
+        let _ = self.commands.shutdown().await;
         let result = self.owner.await;
         drop(self.pool);
         result
@@ -1080,10 +1117,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        AdmittedGpuJob, CommandSender, CudaExecutionError, CudaGpuService,
+        AdmittedGpuJob, CudaExecutionError, CudaGpuService,
         GpuAdmissionError, GpuCapacityGate, GpuPipeError, OwnedBlock,
         OwnedByteBudget, OwnedGpuJob, ReservationSink, command_channel,
     };
+    use proxima_primitives::sync::mpsc::Sender as CommandSender;
+    use proxima_primitives::sync::oneshot;
     use omega::device_owner::{PlanRegistry, execute_registered_plan};
     use omega::owner_config::OwnerConfig;
     use core::future::{Future, poll_fn};
@@ -1094,38 +1133,20 @@ mod tests {
     use proxima_primitives::pipe::{CreditAcquireError, CreditGate, Pipe, PipeExt};
     use proxima_primitives::sync::oneshot::Sender;
     use proxima_tensor::cpu::QuantizedBlock;
-    use proxima_tensor::{Extent, NodeId, Op};
-    use proxima_numeric::{DType};
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
     #[proxima::test]
-    async fn test_omega_async_serving_owner_invalidates_only_named_resident_node() {
+    async fn test_omega_async_serving_owner_releases_only_the_named_residents() {
         let service = CudaGpuService::start_fake().expect("fake owner should start");
-        let program = [
-            Op::Input {
-                dtype: DType::FLOAT32,
-                shape: vec![Extent::Symbolic(0)],
-                name: Some(String::from("changed")),
-            },
-            Op::Input {
-                dtype: DType::FLOAT32,
-                shape: vec![Extent::Symbolic(0)],
-                name: Some(String::from("retained")),
-            },
-        ];
-        {
-            let mut sources = service.fake_resident_sources.lock();
-            sources.insert(NodeId(0), 11);
-            sources.insert(NodeId(1), 22);
-        }
         service
-            .invalidate_resident_sources(&program, &BTreeSet::from(["changed"]))
+            .release_resident_names(&BTreeSet::from(["changed"]))
             .await
-            .expect("owner should process invalidation");
+            .expect("owner should process the release");
+        let released = service.fake_released_names();
         assert_eq!(
-            *service.fake_resident_sources.lock(),
-            [(NodeId(1), 22)].into(),
+            released.iter().map(AsRef::as_ref).collect::<Vec<&str>>(),
+            ["changed"],
         );
         service.shutdown().await.expect("owner should drain");
     }
@@ -1174,7 +1195,7 @@ mod tests {
         fn call(&self, job: AdmittedGpuJob) -> impl Future<Output = Result<usize, GpuPipeError>> {
             let queue = Arc::clone(&self.queue);
             async move {
-                let (reply, response) = super::oneshot::channel();
+                let (reply, response) = oneshot::channel();
                 match queue.send((job, reply)).await {
                     Ok(()) => response.await.unwrap_or(Err(GpuPipeError::Execution(
                         CudaExecutionError::OwnerStopped,
@@ -1276,7 +1297,7 @@ mod tests {
         drop(job);
         assert_eq!(gate.available(), 1);
 
-        let (reply, response) = super::oneshot::channel();
+        let (reply, response) = oneshot::channel();
         reply
             .send(Ok::<_, GpuPipeError>(107))
             .expect("receiver may start late");
@@ -1312,7 +1333,7 @@ mod tests {
         let gate = CreditGate::new(ReservationSink, 1).expect("valid job capacity");
         let (queue, mut receiver) = command_channel(1);
         let queue = Arc::new(queue);
-        let (held_reply, _held_response) = super::oneshot::channel();
+        let (held_reply, _held_response) = oneshot::channel();
         let held_gate = CreditGate::new(ReservationSink, 1).expect("valid held capacity");
         let held_job = AdmittedGpuJob {
             job: test_owned_gpu_job().await,

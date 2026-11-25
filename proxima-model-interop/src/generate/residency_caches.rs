@@ -4398,7 +4398,7 @@ impl BackendRuntime {
                 .chain(resident_names.iter().copied())
                 .collect::<BTreeSet<_>>();
             service
-                .invalidate_resident_sources(program, &invalidated_names)
+                .release_resident_names(&invalidated_names)
                 .await?;
             let owned = if resident.is_empty() {
                 None

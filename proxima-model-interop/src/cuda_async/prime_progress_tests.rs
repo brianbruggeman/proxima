@@ -13,9 +13,11 @@ use proxima_primitives::pipe::{CreditGate, Pipe, PipeExt};
 use proxima_primitives::sync::mpsc::{Receiver as CommandReceiver, channel as command_channel};
 use proxima_tensor::{Evaluated, NodeId};
 
+use omega::device_owner::{Command, DeviceHandle, DeviceKey, StepOutcome};
+
 use super::{
-    AdmittedGpuJob, CompletedGpuJob, CudaExecutionPipe, GpuCapacityGate, OwnedByteBudget,
-    OwnedGpuJob, OwnerCommand, PlanRegistry, ReservationSink,
+    CudaExecutionPipe, GpuCapacityGate, OwnedBlock, OwnedByteBudget, OwnedGpuJob, PlanRegistry,
+    ReservationSink,
 };
 
 async fn owned_gpu_job() -> OwnedGpuJob {
@@ -34,7 +36,7 @@ async fn owned_gpu_job() -> OwnedGpuJob {
 
 type PrimePipeCase = (
     PrimeRuntime,
-    CommandReceiver<OwnerCommand>,
+    CommandReceiver<Command<OwnedBlock>>,
     Receiver<Option<CoreId>>,
     Receiver<(Option<CoreId>, Vec<f32>)>,
 );
@@ -42,7 +44,7 @@ type PrimePipeCase = (
 fn prime_pipe_case() -> PrimePipeCase {
     let runtime = PrimeRuntime::new(1).expect("one prime core should start");
     let (task_commands, commands) = command_channel(1);
-    let task_commands = Arc::new(task_commands);
+    let task_commands = DeviceHandle::new(DeviceKey(0), task_commands);
     let (submitted_sender, submitted_receiver) = mpsc::channel();
     let (completed_sender, completed_receiver) = mpsc::channel();
 
@@ -68,25 +70,22 @@ fn prime_pipe_case() -> PrimePipeCase {
     (runtime, commands, submitted_receiver, completed_receiver)
 }
 
-fn publish_owner_result(commands: &CommandReceiver<OwnerCommand>, value: f32) {
+fn publish_owner_result(commands: &CommandReceiver<Command<OwnedBlock>>, value: f32) {
     let command = commands
         .recv_blocking()
         .expect("a polled pipe should enqueue execution");
-    let OwnerCommand::ExecutePlan { job, reply } = command else {
-        panic!("the controlled queue should contain one execution");
+    let Command::Step {
+        frame, completion, ..
+    } = command
+    else {
+        panic!("the controlled queue should contain one step");
     };
-    let AdmittedGpuJob { job, credit } = job;
     let evaluated = Evaluated::from_parts(NodeId(0), vec![(NodeId(0), vec![1], vec![value])], None);
-    assert!(
-        reply
-            .send(CompletedGpuJob {
-                result: Ok(evaluated),
-                completion_sequence: 0,
-                _credit: credit
-            })
-            .is_ok()
-    );
-    drop(job);
+    completion.complete(Ok(StepOutcome::Done {
+        evaluated,
+        frame,
+        sequence: 0,
+    }));
 }
 
 #[test]
