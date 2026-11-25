@@ -6596,8 +6596,9 @@ mod recording_runtime {
     use crate::owner_config::OwnerConfig;
     use crate::device_owner::{
         Command, Completion, DeviceHandle, DeviceKey, DeviceOwner, Frame, RegisterRequest, ResidentRef,
-        StepOutcome, block_on_thread, launch_on_thread, run_device_owner,
+        DeviceOwnerError, OwnerFlow, StepOutcome, block_on_thread, launch_on_thread, run_device_owner,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// An owned weight or activation block, generic over its element so the test spells no format.
     struct Held<Value>(Arc<[Value]>);
@@ -6669,6 +6670,28 @@ mod recording_runtime {
             .build()
     }
 
+    fn recording_open(
+        runtime: RecordingRuntime,
+    ) -> impl FnMut() -> Result<CudaDriver<RecordingRuntime>, CudaDriverError> + Send + 'static {
+        move || Ok(CudaDriver::recording_on(runtime.clone()))
+    }
+
+    /// Fails the first `failures` opens with the driver error a host without CUDA reports, then opens the recording driver.
+    fn counting_open(
+        attempts: &Arc<AtomicUsize>,
+        failures: usize,
+    ) -> impl FnMut() -> Result<CudaDriver<RecordingRuntime>, CudaDriverError> + Send + 'static {
+        let attempts = Arc::clone(attempts);
+        move || {
+            let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt < failures {
+                Err(CudaDriverError::Driver("no CUDA device on this host".into()))
+            } else {
+                Ok(CudaDriver::recording_on(RecordingRuntime::new()))
+            }
+        }
+    }
+
     async fn drive_plan<Value: Clone>(
         handle: DeviceHandle<Held<Value>>,
         request: RegisterRequest<Held<Value>>,
@@ -6699,9 +6722,7 @@ mod recording_runtime {
     fn the_owner_runs_every_device_call_on_one_thread_that_is_not_a_caller() {
         let runtime = RecordingRuntime::new();
         let owner_runtime = runtime.clone();
-        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(64), move |plan_capacity| {
-            recording_owner(owner_runtime, plan_capacity)
-        });
+        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(64), recording_open(owner_runtime));
         let weight_first = Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0));
         let weight_second = Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0));
         let activation = Arc::from(weight_values(INPUT as usize, 3.0));
@@ -6751,9 +6772,7 @@ mod recording_runtime {
 
         let runtime = RecordingRuntime::new();
         let owner_runtime = runtime.clone();
-        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), move |plan_capacity| {
-            recording_owner(owner_runtime, plan_capacity)
-        });
+        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), recording_open(owner_runtime));
         let request = owner_request(
             &Arc::from(weight_first),
             &Arc::from(weight_second),
@@ -6771,9 +6790,7 @@ mod recording_runtime {
     fn release_and_step_racing_from_two_tasks_linearize() {
         let runtime = RecordingRuntime::new();
         let owner_runtime = runtime.clone();
-        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), move |plan_capacity| {
-            recording_owner(owner_runtime, plan_capacity)
-        });
+        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), recording_open(owner_runtime));
         let request = owner_request(
             &Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0)),
             &Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0)),
@@ -6822,9 +6839,7 @@ mod recording_runtime {
 
         let runtime = RecordingRuntime::new();
         let owner_runtime = runtime.clone();
-        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), move |plan_capacity| {
-            recording_owner(owner_runtime, plan_capacity)
-        });
+        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), recording_open(owner_runtime));
         let mut request = owner_request(
             &Arc::from(weight_first),
             &Arc::from(weight_second),
@@ -6864,9 +6879,7 @@ mod recording_runtime {
 
     #[test]
     fn steps_report_their_owner_completion_sequence_in_order() {
-        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), move |plan_capacity| {
-            recording_owner(RecordingRuntime::new(), plan_capacity)
-        });
+        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), recording_open(RecordingRuntime::new()));
         let request = owner_request(
             &Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0)),
             &Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0)),
@@ -6918,6 +6931,104 @@ mod recording_runtime {
         drop(lease);
     }
 
+    fn same_block<Block>(_handle: &DeviceHandle<Block>, _sample: &Block) {}
+
+    #[test]
+    fn an_owner_whose_open_fails_answers_with_the_open_error_and_retries() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (handle, owner) =
+            launch_on_thread(DeviceKey(0), &recording_config(8), counting_open(&attempts, 1));
+        let weight_first = Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0));
+        let weight_second = Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0));
+        let activation = Arc::from(weight_values(INPUT as usize, 3.0));
+
+        let first = block_on_thread(handle.register(owner_request(&weight_first, &weight_second, &activation)));
+        let second = block_on_thread(handle.register(owner_request(&weight_first, &weight_second, &activation)));
+        block_on_thread(handle.shutdown()).expect("the owner shuts down");
+        owner.join().expect("the owner thread ends");
+
+        assert!(
+            matches!(first, Err(DeviceOwnerError::Driver(CudaDriverError::Driver(_)))),
+            "the first register carries the open error"
+        );
+        assert!(second.is_ok(), "the next register retries the open and plans");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "one failed open and one retry");
+    }
+
+    #[test]
+    fn release_and_shutdown_never_open_the_device() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (handle, owner) =
+            launch_on_thread(DeviceKey(0), &recording_config(8), counting_open(&attempts, 0));
+        same_block(&handle, &held(&weight_values(1, 0.0)));
+
+        block_on_thread(handle.release_names(vec!["w0".into()])).expect("an unopened owner acks the release");
+        block_on_thread(handle.release_ranges(Vec::new())).expect("an unopened owner acks the range release");
+        block_on_thread(handle.shutdown()).expect("an unopened owner shuts down");
+        owner.join().expect("the owner thread ends");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 0, "no command that needs the device ran");
+    }
+
+    #[test]
+    fn a_step_that_fails_in_the_driver_drains_and_stops_queued_commands() {
+        let weight_first = Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0));
+        let weight_second = Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0));
+        let activation = Arc::from(weight_values(INPUT as usize, 3.0));
+        let mut owner = recording_owner(RecordingRuntime::new(), 1);
+        let (reply, answer) = oneshot::channel();
+        owner.serve(Command::Register {
+            request: Box::new(owner_request(&weight_first, &weight_second, &activation)),
+            reply,
+        });
+        let lease = block_on_thread(answer).expect("the owner answers").expect("the owner registers the plan");
+
+        let mut short = Frame::default();
+        short.residents.extend((0..2).map(|slot| ResidentRef { slot, address: 0, len: 0 }));
+        short.dynamic.push(("x".into(), Held(Arc::from(weight_values(INPUT as usize - 1, 3.0)))));
+        let completion = Completion::new();
+        let flow = owner.serve(Command::Step {
+            lease: lease.clone(),
+            frame: short,
+            completion: Arc::clone(&completion),
+        });
+        let stepped = block_on_thread(completion.wait());
+
+        let mut queued = Frame::default();
+        queued.dynamic.push(("x".into(), Held(Arc::clone(&activation))));
+        let queued_completion = Completion::new();
+        DeviceOwner::<RecordingRuntime, _>::reject(Command::Step {
+            lease,
+            frame: queued,
+            completion: Arc::clone(&queued_completion),
+        });
+        let rejected = block_on_thread(queued_completion.wait());
+
+        assert_eq!(flow, OwnerFlow::Drain, "a driver failure drains the owner");
+        assert!(
+            matches!(stepped, Err(DeviceOwnerError::Driver(CudaDriverError::InputContractChanged { .. }))),
+            "a short activation breaks the planned input contract"
+        );
+        assert!(
+            matches!(rejected, Err(DeviceOwnerError::Stopped)),
+            "a command queued behind the fault is answered Stopped"
+        );
+    }
+
+    #[test]
+    fn a_command_sent_after_shutdown_is_closed_not_stopped() {
+        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), recording_open(RecordingRuntime::new()));
+        block_on_thread(handle.shutdown()).expect("the owner shuts down");
+        owner.join().expect("the owner thread ends");
+        let weight_first = Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0));
+        let weight_second = Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0));
+        let activation = Arc::from(weight_values(INPUT as usize, 3.0));
+
+        let late = block_on_thread(handle.register(owner_request(&weight_first, &weight_second, &activation)));
+
+        assert!(matches!(late, Err(DeviceOwnerError::Closed)), "the command was never accepted");
+    }
+
     #[test]
     fn the_owner_future_is_send() {
         fn assert_send<Subject: Send>(_: &Subject) {}
@@ -6926,7 +7037,13 @@ mod recording_runtime {
             for<'block> QuantizedBlock<'block>: From<&'block Block>,
         {
             let (_commands, receiver) = proxima_primitives::sync::mpsc::channel(1);
-            let future = run_device_owner(recording_owner::<Block>(RecordingRuntime::new(), RECORDING_PLAN_CAPACITY), receiver);
+            let config = recording_config(1);
+            let future = run_device_owner(
+                DeviceKey(0),
+                &config,
+                recording_open(RecordingRuntime::new()),
+                receiver,
+            );
             assert_send(&future);
         }
         check(&held(&weight_values(1, 0.0)));

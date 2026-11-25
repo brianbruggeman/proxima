@@ -330,8 +330,12 @@ pub enum DeviceOwnerError {
     Driver(#[from] CudaDriverError),
     #[error("device plan registry refused the command: {0}")]
     Registry(#[from] PlanRegistryError),
+    /// The command was accepted, then the owner stopped or drained before answering it.
     #[error("device owner stopped")]
     Stopped,
+    /// The owner is gone, so the command was never accepted.
+    #[error("device owner closed")]
+    Closed,
 }
 
 /// What one step produced: the outputs, or the resident slots the owner does not hold.
@@ -369,7 +373,8 @@ impl<Value> Completion<Value> {
         })
     }
 
-    fn complete(&self, value: Value) {
+    /// Publishes the reply and wakes the waiter; the owner side of the slot.
+    pub fn complete(&self, value: Value) {
         if self.ring.push(value).is_ok() {
             self.ready.notify_one();
         }
@@ -475,7 +480,15 @@ where
                 lease,
                 frame,
                 completion,
-            } => completion.complete(self.step(&lease, frame)),
+            } => {
+                let reply = self.step(&lease, frame);
+                let flow = match &reply {
+                    Err(DeviceOwnerError::Driver(_)) => OwnerFlow::Drain,
+                    _ => OwnerFlow::Continue,
+                };
+                completion.complete(reply);
+                return flow;
+            }
             Command::Retire { lease, reply } => {
                 let _ = reply.send(self.registry.retire(&lease).map_err(Into::into));
             }
@@ -574,7 +587,8 @@ where
         owned.plan.execute_named(&named, None).map(Ok)
     }
 
-    fn reject(command: Command<Block>) {
+    /// Answers a command the owner will not run: replies carry `Stopped`, releases and shutdown just ack.
+    pub(crate) fn reject(command: Command<Block>) {
         match command {
             Command::Register { reply, .. } => {
                 let _ = reply.send(Err(DeviceOwnerError::Stopped));
@@ -592,22 +606,100 @@ where
     }
 }
 
+enum Lifecycle<R: GpuRuntime, Block, Opener> {
+    Unopened {
+        open: Opener,
+        key: DeviceKey,
+        plan_capacity: usize,
+    },
+    Open(DeviceOwner<R, Block>),
+}
+
+impl<R: GpuRuntime, Block, Opener> Lifecycle<R, Block, Opener>
+where
+    CudaDriverError: From<R::Error> + From<R::BuildError>,
+    for<'block> QuantizedBlock<'block>: From<&'block Block>,
+    Opener: FnMut() -> Result<CudaDriver<R>, CudaDriverError>,
+{
+    fn serve(&mut self, command: Command<Block>) -> OwnerFlow {
+        match self {
+            Self::Open(owner) => owner.serve(command),
+            Self::Unopened {
+                open,
+                key,
+                plan_capacity,
+            } => match command {
+                Command::ReleaseNames { reply, .. } | Command::ReleaseRanges { reply, .. } => {
+                    let _ = reply.send(());
+                    OwnerFlow::Continue
+                }
+                Command::Shutdown { reply } => {
+                    let _ = reply.send(());
+                    OwnerFlow::Drain
+                }
+                command => match open() {
+                    Ok(driver) => {
+                        let mut owner = DeviceOwner::new(*key, driver, *plan_capacity);
+                        let flow = owner.serve(command);
+                        *self = Self::Open(owner);
+                        flow
+                    }
+                    Err(error) => {
+                        Self::refuse(command, error);
+                        OwnerFlow::Continue
+                    }
+                },
+            },
+        }
+    }
+
+    fn refuse(command: Command<Block>, error: CudaDriverError) {
+        match command {
+            Command::Register { reply, .. } => {
+                let _ = reply.send(Err(DeviceOwnerError::Driver(error)));
+            }
+            Command::Step { completion, .. } => {
+                completion.complete(Err(DeviceOwnerError::Driver(error)));
+            }
+            Command::Retire { reply, .. } => {
+                let _ = reply.send(Err(DeviceOwnerError::Driver(error)));
+            }
+            Command::ReleaseNames { reply, .. }
+            | Command::ReleaseRanges { reply, .. }
+            | Command::Shutdown { reply } => {
+                let _ = reply.send(());
+            }
+        }
+    }
+}
+
 /// The owner loop as a future for the caller to spawn on any executor.
 ///
-/// Composes [`run_owner`]: `Shutdown` closes the queue and every queued command is rejected
-/// with [`DeviceOwnerError::Stopped`].
-pub async fn run_device_owner<R: GpuRuntime, Block>(
-    owner: DeviceOwner<R, Block>,
+/// Composes [`run_owner`] over a private lifecycle: the device opens lazily, by calling `open`
+/// on the first `Register`, `Step` or `Retire`. A failed open answers that one command with the
+/// open error and the next command retries; `ReleaseNames`, `ReleaseRanges` and `Shutdown` never
+/// open the device. `Shutdown`, or a `Step` that fails in the driver, closes the queue and every
+/// queued command is rejected with [`DeviceOwnerError::Stopped`].
+pub async fn run_device_owner<R: GpuRuntime, Block, Opener>(
+    key: DeviceKey,
+    config: &OwnerConfig,
+    open: Opener,
     commands: Receiver<Command<Block>>,
 ) where
     CudaDriverError: From<R::Error> + From<R::BuildError>,
     for<'block> QuantizedBlock<'block>: From<&'block Block>,
+    Opener: FnMut() -> Result<CudaDriver<R>, CudaDriverError> + Send,
 {
+    let lifecycle = Lifecycle::Unopened {
+        open,
+        key,
+        plan_capacity: config.plan_capacity,
+    };
     run_owner(
         commands,
-        owner,
-        |owner, commands, command| {
-            let flow = owner.serve(command);
+        lifecycle,
+        |lifecycle, commands, command| {
+            let flow = lifecycle.serve(command);
             if flow == OwnerFlow::Drain {
                 commands.close();
             }
@@ -652,7 +744,7 @@ impl<Block> DeviceHandle<Block> {
         self.commands
             .send(build(reply))
             .await
-            .map_err(|_| DeviceOwnerError::Stopped)?;
+            .map_err(|_| DeviceOwnerError::Closed)?;
         answer.await.map_err(|_| DeviceOwnerError::Stopped)
     }
 
@@ -682,7 +774,7 @@ impl<Block> DeviceHandle<Block> {
         self.commands
             .send(command)
             .await
-            .map_err(|_| DeviceOwnerError::Stopped)?;
+            .map_err(|_| DeviceOwnerError::Closed)?;
         completion.wait().await
     }
 
@@ -730,25 +822,26 @@ pub fn block_on_thread<Output>(future: impl Future<Output = Output>) -> Output {
     }
 }
 
-/// Starts the owner loop on one dedicated std thread: `build` runs on that thread, so the
-/// driver opens there and every device call is made there. For tests and thread-per-device hosts.
-/// `config` sizes the command queue and hands `build` the plan capacity to construct the owner with.
-pub fn launch_on_thread<R, Block, Build>(
+/// Starts the owner loop on one dedicated std thread: `open` runs on that thread, lazily and
+/// retried per command, so the driver opens there and every device call is made there. For tests
+/// and thread-per-device hosts. `config` sizes the command queue and the plan registry.
+pub fn launch_on_thread<R, Block, Opener>(
     key: DeviceKey,
     config: &OwnerConfig,
-    build: Build,
+    open: Opener,
 ) -> (DeviceHandle<Block>, JoinHandle<()>)
 where
     R: GpuRuntime,
     CudaDriverError: From<R::Error> + From<R::BuildError>,
     Block: Send + 'static,
     for<'block> QuantizedBlock<'block>: From<&'block Block>,
-    Build: FnOnce(usize) -> DeviceOwner<R, Block> + Send + 'static,
+    Opener: FnMut() -> Result<CudaDriver<R>, CudaDriverError> + Send + 'static,
 {
     let (commands, receiver) = channel(config.queue_depth);
-    let plan_capacity = config.plan_capacity;
-    let joined =
-        thread::spawn(move || block_on_thread(run_device_owner(build(plan_capacity), receiver)));
+    let owner_config = config.clone();
+    let joined = thread::spawn(move || {
+        block_on_thread(run_device_owner(key, &owner_config, open, receiver));
+    });
     (DeviceHandle::new(key, commands), joined)
 }
 
