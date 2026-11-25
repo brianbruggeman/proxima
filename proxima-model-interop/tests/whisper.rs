@@ -1558,9 +1558,14 @@ mod route_census {
         let mut per_gate: BTreeMap<String, (u64, u64)> = BTreeMap::new();
         let mut reduce_ns_total = 0_u64;
         for row in &rows {
-            let (path, macs) = (path_of(row), work_of(row));
+            let macs = work_of(row);
             let (derived_gate, width_gate) = (contiguous_tile_verdict(row), width_tile_verdict(row));
-            let dot_gate = if row.dot_fast {
+            let asked = dot_declines.iter().any(|(node, _, _)| *node == row.node);
+            let took_dot_tile = dot_declines
+                .iter()
+                .any(|(node, reason, _)| *node == row.node && *reason == "taken");
+            let path = if took_dot_tile { "dot-fast" } else { path_of(row) };
+            let dot_gate = if asked {
                 dot_reason_of(row.node)
             } else {
                 derived_gate.to_string()
