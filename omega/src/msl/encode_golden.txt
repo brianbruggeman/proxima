@@ -14,6 +14,11 @@ entry golden_encode_kernel elements 32 bytes 34
 using namespace metal;
 
 static inline uint golden_encode_scale_store(float value) {
+    uint bits = as_type<uint>(value);
+    uint sign = (bits >> 31u) << 15u;
+    if ((bits & 0x7fffffffu) > 0x7f800000u) {
+        return sign | 0x7c00u | (((bits & 0x7fffffu) >> 13u) | 0x200u);
+    }
     return (uint)as_type<ushort>((half)value);
 }
 
@@ -118,6 +123,11 @@ entry golden_encode_kernel elements 32 bytes 18
 using namespace metal;
 
 static inline uint golden_encode_scale_store(float value) {
+    uint bits = as_type<uint>(value);
+    uint sign = (bits >> 31u) << 15u;
+    if ((bits & 0x7fffffffu) > 0x7f800000u) {
+        return sign | 0x7c00u | (((bits & 0x7fffffu) >> 13u) | 0x200u);
+    }
     return (uint)as_type<ushort>((half)value);
 }
 
@@ -220,6 +230,11 @@ entry golden_encode_kernel elements 1 bytes 2
 using namespace metal;
 
 static inline uint golden_encode_store(float value) {
+    uint bits = as_type<uint>(value);
+    uint sign = (bits >> 31u) << 15u;
+    if ((bits & 0x7fffffffu) > 0x7f800000u) {
+        return sign | 0x7c00u | (((bits & 0x7fffffu) >> 13u) | 0x200u);
+    }
     return (uint)as_type<ushort>((half)value);
 }
 
@@ -232,6 +247,11 @@ entry golden_encode_kernel elements 1 bytes 2
 using namespace metal;
 
 static inline uint golden_encode_store(float value) {
+    uint bits = as_type<uint>(value);
+    uint sign = (bits >> 31u) << 15u;
+    if ((bits & 0x7fffffffu) > 0x7f800000u) {
+        return sign | 0x7f80u | (((bits & 0x7fffffu) >> 16u) | 0x40u);
+    }
     return (uint)as_type<ushort>((bfloat)value);
 }
 
@@ -246,6 +266,11 @@ entry golden_encode_kernel elements 32 bytes 22
 using namespace metal;
 
 static inline uint golden_encode_scale_store(float value) {
+    uint bits = as_type<uint>(value);
+    uint sign = (bits >> 31u) << 15u;
+    if ((bits & 0x7fffffffu) > 0x7f800000u) {
+        return sign | 0x7c00u | (((bits & 0x7fffffu) >> 13u) | 0x200u);
+    }
     return (uint)as_type<ushort>((half)value);
 }
 
@@ -382,6 +407,11 @@ entry golden_encode_kernel elements 32 bytes 36
 using namespace metal;
 
 static inline uint golden_encode_scale_store(float value) {
+    uint bits = as_type<uint>(value);
+    uint sign = (bits >> 31u) << 15u;
+    if ((bits & 0x7fffffffu) > 0x7f800000u) {
+        return sign | 0x7c00u | (((bits & 0x7fffffu) >> 13u) | 0x200u);
+    }
     return (uint)as_type<ushort>((half)value);
 }
 
@@ -390,6 +420,11 @@ static inline float golden_encode_scale_load(uint code) {
 }
 
 static inline uint golden_encode_sum_store(float value) {
+    uint bits = as_type<uint>(value);
+    uint sign = (bits >> 31u) << 15u;
+    if ((bits & 0x7fffffffu) > 0x7f800000u) {
+        return sign | 0x7c00u | (((bits & 0x7fffffu) >> 13u) | 0x200u);
+    }
     return (uint)as_type<ushort>((half)value);
 }
 
@@ -1011,6 +1046,11 @@ entry golden_encode_kernel elements 32 bytes 26
 using namespace metal;
 
 static inline uint golden_encode_scale_store(float value) {
+    uint bits = as_type<uint>(value);
+    uint sign = (bits >> 31u) << 15u;
+    if ((bits & 0x7fffffffu) > 0x7f800000u) {
+        return sign | 0x7c00u | (((bits & 0x7fffffu) >> 13u) | 0x200u);
+    }
     return (uint)as_type<ushort>((half)value);
 }
 

@@ -559,16 +559,19 @@ pub fn store<D: Dialect>(
     if !layout.is_float() {
         return integer_store(&tokens, &layout, name);
     }
-    let value = match HardwareScalar::of(dialect, &layout) {
-        Some(row) if row == wide => tokens.to_bits(wide, "value")?,
+    let (value, nan) = match HardwareScalar::of(dialect, &layout) {
+        Some(row) if row == wide => (tokens.to_bits(wide, "value")?, String::new()),
         Some(row) => {
             let narrow = dialect.cast(&scalar_of(dialect, row)?, "value");
-            dialect.cast(&tokens.word, &tokens.to_bits(row, &narrow)?)
+            (
+                dialect.cast(&tokens.word, &tokens.to_bits(row, &narrow)?),
+                store_nan_branch(dialect, wide, &layout)?,
+            )
         }
         None => return field_store(&tokens, &layout, name),
     };
     let head = tokens.word_head(name, &dialect.parameter(&tokens.ty, "value"));
-    Ok(format!("\n{head} {{\n    return {value};\n}}\n"))
+    Ok(format!("\n{head} {{\n{nan}    return {value};\n}}\n"))
 }
 
 fn field_store_nan<D: Dialect>(tokens: &Tokens<'_, D>, layout: &FloatLayout) -> String {

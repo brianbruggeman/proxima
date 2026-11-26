@@ -17,10 +17,10 @@ use proxima_numeric::NumericFormat;
 use proxima_numeric::block_layout::BlockLayout;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_numeric::decode_scalar;
-use proxima_numeric::float_layout::{FloatLayout, NanPolicy, SignEncoding, Specials};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_numeric::float_layout::NAMED_LAYOUTS;
+use proxima_numeric::float_layout::{FloatLayout, NanPolicy, SignEncoding, Specials};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_numeric::float_layout_codec::{decode, encode};
 
@@ -700,20 +700,87 @@ fn a_rendered_sign_less_float_store_equals_the_host_encode_bit_for_bit_on_negati
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
-fn assert_store_equals_host_encode(keep: impl Fn(&FloatLayout) -> bool) {
+#[test]
+fn a_rendered_narrowing_hardware_float_store_equals_the_host_encode_bit_for_bit_on_signed_payload_nans_inf_and_ties()
+ {
+    let wide = HardwareScalar::widest(&Msl).expect("the metal dialect spells a wide scalar");
+    let narrower_rows = HardwareScalar::all(&Msl).filter(|row| *row != wide).count();
+
+    let compared = assert_store_equals_host_encode(|layout| {
+        layout.is_float() && HardwareScalar::of(&Msl, layout).is_some_and(|row| row != wide)
+    });
+
+    assert!(narrower_rows > 0, "the metal dialect spells a narrower row");
+    assert!(
+        compared >= narrower_rows,
+        "every narrower hardware row is compared at least once: {compared} layouts, {narrower_rows} rows"
+    );
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn assert_store_equals_host_encode(keep: impl Fn(&FloatLayout) -> bool) -> usize {
     let wide = HardwareScalar::widest(&Msl).expect("the metal dialect spells a wide scalar");
     let value_type = Msl.scalar(wide).expect("metal spells the wide scalar");
-    let word_type = Msl.unsigned(wide.bytes()).expect("metal spells the wide word");
+    let word_type = Msl
+        .unsigned(wide.bytes())
+        .expect("metal spells the wide word");
     let inputs: alloc::vec::Vec<u32> = alloc::vec![
-        0x0000_0000, 0x8000_0000, 0x3f00_0000, 0xbf00_0000, 0x3fc0_0000, 0x42fe_0000,
-        0x4300_0000, 0xc300_0000, 0x4700_0000, 0xc700_0000, 0x4f00_0000, 0x4f00_0001,
-        0xcf00_0000, 0x4f80_0000, 0x4f7f_ffff, 0x7f7f_fffe, 0x7f7f_ffff, 0xff7f_ffff,
-        0x7f80_0000, 0xff80_0000, 0x7f80_0001, 0x7fc0_0000, 0x7fff_ffff, 0xffc0_0000,
-        0xffff_fffe, 0xffff_ffff, 0x0000_0001, 0x8000_0001, 0x007f_ffff, 0x0080_0000,
-        0x3f80_0000, 0xbf80_0000, 0x7f00_0000, 0xff00_0000, 0x3f7f_ffff, 0x4000_0000,
+        0x0000_0000,
+        0x8000_0000,
+        0x3f00_0000,
+        0xbf00_0000,
+        0x3fc0_0000,
+        0x42fe_0000,
+        0x4300_0000,
+        0xc300_0000,
+        0x4700_0000,
+        0xc700_0000,
+        0x4f00_0000,
+        0x4f00_0001,
+        0xcf00_0000,
+        0x4f80_0000,
+        0x4f7f_ffff,
+        0x7f7f_fffe,
+        0x7f7f_ffff,
+        0xff7f_ffff,
+        0x7f80_0000,
+        0xff80_0000,
+        0x7f80_0001,
+        0x7fc0_0000,
+        0x7fff_ffff,
+        0xffc0_0000,
+        0xffff_fffe,
+        0xffff_ffff,
+        0x0000_0001,
+        0x8000_0001,
+        0x007f_ffff,
+        0x0080_0000,
+        0x3f80_0000,
+        0xbf80_0000,
+        0x7f00_0000,
+        0xff00_0000,
+        0x3f7f_ffff,
+        0x4000_0000,
+        0x7fa0_0000,
+        0xffa0_1234,
+        0x7f80_2000,
+        0xff81_0000,
+        0x7fe1_2345,
+        0xffd5_5555,
+        0x3f80_1000,
+        0x3f80_3000,
+        0xbf80_1000,
+        0x3f80_8000,
+        0x3f81_8000,
+        0xbf81_8000,
+        0x477f_e000,
+        0x477f_f000,
+        0x4780_0000,
+        0xc77f_f000,
     ];
     let input: alloc::vec::Vec<u8> = inputs.iter().flat_map(|bits| bits.to_le_bytes()).collect();
     let mut compared = 0usize;
+    let mut layouts = 0usize;
     let mut differing = alloc::vec::Vec::new();
 
     for (layout, name) in NAMED_LAYOUTS
@@ -725,6 +792,7 @@ fn assert_store_equals_host_encode(keep: impl Fn(&FloatLayout) -> bool) {
             layout_store_msl(*layout, "probe_store")
         );
         let observed = run_probe_source(&source, &input, inputs.len());
+        layouts += 1;
         for (bits, seen) in inputs.iter().zip(observed) {
             let expected = encode(decode(*bits, wide.layout()), *layout);
             compared += 1;
@@ -734,11 +802,12 @@ fn assert_store_equals_host_encode(keep: impl Fn(&FloatLayout) -> bool) {
         }
     }
 
-    assert!(compared > 0, "no integer layout was compared");
+    assert!(compared > 0, "no layout was compared");
     assert!(
         differing.is_empty(),
         "(layout, input, metal, host) differ: {differing:x?}"
     );
+    layouts
 }
 
 /// the block formats `block_k_refusal` admits: whole four-wide loads in every scale run, and a host
