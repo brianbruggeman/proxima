@@ -18,7 +18,7 @@ repository. Read this file first. It is the entry point; the detail lives in
 | `docs/omega/08-the-ir.md` | The IR from the lowest algebra up, and how a backend lowers it. Read before designing or changing any lowering. |
 | `docs/protocols.md` | The protocol surface: 20+ sans-IO codecs, their features, transport crates, benches, and last recorded result. Generated from `proxima-protocols/src/inventory.rs`. |
 | `.claude/agents/` | The specialist workers (architect, critic, judge, debugger, integrator, migrator, security, test-writer, bencher, concentrator, teacher). |
-| `omega-ir-expert` (agent, in the AI store `60 - Assets/62 - AI/agents/`; knowledge `experts/omega-ir.md`) | The IR and lowering expert. Consult it before any lowering design or brief; it returns the `existing ir:` and `shared lowering:` lines, and it reviews lowering diffs. |
+| `.claude/agents/omega-ir-expert.md`, `.claude/skills/expert-omega-ir/` | The IR and lowering expert, and its knowledge. Consult it before any lowering design or brief; it returns the `existing ir:` and `shared lowering:` lines, and it reviews lowering diffs. These are copies; the source is the owner's AI store, so edit there and re-copy. |
 
 Claude Code loads `.claude/agents/` and `.claude/skills/` automatically. Other
 harnesses should read the files above by relative path.
