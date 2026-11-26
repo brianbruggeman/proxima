@@ -1591,7 +1591,7 @@ mod tests {
 
     use super::*;
 
-    const BIT_EXACT_JSON: &str = r#"{"contraction":false,"reassociation":false,"nan_assumptions":false,"signed_zero":false,"approx_functions":false,"epilogue_sources":false,"input_rounding":false}"#;
+    const BIT_EXACT_JSON: &str = r#"{"contraction":false,"reassociation":false,"nan_assumptions":false,"signed_zero":false,"approx_functions":false,"epilogue_sources":false}"#;
 
     const EMBEDDING: &str = "model.decoder.embed_tokens.weight";
 

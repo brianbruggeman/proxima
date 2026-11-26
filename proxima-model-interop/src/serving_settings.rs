@@ -1011,10 +1011,9 @@ nan_assumptions = true
 signed_zero = true
 approx_functions = true
 epilogue_sources = true
-input_rounding = false
 "#;
 
-    const POLICY_JSON: &str = r#"{"contraction":true,"reassociation":false,"nan_assumptions":true,"signed_zero":true,"approx_functions":true,"epilogue_sources":true,"input_rounding":false}"#;
+    const POLICY_JSON: &str = r#"{"contraction":true,"reassociation":false,"nan_assumptions":true,"signed_zero":true,"approx_functions":true,"epilogue_sources":true}"#;
 
     fn granted_policy() -> NumericPolicy {
         let mut policy = NumericPolicy::bit_exact();
@@ -1110,9 +1109,7 @@ input_rounding = false
             });
         assert_eq!(
             defaults.numeric_policy,
-            NumericPolicy::llama_relaxed()
-                .with_epilogue_sources(true)
-                .with_input_rounding(true)
+            NumericPolicy::llama_relaxed().with_epilogue_sources(true)
         );
         assert_eq!(defaults.kv_bucket_tokens, 32);
         assert_eq!(defaults, ServingSettings::default());
