@@ -161,6 +161,10 @@ pub struct CudaKernel {
     /// Words of the route-compaction buffer the driver binds after this kernel's own bindings
     /// (and after the prologue's own, which names the same buffer); zero when the kernel takes none.
     pub route_compaction_words: usize,
+    /// The reduce body `render_reduce` chose for this kernel, named by the branch that chose it
+    /// (`"mma-gemm"`, `"staged-matvec"`, `"cooperative-reduce"`, ...); empty for a kernel that is not a
+    /// `Keep::Reduce` fold. Per-op timing reads it so a row names the kernel that ran, not the op kind.
+    pub reduce_path: &'static str,
 }
 
 pub use crate::grid::{DEFAULT_BLOCK_WIDTH, LaunchGrid as CudaGridSpec};
@@ -337,13 +341,19 @@ pub(crate) fn emit_on_target(
         "{entry}{}",
         operand_type_suffix(target, resolved, &quantized, &operand_types)?
     );
+    let mut reduce_path = "";
     let source = match &resolved.kind {
         BoundOpKind::Elementwise { .. } => {
             render_elementwise(target, resolved, &entry, &quantized, &operand_types)?
         }
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
-        } => render_reduce(target, resolved, &entry, &quantized, numeric_policy, device, None)?,
+        } => {
+            let (rendered, path) =
+                render_reduce(target, resolved, &entry, &quantized, numeric_policy, device, None)?;
+            reduce_path = path;
+            rendered
+        }
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => render_scan(target, resolved, &entry, &quantized)?,
@@ -396,6 +406,7 @@ pub(crate) fn emit_on_target(
         extra_outputs,
         prologue,
         route_compaction_words: 0,
+        reduce_path,
     })
 }
 
@@ -460,11 +471,13 @@ pub(crate) fn emit_grouped_on_target(
     };
     let base = entry_name(target, resolved, packed_operands, &quantized, numeric_policy, device);
     let entry = grouped_entry(&base);
-    let mut source = render_reduce(target, resolved, &entry, &quantized, numeric_policy, device, Some(&plan))?;
+    let (mut source, reduce_path) =
+        render_reduce(target, resolved, &entry, &quantized, numeric_policy, device, Some(&plan))?;
     let prepass = prepass_entry(&entry);
     source.push_str(&prepass_source(resolved, &plan, &prepass, type_token(target, resolved.node, resolved.dtype)?)?);
-    let kernels = pair(source, [prepass, entry], resolved, &plan, dispatch_bindings(resolved))?;
-    Ok(Some((kernels, compaction_buffer_words(&plan))))
+    let [prepass_kernel, mut gemm_kernel] = pair(source, [prepass, entry], resolved, &plan, dispatch_bindings(resolved))?;
+    gemm_kernel.reduce_path = reduce_path;
+    Ok(Some(([prepass_kernel, gemm_kernel], compaction_buffer_words(&plan))))
 }
 
 /// A pre-quantized activation is readable only by the int8 gemm and the external-activation staged
@@ -667,6 +680,7 @@ pub fn emit_q8_1_quantize(
         extra_outputs: Vec::new(),
         prologue: Vec::new(),
         route_compaction_words: 0,
+        reduce_path: "",
     })
 }
 
@@ -4228,7 +4242,7 @@ fn render_reduce(
     numeric_policy: NumericPolicy,
     device: EmitDevice,
     grouped: Option<&GroupedGemm>,
-) -> Result<String, EmitError> {
+) -> Result<(String, &'static str), EmitError> {
     let BoundOpKind::Reduce {
         reduce_op,
         init,
@@ -4334,7 +4348,7 @@ fn render_reduce(
         );
     }
 
-    if let Some(plan) = &staged {
+    let reduce_path = if let Some(plan) = &staged {
         source = source.replacen(
             "__global__ void ",
             &format!("__global__ void __launch_bounds__({STAGED_THREADS}) "),
@@ -4355,6 +4369,7 @@ fn render_reduce(
             source = source.replacen(last_parameter, with_scratch, 1);
         }
         push_staged_matvec_body(&mut source, resolved, plan)?;
+        "staged-matvec"
     } else if let Some(plan) = gemm {
         source = source.replacen(
             "__global__ void ",
@@ -4362,12 +4377,20 @@ fn render_reduce(
             1,
         );
         push_mma_gemm_body(&mut source, resolved, plan, element_type, route)?;
+        if route.is_some() {
+            "mma-gemm-grouped"
+        } else if plan.int8.is_some() {
+            "mma-gemm-int8"
+        } else {
+            "mma-gemm"
+        }
     } else if let Some(tile_index) = target
         .card_asm
         .then(|| row_tile_axis(resolved, quantized, numeric_policy))
         .flatten()
     {
         push_row_tiled_cooperative_body(&mut source, resolved, quantized, element_type, tile_index)?;
+        "row-tile-cooperative"
     } else if reduce_is_cooperative(resolved, quantized, numeric_policy) {
         push_cooperative_reduce_body(
             target,
@@ -4384,6 +4407,7 @@ fn render_reduce(
             epilogue_operands,
             is_broadcast_epilogue,
         )?;
+        "cooperative-reduce"
     } else {
         push_serial_reduce_body(
             &mut source,
@@ -4406,9 +4430,10 @@ fn render_reduce(
             epilogue_operands,
             is_broadcast_epilogue,
         )?;
-    }
+        "serial-reduce"
+    };
     source.push_str("}\n");
-    Ok(source)
+    Ok((source, reduce_path))
 }
 
 fn render_scan(
@@ -6900,6 +6925,27 @@ mod tests {
     }
 
     #[test]
+    fn a_reduce_kernel_names_the_path_its_emitter_took() {
+        let bound = dense_expert_free_op(128, 512, 200);
+        let tiled = emit_cuda_with_policy(&bound, &PackedOperands::new(), NumericPolicy::llama_relaxed()).expect("tiled emit succeeds");
+        let exact = emit_cuda_with_policy(&bound, &PackedOperands::new(), NumericPolicy::bit_exact()).expect("exact emit succeeds");
+        let row_sum = emit_cuda_with_policy(&matmul_reduce_op(4, 8, ScalarOp::Add), &PackedOperands::new(), NumericPolicy::llama_relaxed())
+            .expect("row reduce emits");
+
+        assert_eq!(tiled.reduce_path, "mma-gemm", "{}", tiled.entry);
+        assert!(!exact.reduce_path.starts_with("mma-gemm"), "{}", exact.reduce_path);
+        assert!(!row_sum.reduce_path.starts_with("mma-gemm"), "{}", row_sum.reduce_path);
+        for kernel in [&exact, &row_sum] {
+            assert!(
+                ["staged-matvec", "row-tile-cooperative", "cooperative-reduce", "serial-reduce"].contains(&kernel.reduce_path),
+                "{}",
+                kernel.reduce_path
+            );
+        }
+        assert_ne!(tiled.reduce_path, row_sum.reduce_path);
+    }
+
+    #[test]
     fn an_activation_by_constant_product_under_the_exact_policy_keeps_the_generic_reduce() {
         let bound = dense_expert_free_op(128, 512, 200);
         let kernel = emit_cuda_with_policy(&bound, &PackedOperands::new(), NumericPolicy::bit_exact()).expect("emit succeeds");
@@ -7392,7 +7438,7 @@ mod tests {
         };
         epilogue_broadcast_axes.push(1);
 
-        let source = render_reduce(Target::CUDA, &bound, "entry", &[None], NumericPolicy::llama_relaxed(), EmitDevice::default(), None)
+        let (source, _) = render_reduce(Target::CUDA, &bound, "entry", &[None], NumericPolicy::llama_relaxed(), EmitDevice::default(), None)
             .expect("broadcast emits");
         assert!(source.contains("broadcast_out_strides[2]"));
         assert!(source.contains("broadcast_full_coord[1]"));
@@ -7402,7 +7448,7 @@ mod tests {
             "the broadcast must assign its result; a bare shuffle leaves lanes 1..31 holding partial sums"
         );
 
-        let hip_source = render_reduce(Target::HIP, &bound, "entry", &[None], NumericPolicy::llama_relaxed(), EmitDevice::default(), None)
+        let (hip_source, _) = render_reduce(Target::HIP, &bound, "entry", &[None], NumericPolicy::llama_relaxed(), EmitDevice::default(), None)
             .expect("hip broadcast emits");
         assert!(hip_source.contains("#define PROXIMA_ALL_LANES 0xffffffffffffffffull"));
         assert!(hip_source.contains("    accumulator = __shfl_sync(PROXIMA_ALL_LANES, accumulator, 0);\n"));

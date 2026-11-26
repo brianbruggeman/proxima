@@ -4011,9 +4011,12 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
     fn op_timing(&self, launch: &LaunchEvents<R>) -> Result<crate::OpGpuTiming, CudaDriverError> {
         let bound = &self.resolved[launch.position];
         let elapsed = R::elapsed(&launch.start, &launch.end)?;
+        let reduce_path = self.kernels[launch.position].reduce_path;
+        // a reduce names the kernel path it ran so per-op tables, which read `kind`, show it
+        let kind = if reduce_path.is_empty() { bound.kind.name() } else { reduce_path };
         Ok(crate::OpGpuTiming {
             node: bound.node,
-            kind: bound.kind.name(),
+            kind,
             extents: bound.extents.clone(),
             output_axes: match &bound.kind {
                 BoundOpKind::Reduce { output_axes, .. } => output_axes.to_vec(),
@@ -4032,7 +4035,7 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
                 .operands()
                 .iter()
                 .find_map(|(source, _, _)| self.packed_operands.get(source).copied()),
-            packed_kernel_variant: "",
+            packed_kernel_variant: reduce_path,
             packed_row_block_rejection: None,
         })
     }
@@ -4705,6 +4708,7 @@ fn add_one_kernel(input: NodeId, output: NodeId, elements: usize) -> Result<Cuda
         extra_outputs: Vec::new(),
         prologue: Vec::new(),
         route_compaction_words: 0,
+        reduce_path: "",
     })
 }
 
@@ -4762,6 +4766,7 @@ fn encode_kernel(rendered: &RenderedEncode, threads: usize) -> Result<CudaKernel
         extra_outputs: Vec::new(),
         prologue: Vec::new(),
         route_compaction_words: 0,
+        reduce_path: "",
     })
 }
 
@@ -6188,6 +6193,38 @@ mod recording_runtime {
             ("w1", QuantizedBlock::from(weight_second)),
             ("x", QuantizedBlock::from(activation)),
         ]
+    }
+
+    #[test]
+    fn op_timing_names_the_reduce_kernel_that_ran() {
+        let (program, out) = two_layer_program();
+        let weight_first = weight_values((HIDDEN * INPUT) as usize, 1.0);
+        let weight_second = weight_values((OUTPUT * HIDDEN) as usize, 7.0);
+        let activation = weight_values(INPUT as usize, 3.0);
+        let named = named_blocks(&weight_first, &weight_second, &activation);
+        let driver = CudaDriver::<RecordingRuntime>::recording();
+        let plan = driver
+            .plan_with_config(&program, &[], &[out], &named, &RuntimeConfig::default())
+            .expect("the recording driver plans the two-layer program");
+
+        let reduces: Vec<(&'static str, &str)> = plan
+            .resolved
+            .iter()
+            .zip(&plan.kernels)
+            .filter(|(bound, _)| matches!(bound.kind, BoundOpKind::Reduce { .. }))
+            .map(|(_, kernel)| (kernel.reduce_path, kernel.entry.as_str()))
+            .collect();
+
+        assert!(!reduces.is_empty(), "the matmuls reach the plan as reduce kernels");
+        for (path, entry) in reduces {
+            assert!(!path.is_empty(), "a reduce kernel carries the path its emitter chose: {entry}");
+            assert_eq!(path.starts_with("mma-gemm"), entry.contains("_mma"), "{path} against {entry}");
+        }
+        for (bound, kernel) in plan.resolved.iter().zip(&plan.kernels) {
+            if !matches!(bound.kind, BoundOpKind::Reduce { .. }) {
+                assert_eq!(kernel.reduce_path, "", "only a reduce fold names a reduce path");
+            }
+        }
     }
 
     #[test]

@@ -52,6 +52,7 @@ fn warp_size_kernel() -> Result<HipKernel, HipDriverError> {
         extra_outputs: Vec::new(),
         prologue: Vec::new(),
         route_compaction_words: 0,
+        reduce_path: "",
     })
 }
 

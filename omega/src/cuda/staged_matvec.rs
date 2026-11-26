@@ -719,6 +719,7 @@ pub(super) fn staged_prepass(
         extra_outputs: Vec::new(),
         prologue: Vec::new(),
         route_compaction_words: 0,
+        reduce_path: "",
     })
 }
 

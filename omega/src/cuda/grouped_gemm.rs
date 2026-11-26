@@ -177,6 +177,7 @@ pub(super) fn pair(source: String, entries: [String; 2], resolved: &BoundOp, pla
         extra_outputs: Vec::new(),
         prologue: Vec::new(),
         route_compaction_words: 0,
+        reduce_path: "",
     };
     Ok([
         kernel(prepass, prepass_grid(resolved)?, prepass_bindings),

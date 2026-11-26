@@ -240,6 +240,7 @@ mod device_scale_dump {
             extra_outputs: Vec::new(),
             prologue: Vec::new(),
             route_compaction_words: 0,
+            reduce_path: "",
         };
         let name = dot.name;
         let source = kernel.source.replace("NAME", &name);
