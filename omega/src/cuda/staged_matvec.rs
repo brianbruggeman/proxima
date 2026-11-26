@@ -10,6 +10,7 @@ use proxima_numeric::{DType, NumericPolicy};
 
 use super::block_dot::{BlockDot, ChunkTerms, DOT_ELEMENTS, block_dot_i8};
 use super::block_quantize::consumer_missing;
+use super::target::Target;
 use super::int8_gemm::{activation_block_offset, activation_code_offset, activation_code_words, activation_scale_offset};
 use super::{
     EmitDevice,
@@ -142,6 +143,7 @@ fn activation_follows_gather(
 }
 
 pub(super) fn staged_matvec_plan(
+    target: Target,
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
@@ -178,7 +180,7 @@ pub(super) fn staged_matvec_plan(
         }
         _ => return None,
     };
-    let dot = block_dot_i8(&codec.block_layout()?)?;
+    let dot = block_dot_i8(target, &codec.block_layout()?)?;
     let reduce_dims = reduction_dims(resolved, output_axes);
     if reduce_dims.is_empty() {
         return None;

@@ -8,6 +8,7 @@ use proxima_numeric::int8_dot::{INT8_DOT_ELEMENTS, Int8DotShape, int8_dot_shape}
 use super::plane_dot::split_block_dot;
 use super::sub_block_dot::sub_block_dot;
 use super::radix_dot::radix_block_dot;
+use super::target::Target;
 use crate::cuda_layout::layout_load_cuda;
 
 /// Elements one int8 dot step covers: eight `dp4a` words.
@@ -42,20 +43,20 @@ pub(super) struct BlockDot {
 /// function is `None`. The structural decision lives in `proxima_numeric::int8_dot`; the builders
 /// below only emit CUDA source, and an `Option` inside one is string-assembly plumbing the shape
 /// has already proven total.
-pub(super) fn block_dot_i8(layout: &BlockLayout) -> Option<BlockDot> {
+pub(super) fn block_dot_i8(target: Target, layout: &BlockLayout) -> Option<BlockDot> {
     let shape = int8_dot_shape(layout)?;
     match shape {
-        Int8DotShape::Radix { radix } => radix_block_dot(layout, u32::from(radix)),
-        Int8DotShape::BitRuns { bits, base_byte } => contiguous_block_dot(layout, usize::from(bits), base_byte),
-        Int8DotShape::NibbleSplit { low_base_byte, high_base_byte } => split_block_dot(layout, low_base_byte, high_base_byte),
-        Int8DotShape::SubBlocks { parts, .. } => sub_block_dot(layout, usize::from(parts)),
+        Int8DotShape::Radix { radix } => radix_block_dot(target, layout, u32::from(radix)),
+        Int8DotShape::BitRuns { bits, base_byte } => contiguous_block_dot(target, layout, usize::from(bits), base_byte),
+        Int8DotShape::NibbleSplit { low_base_byte, high_base_byte } => split_block_dot(target, layout, low_base_byte, high_base_byte),
+        Int8DotShape::SubBlocks { parts, .. } => sub_block_dot(target, layout, usize::from(parts)),
     }
 }
 
-fn contiguous_block_dot(layout: &BlockLayout, bits: usize, base_byte: usize) -> Option<BlockDot> {
+fn contiguous_block_dot(target: Target, layout: &BlockLayout, bits: usize, base_byte: usize) -> Option<BlockDot> {
     let elements = usize::from(layout.elements);
     let name = layout_name(layout);
-    let mut helpers = scale_helpers(layout, &name)?;
+    let mut helpers = scale_helpers(target, layout, &name)?;
     helpers.push_str(&words_helper(&name, layout, bits, base_byte)?);
     Some(BlockDot {
         name,
@@ -79,9 +80,9 @@ pub(super) fn rows_per_warp(radix: bool) -> usize {
 }
 
 /// `<name>_scale(block)`: the block scale, read through the scale field's layout.
-pub(super) fn scale_helpers(layout: &BlockLayout, name: &str) -> Option<String> {
+pub(super) fn scale_helpers(target: Target, layout: &BlockLayout, name: &str) -> Option<String> {
     let scale_read = scale_read(&layout.scale)?;
-    let mut helpers = layout_load_cuda(layout.scale.layout, &format!("{name}_scale_code"));
+    let mut helpers = layout_load_cuda(target, layout.scale.layout, &format!("{name}_scale_code")).ok()?;
     helpers.push_str(&format!(
         "__device__ __forceinline__ float {name}_scale(const unsigned char *block) {{\n    return {name}_scale_code({scale_read});\n}}\n"
     ));
@@ -183,30 +184,31 @@ mod tests {
     use proxima_numeric::block_layout::BlockLayout;
 
     use super::block_dot_i8;
+    use crate::cuda::target::Target;
 
     #[test]
     fn contiguous_runs_and_nibble_split_codes_lower_and_min_or_sub_block_layouts_do_not() {
         for layout in [BlockLayout::Q8_0, BlockLayout::Q1_0, BlockLayout::Q2_0, BlockLayout::PQ2_0] {
-            assert!(block_dot_i8(&layout).is_some(), "{layout:?} is a contiguous linear run");
+            assert!(block_dot_i8(Target::CUDA, &layout).is_some(), "{layout:?} is a contiguous linear run");
         }
         for layout in [BlockLayout::TQ1_0, BlockLayout::PTQ1_0] {
-            assert!(block_dot_i8(&layout).is_some(), "{layout:?} is a radix-packed byte code");
+            assert!(block_dot_i8(Target::CUDA, &layout).is_some(), "{layout:?} is a radix-packed byte code");
         }
         for layout in [BlockLayout::Q4_0, BlockLayout::Q5_0] {
-            assert!(block_dot_i8(&layout).is_some(), "{layout:?} is a nibble-split code with an optional bit-run high plane");
+            assert!(block_dot_i8(Target::CUDA, &layout).is_some(), "{layout:?} is a nibble-split code with an optional bit-run high plane");
         }
         for layout in [BlockLayout::Q4_K, BlockLayout::Q5_K, BlockLayout::Q6_K] {
-            assert!(block_dot_i8(&layout).is_some(), "{layout:?} carries sub-block scales the chunk terms describe");
+            assert!(block_dot_i8(Target::CUDA, &layout).is_some(), "{layout:?} carries sub-block scales the chunk terms describe");
         }
         for layout in [BlockLayout::Q4_1, BlockLayout::Q5_1, BlockLayout::Q3_K, BlockLayout::Q2_K] {
-            assert!(block_dot_i8(&layout).is_none(), "{layout:?} carries a whole-block min or a sub-block shape the lowering rejects");
+            assert!(block_dot_i8(Target::CUDA, &layout).is_none(), "{layout:?} carries a whole-block min or a sub-block shape the lowering rejects");
         }
     }
 
     #[test]
     fn distinct_layouts_get_distinct_helper_names() {
-        let two_bit_64 = block_dot_i8(&BlockLayout::Q2_0).expect("q2_0 lowers");
-        let two_bit_128 = block_dot_i8(&BlockLayout::PQ2_0).expect("pq2_0 lowers");
+        let two_bit_64 = block_dot_i8(Target::CUDA, &BlockLayout::Q2_0).expect("q2_0 lowers");
+        let two_bit_128 = block_dot_i8(Target::CUDA, &BlockLayout::PQ2_0).expect("pq2_0 lowers");
         assert_ne!(two_bit_64.name, two_bit_128.name);
         assert_eq!(two_bit_128.elements, 128);
         assert_eq!(two_bit_128.block_bytes, 34);
@@ -214,8 +216,8 @@ mod tests {
 
     #[test]
     fn radix_and_linear_decodes_fold_different_row_counts() {
-        let radix = block_dot_i8(&BlockLayout::PTQ1_0).expect("ptq1_0 lowers");
-        let linear = block_dot_i8(&BlockLayout::PQ2_0).expect("pq2_0 lowers");
+        let radix = block_dot_i8(Target::CUDA, &BlockLayout::PTQ1_0).expect("ptq1_0 lowers");
+        let linear = block_dot_i8(Target::CUDA, &BlockLayout::PQ2_0).expect("pq2_0 lowers");
         assert_eq!(radix.rows_per_warp, 2);
         assert_eq!(linear.rows_per_warp, 4);
     }
@@ -228,6 +230,7 @@ mod shape_agreement {
     use proxima_numeric::int8_dot::{Int8DotShape, int8_dot_shape};
 
     use super::{ChunkTerms, block_dot_i8};
+    use crate::cuda::target::Target;
 
     #[test]
     fn the_shape_decides_the_lowering_for_every_block_layout_the_crate_names() {
@@ -247,7 +250,7 @@ mod shape_agreement {
         let mut lowered = 0;
         for layout in named {
             let shape = int8_dot_shape(&layout);
-            let dot = block_dot_i8(&layout);
+            let dot = block_dot_i8(Target::CUDA, &layout);
             assert_eq!(shape.is_some(), dot.is_some(), "{layout:?}: shape {shape:?} against lowering");
             let (Some(shape), Some(dot)) = (shape, dot) else { continue };
             lowered += 1;

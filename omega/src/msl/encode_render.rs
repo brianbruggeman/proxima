@@ -54,8 +54,8 @@ impl EncodeDialect for MslEncode {
         }
     }
 
-    fn scalar_store(&self, layout: FloatLayout, name: &str) -> String {
-        layout_store_msl(layout, name)
+    fn scalar_store(&self, layout: FloatLayout, name: &str) -> Option<String> {
+        Some(layout_store_msl(layout, name))
     }
 
     fn scalar_refusal(&self, _layout: &FloatLayout) -> Option<&'static str> {

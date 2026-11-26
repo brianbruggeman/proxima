@@ -4,6 +4,7 @@ use alloc::string::String;
 use proxima_numeric::block_layout::BlockLayout;
 
 use super::block_dot::{BlockDot, affine, layout_name, rows_per_warp, scale_helpers};
+use super::target::Target;
 
 const NIBBLE_BITS: usize = 4;
 
@@ -11,10 +12,10 @@ const NIBBLE_BITS: usize = 4;
 /// 32-element chunk in the low nibbles of 16 bytes, the second half in the high nibbles) and whose
 /// optional high plane is one bit per element in a contiguous run. The assembled code is
 /// `low | high << 4`. The plane addresses come from `Int8DotShape::NibbleSplit`; no format is named.
-pub(super) fn split_block_dot(layout: &BlockLayout, low_base_byte: usize, high_base_byte: Option<usize>) -> Option<BlockDot> {
+pub(super) fn split_block_dot(target: Target, layout: &BlockLayout, low_base_byte: usize, high_base_byte: Option<usize>) -> Option<BlockDot> {
     let elements = usize::from(layout.elements);
     let name = format!("{}_ns{}", layout_name(layout), high_base_byte.map_or_else(String::new, |byte| format!("h{}", byte * 8)));
-    let mut helpers = scale_helpers(layout, &name)?;
+    let mut helpers = scale_helpers(target, layout, &name)?;
     helpers.push_str(&words_helper(&name, layout, low_base_byte, high_base_byte)?);
     Some(BlockDot {
         name,
@@ -50,11 +51,12 @@ mod tests {
     use proxima_numeric::int8_dot::{Int8DotShape, int8_dot_shape};
 
     use crate::cuda::block_dot::block_dot_i8;
+    use crate::cuda::target::Target;
 
     #[test]
     fn nibble_split_planes_lower_with_and_without_a_high_bit_plane() {
-        let q5 = block_dot_i8(&BlockLayout::Q5_0).expect("q5_0 is a nibble-split plane plus a bit run");
-        let q4 = block_dot_i8(&BlockLayout::Q4_0).expect("q4_0 is a nibble-split plane");
+        let q5 = block_dot_i8(Target::CUDA, &BlockLayout::Q5_0).expect("q5_0 is a nibble-split plane plus a bit run");
+        let q4 = block_dot_i8(Target::CUDA, &BlockLayout::Q4_0).expect("q4_0 is a nibble-split plane");
         assert_eq!((q5.elements, q5.block_bytes), (32, 22));
         assert_eq!((q4.elements, q4.block_bytes), (32, 18));
         assert_ne!(q5.name, q4.name);

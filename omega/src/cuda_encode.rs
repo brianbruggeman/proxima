@@ -40,8 +40,8 @@ impl EncodeDialect for CudaEncode {
         }
     }
 
-    fn scalar_store(&self, layout: FloatLayout, name: &str) -> String {
-        layout_store_cuda(layout, name)
+    fn scalar_store(&self, layout: FloatLayout, name: &str) -> Option<String> {
+        layout_store_cuda(self.target, layout, name).ok()
     }
 
     fn scalar_refusal(&self, layout: &FloatLayout) -> Option<&'static str> {

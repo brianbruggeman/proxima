@@ -7,6 +7,7 @@ use proxima_tensor::{BoundOp, Extent, IndexMap, NodeId, Op, ScalarOp, append, bi
 use proxima_numeric::{DType, NumericPolicy};
 
 use crate::cuda::emit_cuda;
+use crate::cuda::target::Target;
 use crate::cuda_layout::{layout_load_cuda, layout_store_cuda};
 use crate::wgsl::{WgslCaps, emit_wgsl};
 use crate::backend::wgpu::dialect::{WORD_BITS, Wgsl};
@@ -192,6 +193,14 @@ fn probe_entry(@builtin(global_invocation_id) id: vec3<u32>) {{
     .unwrap_or_else(|error| panic!("naga's validator rejects the wgsl: {error:?}\n{source}"));
 }
 
+fn cuda_load(layout: FloatLayout, name: &str) -> String {
+    layout_load_cuda(Target::CUDA, layout, name).expect("the cuda dialect spells the layout's load")
+}
+
+fn cuda_store(layout: FloatLayout, name: &str) -> String {
+    layout_store_cuda(Target::CUDA, layout, name).expect("the cuda dialect spells the layout's store")
+}
+
 fn cuda_output_declaration(token: &str) -> String {
     format!("    {token}* __restrict__ out,")
 }
@@ -207,8 +216,8 @@ fn cuda_output_declaration(token: &str) -> String {
 #[case::e4m3_from_fields(E4M3_FROM_FIELDS, "float")]
 async fn float_layout_cuda_emits_text_for_layout(#[case] layout: FloatLayout, #[case] token: &str) {
     let source = cuda_source(layout);
-    let load = layout_load_cuda(layout, "probe_load");
-    let store = layout_store_cuda(layout, "probe_store");
+    let load = cuda_load(layout, "probe_load");
+    let store = cuda_store(layout, "probe_store");
 
     assert!(source.contains(&cuda_output_declaration(token)), "{source}");
     assert!(load.contains("__device__ __forceinline__ float probe_load(unsigned int code)"));
@@ -260,9 +269,9 @@ fn float_layout_cuda_native_types_chosen_by_fields() {
     assert!(near_miss.contains(&cuda_output_declaration("float")));
     assert!(unnamed.contains(&cuda_output_declaration("float")));
     assert!(!unnamed.contains("#include <cuda_bf16.h>"));
-    assert!(layout_load_cuda(BINARY16_BY_FIELDS, "probe_load").contains("__half2float"));
-    assert!(layout_load_cuda(BRAIN16_BY_FIELDS, "probe_load").contains("__bfloat162float"));
-    assert!(!layout_load_cuda(E4M3_FROM_FIELDS, "probe_load").contains("__half"));
+    assert!(cuda_load(BINARY16_BY_FIELDS, "probe_load").contains("__ushort_as_half"));
+    assert!(cuda_load(BRAIN16_BY_FIELDS, "probe_load").contains("__ushort_as_bfloat16"));
+    assert!(!cuda_load(E4M3_FROM_FIELDS, "probe_load").contains("__half"));
 }
 
 #[test]
@@ -326,8 +335,8 @@ fn float_layout_cuda_wgsl_control_changed_bias_changes_constants() {
         ..FloatLayout::E3M2
     };
 
-    let cuda = layout_load_cuda(FloatLayout::E3M2, "probe_load");
-    let cuda_shifted = layout_load_cuda(shifted, "probe_load");
+    let cuda = cuda_load(FloatLayout::E3M2, "probe_load");
+    let cuda_shifted = cuda_load(shifted, "probe_load");
     let wgsl = wgsl_load(FloatLayout::E3M2, "probe_load");
     let wgsl_shifted = wgsl_load(shifted, "probe_load");
 

@@ -6,6 +6,7 @@ use proxima_numeric::block_layout::{BlockLayout, Coded};
 use proxima_numeric::int8_dot::radix_digit_source;
 
 use super::block_dot::{BlockDot, DOT_ELEMENTS, layout_name, rows_per_warp, scale_helpers};
+use super::target::Target;
 
 /// Codes one int8x4 word covers.
 const WORD_ELEMENTS: usize = 4;
@@ -15,12 +16,12 @@ const WORD_ELEMENTS: usize = 4;
 /// the same digit of four consecutive bytes form one word, recovered two 16-bit lanes per
 /// multiply; any other word is assembled code by code. Derived from the layout's regions and
 /// digits alone; no format is named. `radix` is `Int8DotShape::Radix`'s.
-pub(super) fn radix_block_dot(layout: &BlockLayout, radix: u32) -> Option<BlockDot> {
+pub(super) fn radix_block_dot(target: Target, layout: &BlockLayout, radix: u32) -> Option<BlockDot> {
     let element = &layout.element;
     let elements = usize::from(layout.elements);
     let sources = digit_sources(element, radix, elements)?;
     let name = layout_name(layout);
-    let mut helpers = scale_helpers(layout, &name)?;
+    let mut helpers = scale_helpers(target, layout, &name)?;
     let words = (0..DOT_ELEMENTS / WORD_ELEMENTS)
         .map(|word| word_text(layout, &sources, radix, word))
         .collect::<Option<String>>()?;

@@ -563,7 +563,7 @@ fn reject_unserved_prequantized(
     device: EmitDevice,
 ) -> Result<(), EmitError> {
     let staged = target.card_asm
-        && staged_matvec_plan(resolved, quantized, numeric_policy, device)
+        && staged_matvec_plan(target, resolved, quantized, numeric_policy, device)
             .is_some_and(|plan| plan.external.is_some());
     let served = staged
         || (target.card_asm
@@ -593,7 +593,7 @@ fn prologue_kernels(
         return Ok(Vec::new());
     }
     match (
-        staged_matvec_plan(resolved, quantized, numeric_policy, device),
+        staged_matvec_plan(target, resolved, quantized, numeric_policy, device),
         split_chunks(&resolved.kind, device),
     ) {
         (Some(plan), _) if plan.scratch => {
@@ -634,7 +634,7 @@ fn extent_fields(
     let reduce_width = cooperative_width(target, resolved, quantized);
     let staged = target
         .card_asm
-        .then(|| staged_matvec_plan(resolved, quantized, numeric_policy, device))
+        .then(|| staged_matvec_plan(target, resolved, quantized, numeric_policy, device))
         .flatten();
     let kind = resolved.kind.name();
     let grid = if let Some(plan) = staged.as_ref() {
@@ -983,7 +983,7 @@ pub(crate) fn refit_grid_on_target(
         .card_asm
         .then(|| {
             new.launches()
-                .then(|| staged_matvec_plan(new, &quantized, numeric_policy, device))
+                .then(|| staged_matvec_plan(target, new, &quantized, numeric_policy, device))
                 .flatten()
         })
         .flatten()
@@ -2260,7 +2260,7 @@ fn text_plan_token(
         };
     let revision = if let Some(plan) = target
         .card_asm
-        .then(|| staged_matvec_plan(resolved, quantized, numeric_policy, device))
+        .then(|| staged_matvec_plan(target, resolved, quantized, numeric_policy, device))
         .flatten()
     {
         let source = match (plan.scratch, plan.external.is_some()) {
@@ -4467,7 +4467,7 @@ fn render_reduce(
 
     let staged = target
         .card_asm
-        .then(|| staged_matvec_plan(resolved, quantized, numeric_policy, device))
+        .then(|| staged_matvec_plan(target, resolved, quantized, numeric_policy, device))
         .flatten()
         .filter(|_| grouped.is_none());
     let planned = target
@@ -6240,7 +6240,7 @@ mod tests {
         let packed = q4_0_packed(weight);
         let policy = NumericPolicy::default().with_activation_quantization(true);
         let quantized = operand_codecs(&bound, &packed);
-        let plan = staged_matvec_plan(&bound, &quantized, policy, EmitDevice::default())
+        let plan = staged_matvec_plan(Target::CUDA, &bound, &quantized, policy, EmitDevice::default())
             .expect("the empty shape still takes the staged plan");
         assert_eq!(
             staged_matvec_threads(&bound, &plan),
@@ -7506,7 +7506,7 @@ mod tests {
     }
 
     fn int8_grouped_codecs() -> impl Iterator<Item = Codec> {
-        grouped_codecs().filter(|codec| is_int8_weight(*codec))
+        grouped_codecs().filter(|codec| is_int8_weight(Target::CUDA, *codec))
     }
 
     fn int8_grouped_pair(bound: &BoundOp, codec: Codec) -> Option<([CudaKernel; 2], usize)> {

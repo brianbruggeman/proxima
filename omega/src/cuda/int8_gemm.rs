@@ -17,6 +17,7 @@ use super::block_dot::{BlockDot, ChunkTerms, DOT_ELEMENTS, block_dot_i8};
 use super::block_quantize::consumer_missing;
 use super::grouped_gemm::{GroupedRoute, push_grouped_tile_origin};
 use super::mma_gemm::{MmaGemm, push_output_write, push_tile_origin};
+use super::target::Target;
 use super::{Codec, EmitError, reduction_dims};
 
 pub(super) const INT8_FEATURE_TILE: usize = 128;
@@ -50,6 +51,7 @@ fn chunks_per_slab(reduction: u64) -> usize {
 /// held as `block_q8_1` bytes from the start of its buffer); any other activation takes the
 /// fp16 gemm.
 pub(super) fn int8_gemm_plan(
+    target: Target,
     resolved: &BoundOp,
     codec: Codec,
     numeric_policy: NumericPolicy,
@@ -62,7 +64,7 @@ pub(super) fn int8_gemm_plan(
     }
     let activation = prequantized?.block_layout()?;
     consumer_missing(&activation).ok()?;
-    let dot = int8_dot(codec)?;
+    let dot = int8_dot(target, codec)?;
     let reduction: u64 = reduction_dims(resolved, output_axes)
         .iter()
         .map(|&dim| resolved.extents[usize::from(dim)])
@@ -74,15 +76,15 @@ pub(super) fn int8_gemm_plan(
     })
 }
 
-fn int8_dot(codec: Codec) -> Option<BlockDot> {
-    let dot = block_dot_i8(&codec.block_layout()?)?;
+fn int8_dot(target: Target, codec: Codec) -> Option<BlockDot> {
+    let dot = block_dot_i8(target, &codec.block_layout()?)?;
     (dot.centering.is_none() && dot.block_bytes.is_multiple_of(2)).then_some(dot)
 }
 
 /// Whether the int8 gemm unpacks a weight of this codec.
 #[must_use]
-pub fn is_int8_weight(codec: Codec) -> bool {
-    int8_dot(codec).is_some()
+pub fn is_int8_weight(target: Target, codec: Codec) -> bool {
+    int8_dot(target, codec).is_some()
 }
 
 fn run_term(layout: &BlockLayout, group: &str, base: usize, next: usize) -> String {

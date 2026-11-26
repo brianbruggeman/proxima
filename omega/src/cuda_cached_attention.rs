@@ -11,6 +11,7 @@ use crate::identity::description_fingerprint;
 use crate::msl::layout_render::readable_scalar_cache;
 
 use crate::cuda::mma_gemm::MMA_INSTRUCTION;
+use crate::cuda::target::Target;
 use crate::cuda::{
     CudaAttentionClass, cuda_cached_attention_class, cuda_float_literal, preamble, type_token,
     word_c,
@@ -232,7 +233,7 @@ pub(crate) fn render_attention(
         &mut source,
         header_element,
     );
-    source.push_str(&cache_helpers(&reads));
+    source.push_str(&cache_helpers(crate::cuda::target::Target::CUDA, &reads)?);
     source.push_str(helpers);
     let runtime_bounds = cached_attention_runtime_bounds(&resolved.kind);
     let (uniform_fields, bounds_decl) = if runtime_bounds {
@@ -482,7 +483,7 @@ pub(crate) fn cached_attention_kv_reads(
     }
 }
 
-fn cache_helpers(reads: &KvReads) -> String {
+fn cache_helpers(target: Target, reads: &KvReads) -> Result<String, EmitError> {
     let mut text = String::new();
     let layouts: Vec<_> = [&reads.key, &reads.value]
         .into_iter()
@@ -496,13 +497,15 @@ fn cache_helpers(reads: &KvReads) -> String {
     for layout in layouts {
         let name = load_name(&layout);
         if !named.contains(&name) {
-            text.push_str(&layout_load_cuda(layout, &name));
+            let load = layout_load_cuda(target, layout, &name)
+                .map_err(|refusal| EmitError::CudaLayoutRefused { refusal })?;
+            text.push_str(&load);
             named.push(name);
         }
     }
     text.push_str(&role_helpers("key", &reads.key, reads.compute));
     text.push_str(&role_helpers("value", &reads.value, reads.compute));
-    text
+    Ok(text)
 }
 
 fn role_helpers(role: &str, read: &CacheRead, compute: &str) -> String {

@@ -292,6 +292,11 @@ pub enum EmitError {
     #[error("the cuda uniform word `{name}` is not a layout the card-C emitter can spell")]
     CudaUnsupportedWord { name: &'static str },
 
+    /// The shared layout render declined a layout the card-C emitter needed text for.
+    #[cfg(feature = "cuda")]
+    #[error("the cuda layout text was refused: {refusal}")]
+    CudaLayoutRefused { refusal: crate::render::Refusal },
+
     /// `wgsl::emit_wgsl` has no `Q3_K` unpack function -- `crate::msl`'s own
     /// `Codec::Q3K` is metal-only so far (`wgpu_driver::packed_operands_of`
     /// already routes a `Codec::Q3K` node to `None` for this same

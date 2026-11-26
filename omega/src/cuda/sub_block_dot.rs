@@ -7,6 +7,7 @@ use proxima_numeric::float_layout::SignEncoding;
 use proxima_numeric::int8_dot::chunk_byte_run;
 
 use super::block_dot::{BlockDot, ChunkTerms, DOT_ELEMENTS, affine, layout_name, rows_per_warp, scale_helpers, scale_read};
+use super::target::Target;
 use crate::cuda_layout::layout_load_cuda;
 
 const NIBBLE_BITS: u8 = 4;
@@ -26,7 +27,7 @@ struct ChunkPlane {
 /// and whose element code is a 4-bit plane plus an optional 1 or 2 bit plane, each chunk's bytes
 /// strided one per element at a per-chunk offset and shift. Derived from the planes' address maps
 /// alone; no format is named. `parts` is `Int8DotShape::SubBlocks`'s.
-pub(super) fn sub_block_dot(layout: &BlockLayout, parts: usize) -> Option<BlockDot> {
+pub(super) fn sub_block_dot(target: Target, layout: &BlockLayout, parts: usize) -> Option<BlockDot> {
     let sub = layout.sub.as_ref()?;
     let elements = usize::from(layout.elements);
     let min = layout.min.as_ref().zip(sub.min.as_ref());
@@ -38,11 +39,11 @@ pub(super) fn sub_block_dot(layout: &BlockLayout, parts: usize) -> Option<BlockD
     };
     let code_bits = usize::from(NIBBLE_BITS) + high.as_ref().map_or(0, |plane| usize::from(plane.bits));
     let name = format!("{}_sb{}{}h{}", layout_name(layout), parts, if min.is_some() { "m" } else { "n" }, code_bits - 4);
-    let mut helpers = scale_helpers(layout, &name)?;
+    let mut helpers = scale_helpers(target, layout, &name)?;
     helpers.push_str(&words_helper(&name, layout, &low, high.as_ref(), code_bits)?);
     helpers.push_str(&scale_chunk_helpers(&name, sub.scale, usize::from(sub.count), parts)?);
     if let Some((field, coded)) = min {
-        helpers.push_str(&min_chunk_helpers(&name, layout, *field, *coded, usize::from(sub.count))?);
+        helpers.push_str(&min_chunk_helpers(target, &name, layout, *field, *coded, usize::from(sub.count))?);
     }
     Some(BlockDot {
         name,
@@ -155,10 +156,10 @@ fn scale_chunk_helpers(name: &str, coded: Coded, count: usize, parts: usize) -> 
     Some(helpers)
 }
 
-fn min_chunk_helpers(name: &str, layout: &BlockLayout, field: Field, coded: Coded, count: usize) -> Option<String> {
+fn min_chunk_helpers(target: Target, name: &str, layout: &BlockLayout, field: Field, coded: Coded, count: usize) -> Option<String> {
     let read = scale_read(&field)?;
     let mut helpers = sub_code_helper(&format!("{name}_sub_min"), &coded, count)?;
-    helpers.push_str(&layout_load_cuda(field.layout, &format!("{name}_min_code")));
+    helpers.push_str(&layout_load_cuda(target, field.layout, &format!("{name}_min_code")).ok()?);
     helpers.push_str(&format!(
         "__device__ __forceinline__ float {name}_chunk_min(const unsigned char *block, unsigned int chunk) {{\n    return {}.0f * {name}_min_code({read}) * (float){name}_sub_min(block, chunk);\n}}\n",
         layout.min_multiplier
@@ -172,12 +173,13 @@ mod tests {
     use proxima_numeric::int8_dot::{Int8DotShape, int8_dot_shape};
 
     use crate::cuda::block_dot::{ChunkTerms, block_dot_i8};
+    use crate::cuda::target::Target;
 
     #[test]
     fn k_quants_lower_with_the_chunk_terms_their_sub_blocks_describe() {
-        let q4 = block_dot_i8(&BlockLayout::Q4_K).expect("q4_k lowers");
-        let q5 = block_dot_i8(&BlockLayout::Q5_K).expect("q5_k lowers");
-        let q6 = block_dot_i8(&BlockLayout::Q6_K).expect("q6_k lowers");
+        let q4 = block_dot_i8(Target::CUDA, &BlockLayout::Q4_K).expect("q4_k lowers");
+        let q5 = block_dot_i8(Target::CUDA, &BlockLayout::Q5_K).expect("q5_k lowers");
+        let q6 = block_dot_i8(Target::CUDA, &BlockLayout::Q6_K).expect("q6_k lowers");
         assert_eq!(q4.chunk_terms, Some(ChunkTerms { parts: 1, min: true }));
         assert_eq!(q5.chunk_terms, Some(ChunkTerms { parts: 1, min: true }));
         assert_eq!(q6.chunk_terms, Some(ChunkTerms { parts: 2, min: false }));
@@ -200,6 +202,7 @@ mod device_scale_dump {
     use proxima_tensor::NodeId;
 
     use crate::cuda::block_dot::block_dot_i8;
+    use crate::cuda::target::Target;
     use crate::cuda::{Binding, CudaGridSpec, CudaKernel};
     use crate::cuda_driver::CudaDriver;
 
@@ -225,7 +228,7 @@ mod device_scale_dump {
     }
 
     fn device_probes(layout: &BlockLayout, block: &[u8], body: &str) -> Vec<f32> {
-        let dot = block_dot_i8(layout).unwrap_or_else(|| panic!("the layout lowers"));
+        let dot = block_dot_i8(Target::CUDA, layout).unwrap_or_else(|| panic!("the layout lowers"));
         let words: Vec<f32> = block.chunks(4).map(|word| f32::from_bits(u32::from_le_bytes([word[0], word[1], *word.get(2).unwrap_or(&0), *word.get(3).unwrap_or(&0)]))).collect();
         let source = format!(
             "#include <cuda_fp16.h>\n{}\nextern \"C\" __global__ void probe(const float *in, float *out, const int *u) {{\n    const int i = blockIdx.x * blockDim.x + threadIdx.x;\n    if (i >= {PROBES}) return;\n    const unsigned char *block = (const unsigned char *)in;\n    {body}\n}}\n",

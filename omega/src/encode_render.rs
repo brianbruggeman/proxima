@@ -24,8 +24,8 @@ pub trait EncodeDialect {
     fn prelude(&self) -> String;
     /// The integer type that stores one scalar code of `bytes` bytes, `None` when the dialect has none.
     fn storage_token(&self, bytes: usize) -> Option<&'static str>;
-    /// The function `name` that maps a binary32 value to the layout's code.
-    fn scalar_store(&self, layout: FloatLayout, name: &str) -> String;
+    /// The function `name` that maps a binary32 value to the layout's code, `None` when the dialect cannot spell it.
+    fn scalar_store(&self, layout: FloatLayout, name: &str) -> Option<String>;
     /// Why the dialect cannot hold `layout` at all, `None` when it can.
     fn scalar_refusal(&self, layout: &FloatLayout) -> Option<&'static str>;
     /// The kernel signature through its opening brace and the declaration of `gid`, the thread's
@@ -121,7 +121,7 @@ fn scalar_encode_kernel(dialect: &dyn EncodeDialect, layout: FloatLayout, name: 
     let bytes = usize::from(layout.width()) / usize::from(BYTE_BITS);
     let storage = dialect.storage_token(bytes)?;
     let prelude = dialect.prelude();
-    let store = dialect.scalar_store(layout, &format!("{name}_store"));
+    let store = dialect.scalar_store(layout, &format!("{name}_store"))?;
     let open = dialect.kernel_open(name, row_token()?, storage);
     let source = format!("{prelude}{store}\n{open}    output[gid] = ({storage}){name}_store(input[gid]);\n}}\n");
     Some(RenderedEncode { source, entry: format!("{name}_kernel"), elements_per_thread: 1, bytes_per_thread: bytes })

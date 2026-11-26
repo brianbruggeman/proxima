@@ -6316,7 +6316,7 @@ fn a_gathered_expert_product_above_the_grouped_minimum_takes_the_grouped_kernel_
     let inputs = vec![("route".to_string(), route), ("activation".to_string(), activation)];
     let codecs: Vec<Codec> = Codec::ALL
         .into_iter()
-        .filter(|codec| omega::cuda::is_mma_weight(*codec) && omega::cuda::is_int8_weight(*codec))
+        .filter(|codec| omega::cuda::is_mma_weight(*codec) && omega::cuda::is_int8_weight(omega::cuda::target::Target::CUDA, *codec))
         .filter(|codec| codec.block_layout().is_some_and(|layout| depth % usize::from(layout.elements) == 0))
         .collect();
     assert!(!codecs.is_empty(), "the decode table accepts block codecs");
@@ -6370,7 +6370,7 @@ fn a_gathered_expert_product_under_activation_quantization_takes_the_int8_groupe
     let inputs = vec![("route".to_string(), route), ("activation".to_string(), activation)];
     let codecs: Vec<Codec> = Codec::ALL
         .into_iter()
-        .filter(|codec| omega::cuda::is_mma_weight(*codec) && omega::cuda::is_int8_weight(*codec))
+        .filter(|codec| omega::cuda::is_mma_weight(*codec) && omega::cuda::is_int8_weight(omega::cuda::target::Target::CUDA, *codec))
         .filter(|codec| codec.block_layout().is_some_and(|layout| depth % usize::from(layout.elements) == 0))
         .collect();
     assert!(!codecs.is_empty(), "the int8 table accepts block codecs");

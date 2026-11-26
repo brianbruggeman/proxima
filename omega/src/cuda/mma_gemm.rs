@@ -228,6 +228,7 @@ pub(super) fn mma_gemm_plan_for(
         ..
     } = contraction;
     let int8 = int8_gemm_plan(
+        Target::CUDA,
         resolved,
         codec,
         numeric_policy,
