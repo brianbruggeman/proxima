@@ -19,25 +19,29 @@ const MMA_HEAD_DIMS: core::ops::RangeInclusive<u64> = 64..=256;
 
 const MMA_HEAD_DIM_STEP: u64 = 16;
 
-/// The tensor-core body reads the paired planes and rounds Q, K and V to half precision, which only a
-/// policy that quantizes activations accepts; a whole-plane op stays on the full-precision
-/// shared-memory body.
+/// The tensor-core body rounds Q, K and V to half precision, which only a policy that quantizes
+/// activations accepts; paired and whole-plane ops alike take it when their head width meets the
+/// mma width rule, and otherwise stay on the full-precision shared-memory body.
 pub(crate) fn cached_attention_uses_mma(kind: &BoundOpKind, numeric_policy: NumericPolicy) -> bool {
+    let BoundOpKind::CachedAttention { head_dim, .. } = kind else {
+        return false;
+    };
     numeric_policy.activation_quantization
-        && !is_whole(kind)
+        && mma_head_dim_fits(*head_dim)
         && cached_attention_tile_rows(kind, numeric_policy).is_some()
 }
 
-fn is_whole(kind: &BoundOpKind) -> bool {
-    matches!(kind, BoundOpKind::CachedAttention { planes: ScorePlanes::Whole, .. })
+fn mma_head_dim_fits(head_dim: u64) -> bool {
+    MMA_HEAD_DIMS.contains(&head_dim) && head_dim.is_multiple_of(MMA_HEAD_DIM_STEP)
 }
 
 fn head_dim_fits(head_dim: u64, planes: ScorePlanes, numeric_policy: NumericPolicy) -> bool {
     match planes {
-        ScorePlanes::Whole => head_dim > 0 && head_dim.is_multiple_of(4) && head_dim <= LANE_FLOATS,
-        _ if numeric_policy.activation_quantization => {
-            MMA_HEAD_DIMS.contains(&head_dim) && head_dim.is_multiple_of(MMA_HEAD_DIM_STEP)
+        ScorePlanes::Whole => {
+            (head_dim > 0 && head_dim.is_multiple_of(4) && head_dim <= LANE_FLOATS)
+                || (numeric_policy.activation_quantization && mma_head_dim_fits(head_dim))
         }
+        _ if numeric_policy.activation_quantization => mma_head_dim_fits(head_dim),
         _ => head_dim == LANE_FLOATS,
     }
 }

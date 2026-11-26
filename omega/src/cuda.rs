@@ -5375,12 +5375,27 @@ mod tests {
     }
 
     #[test]
-    fn whole_attention_never_takes_the_reduced_precision_tensor_core_body_under_a_quantizing_policy() {
+    fn whole_attention_at_an_mma_width_takes_the_tensor_core_body_under_a_quantizing_policy() {
         let policy = NumericPolicy::bit_exact().with_activation_quantization(true);
         let kernel = emit_cuda_with_policy(&whole_attention_op(64, 6, 64), &no_packed(), policy).expect("whole attention emits");
 
+        assert!(kernel.entry.contains("_tq32_mma"),"{}", kernel.entry);
+        assert!(kernel.source.contains("mma_m16n8k8"));
+    }
+
+    #[test]
+    fn whole_attention_off_the_mma_widths_keeps_the_scalar_tiled_body_under_a_quantizing_policy() {
+        let policy = NumericPolicy::bit_exact().with_activation_quantization(true);
+        let kernel = emit_cuda_with_policy(&whole_attention_op(64, 6, 36), &no_packed(), policy).expect("whole attention emits");
+
         assert!(kernel.entry.contains("_tq32") && !kernel.entry.contains("_mma"), "{}", kernel.entry);
-        assert!(!kernel.source.contains("mma"));
+    }
+
+    #[test]
+    fn whole_attention_under_the_bit_exact_policy_keeps_the_scalar_tiled_body() {
+        let kernel = emit_cuda_with_policy(&whole_attention_op(64, 6, 64), &no_packed(), NumericPolicy::bit_exact()).expect("whole attention emits");
+
+        assert!(kernel.entry.contains("_tq32") && !kernel.entry.contains("_mma"), "{}", kernel.entry);
     }
 
     #[test]

@@ -4643,18 +4643,31 @@ fn prefill_attention_oracle(shape: &PrefillAttentionShape, planes: &[Vec<f32>; P
     out
 }
 
+fn join_pair_planes<Element: Copy>(low: &[Element], high: &[Element], pair: usize) -> Vec<Element> {
+    low.chunks(pair)
+        .zip(high.chunks(pair))
+        .flat_map(|(low_half, high_half)| low_half.iter().chain(high_half))
+        .copied()
+        .collect()
+}
+
 fn run_prefill_attention(
     shape: &PrefillAttentionShape,
     planes: &[Vec<f32>; PREFILL_PLANE_COUNT],
     policy: NumericPolicy,
+    score_planes: proxima_tensor::bind::ScorePlanes,
 ) -> (Vec<f32>, String, String) {
     let PrefillAttentionShape { cached, rows, heads, groups, head_dim, rotary_dim } = *shape;
     let query_heads = heads * groups;
+    let mut kind = prefill_attention_kind(shape);
+    if let proxima_tensor::BoundOpKind::CachedAttention { planes, .. } = &mut kind {
+        *planes = score_planes;
+    }
     let op = proxima_tensor::BoundOp {
         node: NodeId(30),
         dtype: DType::FLOAT32,
         extents: vec![rows as u64, heads as u64, groups as u64, head_dim as u64],
-        kind: prefill_attention_kind(shape),
+        kind,
     };
     let kernel = omega::emit_cuda_with_policy(&op, &std::collections::BTreeMap::new(), policy).expect("attention emits");
     let driver = omega::CudaDriver::new(0).expect("a real cuda device");
@@ -4662,7 +4675,12 @@ fn run_prefill_attention(
     let dummy = [0.0_f32];
     let bound = [cached as f32];
     let [query_low, query_high, cached_low, cached_high, new_low, new_high, cached_values, new_values, query_pass, cached_pass, new_pass] = planes;
-    let mut order: Vec<&[f32]> = if cached == 0 {
+    let whole_query = join_pair_planes(query_low, query_high, rotary_dim / 2);
+    let whole_key = join_pair_planes(new_low, new_high, rotary_dim / 2);
+    let mut order: Vec<&[f32]> = if score_planes == proxima_tensor::bind::ScorePlanes::Whole {
+        assert!(cached == 0 && rotary_dim == head_dim, "whole planes carry no cache and no pass-through dims");
+        vec![&whole_query, &dummy, &dummy, &dummy, &whole_key, &dummy, &dummy, new_values]
+    } else if cached == 0 {
         vec![query_low, query_high, &dummy, &dummy, new_low, new_high, &dummy, new_values]
     } else {
         vec![query_low, query_high, cached_low, cached_high, new_low, new_high, cached_values, new_values]
@@ -4728,16 +4746,23 @@ async fn mma_prefill_attention_matches_the_fp16_rounded_f64_oracle_on_cuda(
     #[case] rotary_dim: usize,
 ) {
     let shape = PrefillAttentionShape { cached, rows, heads, groups, head_dim, rotary_dim };
-    let planes = prefill_attention_planes(&shape);
+    assert_mma_attention_matches_the_rounded_oracle(&shape, proxima_tensor::bind::ScorePlanes::Paired);
+}
+
+fn assert_mma_attention_matches_the_rounded_oracle(shape: &PrefillAttentionShape, score_planes: proxima_tensor::bind::ScorePlanes) {
+    let PrefillAttentionShape { cached, rows, heads, groups, head_dim, rotary_dim } = *shape;
+    let planes = prefill_attention_planes(shape);
     let rounded: [Vec<f32>; PREFILL_PLANE_COUNT] = planes.each_ref().map(|plane| round_through_fp16(plane));
     let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true).with_reciprocal_activation_scale_above_rows(llama_reciprocal_above_rows()).with_activation_scale_arithmetic(llama_scale_arithmetic());
 
-    let (actual, entry, source) = run_prefill_attention(&shape, &planes, policy);
+    let (actual, entry, source) = run_prefill_attention(shape, &planes, policy, score_planes);
     assert!(entry.contains("_mma16x8x8h"), "policy-on prefill attention did not take the mma kernel: {entry}");
+    let whole = score_planes == proxima_tensor::bind::ScorePlanes::Whole;
+    assert_eq!(entry.contains("_wp"), whole, "the launched identity must carry the whole-plane token exactly when the planes are whole: {entry}");
     assert!(source.contains("mma_m16n8k8("), "policy-on prefill attention source carries no mma instruction");
 
-    let against_rounded = peak_relative_diff(&actual, &prefill_attention_oracle(&shape, &rounded));
-    let against_unrounded = peak_relative_diff(&actual, &prefill_attention_oracle(&shape, &planes));
+    let against_rounded = peak_relative_diff(&actual, &prefill_attention_oracle(shape, &rounded));
+    let against_unrounded = peak_relative_diff(&actual, &prefill_attention_oracle(shape, &planes));
     eprintln!("mma attention cached={cached} rows={rows} heads={heads} groups={groups} head_dim={head_dim} rotary={rotary_dim} rounded={against_rounded} unrounded={against_unrounded}");
     assert!(actual.iter().all(|value| value.is_finite()), "mma attention produced a non-finite value");
     assert!(against_rounded < 2e-5, "cached={cached} rows={rows} head_dim={head_dim}: {against_rounded} of peak vs the fp16-rounded f64 oracle");
@@ -4745,6 +4770,19 @@ async fn mma_prefill_attention_matches_the_fp16_rounded_f64_oracle_on_cuda(
         against_unrounded > 2.0 * against_rounded,
         "degenerate control: output matches the unrounded inputs ({against_unrounded}) as tightly as the rounded ones ({against_rounded})"
     );
+}
+
+#[proxima::test]
+#[case::head_dim_64_ragged_37_rows(37, 4, 64)]
+#[case::head_dim_64_encoder_heads_64_rows(64, 20, 64)]
+#[case::head_dim_128_ragged_45_rows(45, 2, 128)]
+async fn whole_plane_attention_takes_the_tensor_core_body_and_matches_the_rounded_oracle_on_cuda(
+    #[case] rows: usize,
+    #[case] heads: usize,
+    #[case] head_dim: usize,
+) {
+    let shape = PrefillAttentionShape { cached: 0, rows, heads, groups: 1, head_dim, rotary_dim: head_dim };
+    assert_mma_attention_matches_the_rounded_oracle(&shape, proxima_tensor::bind::ScorePlanes::Whole);
 }
 
 #[proxima::test]
