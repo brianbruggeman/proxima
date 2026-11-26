@@ -62,10 +62,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use proxima_numeric::block_layout::BlockLayout;
-use proxima_tensor::{
-    ActivationLimits, BoundOp, BoundOpKind, ComposedBody, DeviceMemory, Executes, Form, Keep, Layout, Lookup, NodeId, Op, ReduceInit, Refusal, ScalarOp, ScorePlanes, StepArg,
-};
 use proxima_numeric::{DType, FloatLayout, NumericPolicy, NumericRewrite, ScaleArithmetic, admit};
+use proxima_tensor::{
+    ActivationLimits, BoundOp, BoundOpKind, ComposedBody, DeviceMemory, Executes, Form, Keep,
+    Layout, Lookup, NodeId, Op, ReduceInit, Refusal, ScalarOp, ScorePlanes, StepArg,
+};
 
 use crate::cuda_cached_attention::{
     cached_attention_entry_name, cached_attention_runtime_bounds, render_cached_attention_cuda,
@@ -78,47 +79,49 @@ use crate::epilogue::{
 use crate::error::EmitError;
 use crate::grid::checked_product;
 use crate::identity::{op_token, operand_codecs, reduce_epilogue_is_identity};
-use target::Target;
 use crate::lowering::{
     Binding, Codec, OperandDtypes, PackedOperands, dispatch_bindings, gather_count,
     gather_is_reduction_invariant, gather_slots, is_cooperative_reduce_op, operand_dtype,
     program_operand_dtypes, reduction_dims,
 };
+use target::Target;
 
-pub mod target;
 mod block_dot;
 mod block_quantize;
+mod grouped_gemm;
 mod int8_gemm;
+pub(crate) mod mma_gemm;
 mod plane_dot;
 mod radix_dot;
-mod sub_block_dot;
-pub(crate) mod mma_gemm;
-mod grouped_gemm;
 mod row_tile;
 mod split_attention;
 mod staged_matvec;
+mod sub_block_dot;
+pub mod target;
+pub use block_quantize::Missing;
+#[cfg(any(test, feature = "cuda-driver"))]
+use block_quantize::block_quantize_groups;
+use block_quantize::{block_quantize_grid, quantize_device, render_block_quantize};
+#[cfg(feature = "cuda-driver")]
+pub(crate) use block_quantize::{consumer_missing, producer_missing};
+use grouped_gemm::{
+    GroupedGemm, compaction_buffer_words, grouped_entry, grouped_gemm_plan, pair, prepass_entry,
+    prepass_source,
+};
+use int8_gemm::INT8_MMA_INSTRUCTION;
+pub use int8_gemm::is_int8_weight;
+pub use mma_gemm::is_mma_weight;
+use mma_gemm::{
+    GEMM_THREADS, MMA_F16_HELPER, MMA_GEMM_HELPERS, MMA_INSTRUCTION, mma_contraction_grant,
+    mma_gemm_plan, mma_gemm_threads, push_mma_gemm_body, reads_prequantized_activation,
+};
+use row_tile::{ROW_TILE, push_row_tiled_cooperative_body, row_tile_axis};
 use split_attention::{
     render_combine, split_chunks, split_pass, split_scratch_len, split_scratch_node,
 };
-pub use int8_gemm::is_int8_weight;
-pub use mma_gemm::is_mma_weight;
-use block_quantize::{block_quantize_grid, quantize_device, render_block_quantize};
-pub use block_quantize::Missing;
-#[cfg(feature = "cuda-driver")]
-pub(crate) use block_quantize::{consumer_missing, producer_missing};
-#[cfg(any(test, feature = "cuda-driver"))]
-use block_quantize::block_quantize_groups;
-use int8_gemm::INT8_MMA_INSTRUCTION;
-use grouped_gemm::{GroupedGemm, compaction_buffer_words, grouped_entry, grouped_gemm_plan, pair, prepass_entry, prepass_source};
-use mma_gemm::{
-    GEMM_THREADS, MMA_F16_HELPER, MMA_GEMM_HELPERS, MMA_INSTRUCTION, mma_contraction_grant, mma_gemm_plan, mma_gemm_threads, push_mma_gemm_body,
-    reads_prequantized_activation,
-};
-use row_tile::{ROW_TILE, push_row_tiled_cooperative_body, row_tile_axis};
 use staged_matvec::{
-    STAGED_THREADS, push_staged_matvec_body, staged_matvec_plan, staged_matvec_threads, staged_prepass,
-    staged_prepass_grid,
-    staged_scratch_len, staged_scratch_node,
+    STAGED_THREADS, push_staged_matvec_body, staged_matvec_plan, staged_matvec_threads,
+    staged_prepass, staged_prepass_grid, staged_scratch_len, staged_scratch_node,
 };
 
 /// Appended to a Q4_0 matvec's CUDA entry name only when
@@ -167,8 +170,8 @@ pub struct CudaKernel {
     pub reduce_path: &'static str,
 }
 
-pub use crate::grid::{DEFAULT_BLOCK_WIDTH, LaunchGrid as CudaGridSpec};
 pub(crate) use crate::grid::MAX_GRID_BLOCKS;
+pub use crate::grid::{DEFAULT_BLOCK_WIDTH, LaunchGrid as CudaGridSpec};
 
 /// Emits a CUDA C kernel from a bound [`BoundOp`] — the CUDA counterpart of
 /// [`crate::msl::emit`]. See the module doc for exactly which op shapes v1
@@ -268,7 +271,12 @@ pub fn emit_cuda_with_policy(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
 ) -> Result<CudaKernel, EmitError> {
-    emit_cuda_on_device(resolved, packed_operands, numeric_policy, EmitDevice::default())
+    emit_cuda_on_device(
+        resolved,
+        packed_operands,
+        numeric_policy,
+        EmitDevice::default(),
+    )
 }
 
 /// Emits for a known device: launch grids are shaped to its multiprocessor count.
@@ -319,7 +327,9 @@ pub(crate) fn emit_on_target(
     operand_dtypes: &OperandDtypes,
 ) -> Result<CudaKernel, EmitError> {
     validate(resolved)?;
-    if let Some(grouped) = grouped_kernel(target, resolved, packed_operands, numeric_policy, device)? {
+    if let Some(grouped) =
+        grouped_kernel(target, resolved, packed_operands, numeric_policy, device)?
+    {
         return Ok(grouped);
     }
     let quantized = operand_codecs(resolved, packed_operands);
@@ -331,10 +341,21 @@ pub(crate) fn emit_on_target(
         None
     };
     let entry = match cuda_cached_attention_class(&resolved.kind) {
-        Some(class) if target.card_asm => {
-            cached_attention_entry_name(resolved, class, attention_chunks, numeric_policy, &quantized)?
-        }
-        _ => entry_name(target, resolved, packed_operands, &quantized, numeric_policy, device),
+        Some(class) if target.card_asm => cached_attention_entry_name(
+            resolved,
+            class,
+            attention_chunks,
+            numeric_policy,
+            &quantized,
+        )?,
+        _ => entry_name(
+            target,
+            resolved,
+            packed_operands,
+            &quantized,
+            numeric_policy,
+            device,
+        ),
     };
     let operand_types = elementwise_operand_types(target, resolved, operand_dtypes)?;
     let entry = format!(
@@ -349,8 +370,15 @@ pub(crate) fn emit_on_target(
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
         } => {
-            let (rendered, path) =
-                render_reduce(target, resolved, &entry, &quantized, numeric_policy, device, None)?;
+            let (rendered, path) = render_reduce(
+                target,
+                resolved,
+                &entry,
+                &quantized,
+                numeric_policy,
+                device,
+                None,
+            )?;
             reduce_path = path;
             rendered
         }
@@ -396,8 +424,17 @@ pub(crate) fn emit_on_target(
             });
         }
     };
-    let (grid, extra_outputs) = extent_fields(target, resolved, &quantized, numeric_policy, device)?;
-    let prologue = prologue_kernels(target, resolved, &quantized, numeric_policy, device, &entry, &source)?;
+    let (grid, extra_outputs) =
+        extent_fields(target, resolved, &quantized, numeric_policy, device)?;
+    let prologue = prologue_kernels(
+        target,
+        resolved,
+        &quantized,
+        numeric_policy,
+        device,
+        &entry,
+        &source,
+    )?;
     Ok(CudaKernel {
         source,
         entry,
@@ -445,7 +482,13 @@ pub fn emit_cuda_grouped_on_device(
     numeric_policy: NumericPolicy,
     device: EmitDevice,
 ) -> Result<Option<([CudaKernel; 2], usize)>, EmitError> {
-    emit_grouped_on_target(Target::CUDA, resolved, packed_operands, numeric_policy, device)
+    emit_grouped_on_target(
+        Target::CUDA,
+        resolved,
+        packed_operands,
+        numeric_policy,
+        device,
+    )
 }
 
 /// The two kernels of the expert-grouped contraction form, and the words of the route-compaction
@@ -469,15 +512,43 @@ pub(crate) fn emit_grouped_on_target(
     let Some(plan) = grouped_gemm_plan(resolved, &quantized, numeric_policy) else {
         return Ok(None);
     };
-    let base = entry_name(target, resolved, packed_operands, &quantized, numeric_policy, device);
+    let base = entry_name(
+        target,
+        resolved,
+        packed_operands,
+        &quantized,
+        numeric_policy,
+        device,
+    );
     let entry = grouped_entry(&base);
-    let (mut source, reduce_path) =
-        render_reduce(target, resolved, &entry, &quantized, numeric_policy, device, Some(&plan))?;
+    let (mut source, reduce_path) = render_reduce(
+        target,
+        resolved,
+        &entry,
+        &quantized,
+        numeric_policy,
+        device,
+        Some(&plan),
+    )?;
     let prepass = prepass_entry(&entry);
-    source.push_str(&prepass_source(resolved, &plan, &prepass, type_token(target, resolved.node, resolved.dtype)?)?);
-    let [prepass_kernel, mut gemm_kernel] = pair(source, [prepass, entry], resolved, &plan, dispatch_bindings(resolved))?;
+    source.push_str(&prepass_source(
+        resolved,
+        &plan,
+        &prepass,
+        type_token(target, resolved.node, resolved.dtype)?,
+    )?);
+    let [prepass_kernel, mut gemm_kernel] = pair(
+        source,
+        [prepass, entry],
+        resolved,
+        &plan,
+        dispatch_bindings(resolved),
+    )?;
     gemm_kernel.reduce_path = reduce_path;
-    Ok(Some(([prepass_kernel, gemm_kernel], compaction_buffer_words(&plan))))
+    Ok(Some((
+        [prepass_kernel, gemm_kernel],
+        compaction_buffer_words(&plan),
+    )))
 }
 
 /// A pre-quantized activation is readable only by the int8 gemm and the external-activation staged
@@ -490,10 +561,12 @@ fn reject_unserved_prequantized(
     device: EmitDevice,
 ) -> Result<(), EmitError> {
     let staged = target.card_asm
-        && staged_matvec_plan(resolved, quantized, numeric_policy, device).is_some_and(|plan| plan.external.is_some());
+        && staged_matvec_plan(resolved, quantized, numeric_policy, device)
+            .is_some_and(|plan| plan.external.is_some());
     let served = staged
         || (target.card_asm
-            && mma_gemm_plan(resolved, quantized, numeric_policy).is_some_and(|plan| plan.int8.is_some()));
+            && mma_gemm_plan(resolved, quantized, numeric_policy)
+                .is_some_and(|plan| plan.int8.is_some()));
     if reads_prequantized_activation(quantized) && !served {
         return Err(EmitError::CudaUnsupportedOpKind {
             node: resolved.node,
@@ -521,7 +594,9 @@ fn prologue_kernels(
         staged_matvec_plan(resolved, quantized, numeric_policy, device),
         split_chunks(&resolved.kind, device),
     ) {
-        (Some(plan), _) if plan.scratch => Ok(vec![staged_prepass(resolved, &plan, entry, source)?]),
+        (Some(plan), _) if plan.scratch => {
+            Ok(vec![staged_prepass(resolved, &plan, entry, source)?])
+        }
         (_, Some(chunks)) => Ok(vec![split_pass(resolved, entry, chunks, quantized)?]),
         _ => Ok(Vec::new()),
     }
@@ -607,7 +682,10 @@ fn extent_fields(
         .kind
         .moe_topk_extra_outputs(resolved.extents.iter().product::<u64>() as usize);
     if let Some(plan) = staged.as_ref().filter(|plan| plan.scratch) {
-        extra_outputs.push((staged_scratch_node(resolved.node), staged_scratch_len(plan.reduction)));
+        extra_outputs.push((
+            staged_scratch_node(resolved.node),
+            staged_scratch_len(plan.reduction),
+        ));
     }
     if let Some(chunks) = split_chunks(&resolved.kind, device) {
         extra_outputs.push((
@@ -622,7 +700,6 @@ fn extent_fields(
 const Q8_1_BLOCK_ELEMENTS: u64 = 32;
 
 const Q8_1_QUANTIZE_ENTRY: &str = "omega_cuda_q8_1_quantize";
-
 
 const Q8_1_QUANTIZE_ENTRY_TEXT: &str = r#"
 extern "C" __global__ void omega_cuda_q8_1_quantize(const float *in, float *out, const long long *u) {
@@ -765,8 +842,15 @@ pub(crate) fn emit_reusing_on_target(
         kernels.push(match unchanged {
             Some(kernel) => {
                 reused += 1;
-                refit_extent_fields(target, kernel, bound, packed_operands, numeric_policy, device)
-                    .map_err(|error| (bound.node, error))?
+                refit_extent_fields(
+                    target,
+                    kernel,
+                    bound,
+                    packed_operands,
+                    numeric_policy,
+                    device,
+                )
+                .map_err(|error| (bound.node, error))?
             }
             None => emit_on_target(
                 target,
@@ -895,7 +979,11 @@ pub(crate) fn refit_grid_on_target(
     let quantized = operand_codecs(new, packed_operands);
     let staged = target
         .card_asm
-        .then(|| new.launches().then(|| staged_matvec_plan(new, &quantized, numeric_policy, device)).flatten())
+        .then(|| {
+            new.launches()
+                .then(|| staged_matvec_plan(new, &quantized, numeric_policy, device))
+                .flatten()
+        })
         .flatten()
         .filter(|plan| plan.scratch);
     match (staged, kernel.prologue.as_mut_slice()) {
@@ -1101,8 +1189,7 @@ fn refit_extent_fields_in_place(
         return Ok(());
     }
     let quantized = operand_codecs(bound, packed_operands);
-    let (grid, extra_outputs) =
-        extent_fields(target, bound, &quantized, numeric_policy, device)?;
+    let (grid, extra_outputs) = extent_fields(target, bound, &quantized, numeric_policy, device)?;
     let prologue = prologue_kernels(
         target,
         bound,
@@ -1438,11 +1525,13 @@ fn uniform_word_count(source: &str) -> Result<usize, String> {
     };
     let word_c = word_c(&Target::CUDA).map_err(|error| error.to_string())?;
     let mut total = 0usize;
-    for field in body.split(';').map(str::trim).filter(|field| !field.is_empty()) {
+    for field in body
+        .split(';')
+        .map(str::trim)
+        .filter(|field| !field.is_empty())
+    {
         if !field.starts_with(word_c) {
-            return Err(format!(
-                "a uniform field is not {word_c}: `{field}`"
-            ));
+            return Err(format!("a uniform field is not {word_c}: `{field}`"));
         }
         let mut count = 1usize;
         let mut rest = field;
@@ -1451,9 +1540,7 @@ fn uniform_word_count(source: &str) -> Result<usize, String> {
                 return Err(format!("an array field has no closing extent: `{field}`"));
             };
             let Ok(extent) = rest[open + 1..close].parse::<usize>() else {
-                return Err(format!(
-                    "an array extent is not a literal: `{field}`"
-                ));
+                return Err(format!("an array extent is not a literal: `{field}`"));
             };
             count *= extent;
             rest = &rest[close + 1..];
@@ -1498,7 +1585,9 @@ fn render_leaf(
     let word_c = word_c(&target)?;
     let mut source = String::new();
     preamble(target, &mut source, element_type);
-    source.push_str(&format!("struct Uniforms {{ {word_c} total_elements; }};\n\n"));
+    source.push_str(&format!(
+        "struct Uniforms {{ {word_c} total_elements; }};\n\n"
+    ));
     kernel_signature(target, &mut source, &[], 0, 0, entry, element_type);
     source.push_str("    if (gid >= u.total_elements) { return; }\n");
     match constant {
@@ -1614,7 +1703,12 @@ fn render_moe_topk(target: Target, resolved: &BoundOp, entry: &str) -> Result<St
             "float weight = 0.0f; for (unsigned int warp = 0; warp < num_warps; warp++) { weight += warp_weight[warp]; }",
         )
     } else {
-        ("", "", String::new(), "const float weight = expf(max_value - max0);")
+        (
+            "",
+            "",
+            String::new(),
+            "const float weight = expf(max_value - max0);",
+        )
     };
     source.push_str(&format!(
         "    constexpr unsigned int expert_count = {expert_count}u;\n\
@@ -1702,7 +1796,11 @@ pub(crate) struct DeviceScalar {
 /// The Word-class device scalar: the one every layout without a narrower hardware type is computed in.
 pub(crate) fn word_scalar() -> Option<DeviceScalar> {
     let row = crate::msl::layout_render::hardware_word()?;
-    Some(DeviceScalar { class: DeviceClass::Word, bytes: row.bytes as usize, scalar: row.scalar })
+    Some(DeviceScalar {
+        class: DeviceClass::Word,
+        bytes: row.bytes as usize,
+        scalar: row.scalar,
+    })
 }
 
 /// `None` for a layout wider than 32 bits, which no device scalar holds.
@@ -1716,8 +1814,16 @@ pub(crate) fn device_scalar(dtype: DType) -> Option<DeviceScalar> {
             };
             let (bytes, scalar) = (stage.bytes as usize, stage.scalar);
             Some(match stage.scalar {
-                "half" => DeviceScalar { class: DeviceClass::Half, bytes, scalar },
-                "bfloat" => DeviceScalar { class: DeviceClass::Bfloat, bytes, scalar },
+                "half" => DeviceScalar {
+                    class: DeviceClass::Half,
+                    bytes,
+                    scalar,
+                },
+                "bfloat" => DeviceScalar {
+                    class: DeviceClass::Bfloat,
+                    bytes,
+                    scalar,
+                },
                 _ => word,
             })
         }
@@ -1729,11 +1835,25 @@ pub(crate) fn device_scalar(dtype: DType) -> Option<DeviceScalar> {
 /// `__half` and `__nv_bfloat16` where the layout's fields equal binary16's and bfloat16's, `float`
 /// for every other layout (the kernel computes in binary32 and the host narrows through the
 /// layout codec at the buffer boundary, as on Metal). A mapping over [`device_scalar`].
-pub(crate) fn type_token(target: Target, node: NodeId, dtype: DType) -> Result<&'static str, EmitError> {
+pub(crate) fn type_token(
+    target: Target,
+    node: NodeId,
+    dtype: DType,
+) -> Result<&'static str, EmitError> {
     match device_scalar(dtype) {
-        Some(DeviceScalar { class: DeviceClass::Half, .. }) => Ok("__half"),
-        Some(DeviceScalar { class: DeviceClass::Bfloat, .. }) => Ok(target.bfloat_type),
-        Some(DeviceScalar { class: DeviceClass::Word, scalar, .. }) => Ok(scalar),
+        Some(DeviceScalar {
+            class: DeviceClass::Half,
+            ..
+        }) => Ok("__half"),
+        Some(DeviceScalar {
+            class: DeviceClass::Bfloat,
+            ..
+        }) => Ok(target.bfloat_type),
+        Some(DeviceScalar {
+            class: DeviceClass::Word,
+            scalar,
+            ..
+        }) => Ok(scalar),
         None => Err(EmitError::UnsupportedDType {
             node,
             dtype,
@@ -1862,8 +1982,12 @@ fn lane_major_reduce(resolved: &BoundOp, quantized: &[Option<Codec>]) -> bool {
         && gather_count(resolved) == 0
         && !reduce_epilogue_is_identity(epilogue_body, epilogue_operands)
         && index32_reach_fits(resolved.extents[usize::from(*reduce_dim)])
-        && operands.iter().all(|(_, layout, _)| layout.stride(*reduce_dim) != 1)
-        && operands.iter().any(|(_, layout, _)| layout.stride(last_output) == 1)
+        && operands
+            .iter()
+            .all(|(_, layout, _)| layout.stride(*reduce_dim) != 1)
+        && operands
+            .iter()
+            .any(|(_, layout, _)| layout.stride(last_output) == 1)
 }
 
 fn cooperative_width(target: Target, resolved: &BoundOp, quantized: &[Option<Codec>]) -> u64 {
@@ -1919,7 +2043,10 @@ fn grid_threads(
             if lane_major {
                 return checked_product(
                     resolved.node,
-                    [kept_rows.div_ceil(target.wave), lane_major_block_width(target)],
+                    [
+                        kept_rows.div_ceil(target.wave),
+                        lane_major_block_width(target),
+                    ],
                 );
             }
             let row_per_warp = cooperative && kept_rows > 1;
@@ -2120,13 +2247,12 @@ fn text_plan_token(
     numeric_policy: NumericPolicy,
     device: EmitDevice,
 ) -> String {
-    let activation_token = if numeric_policy.activation_quantization
-        && q4_0_matvec(resolved, quantized).is_some()
-    {
-        ACTIVATION_QUANTIZED_MATVEC_TOKEN
-    } else {
-        ""
-    };
+    let activation_token =
+        if numeric_policy.activation_quantization && q4_0_matvec(resolved, quantized).is_some() {
+            ACTIVATION_QUANTIZED_MATVEC_TOKEN
+        } else {
+            ""
+        };
     let revision = if let Some(plan) = target
         .card_asm
         .then(|| staged_matvec_plan(resolved, quantized, numeric_policy, device))
@@ -2137,9 +2263,21 @@ fn text_plan_token(
             (true, false) => "g",
             (false, false) => "",
         };
-        let gathered = if plan.gather.is_some() { STAGED_GATHER_TOKEN } else { "" };
-        let per_slot = if plan.activation_per_slot { STAGED_SLOT_ACTIVATION_TOKEN } else { "" };
-        format!("_smv{}x{}{source}{gathered}{per_slot}_gid64c9", staged_matvec::STAGED_WARPS, plan.rows)
+        let gathered = if plan.gather.is_some() {
+            STAGED_GATHER_TOKEN
+        } else {
+            ""
+        };
+        let per_slot = if plan.activation_per_slot {
+            STAGED_SLOT_ACTIVATION_TOKEN
+        } else {
+            ""
+        };
+        format!(
+            "_smv{}x{}{source}{gathered}{per_slot}_gid64c9",
+            staged_matvec::STAGED_WARPS,
+            plan.rows
+        )
     } else if let Some(plan) = target
         .card_asm
         .then(|| mma_gemm_plan(resolved, quantized, numeric_policy))
@@ -2443,7 +2581,9 @@ fn hoisted_broadcast_epilogue(
         } else if unit_reduce {
             let reduce_dim = reduce_dims[0];
             push_epilogue_operand_load(&mut before_loop, index, rank, "    ", &outer_coord);
-            before_loop.push_str(&format!("    long long epi_base{index} = epi_off{index};\n"));
+            before_loop.push_str(&format!(
+                "    long long epi_base{index} = epi_off{index};\n"
+            ));
             in_loop.push_str(&format!(
                 "{indent}epi_scratch[{index}] = epi{index}[epi_base{index} + (long long)r * u.epilogue_operand_strides[{index}][{reduce_dim}]];\n"
             ));
@@ -2451,7 +2591,9 @@ fn hoisted_broadcast_epilogue(
             push_epilogue_operand_load(&mut in_loop, index, rank, indent, &inner_coord);
         }
     }
-    before_loop.push_str(&format!("    epi_scratch[{operand_count}] = accumulator;\n"));
+    before_loop.push_str(&format!(
+        "    epi_scratch[{operand_count}] = accumulator;\n"
+    ));
     let value = crate::epilogue::declare_steps_partitioned(
         &mut before_loop,
         &mut in_loop,
@@ -2464,10 +2606,16 @@ fn hoisted_broadcast_epilogue(
             source.push_str(&format!("    {element_type} epi_step{index} = {expr};\n"));
         },
         |source, index, expr| {
-            source.push_str(&format!("{indent}{element_type} epi_step{index} = {expr};\n"));
+            source.push_str(&format!(
+                "{indent}{element_type} epi_step{index} = {expr};\n"
+            ));
         },
     );
-    HoistedEpilogue { before_loop, in_loop, value }
+    HoistedEpilogue {
+        before_loop,
+        in_loop,
+        value,
+    }
 }
 
 /// Shared write tail for every CUDA reduce renderer that folds an output
@@ -2719,7 +2867,9 @@ fn push_gather_uniform_fields(
     if gather_count == 0 {
         return;
     }
-    source.push_str(&format!("    {word_c} gather_index_base[{gather_count}];\n"));
+    source.push_str(&format!(
+        "    {word_c} gather_index_base[{gather_count}];\n"
+    ));
     source.push_str(&format!(
         "    {word_c} gather_index_strides[{gather_count}][{rank_len}];\n"
     ));
@@ -3007,7 +3157,9 @@ fn render_elementwise(
     }
 
     for (index, gather_slot) in gather_slots.iter().enumerate() {
-        source.push_str(&format!("    long long off{index} = u.operand_base[{index}];\n"));
+        source.push_str(&format!(
+            "    long long off{index} = u.operand_base[{index}];\n"
+        ));
         for dim in 0..rank {
             source.push_str(&format!(
                 "    off{index} += coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
@@ -3360,7 +3512,9 @@ fn push_reduction_coord_decompose(
     reduce_rank_len: usize,
     indent: &str,
 ) {
-    source.push_str(&format!("{indent}long long reduction_coord[{reduce_rank_len}];\n"));
+    source.push_str(&format!(
+        "{indent}long long reduction_coord[{reduce_rank_len}];\n"
+    ));
     if reduce_rank == 1 {
         source.push_str(&format!("{indent}reduction_coord[0] = {from};\n"));
         return;
@@ -3577,7 +3731,8 @@ fn push_lean_chunk_loops(
         }
     }
     source.push_str("    long long start = 0;\n");
-    let word_class = device_scalar(resolved.dtype).is_some_and(|scalar| scalar.class == DeviceClass::Word);
+    let word_class =
+        device_scalar(resolved.dtype).is_some_and(|scalar| scalar.class == DeviceClass::Word);
     let plain_vectors: Vec<usize> = if word_class {
         quantized
             .iter()
@@ -3706,7 +3861,9 @@ fn push_lean_fold(
             continue;
         }
         if codec.is_some() {
-            source.push_str(&format!("            long long off{index} = row{index} + r;\n"));
+            source.push_str(&format!(
+                "            long long off{index} = row{index} + r;\n"
+            ));
         } else {
             source.push_str(&format!(
                 "            long long off{index} = lane_base{index} + r * lane_step{index};\n"
@@ -3736,8 +3893,15 @@ fn push_lean_fold(
             operand_read(resolved.node, index, &format!("off{index}"), codec)?
         ));
     }
-    let value_expr = push_body_steps(source, resolved.element_body(), "            ", element_type);
-    source.push_str(&format!("            {element_type} value = {value_expr};\n"));
+    let value_expr = push_body_steps(
+        source,
+        resolved.element_body(),
+        "            ",
+        element_type,
+    );
+    source.push_str(&format!(
+        "            {element_type} value = {value_expr};\n"
+    ));
     let combine_expr = scalar_op_expr(reduce_op, &["accumulator", "value"]);
     source.push_str(&format!(
         "            accumulator = seeded ? {combine_expr} : value;\n"
@@ -3863,16 +4027,26 @@ fn push_cooperative_reduce_body(
     let lane_bits = target.lane_bits();
     let warp_shift = target.warp_shift();
     let (leader, lane_start, lane_stride) = if lane_major {
-        ("fold_warp == 0u", "(long long)fold_warp", format!("{LANE_MAJOR_WARPS}"))
+        (
+            "fold_warp == 0u",
+            "(long long)fold_warp",
+            format!("{LANE_MAJOR_WARPS}"),
+        )
     } else if block_reduce {
-        ("tid == 0u", "(long long)tid", "(long long)blockDim.x".to_string())
+        (
+            "tid == 0u",
+            "(long long)tid",
+            "(long long)blockDim.x".to_string(),
+        )
     } else {
         ("lane == 0u", "(long long)lane", wave.to_string())
     };
     if lane_major {
         source.push_str("    unsigned int tid = threadIdx.x;\n");
         source.push_str(&format!("    unsigned int lane = tid & {lane_bits}u;\n"));
-        source.push_str(&format!("    unsigned int fold_warp = tid >> {warp_shift}u;\n"));
+        source.push_str(&format!(
+            "    unsigned int fold_warp = tid >> {warp_shift}u;\n"
+        ));
         source.push_str(&format!(
             "    long long output_index = (long long)blockIdx.x * {wave}LL + (long long)lane;\n"
         ));
@@ -3984,13 +4158,7 @@ fn push_cooperative_reduce_body(
             } else {
                 ("lane", format!("{wave}u"))
             };
-            push_unit_stride_fold_header(
-                source,
-                resolved,
-                output_axes,
-                fold_start,
-                &fold_step,
-            );
+            push_unit_stride_fold_header(source, resolved, output_axes, fold_start, &fold_step);
         } else if packed_chunked {
             source.push_str(&format!(
                 "    for (long long chunk = (long long)lane * 8; chunk < u.reduction_total; chunk += {wave} * 8) {{\n"
@@ -4021,13 +4189,7 @@ fn push_cooperative_reduce_body(
             ));
         }
         if reduce_rank > 0 && !packed_chunked && !unit_fold {
-            push_reduction_coord_decompose(
-                source,
-                "r",
-                reduce_rank,
-                reduce_rank_len,
-                "        ",
-            );
+            push_reduction_coord_decompose(source, "r", reduce_rank, reduce_rank_len, "        ");
         }
         if reduce_rank > 0 && !unit_fold {
             for (index, dim) in reduce_dims.iter().enumerate() {
@@ -4184,7 +4346,9 @@ fn push_cooperative_reduce_body(
                     ));
                 }
             }
-            source.push_str(&format!("        long long broadcast_full_coord[{rank_len}];\n"));
+            source.push_str(&format!(
+                "        long long broadcast_full_coord[{rank_len}];\n"
+            ));
             for dim in 0..rank {
                 source.push_str(&format!(
                     "        broadcast_full_coord[{dim}] = full_coord[{dim}];\n"
@@ -4328,8 +4492,12 @@ fn render_reduce(
     source.push_str("struct Uniforms {\n");
     source.push_str(&format!("    {word_c} output_total;\n"));
     source.push_str(&format!("    {word_c} reduction_total;\n"));
-    source.push_str(&format!("    {word_c} output_extents[{output_rank_len}];\n"));
-    source.push_str(&format!("    {word_c} reduction_extents[{reduce_rank_len}];\n"));
+    source.push_str(&format!(
+        "    {word_c} output_extents[{output_rank_len}];\n"
+    ));
+    source.push_str(&format!(
+        "    {word_c} reduction_extents[{reduce_rank_len}];\n"
+    ));
     source.push_str(&format!("    {word_c} operand_base[{operand_count}];\n"));
     source.push_str(&format!(
         "    {word_c} operand_strides[{operand_count}][{rank_len}];\n"
@@ -4345,7 +4513,9 @@ fn render_reduce(
         ));
     }
     if is_broadcast_epilogue {
-        source.push_str(&format!("    {word_c} broadcast_out_strides[{rank_len}];\n"));
+        source.push_str(&format!(
+            "    {word_c} broadcast_out_strides[{rank_len}];\n"
+        ));
     }
     push_gather_uniform_fields(&mut source, word_c, gather_count, rank_len);
     source.push_str("};\n\n");
@@ -4408,7 +4578,13 @@ fn render_reduce(
         .then(|| row_tile_axis(resolved, quantized, numeric_policy))
         .flatten()
     {
-        push_row_tiled_cooperative_body(&mut source, resolved, quantized, element_type, tile_index)?;
+        push_row_tiled_cooperative_body(
+            &mut source,
+            resolved,
+            quantized,
+            element_type,
+            tile_index,
+        )?;
         "row-tile-cooperative"
     } else if reduce_is_cooperative(resolved, quantized, numeric_policy) {
         push_cooperative_reduce_body(
@@ -4498,7 +4674,15 @@ fn render_scan(
     push_gather_uniform_fields(&mut source, word_c, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(target, &mut source, quantized, 0, gather_count, entry, element_type);
+    kernel_signature(
+        target,
+        &mut source,
+        quantized,
+        0,
+        gather_count,
+        entry,
+        element_type,
+    );
     source.push_str("    if (gid != 0) { return; }\n");
 
     if outer_rank > 0 {
@@ -4976,10 +5160,14 @@ pub fn executes(target: &Target) -> Executes {
         .with(Form::MoeTopK)
         .with(Form::ReduceEpilogue);
     let forms = if target.card_asm {
-        mma_contraction_grant(base.with(Form::CachedAttention).with(Form::WholeAttention).with_int8_dot(ActivationLimits {
-            max_reduction: staged_matvec::MAX_STAGED_REDUCTION,
-            output_total_max: u64::from(u32::MAX),
-        }))
+        mma_contraction_grant(
+            base.with(Form::CachedAttention)
+                .with(Form::WholeAttention)
+                .with_int8_dot(ActivationLimits {
+                    max_reduction: staged_matvec::MAX_STAGED_REDUCTION,
+                    output_total_max: u64::from(u32::MAX),
+                }),
+        )
     } else {
         base
     };
@@ -5043,13 +5231,19 @@ pub(crate) fn cuda_cached_attention_class(kind: &BoundOpKind) -> Option<CudaAtte
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, reason = "test-only extractor: a missing shuffle IS the test failing")]
+#[allow(
+    clippy::expect_used,
+    reason = "test-only extractor: a missing shuffle IS the test failing"
+)]
 pub(crate) fn emitted_mask_argument(source: &str) -> &str {
     let call = source
         .split_once("_sync(")
         .expect("the kernel emits a shuffle")
         .1;
-    call.split_once(',').expect("the mask is the first argument").0.trim()
+    call.split_once(',')
+        .expect("the mask is the first argument")
+        .0
+        .trim()
 }
 
 #[cfg(test)]
@@ -5058,13 +5252,16 @@ mod device_scalar_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use alloc::boxed::Box;
     use alloc::collections::BTreeMap;
     use alloc::vec;
     use alloc::vec::Vec;
-    use alloc::boxed::Box;
 
-    use proxima_tensor::{AxisTerm, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, map};
-    use proxima_numeric::{DType};
+    use proxima_numeric::DType;
+    use proxima_tensor::{
+        AxisTerm, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer,
+        map,
+    };
 
     use super::*;
     #[cfg(feature = "metal-attn-split-decode")]
@@ -5104,8 +5301,9 @@ mod tests {
             scale: 1.0,
             cached_lower_inclusive: i64::MIN,
             new_upper_inclusive: 0,
-                arithmetic: proxima_tensor::CachedAttentionArithmetic::OnlineF32,
-            attention_sink: false, planes: proxima_tensor::bind::ScorePlanes::Paired,
+            arithmetic: proxima_tensor::CachedAttentionArithmetic::OnlineF32,
+            attention_sink: false,
+            planes: proxima_tensor::bind::ScorePlanes::Paired,
         }
     }
 
@@ -5183,7 +5381,10 @@ mod tests {
         let attention = attention_op_with(attention_kind(9, 5, 256, 256));
         let control = executes(&Target::CUDA).without(Form::CachedAttention);
 
-        assert_eq!(control.admit(&attention), Err(Refusal::Form(Form::CachedAttention)));
+        assert_eq!(
+            control.admit(&attention),
+            Err(Refusal::Form(Form::CachedAttention))
+        );
         assert_eq!(control.admit(&elementwise_tanh_op(4)), Ok(()));
     }
 
@@ -5207,7 +5408,10 @@ mod tests {
         *query_groups = 1;
         *new_upper_inclusive = rows as i64;
         *planes = ScorePlanes::Whole;
-        BoundOp { extents: vec![rows, heads, head_dim], ..attention_op_with(kind) }
+        BoundOp {
+            extents: vec![rows, heads, head_dim],
+            ..attention_op_with(kind)
+        }
     }
 
     #[test]
@@ -5216,39 +5420,67 @@ mod tests {
 
         assert!(executes(&Target::CUDA).forms.contains(Form::WholeAttention));
         assert_eq!(executes(&Target::CUDA).admit(&whole), Ok(()));
-        assert_eq!(executes(&Target::HIP).admit(&whole), Err(Refusal::Form(Form::WholeAttention)));
+        assert_eq!(
+            executes(&Target::HIP).admit(&whole),
+            Err(Refusal::Form(Form::WholeAttention))
+        );
     }
 
     #[test]
     fn whole_attention_refusal_on_a_plain_target_names_the_cuda_emitter() {
-        let refusal = emit_hip(&whole_attention_op(1500, 6, 64), &no_packed()).expect_err("hip has no attention body");
+        let refusal = emit_hip(&whole_attention_op(1500, 6, 64), &no_packed())
+            .expect_err("hip has no attention body");
 
         assert!(matches!(
             refusal,
-            EmitError::CudaUnsupportedOpKind { kind: "whole_attention_on_this_target", .. }
+            EmitError::CudaUnsupportedOpKind {
+                kind: "whole_attention_on_this_target",
+                ..
+            }
         ));
         assert!(refusal.to_string().contains("cuda emitter"), "{refusal}");
     }
 
     #[test]
     fn whole_attention_kernel_scores_one_head_dim_plane_with_no_odd_reads_and_no_ninth_operand() {
-        let kernel = emit_cuda(&whole_attention_op(ATTENTION_TILE_MIN_ROWS - 1, 6, 64), &no_packed()).expect("whole attention emits");
+        let kernel = emit_cuda(
+            &whole_attention_op(ATTENTION_TILE_MIN_ROWS - 1, 6, 64),
+            &no_packed(),
+        )
+        .expect("whole attention emits");
 
-        assert!(kernel.source.contains("constexpr long long pair_dim = head_dim;"));
+        assert!(
+            kernel
+                .source
+                .contains("constexpr long long pair_dim = head_dim;")
+        );
         assert!(kernel.source.contains("partial += in0[qbase + pair] * (cached ? cached_key_at(in2, kbase + pair) : in4[kbase + pair]);"));
         for absent in ["in1[", "in5[", "in8", "pass_query[qpass"] {
-            assert!(!kernel.source.contains(absent), "`{absent}` is dead text in a whole kernel");
+            assert!(
+                !kernel.source.contains(absent),
+                "`{absent}` is dead text in a whole kernel"
+            );
         }
-        assert!(kernel.source.contains("constexpr long long cached_key_rows = 0LL;"));
+        assert!(
+            kernel
+                .source
+                .contains("constexpr long long cached_key_rows = 0LL;")
+        );
         assert!(kernel.source.contains("expf(maximum - next_max)"));
-        assert!(kernel.source.contains("__shfl_xor_sync(PROXIMA_ALL_LANES, partial, offset)"));
+        assert!(
+            kernel
+                .source
+                .contains("__shfl_xor_sync(PROXIMA_ALL_LANES, partial, offset)")
+        );
     }
 
     #[test]
     fn whole_attention_binds_eight_inputs_with_no_cached_len_slot() {
-        let kernel = emit_cuda(&whole_attention_op(1500, 6, 64), &no_packed()).expect("whole attention emits");
+        let kernel = emit_cuda(&whole_attention_op(1500, 6, 64), &no_packed())
+            .expect("whole attention emits");
 
-        let mut expected: Vec<Binding> = (0..8).map(|index| Binding::Input(NodeId(index))).collect();
+        let mut expected: Vec<Binding> =
+            (0..8).map(|index| Binding::Input(NodeId(index))).collect();
         expected.extend([Binding::Output(NodeId(9)), Binding::Uniforms]);
         assert_eq!(kernel.bindings, expected);
     }
@@ -5272,19 +5504,30 @@ mod tests {
     #[test]
     fn whole_attention_below_the_tile_threshold_stays_one_block_per_vector() {
         let rows = ATTENTION_TILE_MIN_ROWS - 1;
-        let kernel = emit_cuda(&whole_attention_op(rows, 8, 128), &no_packed()).expect("whole attention emits");
+        let kernel = emit_cuda(&whole_attention_op(rows, 8, 128), &no_packed())
+            .expect("whole attention emits");
 
         assert!(!kernel.entry.contains("_tq"), "{}", kernel.entry);
         assert_eq!(kernel.grid.blocks(), rows * 8);
         assert_eq!(kernel.grid.block_width(), Some(ATTENTION_WARPS * WARP_SIZE));
-        assert!(kernel.prologue.is_empty(), "a whole bind has no split or merge dispatch");
+        assert!(
+            kernel.prologue.is_empty(),
+            "a whole bind has no split or merge dispatch"
+        );
     }
 
-    const SPLIT_DEVICE: EmitDevice = EmitDevice { multiprocessors: 36 };
+    const SPLIT_DEVICE: EmitDevice = EmitDevice {
+        multiprocessors: 36,
+    };
 
     fn whole_attention_over_keys(rows: u64, keys: u64, heads: u64, head_dim: u64) -> BoundOp {
         let mut op = whole_attention_op(rows, heads, head_dim);
-        let BoundOpKind::CachedAttention { new_key_rows, new_upper_inclusive, .. } = &mut op.kind else {
+        let BoundOpKind::CachedAttention {
+            new_key_rows,
+            new_upper_inclusive,
+            ..
+        } = &mut op.kind
+        else {
             unreachable!("whole_attention_op always builds a CachedAttention kind");
         };
         *new_key_rows = keys;
@@ -5297,19 +5540,44 @@ mod tests {
         for (rows, keys, heads, head_dim) in [(1, 1500, 6, 64), (3, 211, 3, 40)] {
             let op = whole_attention_over_keys(rows, keys, heads, head_dim);
 
-            let kernel = emit_cuda_on_device(&op, &no_packed(), NumericPolicy::default(), SPLIT_DEVICE).expect("whole attention emits");
-            let unsplit = emit_cuda(&op, &no_packed()).expect("whole attention emits for an unknown device");
+            let kernel =
+                emit_cuda_on_device(&op, &no_packed(), NumericPolicy::default(), SPLIT_DEVICE)
+                    .expect("whole attention emits");
+            let unsplit =
+                emit_cuda(&op, &no_packed()).expect("whole attention emits for an unknown device");
 
-            assert_eq!(kernel.prologue.len(), 1, "{rows}x{keys}: a known device splits the key range");
-            assert!(kernel.entry.contains("_wp") && kernel.entry.contains("_sk"), "{}", kernel.entry);
-            assert!(unsplit.prologue.is_empty(), "an unknown device keeps one block per vector");
+            assert_eq!(
+                kernel.prologue.len(),
+                1,
+                "{rows}x{keys}: a known device splits the key range"
+            );
+            assert!(
+                kernel.entry.contains("_wp") && kernel.entry.contains("_sk"),
+                "{}",
+                kernel.entry
+            );
+            assert!(
+                unsplit.prologue.is_empty(),
+                "an unknown device keeps one block per vector"
+            );
             let partial = &kernel.prologue[0];
-            assert!(partial.entry.contains("_wp") && partial.entry.ends_with("_split"), "{}", partial.entry);
+            assert!(
+                partial.entry.contains("_wp") && partial.entry.ends_with("_split"),
+                "{}",
+                partial.entry
+            );
             for absent in ["in1[", "in5[", "in8", "pass_query[qpass", "@"] {
-                assert!(!partial.source.contains(absent), "`{absent}` is dead text in a whole partial pass");
+                assert!(
+                    !partial.source.contains(absent),
+                    "`{absent}` is dead text in a whole partial pass"
+                );
             }
             assert!(partial.source.contains("partial += in0[qbase + pair] * (cached ? cached_key_at(in2, kbase + pair) : in4[kbase + pair]);"));
-            assert!(partial.source.contains("constexpr long long min_chunk_keys = 16LL;"));
+            assert!(
+                partial
+                    .source
+                    .contains("constexpr long long min_chunk_keys = 16LL;")
+            );
             assert!(kernel.source.contains("* __restrict__ partials"));
         }
     }
@@ -5320,18 +5588,38 @@ mod tests {
         let encoder = whole_attention_over_keys(1, 1500, 6, 64);
         let tiled = whole_attention_over_keys(ATTENTION_TILE_MIN_ROWS, 1500, 6, 64);
 
-        assert_eq!(split_chunks(&one_chunk.kind, SPLIT_DEVICE), None, "one chunk of keys needs no split");
-        assert_eq!(split_chunks(&encoder.kind, SPLIT_DEVICE), Some(24), "36 multiprocessors x 4 waves over 6 vectors");
-        assert_eq!(split_chunks(&encoder.kind, EmitDevice::default()), None, "an unknown device keeps one block per vector");
-        assert_eq!(split_chunks(&tiled.kind, SPLIT_DEVICE), None, "the tiled body owns every row from the tile threshold up");
+        assert_eq!(
+            split_chunks(&one_chunk.kind, SPLIT_DEVICE),
+            None,
+            "one chunk of keys needs no split"
+        );
+        assert_eq!(
+            split_chunks(&encoder.kind, SPLIT_DEVICE),
+            Some(24),
+            "36 multiprocessors x 4 waves over 6 vectors"
+        );
+        assert_eq!(
+            split_chunks(&encoder.kind, EmitDevice::default()),
+            None,
+            "an unknown device keeps one block per vector"
+        );
+        assert_eq!(
+            split_chunks(&tiled.kind, SPLIT_DEVICE),
+            None,
+            "the tiled body owns every row from the tile threshold up"
+        );
     }
 
     #[test]
     fn paired_decode_split_pass_keeps_the_odd_plane_and_the_pass_triple_reads() {
         let kind = attention_kind(9, 512, 128, 128);
-        let op = BoundOp { extents: vec![1, 1, 8, 128], ..attention_op_with(kind) };
+        let op = BoundOp {
+            extents: vec![1, 1, 8, 128],
+            ..attention_op_with(kind)
+        };
 
-        let kernel = emit_cuda_on_device(&op, &no_packed(), NumericPolicy::default(), SPLIT_DEVICE).expect("paired decode emits");
+        let kernel = emit_cuda_on_device(&op, &no_packed(), NumericPolicy::default(), SPLIT_DEVICE)
+            .expect("paired decode emits");
 
         let partial = &kernel.prologue[0];
         for present in [
@@ -5341,82 +5629,144 @@ mod tests {
         ] {
             assert!(partial.source.contains(present), "missing `{present}`");
         }
-        assert!(!partial.source.contains('@'), "a template marker leaked into the paired partial pass");
+        assert!(
+            !partial.source.contains('@'),
+            "a template marker leaked into the paired partial pass"
+        );
     }
 
     #[test]
     fn whole_attention_above_the_tile_threshold_stages_k_and_v_tiles_once_per_row_tile() {
         let rows = 1500;
-        let kernel = emit_cuda(&whole_attention_op(rows, 6, 64), &no_packed()).expect("whole attention emits");
+        let kernel = emit_cuda(&whole_attention_op(rows, 6, 64), &no_packed())
+            .expect("whole attention emits");
 
-        assert!(kernel.entry.contains("_wp") && kernel.entry.contains("_tq32"), "{}", kernel.entry);
+        assert!(
+            kernel.entry.contains("_wp") && kernel.entry.contains("_tq32"),
+            "{}",
+            kernel.entry
+        );
         assert!(kernel.source.contains("constexpr int tile_rows = 32;"));
         assert_eq!(kernel.grid.blocks(), rows.div_ceil(32) * 6);
         assert_eq!(kernel.grid.block_width(), Some(ATTENTION_WARPS * WARP_SIZE));
-        assert!(kernel.prologue.is_empty(), "a whole bind has no split or merge dispatch");
-        for present in ["tile_stage[key_tile * key_stride + 64]", "constexpr int dim_chunks = 16;", "constexpr int key_stride = 68;"] {
-            assert!(kernel.source.contains(present), "`{present}` derives from the bound head_dim 64");
+        assert!(
+            kernel.prologue.is_empty(),
+            "a whole bind has no split or merge dispatch"
+        );
+        for present in [
+            "tile_stage[key_tile * key_stride + 64]",
+            "constexpr int dim_chunks = 16;",
+            "constexpr int key_stride = 68;",
+        ] {
+            assert!(
+                kernel.source.contains(present),
+                "`{present}` derives from the bound head_dim 64"
+            );
         }
         for absent in ["in1[", "in5[", "in8", "pass_query[pass_base +", "mma", "@"] {
-            assert!(!kernel.source.contains(absent), "`{absent}` has no place in a 64-wide tiled whole kernel");
+            assert!(
+                !kernel.source.contains(absent),
+                "`{absent}` has no place in a 64-wide tiled whole kernel"
+            );
         }
-        let body = crate::cuda_cached_attention_tiled::tiled_attention_body(&whole_attention_op(rows, 6, 64).kind);
-        assert!(!body.contains("128"), "the tiled body derives its width from the op, no literal lane width");
+        let body = crate::cuda_cached_attention_tiled::tiled_attention_body(
+            &whole_attention_op(rows, 6, 64).kind,
+        );
+        assert!(
+            !body.contains("128"),
+            "the tiled body derives its width from the op, no literal lane width"
+        );
         assert!(kernel.source.ends_with(&body));
     }
 
     #[test]
     fn whole_attention_off_the_tiled_widths_stays_per_row_above_the_threshold() {
         for head_dim in [132, 38] {
-            let kernel = emit_cuda(&whole_attention_op(64, 6, head_dim), &no_packed()).expect("whole attention emits");
+            let kernel = emit_cuda(&whole_attention_op(64, 6, head_dim), &no_packed())
+                .expect("whole attention emits");
 
-            assert!(!kernel.entry.contains("_tq"), "head_dim {head_dim}: {}", kernel.entry);
+            assert!(
+                !kernel.entry.contains("_tq"),
+                "head_dim {head_dim}: {}",
+                kernel.entry
+            );
         }
     }
 
     #[test]
     fn whole_attention_at_an_mma_width_takes_the_tensor_core_body_under_a_quantizing_policy() {
         let policy = NumericPolicy::bit_exact().with_activation_quantization(true);
-        let kernel = emit_cuda_with_policy(&whole_attention_op(64, 6, 64), &no_packed(), policy).expect("whole attention emits");
+        let kernel = emit_cuda_with_policy(&whole_attention_op(64, 6, 64), &no_packed(), policy)
+            .expect("whole attention emits");
 
-        assert!(kernel.entry.contains("_tq32_mma"),"{}", kernel.entry);
+        assert!(kernel.entry.contains("_tq32_mma"), "{}", kernel.entry);
         assert!(kernel.source.contains("mma_m16n8k8"));
     }
 
     #[test]
     fn whole_attention_at_an_mma_width_takes_the_tensor_core_body_under_input_rounding() {
         let policy = NumericPolicy::llama_relaxed().with_input_rounding(true);
-        let kernel = emit_cuda_with_policy(&whole_attention_op(64, 6, 64), &no_packed(), policy).expect("whole attention emits");
+        let kernel = emit_cuda_with_policy(&whole_attention_op(64, 6, 64), &no_packed(), policy)
+            .expect("whole attention emits");
 
         assert!(kernel.entry.contains("_tq32_mma"), "{}", kernel.entry);
     }
 
     #[test]
     fn whole_attention_at_an_mma_width_keeps_the_scalar_tiled_body_under_plain_llama_relaxed() {
-        let kernel = emit_cuda_with_policy(&whole_attention_op(64, 6, 64), &no_packed(), NumericPolicy::llama_relaxed()).expect("whole attention emits");
+        let kernel = emit_cuda_with_policy(
+            &whole_attention_op(64, 6, 64),
+            &no_packed(),
+            NumericPolicy::llama_relaxed(),
+        )
+        .expect("whole attention emits");
 
-        assert!(kernel.entry.contains("_tq32") && !kernel.entry.contains("_mma"), "{}", kernel.entry);
+        assert!(
+            kernel.entry.contains("_tq32") && !kernel.entry.contains("_mma"),
+            "{}",
+            kernel.entry
+        );
     }
 
     #[test]
     fn whole_attention_off_the_mma_widths_keeps_the_scalar_tiled_body_under_a_quantizing_policy() {
         let policy = NumericPolicy::bit_exact().with_activation_quantization(true);
-        let kernel = emit_cuda_with_policy(&whole_attention_op(64, 6, 36), &no_packed(), policy).expect("whole attention emits");
+        let kernel = emit_cuda_with_policy(&whole_attention_op(64, 6, 36), &no_packed(), policy)
+            .expect("whole attention emits");
 
-        assert!(kernel.entry.contains("_tq32") && !kernel.entry.contains("_mma"), "{}", kernel.entry);
+        assert!(
+            kernel.entry.contains("_tq32") && !kernel.entry.contains("_mma"),
+            "{}",
+            kernel.entry
+        );
     }
 
     #[test]
     fn whole_attention_under_the_bit_exact_policy_keeps_the_scalar_tiled_body() {
-        let kernel = emit_cuda_with_policy(&whole_attention_op(64, 6, 64), &no_packed(), NumericPolicy::bit_exact()).expect("whole attention emits");
+        let kernel = emit_cuda_with_policy(
+            &whole_attention_op(64, 6, 64),
+            &no_packed(),
+            NumericPolicy::bit_exact(),
+        )
+        .expect("whole attention emits");
 
-        assert!(kernel.entry.contains("_tq32") && !kernel.entry.contains("_mma"), "{}", kernel.entry);
+        assert!(
+            kernel.entry.contains("_tq32") && !kernel.entry.contains("_mma"),
+            "{}",
+            kernel.entry
+        );
     }
 
     #[test]
     fn paired_attention_at_the_full_lane_width_renders_the_tiled_body_byte_for_byte_as_before() {
         let mut kind = attention_kind(8, 0, 128, 128);
-        let BoundOpKind::CachedAttention { query_rows, new_key_rows, query_groups, .. } = &mut kind else {
+        let BoundOpKind::CachedAttention {
+            query_rows,
+            new_key_rows,
+            query_groups,
+            ..
+        } = &mut kind
+        else {
             unreachable!("attention_kind always builds a CachedAttention kind");
         };
         *query_rows = ATTENTION_TILE_MIN_ROWS * 4;
@@ -5424,17 +5774,33 @@ mod tests {
         *query_groups = 2;
         let before = include_str!("cuda_cached_attention_tiled_paired_128.cu");
 
-        assert_eq!(crate::cuda_cached_attention_tiled::tiled_attention_body(&kind), before);
-        let op = BoundOp { extents: vec![64, 1, 2, 128], ..attention_op_with(kind) };
+        assert_eq!(
+            crate::cuda_cached_attention_tiled::tiled_attention_body(&kind),
+            before
+        );
+        let op = BoundOp {
+            extents: vec![64, 1, 2, 128],
+            ..attention_op_with(kind)
+        };
         let kernel = emit_cuda(&op, &no_packed()).expect("paired emits");
-        assert!(kernel.entry.contains("_tq16") && !kernel.entry.contains("_wp"), "{}", kernel.entry);
-        assert!(kernel.source.ends_with(before), "the emitted paired kernel carries the pre-derivation body verbatim");
+        assert!(
+            kernel.entry.contains("_tq16") && !kernel.entry.contains("_wp"),
+            "{}",
+            kernel.entry
+        );
+        assert!(
+            kernel.source.ends_with(before),
+            "the emitted paired kernel carries the pre-derivation body verbatim"
+        );
     }
 
     #[test]
     fn whole_attention_over_a_cached_range_or_a_ninth_operand_is_refused_naming_the_cuda_emitter() {
         let mut cached = whole_attention_op(16, 6, 64);
-        let BoundOpKind::CachedAttention { cached_key_rows, .. } = &mut cached.kind else {
+        let BoundOpKind::CachedAttention {
+            cached_key_rows, ..
+        } = &mut cached.kind
+        else {
             unreachable!("whole_attention_op always builds a CachedAttention kind");
         };
         *cached_key_rows = 4;
@@ -5446,10 +5812,14 @@ mod tests {
 
         for op in [cached, ninth] {
             assert_eq!(cuda_cached_attention_class(&op.kind), None);
-            let refusal = emit_cuda(&op, &no_packed()).expect_err("the renderer reads no cached range");
+            let refusal =
+                emit_cuda(&op, &no_packed()).expect_err("the renderer reads no cached range");
             assert!(matches!(
                 refusal,
-                EmitError::CudaUnsupportedOpKind { kind: "cached_attention_whole_planes", .. }
+                EmitError::CudaUnsupportedOpKind {
+                    kind: "cached_attention_whole_planes",
+                    ..
+                }
             ));
             assert!(refusal.to_string().contains("cuda emitter"), "{refusal}");
         }
@@ -5458,11 +5828,26 @@ mod tests {
     #[test]
     fn executes_refuses_the_forms_cuda_never_renders_with_their_emit_kind_strings() {
         assert!(!executes(&Target::CUDA).forms.contains(Form::GatedDeltaNet));
-        assert_eq!(refusal_kind(Refusal::Form(Form::GatedDeltaNet)), "gated_delta_net");
-        assert_eq!(refusal_kind(Refusal::Form(Form::TopFractionSelect)), "top_fraction_select");
-        assert_eq!(refusal_kind(Refusal::Form(Form::RoundBatchedReduce)), "round_batched_reduce");
-        assert_eq!(refusal_kind(Refusal::Form(Form::CachedSoftmaxWeights)), "cached_softmax_weights");
-        assert_eq!(refusal_kind(Refusal::Form(Form::ElementwiseTwin)), "elementwise_twin");
+        assert_eq!(
+            refusal_kind(Refusal::Form(Form::GatedDeltaNet)),
+            "gated_delta_net"
+        );
+        assert_eq!(
+            refusal_kind(Refusal::Form(Form::TopFractionSelect)),
+            "top_fraction_select"
+        );
+        assert_eq!(
+            refusal_kind(Refusal::Form(Form::RoundBatchedReduce)),
+            "round_batched_reduce"
+        );
+        assert_eq!(
+            refusal_kind(Refusal::Form(Form::CachedSoftmaxWeights)),
+            "cached_softmax_weights"
+        );
+        assert_eq!(
+            refusal_kind(Refusal::Form(Form::ElementwiseTwin)),
+            "elementwise_twin"
+        );
     }
 
     #[test]
@@ -5486,7 +5871,11 @@ mod tests {
         assert!(kernel.source.contains("pass_query = in9"));
         assert!(kernel.source.contains("pass_cached_key = in10"));
         assert!(kernel.source.contains("pass_new_key = in11"));
-        assert!(kernel.source.contains("constexpr long long pass_dim = head_dim - rotary_dim"));
+        assert!(
+            kernel
+                .source
+                .contains("constexpr long long pass_dim = head_dim - rotary_dim")
+        );
     }
 
     #[test]
@@ -5518,7 +5907,9 @@ mod tests {
         let static_kernel = emit_cuda(&static_op, &no_packed()).expect("static form emits");
 
         let inputs = |count: u32| -> Vec<Binding> {
-            (0..count).map(|index| Binding::Input(NodeId(index))).collect()
+            (0..count)
+                .map(|index| Binding::Input(NodeId(index)))
+                .collect()
         };
         let mut nine = inputs(9);
         nine.extend([Binding::Output(NodeId(9)), Binding::Uniforms]);
@@ -5564,7 +5955,11 @@ mod tests {
         let total = i64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"));
 
         assert_eq!(total, 3 * 8);
-        assert_eq!(bytes.len(), 32, "a multi-row form also carries its row bounds");
+        assert_eq!(
+            bytes.len(),
+            32,
+            "a multi-row form also carries its row bounds"
+        );
     }
 
     /// The card-C spelling is derived from the numeric layout, not hand-written
@@ -5573,7 +5968,9 @@ mod tests {
     #[test]
     fn the_uniform_word_is_a_fixed_width_sixty_four_bit_integer() {
         for target in [Target::CUDA, Target::HIP, Target::hip_wave(32)] {
-            let word = target.word_layout().expect("the default word names a layout");
+            let word = target
+                .word_layout()
+                .expect("the default word names a layout");
             assert_eq!(word.width(), 64);
             assert!(word.is_integer());
             assert!(word.is_signed_integer());
@@ -5594,7 +5991,9 @@ mod tests {
 
         assert_eq!(
             word_c(&target),
-            Err(EmitError::CudaUnsupportedWord { name: "no_such_layout" })
+            Err(EmitError::CudaUnsupportedWord {
+                name: "no_such_layout"
+            })
         );
     }
 
@@ -5618,18 +6017,16 @@ mod tests {
             ),
         ];
 
-        type DialectEmitter =
-            fn(&BoundOp, &PackedOperands) -> Result<CudaKernel, EmitError>;
-        let dialects: [(&str, DialectEmitter); 2] =
-            [("cuda", emit_cuda), ("hip", emit_hip)];
+        type DialectEmitter = fn(&BoundOp, &PackedOperands) -> Result<CudaKernel, EmitError>;
+        let dialects: [(&str, DialectEmitter); 2] = [("cuda", emit_cuda), ("hip", emit_hip)];
         #[cfg(feature = "reduce-epilogue-fusion")]
         let ops = {
             let mut ops = ops;
             ops.push(("broadcast", row_sum_plus_bias_op(4, 16)));
             ops
         };
-        let quantize = emit_q8_1_quantize(NodeId(0), NodeId(1), 32)
-            .expect("the q8_1 prologue emits");
+        let quantize =
+            emit_q8_1_quantize(NodeId(0), NodeId(1), 32).expect("the q8_1 prologue emits");
         assert_no_host_width_long(&quantize.source)
             .expect("the q8_1 prologue carries the 64-bit word");
         assert!(quantize.source.contains("const long long *u"));
@@ -5686,10 +6083,17 @@ mod tests {
 
     #[test]
     fn single_row_kernel_keeps_its_bounds_as_constants() {
-        let kernel = emit_cuda(&attention_op_with(attention_kind(9, 5, 256, 256)), &no_packed())
-            .expect("decode form emits");
+        let kernel = emit_cuda(
+            &attention_op_with(attention_kind(9, 5, 256, 256)),
+            &no_packed(),
+        )
+        .expect("decode form emits");
 
-        assert!(kernel.source.contains("constexpr long long new_key_rows = 1LL;"));
+        assert!(
+            kernel
+                .source
+                .contains("constexpr long long new_key_rows = 1LL;")
+        );
     }
 
     #[test]
@@ -5700,8 +6104,16 @@ mod tests {
 
         assert!(kernel.source.contains("(long long)in8[0]"));
         assert!(kernel.source.contains("expf(maximum - next_max)"));
-        assert!(kernel.source.contains("weighted[local_dimension] * rescale"));
-        assert!(kernel.source.contains("__shfl_xor_sync(PROXIMA_ALL_LANES, partial, offset)"));
+        assert!(
+            kernel
+                .source
+                .contains("weighted[local_dimension] * rescale")
+        );
+        assert!(
+            kernel
+                .source
+                .contains("__shfl_xor_sync(PROXIMA_ALL_LANES, partial, offset)")
+        );
     }
 
     /// One attention vector is one block of `ATTENTION_WARPS` warps, each on a
@@ -5720,7 +6132,11 @@ mod tests {
         assert!(kernel.source.contains("constexpr int warps = 4;"));
         assert!(kernel.source.contains("key += warps"));
         assert!(kernel.source.contains("__syncthreads();"));
-        assert!(kernel.source.contains("shared_weighted[source * head_dim + dimension]"));
+        assert!(
+            kernel
+                .source
+                .contains("shared_weighted[source * head_dim + dimension]")
+        );
     }
 
     #[cfg(feature = "metal-attn-split-decode")]
@@ -5730,7 +6146,10 @@ mod tests {
         let metal_form = cached_attention_form(&kind, NumericPolicy::llama_relaxed());
 
         assert!(
-            matches!(metal_form, Some(CachedAttentionForm::TwoRangeDecodeSplit { .. })),
+            matches!(
+                metal_form,
+                Some(CachedAttentionForm::TwoRangeDecodeSplit { .. })
+            ),
             "control needs metal to select DecodeSplit, got {metal_form:?}"
         );
         assert_eq!(
@@ -5790,9 +6209,15 @@ mod tests {
     fn zero_extent_elementwise_is_idle() {
         let empty = elementwise_tanh_op(0);
         assert_eq!(empty.output_len(), 0);
-        assert!(!empty.launches(), "zero extent is a valid empty tensor, not a launch");
+        assert!(
+            !empty.launches(),
+            "zero extent is a valid empty tensor, not a launch"
+        );
         let kernel = emit_cuda(&empty, &no_packed()).expect("emit succeeds");
-        assert!(kernel.grid.is_idle(), "an empty tensor is an idle grid, never a zero-thread launch");
+        assert!(
+            kernel.grid.is_idle(),
+            "an empty tensor is an idle grid, never a zero-thread launch"
+        );
         let live = elementwise_tanh_op(8);
         assert_eq!(live.output_len(), 8);
         assert!(live.launches());
@@ -5803,7 +6228,10 @@ mod tests {
     #[test]
     fn zero_extent_staged_matvec_is_idle() {
         let (bound, weight) = q4_0_matvec_op(0, 64, true);
-        assert!(!bound.launches(), "an empty output row set dispatches nothing");
+        assert!(
+            !bound.launches(),
+            "an empty output row set dispatches nothing"
+        );
         let packed = q4_0_packed(weight);
         let policy = NumericPolicy::default().with_activation_quantization(true);
         let quantized = operand_codecs(&bound, &packed);
@@ -5816,7 +6244,10 @@ mod tests {
         );
         let kernel = emit_cuda_with_policy(&bound, &packed, policy)
             .expect("an empty staged matvec still emits");
-        assert!(kernel.grid.is_idle(), "the staged arm must not emit threads: 0");
+        assert!(
+            kernel.grid.is_idle(),
+            "the staged arm must not emit threads: 0"
+        );
     }
 
     #[test]
@@ -5972,7 +6403,9 @@ mod tests {
     fn selected_score_top_k_op(expert_count: u64, top_k: u64) -> BoundOp {
         let mut bound = moe_top_k_op(expert_count, top_k, false);
         if let BoundOpKind::MoeTopK {
-            operands, weighting, ..
+            operands,
+            weighting,
+            ..
         } = &mut bound.kind
         {
             operands.push((
@@ -5989,7 +6422,8 @@ mod tests {
     }
 
     #[test]
-    fn moe_topk_selected_score_weighting_reads_the_unbiased_scores_and_sums_them_over_the_tied_lanes() {
+    fn moe_topk_selected_score_weighting_reads_the_unbiased_scores_and_sums_them_over_the_tied_lanes()
+     {
         let kernel = emit_cuda(&selected_score_top_k_op(256, 6), &no_packed())
             .expect("a 256 expert sigmoid router emits");
 
@@ -6002,7 +6436,11 @@ mod tests {
                 Binding::Uniforms
             ]
         );
-        assert!(kernel.source.contains("const float* __restrict__ weight_scores"));
+        assert!(
+            kernel
+                .source
+                .contains("const float* __restrict__ weight_scores")
+        );
         assert!(kernel.source.contains("warp_weight[warp_id] = lane_weight"));
         assert!(!kernel.source.contains("expf(max_value - max0)"));
         let softmax = emit_cuda(&moe_top_k_op(256, 6, false), &no_packed())
@@ -6040,7 +6478,10 @@ mod tests {
 
     #[test]
     fn reuse_matches_fresh_emit_for_every_op() {
-        let pairs = [(elementwise_tanh_op(4), elementwise_tanh_op(4096)), (scan_op(8), scan_op(64))];
+        let pairs = [
+            (elementwise_tanh_op(4), elementwise_tanh_op(4096)),
+            (scan_op(8), scan_op(64)),
+        ];
         #[cfg(feature = "reduce-epilogue-fusion")]
         let pairs = pairs
             .into_iter()
@@ -6212,10 +6653,18 @@ mod tests {
         let q4_0_weight_f32_activation = operand_codecs(&bound, &q4_0_packed(weight));
 
         let q6k_weight = [Some(Codec::Q6K), None];
-        assert_eq!(q4_0_matvec(&bound, &q6k_weight), None, "Q6_K weight rejected");
+        assert_eq!(
+            q4_0_matvec(&bound, &q6k_weight),
+            None,
+            "Q6_K weight rejected"
+        );
 
         let two_q4_0 = [Some(Codec::Q4_0), Some(Codec::Q4_0)];
-        assert_eq!(q4_0_matvec(&bound, &two_q4_0), None, "two Q4_0 operands rejected");
+        assert_eq!(
+            q4_0_matvec(&bound, &two_q4_0),
+            None,
+            "two Q4_0 operands rejected"
+        );
 
         let mut maximum = bound.clone();
         if let BoundOpKind::Reduce { reduce_op, .. } = &mut maximum.kind {
@@ -6287,10 +6736,17 @@ mod tests {
             ]
         );
         assert_eq!(kernel.entry, "omega_cuda_q8_1_quantize");
-        assert!(kernel.source.contains("#define PROXIMA_ALL_LANES 0xffffffffu"));
+        assert!(
+            kernel
+                .source
+                .contains("#define PROXIMA_ALL_LANES 0xffffffffu")
+        );
         assert!(kernel.source.contains("__shfl_xor_sync(PROXIMA_ALL_LANES,"));
         assert!(
-            kernel.source.find("#define PROXIMA_ALL_LANES").expect("define")
+            kernel
+                .source
+                .find("#define PROXIMA_ALL_LANES")
+                .expect("define")
                 < kernel.source.find("PROXIMA_ALL_LANES,").expect("use"),
             "the hand-built source must bind the token before it uses it"
         );
@@ -6324,17 +6780,44 @@ mod tests {
     #[test]
     fn a_block_quantize_kernel_returns_only_after_its_full_mask_shuffles_on_every_target() {
         let bound = q8_1_quantize_op();
-        let cuda = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::default()).expect("cuda emits");
-        let hip32 = emit_hip_at_wave(HipWave::Wave32, &bound, &no_packed(), NumericPolicy::default(), EmitDevice::default(), &OperandDtypes::new())
-            .expect("a 32-lane hip target renders block quantize under the one lowering");
-        let hip64 = emit_hip_at_wave(HipWave::Wave64, &bound, &no_packed(), NumericPolicy::default(), EmitDevice::default(), &OperandDtypes::new())
-            .expect("a 64-lane hip target renders block quantize under the one lowering");
+        let cuda = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::default())
+            .expect("cuda emits");
+        let hip32 = emit_hip_at_wave(
+            HipWave::Wave32,
+            &bound,
+            &no_packed(),
+            NumericPolicy::default(),
+            EmitDevice::default(),
+            &OperandDtypes::new(),
+        )
+        .expect("a 32-lane hip target renders block quantize under the one lowering");
+        let hip64 = emit_hip_at_wave(
+            HipWave::Wave64,
+            &bound,
+            &no_packed(),
+            NumericPolicy::default(),
+            EmitDevice::default(),
+            &OperandDtypes::new(),
+        )
+        .expect("a 64-lane hip target renders block quantize under the one lowering");
 
         for (target, kernel) in [("cuda", cuda), ("hip32", hip32), ("hip64", hip64)] {
-            let first_return = kernel.source.find("return").expect("the dead-lane exit exists");
-            let last_shuffle = kernel.source.rfind("__shfl_xor_sync").expect("the shuffles exist");
-            assert!(first_return > last_shuffle, "{target}: a lane returns before the full-mask shuffles finish");
-            assert!(kernel.source.contains("live ? group : u.groups - 1"), "{target}: dead lanes still run the shuffles");
+            let first_return = kernel
+                .source
+                .find("return")
+                .expect("the dead-lane exit exists");
+            let last_shuffle = kernel
+                .source
+                .rfind("__shfl_xor_sync")
+                .expect("the shuffles exist");
+            assert!(
+                first_return > last_shuffle,
+                "{target}: a lane returns before the full-mask shuffles finish"
+            );
+            assert!(
+                kernel.source.contains("live ? group : u.groups - 1"),
+                "{target}: dead lanes still run the shuffles"
+            );
         }
     }
 
@@ -6345,10 +6828,17 @@ mod tests {
         let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::default())
             .expect("a q8_1 run layout emits a quantize kernel");
 
-        assert!(kernel.source.contains("#define PROXIMA_ALL_LANES 0xffffffffu"));
+        assert!(
+            kernel
+                .source
+                .contains("#define PROXIMA_ALL_LANES 0xffffffffu")
+        );
         assert!(kernel.source.contains("__shfl_xor_sync(PROXIMA_ALL_LANES,"));
         assert!(
-            kernel.source.find("#define PROXIMA_ALL_LANES").expect("define")
+            kernel
+                .source
+                .find("#define PROXIMA_ALL_LANES")
+                .expect("define")
                 < kernel.source.find("PROXIMA_ALL_LANES,").expect("use"),
             "the block-quantize source must bind the token before it uses it"
         );
@@ -6386,7 +6876,10 @@ mod tests {
         assert!(flag_off.prologue.is_empty());
         assert!(flag_on.prologue.is_empty());
         assert!(!flag_off.source.contains("blockdot_"));
-        assert!(flag_on.source.contains("blockdot_"), "the flag-on q4_0 matvec reads the layout-driven int8 dot");
+        assert!(
+            flag_on.source.contains("blockdot_"),
+            "the flag-on q4_0 matvec reads the layout-driven int8 dot"
+        );
         assert_ne!(flag_on.entry, flag_off.entry);
     }
 
@@ -6395,7 +6888,14 @@ mod tests {
         let (bound, weight) = q4_0_matvec_op(8, 64, true);
         let packed = q4_0_packed(weight);
         let quantized = operand_codecs(&bound, &packed);
-        let flag_off = entry_name(Target::CUDA, &bound, &packed, &quantized, NumericPolicy::default(), EmitDevice::default());
+        let flag_off = entry_name(
+            Target::CUDA,
+            &bound,
+            &packed,
+            &quantized,
+            NumericPolicy::default(),
+            EmitDevice::default(),
+        );
         let flag_on = entry_name(
             Target::CUDA,
             &bound,
@@ -6419,7 +6919,10 @@ mod tests {
             ),
             "with the flag off the entry name is the pre-existing identity"
         );
-        assert_ne!(flag_off, flag_on, "the dp4a body must not share the f32 entry name");
+        assert_ne!(
+            flag_off, flag_on,
+            "the dp4a body must not share the f32 entry name"
+        );
     }
 
     #[test]
@@ -6630,7 +7133,12 @@ mod tests {
     /// `Σ_k table[ids[s], k]` over iteration space `(s, k)`. With
     /// `index_depends_on_reduction` the index also varies with `k`, so its
     /// stride on the reduction dim is nonzero and the reduce must stay serial.
-    fn gathered_reduce_op(vocab: u32, width: u32, seq: u32, index_depends_on_reduction: bool) -> BoundOp {
+    fn gathered_reduce_op(
+        vocab: u32,
+        width: u32,
+        seq: u32,
+        index_depends_on_reduction: bool,
+    ) -> BoundOp {
         let mut program = Vec::new();
         let table = append(
             &mut program,
@@ -6730,13 +7238,23 @@ mod tests {
 
     /// With `per_slot` the activation is `[slots, width]`, as a stacked down product reads one
     /// SwiGLU row per routed expert.
-    fn stacked_expert_op_with_activation(experts: u32, rows: u32, width: u32, slots: u32, per_slot: bool) -> BoundOp {
+    fn stacked_expert_op_with_activation(
+        experts: u32,
+        rows: u32,
+        width: u32,
+        slots: u32,
+        per_slot: bool,
+    ) -> BoundOp {
         let mut program = Vec::new();
         let weight = append(
             &mut program,
             Op::Input {
                 dtype: DType::FLOAT32,
-                shape: vec![Extent::Static(experts), Extent::Static(rows), Extent::Static(width)],
+                shape: vec![
+                    Extent::Static(experts),
+                    Extent::Static(rows),
+                    Extent::Static(width),
+                ],
                 name: None,
             },
         );
@@ -6782,7 +7300,10 @@ mod tests {
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (weight, gathered_map),
-                    (activation, IndexMap::Affine(map::projection(3, activation_axes))),
+                    (
+                        activation,
+                        IndexMap::Affine(map::projection(3, activation_axes)),
+                    ),
                 ],
                 name: None,
             },
@@ -6814,7 +7335,8 @@ mod tests {
     }
 
     #[test]
-    fn a_stacked_q8_0_expert_product_takes_the_staged_dp4a_with_the_gather_base_in_the_row_address() {
+    fn a_stacked_q8_0_expert_product_takes_the_staged_dp4a_with_the_gather_base_in_the_row_address()
+    {
         let bound = stacked_expert_op(32, 512, 1024, 8);
         let mut packed = BTreeMap::new();
         packed.insert(bound.operands()[0].0, Codec::Q8_0);
@@ -6825,28 +7347,44 @@ mod tests {
         )
         .expect("emit succeeds");
         let source = &kernel.source;
-        let fetch = source.find("long long fetched0 =").expect("per-row expert fetch");
+        let fetch = source
+            .find("long long fetched0 =")
+            .expect("per-row expert fetch");
         let row = source
             .find("const long long row_element = u.operand_base[0] + packed_row * 1024 + gather_base0;")
             .expect("row address carries the gather base");
         assert!(fetch < row, "the expert fetch precedes the row address");
         assert!(source.contains("__dp4a"), "the dot is the staged dp4a body");
-        assert!(source.contains("atomicExch(&fault[0]"), "an out-of-range expert records a fault");
+        assert!(
+            source.contains("atomicExch(&fault[0]"),
+            "an out-of-range expert records a fault"
+        );
         assert!(kernel.entry.contains("_smv"), "{}", kernel.entry);
         assert!(kernel.entry.contains("_sg1"), "{}", kernel.entry);
         assert!(source.contains(&kernel.entry));
     }
 
     fn dense_expert_free_op(rows: u32, width: u32, tokens: u32) -> BoundOp {
-        let dtype = proxima_numeric::Numerics::default().activation.to_dtype().expect("activation format has a dtype");
+        let dtype = proxima_numeric::Numerics::default()
+            .activation
+            .to_dtype()
+            .expect("activation format has a dtype");
         let mut program = Vec::new();
         let weight = append(
             &mut program,
-            Op::Input { dtype, shape: vec![Extent::Static(rows), Extent::Static(width)], name: None },
+            Op::Input {
+                dtype,
+                shape: vec![Extent::Static(rows), Extent::Static(width)],
+                name: None,
+            },
         );
         let activation = append(
             &mut program,
-            Op::Input { dtype, shape: vec![Extent::Static(tokens), Extent::Static(width)], name: None },
+            Op::Input {
+                dtype,
+                shape: vec![Extent::Static(tokens), Extent::Static(width)],
+                name: None,
+            },
         );
         let product = append(
             &mut program,
@@ -6874,11 +7412,16 @@ mod tests {
             }),
         );
         let shapes = infer(&program, &[]).expect("dense reduce infers");
-        bind(&program, &shapes, &[NodeId((program.len() - 1) as u32)], proxima_numeric::NumericPolicy::default())
-            .expect("dense reduce lowers")
-            .into_iter()
-            .next()
-            .expect("one bound emitted")
+        bind(
+            &program,
+            &shapes,
+            &[NodeId((program.len() - 1) as u32)],
+            proxima_numeric::NumericPolicy::default(),
+        )
+        .expect("dense reduce lowers")
+        .into_iter()
+        .next()
+        .expect("one bound emitted")
     }
 
     fn packed_expert_weight(bound: &BoundOp, codec: Codec) -> PackedOperands {
@@ -6893,30 +7436,69 @@ mod tests {
 
     fn grouped_pair(bound: &BoundOp, codec: Codec) -> Option<([CudaKernel; 2], usize)> {
         let packed = packed_expert_weight(bound, codec);
-        emit_cuda_grouped_on_device(bound, &packed, NumericPolicy::llama_relaxed(), EmitDevice::default()).expect("grouped emit succeeds")
+        emit_cuda_grouped_on_device(
+            bound,
+            &packed,
+            NumericPolicy::llama_relaxed(),
+            EmitDevice::default(),
+        )
+        .expect("grouped emit succeeds")
     }
 
     #[test]
-    fn a_gathered_expert_product_above_the_grouped_minimum_renders_a_prepass_and_a_grouped_kernel_for_every_decoded_codec() {
-        let slots = u32::try_from(crate::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS).expect("minimum fits") + 8;
+    fn a_gathered_expert_product_above_the_grouped_minimum_renders_a_prepass_and_a_grouped_kernel_for_every_decoded_codec()
+     {
+        let slots = u32::try_from(crate::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS)
+            .expect("minimum fits")
+            + 8;
         let bound = stacked_expert_op(8, 128, 512, slots);
-        assert!(grouped_codecs().count() > 0, "the decode table accepts codecs");
+        assert!(
+            grouped_codecs().count() > 0,
+            "the decode table accepts codecs"
+        );
         for codec in grouped_codecs() {
-            let (kernels, words) = grouped_pair(&bound, codec).unwrap_or_else(|| panic!("the grouped form is taken for {codec:?}"));
+            let (kernels, words) = grouped_pair(&bound, codec)
+                .unwrap_or_else(|| panic!("the grouped form is taken for {codec:?}"));
             let [prepass, grouped] = kernels;
-            assert!(prepass.entry.ends_with("_route_prepass"), "{}", prepass.entry);
-            assert!(prepass.entry.starts_with(&grouped.entry), "the prepass shares the grouped kernel's name");
+            assert!(
+                prepass.entry.ends_with("_route_prepass"),
+                "{}",
+                prepass.entry
+            );
+            assert!(
+                prepass.entry.starts_with(&grouped.entry),
+                "the prepass shares the grouped kernel's name"
+            );
             assert!(grouped.entry.contains("_grp1"), "{}", grouped.entry);
-            assert_eq!(prepass.source, grouped.source, "both entries live in one module");
-            assert!(grouped.source.contains("scratch0"), "the grouped kernel runs the shared tile loop");
-            assert!(grouped.source.contains("const unsigned int *tile_list"), "activation rows come through the compacted list");
-            assert!(grouped.source.contains("tile_expert_base + tile_index"), "the slice names its expert from the tile table");
-            assert!(grouped.source.contains("grouped_expert * u.gather_element_stride[0]"), "the weight is read at the slice's expert");
-            assert!(prepass.source.contains("__ballot_sync"), "the prepass ranks rows by ballot");
+            assert_eq!(
+                prepass.source, grouped.source,
+                "both entries live in one module"
+            );
+            assert!(
+                grouped.source.contains("scratch0"),
+                "the grouped kernel runs the shared tile loop"
+            );
+            assert!(
+                grouped.source.contains("const unsigned int *tile_list"),
+                "activation rows come through the compacted list"
+            );
+            assert!(
+                grouped.source.contains("tile_expert_base + tile_index"),
+                "the slice names its expert from the tile table"
+            );
+            assert!(
+                grouped
+                    .source
+                    .contains("grouped_expert * u.gather_element_stride[0]"),
+                "the weight is read at the slice's expert"
+            );
+            assert!(
+                prepass.source.contains("__ballot_sync"),
+                "the prepass ranks rows by ballot"
+            );
             assert!(words > 0);
         }
     }
-
 
     fn int8_grouped_codecs() -> impl Iterator<Item = Codec> {
         grouped_codecs().filter(|codec| is_int8_weight(*codec))
@@ -6924,45 +7506,89 @@ mod tests {
 
     fn int8_grouped_pair(bound: &BoundOp, codec: Codec) -> Option<([CudaKernel; 2], usize)> {
         let mut packed = packed_expert_weight(bound, codec);
-        let activation = Codec::ALL.into_iter().find(|codec| codec.is_quantized_activation()).expect("a quantized activation codec");
+        let activation = Codec::ALL
+            .into_iter()
+            .find(|codec| codec.is_quantized_activation())
+            .expect("a quantized activation codec");
         packed.insert(bound.operands()[1].0, activation);
         let policy = NumericPolicy::llama_relaxed().with_activation_quantization(true);
-        emit_cuda_grouped_on_device(bound, &packed, policy, EmitDevice::default()).expect("grouped emit succeeds")
+        emit_cuda_grouped_on_device(bound, &packed, policy, EmitDevice::default())
+            .expect("grouped emit succeeds")
     }
 
     #[test]
-    fn a_gathered_expert_product_over_a_prequantized_activation_renders_the_grouped_kernel_on_the_int8_tile() {
-        let slots = u32::try_from(crate::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS).expect("minimum fits") + 8;
+    fn a_gathered_expert_product_over_a_prequantized_activation_renders_the_grouped_kernel_on_the_int8_tile()
+     {
+        let slots = u32::try_from(crate::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS)
+            .expect("minimum fits")
+            + 8;
         let bound = stacked_expert_op(8, 128, 512, slots);
-        assert!(int8_grouped_codecs().count() > 0, "the int8 table accepts codecs");
+        assert!(
+            int8_grouped_codecs().count() > 0,
+            "the int8 table accepts codecs"
+        );
         for codec in int8_grouped_codecs() {
-            let (kernels, words) = int8_grouped_pair(&bound, codec).unwrap_or_else(|| panic!("the grouped form is taken for {codec:?}"));
+            let (kernels, words) = int8_grouped_pair(&bound, codec)
+                .unwrap_or_else(|| panic!("the grouped form is taken for {codec:?}"));
             let [prepass, grouped] = kernels;
-            assert!(prepass.entry.ends_with("_route_prepass"), "{}", prepass.entry);
+            assert!(
+                prepass.entry.ends_with("_route_prepass"),
+                "{}",
+                prepass.entry
+            );
             assert!(grouped.entry.contains("_grp1"), "{}", grouped.entry);
-            assert!(grouped.source.contains("mma_s8("), "{codec:?}: the int8 mma is the tile");
-            assert!(grouped.source.contains("act_tile"), "{codec:?}: the activation stages as int8 codes");
-            assert!(!grouped.source.contains("act_high"), "{codec:?}: no wide activation tile");
-            assert!(grouped.source.contains("tile_list[token]"), "{codec:?}: activation rows come through the compacted list");
-            assert!(grouped.source.contains("grouped_expert * u.gather_element_stride[0]"), "{codec:?}: the weight is read at the slice's expert");
-            assert!(prepass.source.contains("__ballot_sync"), "{codec:?}: the prepass ranks rows by ballot");
+            assert!(
+                grouped.source.contains("mma_s8("),
+                "{codec:?}: the int8 mma is the tile"
+            );
+            assert!(
+                grouped.source.contains("act_tile"),
+                "{codec:?}: the activation stages as int8 codes"
+            );
+            assert!(
+                !grouped.source.contains("act_high"),
+                "{codec:?}: no wide activation tile"
+            );
+            assert!(
+                grouped.source.contains("tile_list[token]"),
+                "{codec:?}: activation rows come through the compacted list"
+            );
+            assert!(
+                grouped
+                    .source
+                    .contains("grouped_expert * u.gather_element_stride[0]"),
+                "{codec:?}: the weight is read at the slice's expert"
+            );
+            assert!(
+                prepass.source.contains("__ballot_sync"),
+                "{codec:?}: the prepass ranks rows by ballot"
+            );
             assert!(words > 0);
         }
     }
 
     #[test]
-    fn the_plain_emit_of_a_grouped_product_is_the_grouped_kernel_with_its_prepass_as_the_prologue() {
-        let slots = u32::try_from(crate::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS).expect("minimum fits") + 8;
+    fn the_plain_emit_of_a_grouped_product_is_the_grouped_kernel_with_its_prepass_as_the_prologue()
+    {
+        let slots = u32::try_from(crate::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS)
+            .expect("minimum fits")
+            + 8;
         let bound = stacked_expert_op(8, 128, 512, slots);
         for codec in grouped_codecs() {
             let packed = packed_expert_weight(&bound, codec);
-            let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed()).expect("emit succeeds");
+            let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
+                .expect("emit succeeds");
             let (pair, words) = grouped_pair(&bound, codec).expect("the grouped form is taken");
             assert_eq!(kernel.entry, pair[1].entry);
             assert_eq!(kernel.route_compaction_words, words);
             assert_eq!(kernel.prologue.len(), 1, "{codec:?}");
             assert_eq!(kernel.prologue[0].entry, pair[0].entry);
-            assert!(!kernel.prologue[0].bindings.iter().any(|binding| matches!(binding, Binding::Output(_))));
+            assert!(
+                !kernel.prologue[0]
+                    .bindings
+                    .iter()
+                    .any(|binding| matches!(binding, Binding::Output(_)))
+            );
         }
     }
 
@@ -6971,7 +7597,8 @@ mod tests {
         let bound = dense_expert_free_op(128, 512, 200);
         for codec in grouped_codecs() {
             let packed = packed_expert_weight(&bound, codec);
-            let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed()).expect("dense emit succeeds");
+            let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
+                .expect("dense emit succeeds");
             assert!(kernel.entry.contains("_mma"), "{}", kernel.entry);
             assert!(!kernel.entry.contains("_grp1"), "{}", kernel.entry);
             assert!(grouped_pair(&bound, codec).is_none());
@@ -6979,9 +7606,12 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_mma_operand_weight_gemm_rounds_the_activation_once_under_either_rounding_permission() {
+    fn a_stored_mma_operand_weight_gemm_rounds_the_activation_once_under_either_rounding_permission()
+     {
         let bound = dense_expert_free_op(128, 512, 200);
-        let codec = Target::CUDA.mma_operand_codec().expect("the cuda target names its mma operand");
+        let codec = Target::CUDA
+            .mma_operand_codec()
+            .expect("the cuda target names its mma operand");
         let quantized = operand_codecs(&bound, &packed_expert_weight(&bound, codec));
         let single = |policy: NumericPolicy| {
             mma_gemm_plan(&bound, &quantized, policy)
@@ -6989,8 +7619,12 @@ mod tests {
                 .single_activation
         };
 
-        assert!(single(NumericPolicy::llama_relaxed().with_input_rounding(true)));
-        assert!(single(NumericPolicy::llama_relaxed().with_activation_quantization(true)));
+        assert!(single(
+            NumericPolicy::llama_relaxed().with_input_rounding(true)
+        ));
+        assert!(single(
+            NumericPolicy::llama_relaxed().with_activation_quantization(true)
+        ));
         assert!(!single(NumericPolicy::llama_relaxed()));
     }
 
@@ -6998,29 +7632,71 @@ mod tests {
     fn an_activation_by_constant_product_takes_the_tiled_entry_with_no_packed_operand() {
         for (rows, width, tokens) in [(128, 512, 200), (201, 400, 3000)] {
             let bound = dense_expert_free_op(rows, width, tokens);
-            let kernel = emit_cuda_with_policy(&bound, &PackedOperands::new(), NumericPolicy::llama_relaxed()).expect("emit succeeds");
+            let kernel = emit_cuda_with_policy(
+                &bound,
+                &PackedOperands::new(),
+                NumericPolicy::llama_relaxed(),
+            )
+            .expect("emit succeeds");
             let case = format!("{rows} features, reduction {width}, {tokens} tokens");
             assert!(kernel.entry.contains("_mma"), "{case}: {}", kernel.entry);
-            assert!(kernel.source.contains("w_low_a"), "{case}: the stored weight stages its low part");
-            assert!(kernel.source.contains("stage_first + load_segment < u.reduction_total"), "{case}: the tail stage is masked");
-            assert_eq!(kernel.grid.block_width(), Some(GEMM_THREADS), "{case}: one tile block per launch");
+            assert!(
+                kernel.source.contains("w_low_a"),
+                "{case}: the stored weight stages its low part"
+            );
+            assert!(
+                kernel
+                    .source
+                    .contains("stage_first + load_segment < u.reduction_total"),
+                "{case}: the tail stage is masked"
+            );
+            assert_eq!(
+                kernel.grid.block_width(),
+                Some(GEMM_THREADS),
+                "{case}: one tile block per launch"
+            );
         }
     }
 
     #[test]
     fn a_reduce_kernel_names_the_path_its_emitter_took() {
         let bound = dense_expert_free_op(128, 512, 200);
-        let tiled = emit_cuda_with_policy(&bound, &PackedOperands::new(), NumericPolicy::llama_relaxed()).expect("tiled emit succeeds");
-        let exact = emit_cuda_with_policy(&bound, &PackedOperands::new(), NumericPolicy::bit_exact()).expect("exact emit succeeds");
-        let row_sum = emit_cuda_with_policy(&matmul_reduce_op(4, 8, ScalarOp::Add), &PackedOperands::new(), NumericPolicy::llama_relaxed())
-            .expect("row reduce emits");
+        let tiled = emit_cuda_with_policy(
+            &bound,
+            &PackedOperands::new(),
+            NumericPolicy::llama_relaxed(),
+        )
+        .expect("tiled emit succeeds");
+        let exact =
+            emit_cuda_with_policy(&bound, &PackedOperands::new(), NumericPolicy::bit_exact())
+                .expect("exact emit succeeds");
+        let row_sum = emit_cuda_with_policy(
+            &matmul_reduce_op(4, 8, ScalarOp::Add),
+            &PackedOperands::new(),
+            NumericPolicy::llama_relaxed(),
+        )
+        .expect("row reduce emits");
 
         assert_eq!(tiled.reduce_path, "mma-gemm", "{}", tiled.entry);
-        assert!(!exact.reduce_path.starts_with("mma-gemm"), "{}", exact.reduce_path);
-        assert!(!row_sum.reduce_path.starts_with("mma-gemm"), "{}", row_sum.reduce_path);
+        assert!(
+            !exact.reduce_path.starts_with("mma-gemm"),
+            "{}",
+            exact.reduce_path
+        );
+        assert!(
+            !row_sum.reduce_path.starts_with("mma-gemm"),
+            "{}",
+            row_sum.reduce_path
+        );
         for kernel in [&exact, &row_sum] {
             assert!(
-                ["staged-matvec", "row-tile-cooperative", "cooperative-reduce", "serial-reduce"].contains(&kernel.reduce_path),
+                [
+                    "staged-matvec",
+                    "row-tile-cooperative",
+                    "cooperative-reduce",
+                    "serial-reduce"
+                ]
+                .contains(&kernel.reduce_path),
                 "{}",
                 kernel.reduce_path
             );
@@ -7031,10 +7707,15 @@ mod tests {
     #[test]
     fn an_activation_by_constant_product_under_the_exact_policy_keeps_the_generic_reduce() {
         let bound = dense_expert_free_op(128, 512, 200);
-        let kernel = emit_cuda_with_policy(&bound, &PackedOperands::new(), NumericPolicy::bit_exact()).expect("emit succeeds");
+        let kernel =
+            emit_cuda_with_policy(&bound, &PackedOperands::new(), NumericPolicy::bit_exact())
+                .expect("emit succeeds");
 
         assert!(!kernel.entry.contains("_mma"), "{}", kernel.entry);
-        assert!(!kernel.source.contains("mma"), "the exact policy never rounds an operand into a tensor-core tile");
+        assert!(
+            !kernel.source.contains("mma"),
+            "the exact policy never rounds an operand into a tensor-core tile"
+        );
     }
 
     #[test]
@@ -7043,7 +7724,8 @@ mod tests {
         for codec in grouped_codecs() {
             assert!(grouped_pair(&bound, codec).is_none());
             let packed = packed_expert_weight(&bound, codec);
-            let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed()).expect("emit succeeds");
+            let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
+                .expect("emit succeeds");
             assert!(!kernel.entry.contains("_mma"), "{}", kernel.entry);
             assert!(!kernel.entry.contains("_grp1"), "{}", kernel.entry);
             assert!(kernel.prologue.is_empty());
@@ -7052,7 +7734,11 @@ mod tests {
 
     #[test]
     fn the_cuda_grant_names_the_grouped_form_now_the_driver_launches_it() {
-        assert!(executes(&Target::CUDA).forms.contains(Form::GroupedContraction));
+        assert!(
+            executes(&Target::CUDA)
+                .forms
+                .contains(Form::GroupedContraction)
+        );
     }
 
     #[test]
@@ -7060,7 +7746,8 @@ mod tests {
         let bound = stacked_expert_op(32, 512, 1024, 8);
         let mut packed = BTreeMap::new();
         packed.insert(bound.operands()[0].0, Codec::Q8_0);
-        let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::default()).expect("emit succeeds");
+        let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::default())
+            .expect("emit succeeds");
         assert!(!kernel.entry.contains("_smv"), "{}", kernel.entry);
         assert!(!kernel.entry.contains("_sg1"), "{}", kernel.entry);
         assert!(!kernel.source.contains("__dp4a"));
@@ -7073,12 +7760,17 @@ mod tests {
         if let Some(codec) = activation {
             packed.insert(bound.operands()[1].0, codec);
         }
-        emit_cuda_with_policy(&bound, &packed, NumericPolicy::default().with_activation_quantization(true))
-            .expect("emit succeeds")
+        emit_cuda_with_policy(
+            &bound,
+            &packed,
+            NumericPolicy::default().with_activation_quantization(true),
+        )
+        .expect("emit succeeds")
     }
 
     #[test]
-    fn a_stacked_q8_0_down_product_with_a_per_slot_activation_adds_the_slot_offset_and_a_distinct_name() {
+    fn a_stacked_q8_0_down_product_with_a_per_slot_activation_adds_the_slot_offset_and_a_distinct_name()
+     {
         let kernel = emit_stacked_down(true, Some(Codec::Q8_1Grouped));
         let source = &kernel.source;
         assert!(kernel.entry.contains("_smv"), "{}", kernel.entry);
@@ -7087,9 +7779,16 @@ mod tests {
         assert!(source.contains("act_row_element += coord0 * u.operand_strides[1][0];"));
         assert!(source.contains("act_row_byte[row] = (act_row_element / 128) * 144LL;"));
         assert!(source.contains("staged_blocks + act_row_byte[row] + ((chunk) / 4) * 144"));
-        let row_loop = source.find("if (row_start[row] == 0) { continue; }").expect("row loop");
-        let load = source.find("staged_blocks + act_row_byte[row]").expect("per-row activation load");
-        assert!(row_loop < load, "the activation is loaded per row, inside the row loop");
+        let row_loop = source
+            .find("if (row_start[row] == 0) { continue; }")
+            .expect("row loop");
+        let load = source
+            .find("staged_blocks + act_row_byte[row]")
+            .expect("per-row activation load");
+        assert!(
+            row_loop < load,
+            "the activation is loaded per row, inside the row loop"
+        );
     }
 
     #[test]
@@ -7106,7 +7805,11 @@ mod tests {
         assert!(kernel.entry.contains("_smv"), "{}", kernel.entry);
         assert!(!kernel.entry.contains("_ss1"), "{}", kernel.entry);
         assert!(!kernel.source.contains("act_row_byte"));
-        assert!(kernel.source.contains("staged_blocks + ((chunk) / 4) * 144"));
+        assert!(
+            kernel
+                .source
+                .contains("staged_blocks + ((chunk) / 4) * 144")
+        );
     }
 
     #[test]
@@ -7171,7 +7874,9 @@ mod tests {
             .expect("emit succeeds");
         let source = &kernel.source;
         assert_eq!(kernel.grid.block_width(), Some(WARP_SIZE));
-        let fetch = source.find("long long gather_base0 =").expect("hoisted gather base");
+        let fetch = source
+            .find("long long gather_base0 =")
+            .expect("hoisted gather base");
         let row = source
             .find("const long long row0 = u.operand_base[0] + packed_row0 * u.reduction_total + gather_base0;")
             .expect("row base carries the gather base");
@@ -7179,8 +7884,14 @@ mod tests {
             .find("q8_0_chunk8(in0 + (off0_3 /")
             .expect("unrolled lean chunk decode");
         assert!(fetch < row && row < unrolled);
-        assert!(!source.contains("off0 += gather_base0;"), "no per-chunk gather add");
-        assert!(source.contains("__ldg((const float4 *)(in1"), "activation read as float4");
+        assert!(
+            !source.contains("off0 += gather_base0;"),
+            "no per-chunk gather add"
+        );
+        assert!(
+            source.contains("__ldg((const float4 *)(in1"),
+            "activation read as float4"
+        );
         assert!(kernel.entry.ends_with("_gid64c8_lg1"), "{}", kernel.entry);
         assert!(source.contains(&kernel.entry));
     }
@@ -7192,7 +7903,11 @@ mod tests {
         packed.insert(bound.operands()[0].0, Codec::Q6K);
         let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
             .expect("emit succeeds");
-        assert!(kernel.source.contains("packed_row0 * u.reduction_total + gather_base0;"));
+        assert!(
+            kernel
+                .source
+                .contains("packed_row0 * u.reduction_total + gather_base0;")
+        );
         assert!(kernel.source.contains("q6k_chunk8(in0 + (off0_3 /"));
         assert!(!kernel.source.contains("off0 += gather_base0;"));
     }
@@ -7235,11 +7950,11 @@ mod tests {
     #[test]
     fn logical_packed_address_toggle_still_adds_hoisted_gather_base() {
         let bound = gathered_reduce_op(16, 64, 4, false);
-        let kernel = temp_env::with_vars(
-            [("PROXIMA_CUDA_LOGICAL_PACKED_ADDRESS", Some("1"))],
-            || emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed()),
-        )
-        .expect("emit succeeds");
+        let kernel =
+            temp_env::with_vars([("PROXIMA_CUDA_LOGICAL_PACKED_ADDRESS", Some("1"))], || {
+                emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
+            })
+            .expect("emit succeeds");
         assert_eq!(kernel.grid.block_width(), Some(WARP_SIZE));
         assert!(kernel.source.contains("gather_base0"));
         assert!(kernel.source.contains("off0 += gather_base0;"));
@@ -7492,8 +8207,16 @@ mod tests {
     #[test]
     fn render_reduce_rejects_an_elementwise_bound_op() {
         let bound = elementwise_tanh_op(8);
-        let error = render_reduce(Target::CUDA, &bound, "entry", &[None], NumericPolicy::bit_exact(), EmitDevice::default(), None)
-            .expect_err("an elementwise chain is not a Reduce fold");
+        let error = render_reduce(
+            Target::CUDA,
+            &bound,
+            "entry",
+            &[None],
+            NumericPolicy::bit_exact(),
+            EmitDevice::default(),
+            None,
+        )
+        .expect_err("an elementwise chain is not a Reduce fold");
         assert!(matches!(
             error,
             EmitError::RenderKindMismatch {
@@ -7521,20 +8244,41 @@ mod tests {
         };
         epilogue_broadcast_axes.push(1);
 
-        let (source, _) = render_reduce(Target::CUDA, &bound, "entry", &[None], NumericPolicy::llama_relaxed(), EmitDevice::default(), None)
-            .expect("broadcast emits");
+        let (source, _) = render_reduce(
+            Target::CUDA,
+            &bound,
+            "entry",
+            &[None],
+            NumericPolicy::llama_relaxed(),
+            EmitDevice::default(),
+            None,
+        )
+        .expect("broadcast emits");
         assert!(source.contains("broadcast_out_strides[2]"));
         assert!(source.contains("broadcast_full_coord[1]"));
-        assert!(source.contains("    accumulator = __shfl_sync(PROXIMA_ALL_LANES, accumulator, 0);\n"));
+        assert!(
+            source.contains("    accumulator = __shfl_sync(PROXIMA_ALL_LANES, accumulator, 0);\n")
+        );
         assert!(
             !source.contains("    __shfl_sync(PROXIMA_ALL_LANES, accumulator, 0);\n"),
             "the broadcast must assign its result; a bare shuffle leaves lanes 1..31 holding partial sums"
         );
 
-        let (hip_source, _) = render_reduce(Target::HIP, &bound, "entry", &[None], NumericPolicy::llama_relaxed(), EmitDevice::default(), None)
-            .expect("hip broadcast emits");
+        let (hip_source, _) = render_reduce(
+            Target::HIP,
+            &bound,
+            "entry",
+            &[None],
+            NumericPolicy::llama_relaxed(),
+            EmitDevice::default(),
+            None,
+        )
+        .expect("hip broadcast emits");
         assert!(hip_source.contains("#define PROXIMA_ALL_LANES 0xffffffffffffffffull"));
-        assert!(hip_source.contains("    accumulator = __shfl_sync(PROXIMA_ALL_LANES, accumulator, 0);\n"));
+        assert!(
+            hip_source
+                .contains("    accumulator = __shfl_sync(PROXIMA_ALL_LANES, accumulator, 0);\n")
+        );
         assert!(!hip_source.contains("    __shfl_sync(PROXIMA_ALL_LANES, accumulator, 0);\n"));
 
         let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
@@ -7565,10 +8309,24 @@ mod tests {
         let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
             .expect("broadcast kernel emits");
 
-        assert_eq!(kernel.grid.block_width(), Some(1024 / BLOCK_REDUCE_ELEMENTS_PER_THREAD));
-        assert_eq!(kernel.grid.threads(), 1024 / BLOCK_REDUCE_ELEMENTS_PER_THREAD);
-        assert!(kernel.source.contains("__shared__ float warp_partials[32];"));
-        assert!(kernel.source.contains("long long output_index = (long long)blockIdx.x;"));
+        assert_eq!(
+            kernel.grid.block_width(),
+            Some(1024 / BLOCK_REDUCE_ELEMENTS_PER_THREAD)
+        );
+        assert_eq!(
+            kernel.grid.threads(),
+            1024 / BLOCK_REDUCE_ELEMENTS_PER_THREAD
+        );
+        assert!(
+            kernel
+                .source
+                .contains("__shared__ float warp_partials[32];")
+        );
+        assert!(
+            kernel
+                .source
+                .contains("long long output_index = (long long)blockIdx.x;")
+        );
     }
 
     #[test]
@@ -7606,9 +8364,14 @@ mod tests {
             let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
                 .expect("emit succeeds");
 
-            assert!(kernel.source.contains("const long long row0 ="), "{name} row base");
             assert!(
-                kernel.source.contains(&format!("{name}_chunk8(in0 + (off0_3 /")),
+                kernel.source.contains("const long long row0 ="),
+                "{name} row base"
+            );
+            assert!(
+                kernel
+                    .source
+                    .contains(&format!("{name}_chunk8(in0 + (off0_3 /")),
                 "{name} unrolled chunk decode"
             );
             assert!(
@@ -7759,8 +8522,22 @@ mod tests {
         let packed = no_packed();
         let policy = NumericPolicy::default();
         assert_ne!(
-            entry_name(Target::CUDA, &fused, &packed, &[], policy, EmitDevice::default()),
-            entry_name(Target::CUDA, &bare, &packed, &[], policy, EmitDevice::default()),
+            entry_name(
+                Target::CUDA,
+                &fused,
+                &packed,
+                &[],
+                policy,
+                EmitDevice::default()
+            ),
+            entry_name(
+                Target::CUDA,
+                &bare,
+                &packed,
+                &[],
+                policy,
+                EmitDevice::default()
+            ),
             "a fused epilogue must never collide with the bare reduce's cache key \
              (crate::wgpu_driver::pipeline_for's own caching-by-name hazard)"
         );
@@ -8022,11 +8799,13 @@ pub fn emit_hip_at_wave(
 #[cfg(test)]
 mod rocm_tests {
     use alloc::vec;
-        use proxima_tensor::{Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, map};
-        use proxima_numeric::{DType};
+    use proxima_numeric::DType;
+    use proxima_tensor::{
+        Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, map,
+    };
 
     use super::*;
-    
+
     fn elementwise_tanh() -> BoundOp {
         let mut program = Vec::new();
         let source = append(
@@ -8047,14 +8826,9 @@ mod rocm_tests {
             },
         );
         let shapes = infer(&program, &[]).expect("the program has static shapes");
-        bind(
-            &program,
-            &shapes,
-            &[activated],
-            NumericPolicy::default(),
-        )
-        .expect("binding an elementwise op succeeds")
-        .remove(0)
+        bind(&program, &shapes, &[activated], NumericPolicy::default())
+            .expect("binding an elementwise op succeeds")
+            .remove(0)
     }
 
     fn matmul_reduce(rows: u32, columns: u32) -> BoundOp {
@@ -8095,8 +8869,18 @@ mod rocm_tests {
         PackedOperands::new()
     }
 
-    fn emit_hip_under(bound: &BoundOp, numeric_policy: NumericPolicy) -> Result<HipKernel, EmitError> {
-        emit_hip_at_wave(HipWave::Wave64, bound, &no_packed(), numeric_policy, EmitDevice::default(), &OperandDtypes::new())
+    fn emit_hip_under(
+        bound: &BoundOp,
+        numeric_policy: NumericPolicy,
+    ) -> Result<HipKernel, EmitError> {
+        emit_hip_at_wave(
+            HipWave::Wave64,
+            bound,
+            &no_packed(),
+            numeric_policy,
+            EmitDevice::default(),
+            &OperandDtypes::new(),
+        )
     }
 
     #[test]
@@ -8140,9 +8924,14 @@ mod rocm_tests {
             let build_guard = format!(
                 "#if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != {lanes}\n#error \"omega HIP text built for {lanes}-lane waves\"\n#endif\n"
             );
-            assert!(kernel.source.contains(&build_guard), "{lanes}-lane text carries the build-time guard");
             assert!(
-                kernel.source.contains(&format!("if (warpSize != {lanes}) {{ __builtin_trap(); }}")),
+                kernel.source.contains(&build_guard),
+                "{lanes}-lane text carries the build-time guard"
+            );
+            assert!(
+                kernel
+                    .source
+                    .contains(&format!("if (warpSize != {lanes}) {{ __builtin_trap(); }}")),
                 "{lanes}-lane text traps at kernel entry on another width"
             );
         }
@@ -8150,8 +8939,12 @@ mod rocm_tests {
 
     #[test]
     fn cuda_text_carries_no_hip_wave_guard() {
-        let kernel = emit_cuda_with_policy(&matmul_reduce(4, 4096), &no_packed(), NumericPolicy::llama_relaxed())
-            .expect("reduce cuda emits");
+        let kernel = emit_cuda_with_policy(
+            &matmul_reduce(4, 4096),
+            &no_packed(),
+            NumericPolicy::llama_relaxed(),
+        )
+        .expect("reduce cuda emits");
 
         assert!(!kernel.source.contains("__AMDGCN_WAVEFRONT_SIZE"));
         assert!(!kernel.source.contains("warpSize"));
@@ -8162,9 +8955,21 @@ mod rocm_tests {
         let kernel = emit_hip_under(&matmul_reduce(4, 4096), NumericPolicy::llama_relaxed())
             .expect("reduce hip emits");
 
-        assert!(kernel.source.contains("#define PROXIMA_ALL_LANES 0xffffffffffffffffull"));
-        assert!(kernel.source.contains("__shfl_down_sync(PROXIMA_ALL_LANES,"));
-        assert!(kernel.source.contains("for (int shift = 32; shift > 0; shift >>= 1)"));
+        assert!(
+            kernel
+                .source
+                .contains("#define PROXIMA_ALL_LANES 0xffffffffffffffffull")
+        );
+        assert!(
+            kernel
+                .source
+                .contains("__shfl_down_sync(PROXIMA_ALL_LANES,")
+        );
+        assert!(
+            kernel
+                .source
+                .contains("for (int shift = 32; shift > 0; shift >>= 1)")
+        );
         assert!(kernel.source.contains("(gid % 64)"));
         assert_eq!(kernel.grid.block_width(), Some(64));
         assert_eq!(kernel.grid.threads(), 4 * 64);
@@ -8184,11 +8989,23 @@ mod rocm_tests {
         )
         .expect("wave32 hip emits");
 
-        assert!(kernel.source.contains("#define PROXIMA_ALL_LANES 0xffffffffull"));
+        assert!(
+            kernel
+                .source
+                .contains("#define PROXIMA_ALL_LANES 0xffffffffull")
+        );
         assert!(!kernel.source.contains("0xffffffffu,"));
         assert_eq!(emitted_mask_argument(&kernel.source), "PROXIMA_ALL_LANES");
-        assert!(kernel.source.contains("__shfl_down_sync(PROXIMA_ALL_LANES,"));
-        assert!(kernel.source.contains("for (int shift = 16; shift > 0; shift >>= 1)"));
+        assert!(
+            kernel
+                .source
+                .contains("__shfl_down_sync(PROXIMA_ALL_LANES,")
+        );
+        assert!(
+            kernel
+                .source
+                .contains("for (int shift = 16; shift > 0; shift >>= 1)")
+        );
         assert!(kernel.entry.ends_with("_hip_w32_gid64c8"));
         assert_eq!(kernel.grid.block_width(), Some(32));
     }
@@ -8219,7 +9036,10 @@ mod rocm_tests {
                 HipWave::Wave32 => "#define PROXIMA_ALL_LANES 0xffffffffull",
                 HipWave::Wave64 => "#define PROXIMA_ALL_LANES 0xffffffffffffffffull",
             };
-            assert!(kernel.source.contains(expected), "{wave:?} must spell a 64-bit mask");
+            assert!(
+                kernel.source.contains(expected),
+                "{wave:?} must spell a 64-bit mask"
+            );
             assert_eq!(
                 kernel.source.matches("0xffffffff").count(),
                 1,
@@ -8245,8 +9065,8 @@ mod rocm_tests {
     #[test]
     fn bit_exact_policy_keeps_the_serial_fold() {
         let bound = matmul_reduce(4, 8);
-        let kernel = emit_hip_under(&bound, NumericPolicy::bit_exact())
-            .expect("hip emits under bit-exact");
+        let kernel =
+            emit_hip_under(&bound, NumericPolicy::bit_exact()).expect("hip emits under bit-exact");
 
         assert!(!kernel.source.contains("__shfl_down_sync"));
         assert!(kernel.grid.block_width().is_none());
@@ -8282,7 +9102,8 @@ mod rocm_tests {
             cached_lower_inclusive: 0,
             new_upper_inclusive: 0,
             arithmetic: Default::default(),
-            attention_sink: false, planes: proxima_tensor::bind::ScorePlanes::Paired,
+            attention_sink: false,
+            planes: proxima_tensor::bind::ScorePlanes::Paired,
         };
 
         let error = emit_hip(&attention, &no_packed()).expect_err("attention is refused");
@@ -8310,12 +9131,15 @@ mod rocm_tests {
             cached_lower_inclusive: i64::MIN,
             new_upper_inclusive: 0,
             arithmetic: Default::default(),
-            attention_sink: true, planes: proxima_tensor::bind::ScorePlanes::Paired,
+            attention_sink: true,
+            planes: proxima_tensor::bind::ScorePlanes::Paired,
         };
         let kind = attention.kind.clone();
         assert!(cuda_cached_attention_class(&kind).is_none());
         match emit_hip(&attention, &no_packed()).expect_err("a sink is refused") {
-            EmitError::CudaUnsupportedOpKind { kind, .. } => assert_eq!(kind, "cached_attention_sink"),
+            EmitError::CudaUnsupportedOpKind { kind, .. } => {
+                assert_eq!(kind, "cached_attention_sink")
+            }
             other => panic!("unexpected error: {other:?}"),
         }
     }
@@ -8339,4 +9163,3 @@ mod rocm_tests {
         assert!(!hip.source.contains("cuda_"));
     }
 }
-

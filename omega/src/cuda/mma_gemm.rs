@@ -15,21 +15,23 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use proxima_tensor::{
-    BoundOp, BoundOpKind, ContractionForm, ContractionLimits, Executes, Form, Keep, ProductContraction, ReduceInit, ScalarOp,
-    contraction_form, unit_batched_product_contraction,
-};
 use proxima_numeric::{DType, NumericPolicy};
+use proxima_tensor::{
+    BoundOp, BoundOpKind, ContractionForm, ContractionLimits, Executes, Form, Keep,
+    ProductContraction, ReduceInit, ScalarOp, contraction_form, unit_batched_product_contraction,
+};
 
 use super::grouped_gemm::{GroupedRoute, push_grouped_tile_origin};
-use super::int8_gemm::{INT8_FEATURE_TILE, INT8_TOKEN_TILE, Int8Gemm, int8_gemm_plan, push_int8_gemm_body};
+use super::int8_gemm::{
+    INT8_FEATURE_TILE, INT8_TOKEN_TILE, Int8Gemm, int8_gemm_plan, push_int8_gemm_body,
+};
 use super::{
-    Codec, EmitError, Target, PQ2_0_BLOCK_BYTES, PQ2_0_BLOCK_ELEMENTS, Q1_0_BLOCK_BYTES,
+    Codec, EmitError, PQ2_0_BLOCK_BYTES, PQ2_0_BLOCK_ELEMENTS, Q1_0_BLOCK_BYTES,
     Q1_0_BLOCK_ELEMENTS, Q2_0_BLOCK_BYTES, Q2_0_BLOCK_ELEMENTS, Q4_0_BLOCK_BYTES,
     Q4_0_BLOCK_ELEMENTS, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS, Q5_0_BLOCK_BYTES,
     Q5_0_BLOCK_ELEMENTS, Q5K_BLOCK_BYTES, Q6K_BLOCK_BYTES, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS,
-    flat_packed_rows, packed_reduction_in_order, push_reduce_epilogue_write, reduce_is_cooperative,
-    reduction_dims,
+    Target, flat_packed_rows, packed_reduction_in_order, push_reduce_epilogue_write,
+    reduce_is_cooperative, reduction_dims,
 };
 
 pub(super) const FEATURE_TILE: usize = 64;
@@ -69,15 +71,45 @@ struct CodecShape {
 
 fn codec_shape(codec: Codec) -> Option<CodecShape> {
     let (decode, block_bytes, block_elements, has_minimum) = match codec {
-        Codec::Q8_0 => ("mma_decode_q8_0", Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS, false),
-        Codec::Q4_0 => ("mma_decode_q4_0", Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS, false),
-        Codec::Q5_0 => ("mma_decode_q5_0", Q5_0_BLOCK_BYTES, Q5_0_BLOCK_ELEMENTS, false),
+        Codec::Q8_0 => (
+            "mma_decode_q8_0",
+            Q8_0_BLOCK_BYTES,
+            Q8_0_BLOCK_ELEMENTS,
+            false,
+        ),
+        Codec::Q4_0 => (
+            "mma_decode_q4_0",
+            Q4_0_BLOCK_BYTES,
+            Q4_0_BLOCK_ELEMENTS,
+            false,
+        ),
+        Codec::Q5_0 => (
+            "mma_decode_q5_0",
+            Q5_0_BLOCK_BYTES,
+            Q5_0_BLOCK_ELEMENTS,
+            false,
+        ),
         Codec::Q4K => ("mma_decode_q4k", Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS, true),
         Codec::Q5K => ("mma_decode_q5k", Q5K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS, true),
         Codec::Q6K => ("mma_decode_q6k", Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS, false),
-        Codec::Q1_0 => ("mma_decode_q1_0", Q1_0_BLOCK_BYTES, Q1_0_BLOCK_ELEMENTS, false),
-        Codec::Q2_0 => ("mma_decode_q2_0", Q2_0_BLOCK_BYTES, Q2_0_BLOCK_ELEMENTS, false),
-        Codec::Pq2_0 => ("mma_decode_q2_0", PQ2_0_BLOCK_BYTES, PQ2_0_BLOCK_ELEMENTS, false),
+        Codec::Q1_0 => (
+            "mma_decode_q1_0",
+            Q1_0_BLOCK_BYTES,
+            Q1_0_BLOCK_ELEMENTS,
+            false,
+        ),
+        Codec::Q2_0 => (
+            "mma_decode_q2_0",
+            Q2_0_BLOCK_BYTES,
+            Q2_0_BLOCK_ELEMENTS,
+            false,
+        ),
+        Codec::Pq2_0 => (
+            "mma_decode_q2_0",
+            PQ2_0_BLOCK_BYTES,
+            PQ2_0_BLOCK_ELEMENTS,
+            false,
+        ),
         Codec::Float16 => ("mma_decode_f16", 2, 1, false),
         _ => return None,
     };
@@ -103,10 +135,12 @@ pub(super) const fn mma_contraction_grant(base: Executes) -> Executes {
 
 /// What the grouped emitter plans against: the tiled grant plus [`Form::GroupedContraction`] at `[contraction] grouped_min_tokens`.
 pub(super) const fn grouped_contraction_grant(base: Executes) -> Executes {
-    base.with(Form::TiledContraction).with(Form::GroupedContraction).with_contraction(ContractionLimits {
-        tiled_min_tokens: crate::sized::CUDA_TILED_CONTRACTION_MIN_TOKENS,
-        grouped_min_tokens: crate::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS,
-    })
+    base.with(Form::TiledContraction)
+        .with(Form::GroupedContraction)
+        .with_contraction(ContractionLimits {
+            tiled_min_tokens: crate::sized::CUDA_TILED_CONTRACTION_MIN_TOKENS,
+            grouped_min_tokens: crate::sized::CUDA_GROUPED_CONTRACTION_MIN_TOKENS,
+        })
 }
 
 /// `Some` when this reduce is a plain `weight * activation` sum with more than
@@ -116,7 +150,13 @@ pub(super) fn mma_gemm_plan(
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
 ) -> Option<MmaGemm> {
-    mma_gemm_plan_for(resolved, quantized, numeric_policy, &mma_contraction_grant(Executes::BASE), ContractionForm::Tiled)
+    mma_gemm_plan_for(
+        resolved,
+        quantized,
+        numeric_policy,
+        &mma_contraction_grant(Executes::BASE),
+        ContractionForm::Tiled,
+    )
 }
 
 /// [`mma_gemm_plan`] for the contraction `form` that `grant` decides for this op.
@@ -157,15 +197,22 @@ pub(super) fn mma_gemm_plan_for(
     let activation = 1 - weight;
     let contraction = unit_batched_product_contraction(resolved, weight)?;
     let weight_layout = &operands[weight].1;
-    let reduction_granule = if shape.block_elements == 1 { WHOLE_SEGMENT } else { STAGE_K as u64 };
+    let reduction_granule = if shape.block_elements == 1 {
+        WHOLE_SEGMENT
+    } else {
+        STAGE_K as u64
+    };
     let eligible = resolved.dtype == DType::FLOAT32
         && epilogue_broadcast_axes.is_empty()
         && (contraction.gathered_operands == 0) == (form == ContractionForm::Tiled)
-        && (form == ContractionForm::Tiled || (contraction.gathered_operands == 1 && contraction.weight_gathered))
+        && (form == ContractionForm::Tiled
+            || (contraction.gathered_operands == 1 && contraction.weight_gathered))
         && flat_packed_rows(resolved, quantized)
         && reduce_is_cooperative(resolved, quantized, numeric_policy)
         && !reduction_dims(resolved, output_axes).is_empty()
-        && contraction.reduction_extent.is_multiple_of(reduction_granule)
+        && contraction
+            .reduction_extent
+            .is_multiple_of(reduction_granule)
         && weight_layout.base.rem_euclid(WEIGHT_BASE_ALIGNMENT) == 0;
     if !eligible {
         return None;
@@ -177,23 +224,31 @@ pub(super) fn mma_gemm_plan_for(
         token_positions,
         ..
     } = contraction;
-    let int8 = int8_gemm_plan(resolved, codec, numeric_policy, activation_layout, output_axes, prequantized);
+    let int8 = int8_gemm_plan(
+        resolved,
+        codec,
+        numeric_policy,
+        activation_layout,
+        output_axes,
+        prequantized,
+    );
     let served = prequantized.is_none() || int8.is_some();
     let tiled_form = form == ContractionForm::Tiled;
     let several_tokens = tiled || (tiled_form && prequantized.is_some());
-    (served && !feature_positions.is_empty() && !token_positions.is_empty() && several_tokens).then_some(
-        MmaGemm {
+    (served && !feature_positions.is_empty() && !token_positions.is_empty() && several_tokens)
+        .then_some(MmaGemm {
             weight,
             activation,
             codec,
             plain_weight,
             single_activation: numeric_policy.activation_quantization
-                || (numeric_policy.input_rounding && !plain_weight && Some(codec) == Target::CUDA.mma_operand_codec()),
+                || (numeric_policy.input_rounding
+                    && !plain_weight
+                    && Some(codec) == Target::CUDA.mma_operand_codec()),
             int8,
             feature_positions,
             token_positions,
-        },
-    )
+        })
 }
 
 /// The operand an activation-by-constant contraction reads as its weight: the slot whose rows
@@ -220,14 +275,21 @@ fn plain_weight_slot(resolved: &BoundOp, output_axes: &[u16]) -> Option<usize> {
 
 /// The weight slot, its codec, and whether the other slot is an activation a `BlockQuantize`
 /// already produced (a `Q8_1` byte operand beside a non-`Q8_1` weight).
-pub(super) fn weight_slot(first: Option<Codec>, second: Option<Codec>) -> Option<(usize, Codec, Option<Codec>)> {
+pub(super) fn weight_slot(
+    first: Option<Codec>,
+    second: Option<Codec>,
+) -> Option<(usize, Codec, Option<Codec>)> {
     match (first, second) {
         (Some(codec), None) => Some((0, codec, None)),
         (None, Some(codec)) => Some((1, codec, None)),
-        (Some(codec), Some(activation)) if activation.is_quantized_activation() && !codec.is_quantized_activation() => {
+        (Some(codec), Some(activation))
+            if activation.is_quantized_activation() && !codec.is_quantized_activation() =>
+        {
             Some((0, codec, Some(activation)))
         }
-        (Some(activation), Some(codec)) if activation.is_quantized_activation() && !codec.is_quantized_activation() => {
+        (Some(activation), Some(codec))
+            if activation.is_quantized_activation() && !codec.is_quantized_activation() =>
+        {
             Some((1, codec, Some(activation)))
         }
         _ => None,
@@ -262,8 +324,8 @@ pub(super) fn mma_gemm_threads(resolved: &BoundOp, plan: &MmaGemm) -> u64 {
         return 0;
     };
     let (feature_tile, token_tile) = gemm_tiles(plan);
-    let feature_tiles = axes_product(resolved, output_axes, &plan.feature_positions)
-        .div_ceil(feature_tile as u64);
+    let feature_tiles =
+        axes_product(resolved, output_axes, &plan.feature_positions).div_ceil(feature_tile as u64);
     let token_tiles =
         axes_product(resolved, output_axes, &plan.token_positions).div_ceil(token_tile as u64);
     feature_tiles * token_tiles * GEMM_THREADS
@@ -444,20 +506,36 @@ pub(super) fn push_mma_gemm_body(
 
     push_tile_origin(source, plan, FEATURE_TILE, TOKEN_TILE);
     let first = if route.is_some() { "0" } else { "token_first" };
-    let limit = if route.is_some() { "tile_count" } else { "token_total" };
+    let limit = if route.is_some() {
+        "tile_count"
+    } else {
+        "token_total"
+    };
     if let Some(route) = route {
         push_grouped_tile_origin(source, route, TOKEN_TILE);
     }
-    source.push_str("    const int load_row = tid >> 2;
-");
-    source.push_str("    const int load_segment = (tid & 3) * 8;
-");
-    source.push_str("    const long long load_feature = feature_first + load_row;
-");
-    source.push_str("    const bool feature_ok = load_feature < feature_total;
-");
+    source.push_str(
+        "    const int load_row = tid >> 2;
+",
+    );
+    source.push_str(
+        "    const int load_segment = (tid & 3) * 8;
+",
+    );
+    source.push_str(
+        "    const long long load_feature = feature_first + load_row;
+",
+    );
+    source.push_str(
+        "    const bool feature_ok = load_feature < feature_total;
+",
+    );
     for rep in 0..ACT_REPS {
-        let token_source = if route.is_some() { format!("(long long)tile_list[load_token{rep}]") } else { format!("load_token{rep}") };
+        let token_source = if route.is_some() {
+            format!("(long long)tile_list[load_token{rep}]")
+        } else {
+            format!("load_token{rep}")
+        };
         source.push_str(&format!(
             "    const long long load_token{rep} = {first} + load_row + {};
     const bool token_ok{rep} = load_token{rep} < {limit};
@@ -474,10 +552,17 @@ pub(super) fn push_mma_gemm_body(
 "
             ));
         }
-        source.push_str("    }
-");
+        source.push_str(
+            "    }
+",
+        );
     }
-    let expert_term = route.map_or_else(String::new, |route| format!(" + grouped_expert * u.gather_element_stride[{}]", route.slot));
+    let expert_term = route.map_or_else(String::new, |route| {
+        format!(
+            " + grouped_expert * u.gather_element_stride[{}]",
+            route.slot
+        )
+    });
     source.push_str(&format!(
         "    const long long weight_row = u.operand_base[{weight}]{expert_term} + load_feature * u.reduction_total;\n"
     ));
@@ -505,9 +590,7 @@ pub(super) fn push_mma_gemm_body(
         source.push_str(&format!(
             "    __shared__ float weight_minimum[{FEATURE_TILE}][2];\n"
         ));
-        source.push_str(&format!(
-            "    __shared__ float act_sum[{TOKEN_TILE}][2];\n"
-        ));
+        source.push_str(&format!("    __shared__ float act_sum[{TOKEN_TILE}][2];\n"));
     }
     for tile in 0..WARP_TILES {
         source.push_str(&format!(
@@ -529,7 +612,8 @@ pub(super) fn push_mma_gemm_body(
         source.push_str("        __align__(16) __half2 weight_low_pairs[4];\n");
         source.push_str("        #pragma unroll\n        for (int pair = 0; pair < 4; pair++) { weight_low_pairs[pair] = __float2half2_rn(0.0f); }\n");
     }
-    source.push_str("        if (feature_ok && stage_first + load_segment < u.reduction_total) {\n");
+    source
+        .push_str("        if (feature_ok && stage_first + load_segment < u.reduction_total) {\n");
     source.push_str("            long long element = weight_row + stage_first + load_segment;\n");
     if plain {
         source.push_str(&format!(
@@ -555,7 +639,9 @@ pub(super) fn push_mma_gemm_body(
         ));
     }
     source.push_str("        }\n");
-    source.push_str("        *(uint4 *)&weight_q[load_row][load_segment] = *(const uint4 *)weight_pairs;\n");
+    source.push_str(
+        "        *(uint4 *)&weight_q[load_row][load_segment] = *(const uint4 *)weight_pairs;\n",
+    );
     if plain {
         source.push_str("        *(uint4 *)&weight_lo[load_row][load_segment] = *(const uint4 *)weight_low_pairs;\n");
     }
@@ -568,40 +654,62 @@ pub(super) fn push_mma_gemm_body(
 
     for rep in 0..ACT_REPS {
         let row = format!("load_row + {}", rep * FEATURE_TILE);
-        source.push_str("        {
-");
-        source.push_str("        __align__(16) __half2 high_pairs[4];
-");
+        source.push_str(
+            "        {
+",
+        );
+        source.push_str(
+            "        __align__(16) __half2 high_pairs[4];
+",
+        );
         if !single {
-            source.push_str("        __align__(16) __half2 low_pairs[4];
-");
+            source.push_str(
+                "        __align__(16) __half2 low_pairs[4];
+",
+            );
         }
         if has_minimum {
-            source.push_str("        float half_sum = 0.0f;
-");
+            source.push_str(
+                "        float half_sum = 0.0f;
+",
+            );
         }
-        source.push_str("        #pragma unroll
+        source.push_str(
+            "        #pragma unroll
         for (int pair = 0; pair < 4; pair++) {
-");
-        source.push_str(&format!("            __half high_a = __float2half_rn(act_values{rep}[2 * pair]);
-"));
-        source.push_str(&format!("            __half high_b = __float2half_rn(act_values{rep}[2 * pair + 1]);
-"));
-        source.push_str("            high_pairs[pair] = __halves2half2(high_a, high_b);
-");
+",
+        );
+        source.push_str(&format!(
+            "            __half high_a = __float2half_rn(act_values{rep}[2 * pair]);
+"
+        ));
+        source.push_str(&format!(
+            "            __half high_b = __float2half_rn(act_values{rep}[2 * pair + 1]);
+"
+        ));
+        source.push_str(
+            "            high_pairs[pair] = __halves2half2(high_a, high_b);
+",
+        );
         if !single {
             source.push_str(&format!("            low_pairs[pair] = __halves2half2(__float2half_rn(act_values{rep}[2 * pair] - __half2float(high_a)), __float2half_rn(act_values{rep}[2 * pair + 1] - __half2float(high_b)));
 "));
         }
         if has_minimum && single {
-            source.push_str("            half_sum += __half2float(high_a) + __half2float(high_b);
-");
+            source.push_str(
+                "            half_sum += __half2float(high_a) + __half2float(high_b);
+",
+            );
         } else if has_minimum {
-            source.push_str(&format!("            half_sum += act_values{rep}[2 * pair] + act_values{rep}[2 * pair + 1];
-"));
+            source.push_str(&format!(
+                "            half_sum += act_values{rep}[2 * pair] + act_values{rep}[2 * pair + 1];
+"
+            ));
         }
-        source.push_str("        }
-");
+        source.push_str(
+            "        }
+",
+        );
         source.push_str(&format!(
             "        *(uint4 *)&act_high[{row}][load_segment] = *(const uint4 *)high_pairs;
 "
@@ -613,28 +721,41 @@ pub(super) fn push_mma_gemm_body(
             ));
         }
         if has_minimum {
-            source.push_str("        half_sum += __shfl_xor_sync(PROXIMA_ALL_LANES, half_sum, 1);
-");
+            source.push_str(
+                "        half_sum += __shfl_xor_sync(PROXIMA_ALL_LANES, half_sum, 1);
+",
+            );
             source.push_str(&format!(
                 "        if ((load_segment & 15) == 0) {{ act_sum[{row}][load_segment >> 4] = half_sum; }}
 "
             ));
         }
-        source.push_str("        }
-");
+        source.push_str(
+            "        }
+",
+        );
     }
     source.push_str("        __syncthreads();\n");
     source.push_str(&format!(
         "        if (stage_first + {STAGE_K} < u.reduction_total) {{\n"
     ));
     for rep in 0..ACT_REPS {
-        push_act_load(source, plan, &reduce_dims, reduce_rank, rep, &format!("stage_first + {STAGE_K}"));
+        push_act_load(
+            source,
+            plan,
+            &reduce_dims,
+            reduce_rank,
+            rep,
+            &format!("stage_first + {STAGE_K}"),
+        );
     }
     source.push_str("        }\n");
 
     for half_index in 0..2usize {
-        source.push_str("        {
-");
+        source.push_str(
+            "        {
+",
+        );
         for tile in 0..WARP_TILES {
             source.push_str(&format!(
                 "            float scratch{tile}[4] = {{0.0f, 0.0f, 0.0f, 0.0f}};
@@ -659,10 +780,14 @@ pub(super) fn push_mma_gemm_body(
             let low_activation = if single {
                 String::new()
             } else {
-                format!("                    mma_m16n8k8(scratch{{tile}}, a_low, a_high, *(const unsigned int *)&act_low[token_row][{k_base}]);\n")
+                format!(
+                    "                    mma_m16n8k8(scratch{{tile}}, a_low, a_high, *(const unsigned int *)&act_low[token_row][{k_base}]);\n"
+                )
             };
             let low_weight = if plain {
-                format!("                    mma_m16n8k8(scratch{{tile}}, w_low_a, w_low_b, *(const unsigned int *)&act_high[token_row][{k_base}]);\n")
+                format!(
+                    "                    mma_m16n8k8(scratch{{tile}}, w_low_a, w_low_b, *(const unsigned int *)&act_high[token_row][{k_base}]);\n"
+                )
             } else {
                 String::new()
             };
@@ -679,8 +804,10 @@ pub(super) fn push_mma_gemm_body(
                     low_mma.replace("{tile}", &tile.to_string())
                 ));
             }
-            source.push_str("            }
-");
+            source.push_str(
+                "            }
+",
+            );
         }
         source.push_str(&format!(
             "            const float scale_low = weight_scale[warp_feature * 16 + group][{half_index}];
@@ -721,18 +848,26 @@ pub(super) fn push_mma_gemm_body(
 "
                 ));
             }
-            source.push_str("            }
-");
+            source.push_str(
+                "            }
+",
+            );
         }
-        source.push_str("        }
-");
+        source.push_str(
+            "        }
+",
+        );
     }
-    source.push_str("        __syncthreads();
+    source.push_str(
+        "        __syncthreads();
     }
-");
+",
+    );
 
-    source.push_str("    float flat[32];
-");
+    source.push_str(
+        "    float flat[32];
+",
+    );
     for tile in 0..WARP_TILES {
         for slot in 0..4usize {
             source.push_str(&format!(
@@ -744,7 +879,9 @@ pub(super) fn push_mma_gemm_body(
     }
     let local_token = "warp_token * 64 + tile * 8 + quad * 2 + (slot & 1)";
     let token_expr = if route.is_some() {
-        format!("(({local_token}) < tile_count ? (long long)tile_list[{local_token}] : token_total)")
+        format!(
+            "(({local_token}) < tile_count ? (long long)tile_list[{local_token}] : token_total)"
+        )
     } else {
         format!("token_first + {local_token}")
     };
@@ -809,10 +946,12 @@ fn push_act_load(
             prev = index - 1
         ));
     }
-    source.push_str("            }
+    source.push_str(
+        "            }
             }
         }
-");
+",
+    );
 }
 
 pub(super) fn push_tile_origin(
@@ -826,11 +965,15 @@ pub(super) fn push_tile_origin(
     source.push_str("    const int quad = lane & 3;\n    const int warp_feature = warp & 3;\n");
     source.push_str("    const int warp_token = warp >> 2;\n    long long feature_total = 1;\n");
     for &position in &plan.feature_positions {
-        source.push_str(&format!("    feature_total *= u.output_extents[{position}];\n"));
+        source.push_str(&format!(
+            "    feature_total *= u.output_extents[{position}];\n"
+        ));
     }
     source.push_str("    long long token_total = 1;\n");
     for &position in &plan.token_positions {
-        source.push_str(&format!("    token_total *= u.output_extents[{position}];\n"));
+        source.push_str(&format!(
+            "    token_total *= u.output_extents[{position}];\n"
+        ));
     }
     source.push_str(&format!(
         "    const long long feature_tiles = (feature_total + {feature_tile} - 1) / {feature_tile};\n\
