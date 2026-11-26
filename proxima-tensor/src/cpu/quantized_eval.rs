@@ -541,7 +541,6 @@ pub(super) struct StepPrepared {
     pub(super) root: NodeId,
     pub(super) effective_outputs: Vec<NodeId>,
     pub(super) planning_outputs: Vec<NodeId>,
-    dense_packed_nodes: BTreeSet<NodeId>,
     /// Matmul node -> its f32 activation node, for every matmul the policy rounds to bf16.
     bf16_rounded_activations: BTreeMap<NodeId, NodeId>,
     pub(super) unadjusted: Vec<BoundOp>,
@@ -807,23 +806,8 @@ pub(super) fn assemble_step(
     let quantized_weight_nodes: BTreeSet<NodeId> = quantized_weights.keys().copied().collect();
     let mut resolved = unadjusted.clone();
     bind::correct_materialized_packed_matmul_layouts(&mut resolved, &quantized_weight_nodes);
-    let dense_packed_nodes: BTreeSet<NodeId> = quantized_weights
-        .iter()
-        .filter_map(|(node, block)| {
-            (matches!(
-                block,
-                QuantizedBlock::Packed {
-                    codec: Codec::Float16 | Codec::BFloat16,
-                    ..
-                }
-            ) && is_quantized_matmul_operand(program, *node))
-            .then_some(*node)
-        })
-        .collect();
-    bind::correct_packed_matmul_layouts(&mut resolved, &dense_packed_nodes);
     let remaining_weights: BTreeMap<NodeId, QuantizedBlock> = quantized_weights
         .iter()
-        .filter(|(node, _)| !dense_packed_nodes.contains(node))
         .map(|(node, block)| (*node, *block))
         .collect();
     let bf16_rounded_activations =
@@ -860,7 +844,6 @@ pub(super) fn assemble_step(
         root,
         effective_outputs,
         planning_outputs,
-        dense_packed_nodes,
         bf16_rounded_activations,
         unadjusted,
         resolved,
@@ -887,17 +870,6 @@ pub(super) fn materialize_step_inputs(
         buffers,
         quantized_weights,
     } = inputs;
-    for node in &prepared.dense_packed_nodes {
-        materialize_quantized_weight_output(
-            *node,
-            &prepared.shapes,
-            quantized_weights,
-            None,
-            buffers,
-            free_buffers,
-        )?;
-        quantized_weights.remove(node);
-    }
     materialize_quantized_weights_read_by_non_primary_operands(
         #[cfg(feature = "instrument")]
         program,

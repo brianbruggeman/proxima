@@ -13356,10 +13356,9 @@ fn scratch_pool_bytes(pools: &BufferPools) -> usize {
 /// smaller than the smallest weight, must leave no widened copy of any weight
 /// in those pools, and the pools must not grow from step 1 to step 4. The
 /// incumbent reads the packed weight in place with no widened copy; here
-/// `assemble_step`'s `dense_packed_nodes` dequantizes every such weight into a
-/// pooled buffer before the node loop on every step.
+/// every half-precision weight takes the same packed matmul path as every
+/// other codec.
 #[test]
-#[ignore = "PROXNUM-753: packed weights are widened into the scratch pools every step"]
 fn half_precision_weights_leave_no_widened_copy_in_the_scratch_pools_across_steps() {
     const WIDTH: u32 = 64;
     const ROW_COUNTS: [u32; 3] = [8, 16, 32];
