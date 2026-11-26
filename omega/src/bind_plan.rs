@@ -37,7 +37,15 @@ impl<'a> BindConfig<'a> {
     /// Fusion follows the reassociation permission unless the caller overrides it.
     #[must_use]
     pub fn new(numeric: NumericPolicy, allow_fusion: bool, packed: &'a PackedOperands) -> Self {
-        Self { numeric, allow_fusion, fuse_cached_attention: numeric.reassociation, packed, leaves: None, activation_storage: None, top_fraction_min_rows: None }
+        Self {
+            numeric,
+            allow_fusion,
+            fuse_cached_attention: numeric.reassociation,
+            packed,
+            leaves: None,
+            activation_storage: None,
+            top_fraction_min_rows: None,
+        }
     }
 
     #[must_use]
@@ -73,8 +81,12 @@ pub fn binding_policy(numeric: NumericPolicy, executes: &Executes) -> NumericPol
     if *executes == Executes::CPU {
         return numeric;
     }
-    let narrowed = numeric.with_accumulator_narrowing().with_flash_narrowing(true);
-    narrowed.with_flat_activation_blocks(narrowed.flat_activation_blocks || executes.forms.contains(Form::Int8DotReduce))
+    let narrowed = numeric
+        .with_accumulator_narrowing()
+        .with_flash_narrowing(true);
+    narrowed.with_flat_activation_blocks(
+        narrowed.flat_activation_blocks || executes.forms.contains(Form::Int8DotReduce),
+    )
 }
 
 /// Binds `program` for `executes` and runs the passes that grant asks for.
@@ -92,12 +104,27 @@ pub fn bind_plan(
     let mut leaves: BTreeSet<NodeId> = config.packed.keys().copied().collect();
     leaves.extend(config.leaves.into_iter().flatten().copied());
     let bound = if config.allow_fusion {
-        let fuse_attention = config.fuse_cached_attention && executes.forms.contains(Form::CachedAttention);
-        bind_fused(program, shapes, outputs, (fuse_attention, policy), &leaves, config, executes)?
+        let fuse_attention =
+            config.fuse_cached_attention && executes.forms.contains(Form::CachedAttention);
+        bind_fused(
+            program,
+            shapes,
+            outputs,
+            (fuse_attention, policy),
+            &leaves,
+            config,
+            executes,
+        )?
     } else {
         bind_unfused(program, shapes, outputs, policy)?
     };
-    Ok(finish_bound(prune_dead(bound, outputs), program, shapes, config, executes))
+    Ok(finish_bound(
+        prune_dead(bound, outputs),
+        program,
+        shapes,
+        config,
+        executes,
+    ))
 }
 
 fn bind_fused(
@@ -110,13 +137,31 @@ fn bind_fused(
     executes: &Executes,
 ) -> Result<Vec<BoundOp>, TensorError> {
     #[cfg(feature = "top-fraction-fusion")]
-    if let Some(min_rows) = config.top_fraction_min_rows.filter(|_| executes.forms.contains(Form::TopFractionSelect)) {
+    if let Some(min_rows) = config
+        .top_fraction_min_rows
+        .filter(|_| executes.forms.contains(Form::TopFractionSelect))
+    {
         return proxima_tensor::bind::bind_with_top_fraction_and_packed_leaves(
-            program, shapes, outputs, fuse_attention, policy, min_rows, leaves, executes,
+            program,
+            shapes,
+            outputs,
+            fuse_attention,
+            policy,
+            min_rows,
+            leaves,
+            executes,
         );
     }
     let _ = config;
-    bind_with_fusion_and_packed_leaves(program, shapes, outputs, fuse_attention, policy, leaves, executes)
+    bind_with_fusion_and_packed_leaves(
+        program,
+        shapes,
+        outputs,
+        fuse_attention,
+        policy,
+        leaves,
+        executes,
+    )
 }
 
 /// The post-bind passes alone, for a refit that rebinds nothing.
@@ -134,9 +179,21 @@ pub fn finish_bound(
         correct_packed_matmul_layouts(&mut resolved, &packed.keys().copied().collect());
     }
     if executes.forms.contains(Form::Int8DotReduce) {
-        resolved = derive_through_tensor_pass(resolved, program, shapes, &mut packed, policy, config.activation_storage, executes);
+        resolved = derive_through_tensor_pass(
+            resolved,
+            program,
+            shapes,
+            &mut packed,
+            policy,
+            config.activation_storage,
+            executes,
+        );
     }
-    Bound { resolved, packed, policy }
+    Bound {
+        resolved,
+        packed,
+        policy,
+    }
 }
 
 /// Runs `derive_activation_quantize` against the grant and folds the held codecs into `packed`.
@@ -150,7 +207,8 @@ pub(crate) fn derive_through_tensor_pass(
     executes: &Executes,
 ) -> Vec<BoundOp> {
     packed.retain(|node, _| (node.0 as usize) < program.len());
-    let (bound, held) = derive_activation_quantize(resolved, program, shapes, packed, policy, executes, storage);
+    let (bound, held) =
+        derive_activation_quantize(resolved, program, shapes, packed, policy, executes, storage);
     packed.extend(held);
     bound
 }
@@ -169,13 +227,19 @@ mod tests {
         assert!(cuda.flat_activation_blocks && cuda.accumulator_narrowing && cuda.flash_narrowing);
         let hip = binding_policy(numeric, &executes(&Target::HIP));
         assert!(!hip.flat_activation_blocks && hip.accumulator_narrowing && hip.flash_narrowing);
-        assert_eq!(binding_policy(numeric, &executes(&Target::CUDA)), cuda, "binding twice changes nothing");
+        assert_eq!(
+            binding_policy(numeric, &executes(&Target::CUDA)),
+            cuda,
+            "binding twice changes nothing"
+        );
     }
 
     #[cfg(feature = "cached-attention-streaming")]
     #[test]
     fn the_kv_padding_probe_agrees_with_the_entry_on_whether_attention_fuses() {
-        let (program, root, _) = proxima_tensor::spec::gqa_cached_forward_program(32, 16, 24, 4, 2, 4, 2).expect("fixture builds");
+        let (program, root, _) =
+            proxima_tensor::spec::gqa_cached_forward_program(32, 16, 24, 4, 2, 4, 2)
+                .expect("fixture builds");
         let shapes = proxima_tensor::infer(&program, &[1, 6]).expect("infers");
         let packed = PackedOperands::new();
         let numeric = NumericPolicy::llama_relaxed();
@@ -183,31 +247,47 @@ mod tests {
             let grant = executes(&target);
             let config = BindConfig::new(numeric, true, &packed);
             let bound = bind_plan(&program, &shapes, &[root], &config, &grant).expect("binds");
-            assert_eq!(has_cached_attention(&bound), grant.forms.contains(Form::CachedAttention), "{target:?}");
+            assert_eq!(
+                has_cached_attention(&bound),
+                grant.forms.contains(Form::CachedAttention),
+                "{target:?}"
+            );
             assert_eq!(bound.policy, binding_policy(numeric, &grant));
             let unfused = BindConfig::new(numeric, false, &packed);
             let bound = bind_plan(&program, &shapes, &[root], &unfused, &grant).expect("binds");
-            assert!(!has_cached_attention(&bound), "{target:?} fused with fusion disallowed");
+            assert!(
+                !has_cached_attention(&bound),
+                "{target:?} fused with fusion disallowed"
+            );
         }
     }
 
     #[cfg(feature = "cached-attention-streaming")]
     #[test]
     fn the_config_can_withhold_cached_attention_from_a_grant_that_renders_it() {
-        let (program, root, _) = proxima_tensor::spec::gqa_cached_forward_program(32, 16, 24, 4, 2, 4, 2).expect("fixture builds");
+        let (program, root, _) =
+            proxima_tensor::spec::gqa_cached_forward_program(32, 16, 24, 4, 2, 4, 2)
+                .expect("fixture builds");
         let shapes = proxima_tensor::infer(&program, &[1, 6]).expect("infers");
         let packed = PackedOperands::new();
         let grant = executes(&Target::CUDA);
         let config = BindConfig::new(NumericPolicy::llama_relaxed(), true, &packed);
-        assert!(has_cached_attention(&bind_plan(&program, &shapes, &[root], &config, &grant).expect("binds")));
+        assert!(has_cached_attention(
+            &bind_plan(&program, &shapes, &[root], &config, &grant).expect("binds")
+        ));
         let withheld = config.with_fused_cached_attention(false);
-        assert!(!has_cached_attention(&bind_plan(&program, &shapes, &[root], &withheld, &grant).expect("binds")));
+        assert!(!has_cached_attention(
+            &bind_plan(&program, &shapes, &[root], &withheld, &grant).expect("binds")
+        ));
         assert_eq!(withheld.with_top_fraction(8).top_fraction_min_rows, Some(8));
         assert_eq!(withheld.top_fraction_min_rows, None);
     }
 
     fn has_cached_attention(bound: &Bound) -> bool {
-        bound.resolved.iter().any(|op| matches!(op.kind, BoundOpKind::CachedAttention { .. }))
+        bound
+            .resolved
+            .iter()
+            .any(|op| matches!(op.kind, BoundOpKind::CachedAttention { .. }))
     }
 }
 
@@ -219,12 +299,20 @@ mod wgpu_bind_tests {
 
     #[test]
     fn the_entry_binds_a_wgpu_grant_to_what_the_retired_binder_produced() {
-        let (program, root, _) = proxima_tensor::spec::gqa_cached_forward_program(32, 16, 24, 4, 2, 4, 2).expect("fixture builds");
+        let (program, root, _) =
+            proxima_tensor::spec::gqa_cached_forward_program(32, 16, 24, 4, 2, 4, 2)
+                .expect("fixture builds");
         let shapes = proxima_tensor::infer(&program, &[1, 6]).expect("infers");
         let packed = PackedOperands::new();
         let numeric = NumericPolicy::llama_relaxed();
-        let narrowed = numeric.with_accumulator_narrowing().with_flash_narrowing(true);
-        let retired = prune_dead(bind_without_reduce_epilogue_fusion(&program, &shapes, &[root], false, narrowed).expect("binds"), &[root]);
+        let narrowed = numeric
+            .with_accumulator_narrowing()
+            .with_flash_narrowing(true);
+        let retired = prune_dead(
+            bind_without_reduce_epilogue_fusion(&program, &shapes, &[root], false, narrowed)
+                .expect("binds"),
+            &[root],
+        );
         let config = BindConfig::new(numeric, true, &packed);
         let entry = bind_plan(&program, &shapes, &[root], &config, &executes()).expect("binds");
         assert!(!retired.is_empty());

@@ -43,10 +43,13 @@ use std::hash::{Hash, Hasher};
 use std::sync::mpsc;
 use std::time::Instant;
 
+use proxima_numeric::{DType, NumericPolicy};
 use proxima_telemetry::counter;
 use proxima_telemetry::metric::Counter;
-use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Executes, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes, TensorError, infer, resolve_named_blocks};
-use proxima_numeric::{DType, NumericPolicy};
+use proxima_tensor::{
+    BoundOp, BoundOpKind, Evaluated, Executes, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes,
+    TensorError, infer, resolve_named_blocks,
+};
 
 use crate::bind_plan::{BindConfig, bind_plan};
 use crate::config::{ResourceConstraints, RuntimeConfig};
@@ -632,7 +635,14 @@ fn plan_with_options(
     let no_codecs = PackedOperands::new();
     let allow_fusion = config.is_none_or(|value| value.allow_fusion);
     let bind_config = BindConfig::new(numeric_policy, allow_fusion, &no_codecs);
-    let resolved = bind_plan(program, &shapes, &effective_outputs, &bind_config, &executes())?.resolved;
+    let resolved = bind_plan(
+        program,
+        &shapes,
+        &effective_outputs,
+        &bind_config,
+        &executes(),
+    )?
+    .resolved;
     let (device, queue, caps, device_identity) = acquire_device()?;
     let mut plan = WgpuPlan {
         resource_rows: Vec::new(),
@@ -1873,8 +1883,8 @@ mod layout_parity_tests;
 mod tests {
     use alloc::vec;
 
+    use proxima_numeric::DType;
     use proxima_tensor::{Extent, IndexMap, ScalarOp, append, bind, map};
-    use proxima_numeric::{DType};
 
     use super::*;
 
@@ -1968,8 +1978,10 @@ mod tests {
 mod block_node_attribution_tests {
     use alloc::vec;
 
-    use proxima_tensor::{Extent, IndexMap, Keep, Reduce, ReduceInit, ScalarOp, TensorError, append, projection};
-    use proxima_numeric::{DType};
+    use proxima_numeric::DType;
+    use proxima_tensor::{
+        Extent, IndexMap, Keep, Reduce, ReduceInit, ScalarOp, TensorError, append, projection,
+    };
 
     use super::{Codec, NodeId, Op, QuantizedBlock, WgpuError, plan};
 

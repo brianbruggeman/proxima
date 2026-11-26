@@ -9,57 +9,61 @@
 //! the full graph binding layer is connected.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
-use std::ffi::CString;
 use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::CString;
 use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::encode_render::{EncodeRows, RenderedEncode, row_bytes};
+use crate::gpu_runtime::{CudarcRuntime, GpuRuntime, LaunchArguments, LaunchShape};
 use conflaguration::Settings;
 use cudarc::driver::sys as cuda_sys;
-use cudarc::driver::{
-    CudaContext, CudaFunction, CudaModule, DriverError,
-};
-use crate::gpu_runtime::{CudarcRuntime, GpuRuntime, LaunchArguments, LaunchShape};
-use crate::encode_render::{EncodeRows, RenderedEncode, row_bytes};
-use cudarc::nvrtc::sys as nvrtc_sys;
+use cudarc::driver::{CudaContext, CudaFunction, CudaModule, DriverError};
 use cudarc::nvrtc::result as nvrtc_result;
+use cudarc::nvrtc::sys as nvrtc_sys;
 use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
 use proxima_core::kv_carry::{
-    Appended, Extent, KvCarry, KvCarryError, KvCommand, KvEvent, RowPair, StateCarryError, StateCommand, StateEvent,
-    StateSwap,
+    Appended, Extent, KvCarry, KvCarryError, KvCommand, KvEvent, RowPair, StateCarryError,
+    StateCommand, StateEvent, StateSwap,
 };
 use proxima_primitives::sync::blocking::Mutex;
 
+use crate::bind_plan::{BindConfig, bind_plan, finish_bound};
 use crate::config::{ResourceConstraints, RuntimeConfig};
 use crate::cuda::target::Target;
-use crate::cuda::{CudaGridSpec, CudaKernel, DeviceClass, EmitDevice, cuda_cached_attention_class, device_scalar, executes as cuda_executes, word_scalar};
+use crate::cuda::{
+    CudaGridSpec, CudaKernel, DeviceClass, EmitDevice, cuda_cached_attention_class, device_scalar,
+    executes as cuda_executes, word_scalar,
+};
 use crate::cuda_kernel_cache::{
     CacheKey, decode_binary_entry, decode_entry, encode_binary_entry, encode_entry, header_digest,
 };
-use crate::kernel_cache_config::KernelCacheConfig;
-use crate::resident_identity::{ResidentIdentity, ResidentLedger, ResidentRefusal};
 use crate::cuda_ptx_store::PtxStore;
-use crate::bind_plan::{BindConfig, bind_plan, finish_bound};
 use crate::derived_quantize::{ActivationRefusal, validate_storage};
-use proxima_numeric::NumericFormat;
+use crate::kernel_cache_config::KernelCacheConfig;
 use crate::lowering::{
     Binding, Codec, OperandDtypes, PackedOperands, gather_count, program_operand_dtypes,
 };
+use crate::msl::layout_render::{hardware_stage_type, hardware_word};
+use crate::resident_identity::{ResidentIdentity, ResidentLedger, ResidentRefusal};
+use proxima_numeric::NumericFormat;
+use proxima_numeric::float_layout::NAMED_LAYOUTS;
+use proxima_numeric::{DType, Numeric, NumericError, NumericPolicy, NumericRewrite, admit};
 use proxima_tensor::bind::{
-    RefreshRefusal, changed_nodes, kv_read_only_by_fused_attention, refit_cached_attention_at,
-    RowTemplate, SymbolsTemplate, apply_row_template, apply_symbols_template, refresh_bound_ops,
+    RefreshRefusal, RowTemplate, SymbolsTemplate, apply_row_template, apply_symbols_template,
+    changed_nodes, kv_read_only_by_fused_attention, refit_cached_attention_at, refresh_bound_ops,
     refresh_cached_attention, row_template, rows_enumerable, symbols_shapes_template,
     touched_positions, touches_changed,
 };
-use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Executes, NodeId, Op, QuantizedBlock, Shapes, block_node_ids, infer, resolve_named_blocks, underive_block_quantize};
-use proxima_numeric::float_layout::NAMED_LAYOUTS;
-use proxima_numeric::{DType, Numeric, NumericError, NumericPolicy, NumericRewrite, admit};
-use crate::msl::layout_render::{hardware_stage_type, hardware_word};
+use proxima_tensor::{
+    BoundOp, BoundOpKind, Evaluated, Executes, NodeId, Op, QuantizedBlock, Shapes, block_node_ids,
+    infer, resolve_named_blocks, underive_block_quantize,
+};
 
 /// Errors from CUDA initialization, NVRTC compilation, or execution.
 #[derive(Debug, thiserror::Error)]
@@ -145,7 +149,11 @@ impl From<StateCarryError<NodeId>> for CudaDriverError {
 impl From<KvCarryError<NodeId>> for CudaDriverError {
     fn from(error: KvCarryError<NodeId>) -> Self {
         match error {
-            KvCarryError::Overflow { input, valid_elements, capacity_elements } => Self::AppendOverflow {
+            KvCarryError::Overflow {
+                input,
+                valid_elements,
+                capacity_elements,
+            } => Self::AppendOverflow {
                 node: input,
                 valid_elements: valid_elements as usize,
                 new_elements: 0,
@@ -187,7 +195,9 @@ fn device_element_bytes(dtype: DType) -> usize {
 
 /// Device bytes of `elements` elements of `dtype`.
 fn activation_bytes(elements: usize, dtype: DType) -> Result<usize, CudaDriverError> {
-    elements.checked_mul(device_element_bytes(dtype)).ok_or(CudaDriverError::ResourceOverflow)
+    elements
+        .checked_mul(device_element_bytes(dtype))
+        .ok_or(CudaDriverError::ResourceOverflow)
 }
 
 /// Device bytes of one node's activation buffer, from its own dtype.
@@ -204,7 +214,10 @@ fn buffer_elements<R: GpuRuntime>(buffer: &CudaGraphBuffer<R>) -> u64 {
 
 /// Host values of whatever type the caller names, read out of device bytes without assuming alignment.
 fn host_values<Value: bytemuck::AnyBitPattern>(bytes: &[u8]) -> Vec<Value> {
-    bytes.chunks_exact(core::mem::size_of::<Value>()).map(bytemuck::pod_read_unaligned).collect()
+    bytes
+        .chunks_exact(core::mem::size_of::<Value>())
+        .map(bytemuck::pod_read_unaligned)
+        .collect()
 }
 
 fn buffer_bytes<R: GpuRuntime>(buffer: &CudaGraphBuffer<R>) -> u64 {
@@ -216,11 +229,13 @@ fn buffer_bytes<R: GpuRuntime>(buffer: &CudaGraphBuffer<R>) -> u64 {
 
 /// Device bytes of a tensor of `extents` whose elements are `dtype`.
 fn cuda_device_bytes(extents: &[u64], dtype: DType) -> Result<u64, CudaDriverError> {
-    extents.iter().try_fold(device_element_bytes(dtype) as u64, |bytes, extent| {
-        bytes
-            .checked_mul(*extent)
-            .ok_or(CudaDriverError::ResourceOverflow)
-    })
+    extents
+        .iter()
+        .try_fold(device_element_bytes(dtype) as u64, |bytes, extent| {
+            bytes
+                .checked_mul(*extent)
+                .ok_or(CudaDriverError::ResourceOverflow)
+        })
 }
 
 fn cuda_input_contract(
@@ -347,7 +362,8 @@ fn plan_grant() -> Executes {
 }
 
 fn multiprocessor_count(context: &CudaContext) -> Result<u32, CudaDriverError> {
-    let count = context.attribute(cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)?;
+    let count = context
+        .attribute(cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)?;
     Ok(u32::try_from(count).unwrap_or(0))
 }
 
@@ -511,7 +527,8 @@ fn kernel_read_nodes(kernel: &CudaKernel) -> impl Iterator<Item = NodeId> + '_ {
 }
 
 impl<R: GpuRuntime> CudaF32Arena<R>
-where CudaDriverError: From<R::Error> + From<R::BuildError>
+where
+    CudaDriverError: From<R::Error> + From<R::BuildError>,
 {
     /// Seats a pooled buffer of exactly `bytes` bytes under `node`, tagged with the node's dtype:
     /// the pool is keyed by bytes, so a size class never mixes scalar widths.
@@ -520,14 +537,23 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
             return;
         }
         if let Some(buffer) = self.pool.get_mut(&bytes).and_then(Vec::pop) {
-            self.buffers.insert(node, CudaGraphBuffer::Activation(ActivationBuffer { bytes: buffer, dtype }));
+            self.buffers.insert(
+                node,
+                CudaGraphBuffer::Activation(ActivationBuffer {
+                    bytes: buffer,
+                    dtype,
+                }),
+            );
         }
     }
 
     fn release_to_pool(&mut self, nodes: &[NodeId]) {
         for node in nodes {
             if let Some(CudaGraphBuffer::Activation(buffer)) = self.buffers.remove(node) {
-                self.pool.entry(R::len(&buffer.bytes)).or_default().push(buffer.bytes);
+                self.pool
+                    .entry(R::len(&buffer.bytes))
+                    .or_default()
+                    .push(buffer.bytes);
             }
         }
     }
@@ -616,7 +642,10 @@ impl LaunchProfile {
 /// A deferred launch of a kernel with a fault binding must be given the fault window it reports
 /// into, or the diagnostic would never be observed.
 fn require_deferred_fault(kernel: &CudaKernel, deferred: bool) -> Result<(), CudaDriverError> {
-    let faults = kernel.bindings.iter().any(|binding| matches!(binding, Binding::Fault));
+    let faults = kernel
+        .bindings
+        .iter()
+        .any(|binding| matches!(binding, Binding::Fault));
     if faults && !deferred {
         return Err(CudaDriverError::BindingContract);
     }
@@ -656,7 +685,10 @@ struct LaunchEvents<R: GpuRuntime> {
     operand_bytes: u64,
 }
 
-fn push_buffer<'a, 'b, R: GpuRuntime + 'a>(args: &'b mut R::Launch<'a>, buffer: &'a CudaGraphBuffer<R>) -> &'b mut R::Launch<'a> {
+fn push_buffer<'a, 'b, R: GpuRuntime + 'a>(
+    args: &'b mut R::Launch<'a>,
+    buffer: &'a CudaGraphBuffer<R>,
+) -> &'b mut R::Launch<'a> {
     match buffer {
         CudaGraphBuffer::Activation(input) => args.push(&input.bytes),
         CudaGraphBuffer::Bytes(input) => args.push(input.as_ref()),
@@ -730,8 +762,12 @@ struct KvEncode {
 
 fn kv_encode(target: Target, format: &NumericFormat) -> Option<KvEncode> {
     let dialect = crate::cuda_encode::CudaEncode { target };
-    let rendered = crate::encode_render::format_encode_kernel(&dialect, format, "kv_carry_encode").ok()?;
-    Some(KvEncode { format: *format, rendered })
+    let rendered =
+        crate::encode_render::format_encode_kernel(&dialect, format, "kv_carry_encode").ok()?;
+    Some(KvEncode {
+        format: *format,
+        rendered,
+    })
 }
 
 /// Numeric and activation policy for one plan, plus the runtime config when the
@@ -747,7 +783,8 @@ struct PlanPolicy<'config> {
 }
 
 impl<R: GpuRuntime> CudaF32Arena<R>
-where CudaDriverError: From<R::Error> + From<R::BuildError>
+where
+    CudaDriverError: From<R::Error> + From<R::BuildError>,
 {
     /// Number of device allocations performed by this arena.
     #[must_use]
@@ -776,7 +813,9 @@ impl CudaDriver<CudarcRuntime> {
         let context = CudaContext::new(ordinal)?;
         let context_us = elapsed_micros(step);
         let step = Instant::now();
-        let device = EmitDevice { multiprocessors: multiprocessor_count(&context)? };
+        let device = EmitDevice {
+            multiprocessors: multiprocessor_count(&context)?,
+        };
         let multiprocessors_us = elapsed_micros(step);
         // every launch runs on this one default stream, so per-buffer read/write events order nothing and cost two cuEventCreate per buffer
         unsafe { context.disable_event_tracking() };
@@ -813,8 +852,14 @@ impl CudaDriver<CudarcRuntime> {
     ///
     /// # Errors
     /// The module failed to load or the entry is missing.
-    pub fn precompiled_function(&self, module_key: &str, entry: &str, ptx_source: &str) -> Result<CudaFunction, CudaDriverError> {
-        self.runtime.precompiled_function(module_key, entry, ptx_source)
+    pub fn precompiled_function(
+        &self,
+        module_key: &str,
+        entry: &str,
+        ptx_source: &str,
+    ) -> Result<CudaFunction, CudaDriverError> {
+        self.runtime
+            .precompiled_function(module_key, entry, ptx_source)
     }
 
     /// Runs the same numerical smoke through a hand-authored PTX module.
@@ -836,20 +881,23 @@ impl CudaDriver<CudarcRuntime> {
         args.push_mut(&mut device_output);
         args.push(&device_uniforms);
         unsafe {
-            self.runtime.launch(args, LaunchShape {
-                grid_dim: ((input.len() as u32).div_ceil(256), 1, 1),
-                block_dim: (256, 1, 1),
-                shared_mem_bytes: 0,
-            })
+            self.runtime.launch(
+                args,
+                LaunchShape {
+                    grid_dim: ((input.len() as u32).div_ceil(256), 1, 1),
+                    block_dim: (256, 1, 1),
+                    shared_mem_bytes: 0,
+                },
+            )
         }?;
         self.runtime.synchronize()?;
         self.download_values(dtype, &device_output)
     }
-
 }
 
 impl<R: GpuRuntime> CudaDriver<R>
-where CudaDriverError: From<R::Error> + From<R::BuildError>
+where
+    CudaDriverError: From<R::Error> + From<R::BuildError>,
 {
     /// Reads the runtime's device identity and the driver's graph activity counters.
     pub fn device_snapshot(&self) -> Result<CudaDeviceSnapshot, CudaDriverError> {
@@ -865,7 +913,10 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
     /// of each distinct kernel identity.
     #[must_use]
     pub fn kernel_compilations(&self) -> u64 {
-        self.runtime.compile_counters().compilations.load(Ordering::Relaxed)
+        self.runtime
+            .compile_counters()
+            .compilations
+            .load(Ordering::Relaxed)
     }
 
     /// Kernels whose PTX was loaded from the on-disk cache instead of NVRTC.
@@ -873,7 +924,8 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
     /// and grows this instead.
     #[must_use]
     pub fn disk_cache_hits(&self) -> u64 {
-        self.runtime.compile_counters()
+        self.runtime
+            .compile_counters()
             .disk_cache_hits
             .load(Ordering::Relaxed)
     }
@@ -882,7 +934,10 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
     /// compilation across this driver's `kernel_compilations`.
     #[must_use]
     pub fn nvrtc_micros(&self) -> u64 {
-        self.runtime.compile_counters().nvrtc_micros.load(Ordering::Relaxed)
+        self.runtime
+            .compile_counters()
+            .nvrtc_micros
+            .load(Ordering::Relaxed)
     }
 
     /// Cumulative wall-clock microseconds spent in `cuModuleLoadData` (PTX to
@@ -890,7 +945,10 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
     /// `kernel_compilations`.
     #[must_use]
     pub fn load_micros(&self) -> u64 {
-        self.runtime.compile_counters().load_micros.load(Ordering::Relaxed)
+        self.runtime
+            .compile_counters()
+            .load_micros
+            .load(Ordering::Relaxed)
     }
 
     /// Returns the CUDA driver's current `(free_bytes, total_bytes)` view.
@@ -989,9 +1047,14 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         if row_bytes() != Some(word) {
             return Err(CudaDriverError::BindingContract);
         }
-        let range = rows.byte_range(format).ok_or(CudaDriverError::BindingContract)?;
+        let range = rows
+            .byte_range(format)
+            .ok_or(CudaDriverError::BindingContract)?;
         let threads = rows.threads(rendered.elements_per_thread);
-        if threads * rendered.elements_per_thread != rows.element_count || rows.element_count > R::len(source) / word || range.end > R::view_mut_len(destination) {
+        if threads * rendered.elements_per_thread != rows.element_count
+            || rows.element_count > R::len(source) / word
+            || range.end > R::view_mut_len(destination)
+        {
             return Err(CudaDriverError::BindingContract);
         }
         let count = u32::try_from(threads).map_err(|_| CudaDriverError::InputTooLarge(threads))?;
@@ -1020,14 +1083,29 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         offset: usize,
         count: usize,
     ) -> Result<(), CudaDriverError> {
-        let byte_offset = encode.format.packed_len(offset).ok_or(CudaDriverError::BindingContract)?;
+        let byte_offset = encode
+            .format
+            .packed_len(offset)
+            .ok_or(CudaDriverError::BindingContract)?;
         let mut window = R::bytes_mut(cache).ok_or(CudaDriverError::BindingContract)?;
-        self.encode_rows_into(&encode.rendered, &encode.format, source, &mut window, EncodeRows { element_count: count, byte_offset })
+        self.encode_rows_into(
+            &encode.rendered,
+            &encode.format,
+            source,
+            &mut window,
+            EncodeRows {
+                element_count: count,
+                byte_offset,
+            },
+        )
     }
 }
 
 impl CudarcRuntime {
-    pub(crate) fn function_for(&self, kernel: &CudaKernel) -> Result<CudaFunction, CudaDriverError> {
+    pub(crate) fn function_for(
+        &self,
+        kernel: &CudaKernel,
+    ) -> Result<CudaFunction, CudaDriverError> {
         self.cached_function(&kernel.entry, &kernel.entry, &kernel.source, || {
             self.build_kernel_module(kernel)
         })
@@ -1041,14 +1119,21 @@ impl CudarcRuntime {
         module
     }
 
-    fn build_kernel_module_untimed(&self, kernel: &CudaKernel) -> Result<Arc<CudaModule>, CudaDriverError> {
+    fn build_kernel_module_untimed(
+        &self,
+        kernel: &CudaKernel,
+    ) -> Result<Arc<CudaModule>, CudaDriverError> {
         let header_dir = cuda_header_dir(&kernel.source)?;
         let options = nvrtc_options(header_dir.as_deref());
         let header = self.header_stand_in(header_dir.as_deref())?;
         if let Some(module) = self.cubin_module(kernel, header_dir.as_deref(), header.as_ref()) {
             return Ok(module);
         }
-        let key = self.kernel_cache_key(&kernel.source, header.as_ref().map(|digest| digest.as_slice()), &options)?;
+        let key = self.kernel_cache_key(
+            &kernel.source,
+            header.as_ref().map(|digest| digest.as_slice()),
+            &options,
+        )?;
         let read_started = Instant::now();
         let cached = cached_ptx(&self.compile_counters.disk_store, &key);
         CompileCounters::add(&self.compile_counters.disk_read_micros, read_started);
@@ -1072,7 +1157,10 @@ impl CudarcRuntime {
         Ok(module)
     }
 
-    fn header_stand_in(&self, header_dir: Option<&Path>) -> Result<Option<[u8; 32]>, CudaDriverError> {
+    fn header_stand_in(
+        &self,
+        header_dir: Option<&Path>,
+    ) -> Result<Option<[u8; 32]>, CudaDriverError> {
         let Some(dir) = header_dir else {
             return Ok(None);
         };
@@ -1114,7 +1202,13 @@ impl CudarcRuntime {
         let arch = self.cubin_arch().ok()?;
         let mut options = nvrtc_options(header_dir);
         options.arch = Some(arch);
-        let key = self.kernel_cache_key(&kernel.source, header.map(|digest| digest.as_slice()), &options).ok()?;
+        let key = self
+            .kernel_cache_key(
+                &kernel.source,
+                header.map(|digest| digest.as_slice()),
+                &options,
+            )
+            .ok()?;
         let image = self
             .cached_cubin(&key)
             .or_else(|| self.compiled_cubin(kernel, &key, header_dir, arch))?;
@@ -1129,7 +1223,12 @@ impl CudarcRuntime {
 
     fn cached_cubin(&self, key: &CacheKey) -> Option<Vec<u8>> {
         let started = Instant::now();
-        let entry = self.compile_counters.disk_store.get(&key.to_hex()).ok().flatten();
+        let entry = self
+            .compile_counters
+            .disk_store
+            .get(&key.to_hex())
+            .ok()
+            .flatten();
         CompileCounters::add(&self.compile_counters.disk_read_micros, started);
         let image = decode_binary_entry(key, &entry?).ok()?.to_vec();
         self.compile_counters
@@ -1280,11 +1379,11 @@ impl CudarcRuntime {
             Ok(module)
         })
     }
-
 }
 
 impl<R: GpuRuntime> CudaDriver<R>
-where CudaDriverError: From<R::Error> + From<R::BuildError>
+where
+    CudaDriverError: From<R::Error> + From<R::BuildError>,
 {
     /// Resolves a dense/reduction graph into a persistent CUDA plan.
     pub fn plan(
@@ -1538,7 +1637,13 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         }
         let buffer = self.runtime.upload(&bytes)?;
         self.graph_uploads.fetch_add(1, Ordering::Relaxed);
-        arena.buffers.insert(node, CudaGraphBuffer::Activation(ActivationBuffer { bytes: buffer, dtype }));
+        arena.buffers.insert(
+            node,
+            CudaGraphBuffer::Activation(ActivationBuffer {
+                bytes: buffer,
+                dtype,
+            }),
+        );
         arena.allocations += 1;
         Ok(())
     }
@@ -1549,12 +1654,23 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
     }
 
     /// A zeroed activation buffer of `elements` elements of `dtype`, sized from its device scalar.
-    fn alloc_activation(&self, elements: usize, dtype: DType) -> Result<ActivationBuffer<R>, CudaDriverError> {
-        Ok(ActivationBuffer { bytes: self.alloc_bytes(activation_bytes(elements, dtype)?)?, dtype })
+    fn alloc_activation(
+        &self,
+        elements: usize,
+        dtype: DType,
+    ) -> Result<ActivationBuffer<R>, CudaDriverError> {
+        Ok(ActivationBuffer {
+            bytes: self.alloc_bytes(activation_bytes(elements, dtype)?)?,
+            dtype,
+        })
     }
 
     /// Reads a device byte buffer of `dtype` back as host values.
-    fn download_values<Value: bytemuck::Pod>(&self, dtype: DType, buffer: &R::Buffer<u8>) -> Result<Vec<Value>, CudaDriverError> {
+    fn download_values<Value: bytemuck::Pod>(
+        &self,
+        dtype: DType,
+        buffer: &R::Buffer<u8>,
+    ) -> Result<Vec<Value>, CudaDriverError> {
         Self::from_device(dtype, &self.runtime.download(buffer)?)
     }
 
@@ -1630,7 +1746,11 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         if let Some(buffer) = arena.uniforms.get_mut(&node)
             && R::len(buffer) == values.len()
         {
-            if arena.uniform_host.get(&node).is_some_and(|held| held == values) {
+            if arena
+                .uniform_host
+                .get(&node)
+                .is_some_and(|held| held == values)
+            {
                 return Ok(());
             }
             self.runtime.upload_into(values, buffer)?;
@@ -1658,7 +1778,10 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
     ) -> Result<(), CudaDriverError> {
         if values.is_empty() {
             arena.allocations += 1;
-            arena.buffers.insert(node, CudaGraphBuffer::Activation(self.alloc_activation(0, dtype)?));
+            arena.buffers.insert(
+                node,
+                CudaGraphBuffer::Activation(self.alloc_activation(0, dtype)?),
+            );
             return Ok(());
         }
         self.upload_f32(arena, node, dtype, values)
@@ -1666,7 +1789,10 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
 
     /// Host values as the device bytes of `dtype`: the Word class borrows them untouched, Half
     /// and Bfloat narrow through the layout codec (`Numeric` holds the host values as binary32).
-    fn to_device<Value: bytemuck::Pod>(dtype: DType, values: &[Value]) -> Result<Cow<'_, [u8]>, CudaDriverError> {
+    fn to_device<Value: bytemuck::Pod>(
+        dtype: DType,
+        values: &[Value],
+    ) -> Result<Cow<'_, [u8]>, CudaDriverError> {
         match device_scalar(dtype).map(|scalar| scalar.class) {
             Some(DeviceClass::Word) => Ok(Cow::Borrowed(bytemuck::cast_slice(values))),
             Some(DeviceClass::Half | DeviceClass::Bfloat) => {
@@ -1675,12 +1801,17 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
                 Numeric::new(&format, bytemuck::cast_slice(values))?.encode(&mut bytes)?;
                 Ok(Cow::Owned(bytes))
             }
-            None => Err(CudaDriverError::HostBoundary(format!("{dtype:?} has no device scalar"))),
+            None => Err(CudaDriverError::HostBoundary(format!(
+                "{dtype:?} has no device scalar"
+            ))),
         }
     }
 
     /// Device bytes of `dtype` as host values, the inverse of [`Self::to_device`].
-    fn from_device<Value: bytemuck::Pod>(dtype: DType, bytes: &[u8]) -> Result<Vec<Value>, CudaDriverError> {
+    fn from_device<Value: bytemuck::Pod>(
+        dtype: DType,
+        bytes: &[u8],
+    ) -> Result<Vec<Value>, CudaDriverError> {
         match device_scalar(dtype).map(|scalar| scalar.class) {
             Some(DeviceClass::Word) => Ok(host_values(bytes)),
             Some(DeviceClass::Half | DeviceClass::Bfloat) => {
@@ -1689,7 +1820,9 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
                 Numeric::decode(&format, bytes, bytemuck::cast_slice_mut(&mut values))?;
                 Ok(values)
             }
-            None => Err(CudaDriverError::HostBoundary(format!("{dtype:?} has no device scalar"))),
+            None => Err(CudaDriverError::HostBoundary(format!(
+                "{dtype:?} has no device scalar"
+            ))),
         }
     }
 
@@ -1715,11 +1848,15 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
             self.alloc_activation(0, dtype)?
         } else {
             let values = vec![value; output_len];
-            let bytes = self.runtime.upload::<u8>(&Self::to_device(dtype, &values)?)?;
+            let bytes = self
+                .runtime
+                .upload::<u8>(&Self::to_device(dtype, &values)?)?;
             self.graph_uploads.fetch_add(1, Ordering::Relaxed);
             ActivationBuffer { bytes, dtype }
         };
-        arena.buffers.insert(node, CudaGraphBuffer::Activation(buffer));
+        arena
+            .buffers
+            .insert(node, CudaGraphBuffer::Activation(buffer));
         arena.allocations += 1;
         Ok(())
     }
@@ -1829,7 +1966,13 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         if kernel.grid.is_idle() {
             return Err(CudaDriverError::IdleLaunch);
         }
-        self.launch_f32_persistent_sized(arena, kernel, dtype, uniforms, kernel.grid.threads() as usize)
+        self.launch_f32_persistent_sized(
+            arena,
+            kernel,
+            dtype,
+            uniforms,
+            kernel.grid.threads() as usize,
+        )
     }
 
     /// Persistent launch with an output allocation sized independently from
@@ -1844,7 +1987,12 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         output_len: usize,
     ) -> Result<(), CudaDriverError> {
         self.launch_sized_with_sync(
-            arena, kernel, uniforms, (output_len, dtype), Completion::Synchronize, None,
+            arena,
+            kernel,
+            uniforms,
+            (output_len, dtype),
+            Completion::Synchronize,
+            None,
         )
     }
 
@@ -2044,15 +2192,39 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         let fault_window =
             deferred_fault.map(|(array, offset, slots)| R::view(array, offset..offset + slots));
         arena.launch_profile.mark(3, &mut lap);
-        let mut route_buffer = self.take_route_compaction(&mut arena.route_compaction, output_node, kernel.route_compaction_words)?;
+        let mut route_buffer = self.take_route_compaction(
+            &mut arena.route_compaction,
+            output_node,
+            kernel.route_compaction_words,
+        )?;
         let prepass_result = match route_buffer.as_mut() {
             Some(compaction) => {
-                let owned_view = fault_buffer.as_ref().map(|buffer| R::view(buffer, 0..R::len(buffer)));
+                let owned_view = fault_buffer
+                    .as_ref()
+                    .map(|buffer| R::view(buffer, 0..R::len(buffer)));
                 // the view type is invariant in its borrow, so each source is passed on its own instead of joined through Option::or
                 match (fault_window.as_ref(), owned_view.as_ref()) {
-                    (Some(window), _) => self.launch_route_prepass(&arena.buffers, kernel, compaction, device_uniforms, Some(window)),
-                    (None, Some(window)) => self.launch_route_prepass(&arena.buffers, kernel, compaction, device_uniforms, Some(window)),
-                    (None, None) => self.launch_route_prepass(&arena.buffers, kernel, compaction, device_uniforms, None),
+                    (Some(window), _) => self.launch_route_prepass(
+                        &arena.buffers,
+                        kernel,
+                        compaction,
+                        device_uniforms,
+                        Some(window),
+                    ),
+                    (None, Some(window)) => self.launch_route_prepass(
+                        &arena.buffers,
+                        kernel,
+                        compaction,
+                        device_uniforms,
+                        Some(window),
+                    ),
+                    (None, None) => self.launch_route_prepass(
+                        &arena.buffers,
+                        kernel,
+                        compaction,
+                        device_uniforms,
+                        None,
+                    ),
                 }
             }
             None => Ok(()),
@@ -2201,7 +2373,14 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         // the route kernels write their extra outputs as the Word class, whatever the output dtype
         let word = float_kernel_dtype()?;
         match arena.buffers.remove(&node) {
-            Some(CudaGraphBuffer::Activation(buffer)) if R::len(&buffer.bytes) == activation_bytes(length, word)? => Ok(ActivationBuffer { dtype: word, ..buffer }),
+            Some(CudaGraphBuffer::Activation(buffer))
+                if R::len(&buffer.bytes) == activation_bytes(length, word)? =>
+            {
+                Ok(ActivationBuffer {
+                    dtype: word,
+                    ..buffer
+                })
+            }
             Some(CudaGraphBuffer::Bytes(_)) => Err(CudaDriverError::BindingContract),
             Some(CudaGraphBuffer::Activation(_)) | None => {
                 arena.allocations += 1;
@@ -2211,9 +2390,14 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         }
     }
 
-    fn restore_extra_outputs(arena: &mut CudaF32Arena<R>, buffers: Vec<(NodeId, ActivationBuffer<R>)>) {
+    fn restore_extra_outputs(
+        arena: &mut CudaF32Arena<R>,
+        buffers: Vec<(NodeId, ActivationBuffer<R>)>,
+    ) {
         for (node, buffer) in buffers {
-            arena.buffers.insert(node, CudaGraphBuffer::Activation(buffer));
+            arena
+                .buffers
+                .insert(node, CudaGraphBuffer::Activation(buffer));
         }
     }
 
@@ -2279,8 +2463,16 @@ pub fn probe_bound_graph(
         node: NodeId(0),
         reason: "shape inference failed",
     })?;
-    let (resolved, packed, _) =
-        bind_resolved(program, &shapes, outputs, &packed_operands, numeric_policy, false, activation_storage, &plan_grant())?;
+    let (resolved, packed, _) = bind_resolved(
+        program,
+        &shapes,
+        outputs,
+        &packed_operands,
+        numeric_policy,
+        false,
+        activation_storage,
+        &plan_grant(),
+    )?;
     Ok((resolved, packed))
 }
 
@@ -2296,10 +2488,13 @@ fn bind_resolved(
     grant: &Executes,
 ) -> Result<(Vec<BoundOp>, PackedOperands, LowerMicros), CudaDriverError> {
     let bind_started = Instant::now();
-    let config = BindConfig::new(numeric_policy, !unfused, packed_operands).with_activation_storage(activation_storage);
-    let bound = bind_plan(program, shapes, outputs, &config, grant).map_err(|_| CudaDriverError::UnsupportedGraph {
-        node: NodeId(0),
-        reason: "graph binding failed",
+    let config = BindConfig::new(numeric_policy, !unfused, packed_operands)
+        .with_activation_storage(activation_storage);
+    let bound = bind_plan(program, shapes, outputs, &config, grant).map_err(|_| {
+        CudaDriverError::UnsupportedGraph {
+            node: NodeId(0),
+            reason: "graph binding failed",
+        }
     })?;
     let (resolved, packed, numeric_policy) = (bound.resolved, bound.packed, bound.policy);
     validate_resolved(&resolved, numeric_policy, grant)?;
@@ -2393,7 +2588,11 @@ where
     }
     let mut ranked: Vec<_> = by_kernel.into_iter().collect();
     ranked.sort_by_key(|row| Reverse(row.1.0));
-    eprintln!("cuda_event_timing: nodes={} gpu_ms={}", rows.len(), format_millis(total));
+    eprintln!(
+        "cuda_event_timing: nodes={} gpu_ms={}",
+        rows.len(),
+        format_millis(total)
+    );
     for (label, (elapsed, count, output_len)) in ranked.iter().take(24) {
         let each_nanos = elapsed.as_nanos() / (*count).max(1) as u128;
         eprintln!(
@@ -2457,7 +2656,8 @@ fn refresh_bound_resolved(
         1,
         numeric_policy,
     )?;
-    let config = BindConfig::new(numeric_policy, true, packed_operands).with_activation_storage(activation_storage);
+    let config = BindConfig::new(numeric_policy, true, packed_operands)
+        .with_activation_storage(activation_storage);
     let finished = finish_bound(refreshed, program, shapes, &config, grant);
     Ok((finished.resolved, finished.packed, touched))
 }
@@ -2600,9 +2800,12 @@ fn compile_cubin(
     header_dir: Option<&Path>,
     arch: &str,
 ) -> Result<Vec<u8>, CudaDriverError> {
-    let refused = |what: &str, error: &dyn std::fmt::Debug| CudaDriverError::Nvrtc(format!("{what}: {error:?}"));
+    let refused = |what: &str, error: &dyn std::fmt::Debug| {
+        CudaDriverError::Nvrtc(format!("{what}: {error:?}"))
+    };
     let text = CString::new(source).map_err(|error| refused("kernel source", &error))?;
-    let program = nvrtc_result::create_program(&text, None).map_err(|error| refused("create", &error))?;
+    let program =
+        nvrtc_result::create_program(&text, None).map_err(|error| refused("create", &error))?;
     let mut flags = vec![format!("--gpu-architecture={arch}")];
     if let Some(dir) = header_dir {
         flags.push(format!("--include-path={}", dir.to_string_lossy()));
@@ -2610,7 +2813,8 @@ fn compile_cubin(
     let image = unsafe { nvrtc_result::compile_program(program, &flags) }
         .map_err(|error| refused("compile", &error))
         .and_then(|()| unsafe { read_cubin(program) });
-    unsafe { nvrtc_result::destroy_program(program) }.map_err(|error| refused("destroy", &error))?;
+    unsafe { nvrtc_result::destroy_program(program) }
+        .map_err(|error| refused("destroy", &error))?;
     image
 }
 
@@ -2716,14 +2920,18 @@ pub(crate) fn stored_or_compiled<Failure>(
         return Ok(image);
     }
     let image = compile()?;
-    if let Err(error) = counters.disk_store.put(&name, &encode_binary_entry(key, &image)) {
+    if let Err(error) = counters
+        .disk_store
+        .put(&name, &encode_binary_entry(key, &image))
+    {
         proxima_telemetry::warn!(file = %name, error = %error, "kernel cache write failed; kernel stays uncached");
     }
     Ok(image)
 }
 
 impl<R: GpuRuntime> DevicePlan<R>
-where CudaDriverError: From<R::Error> + From<R::BuildError>
+where
+    CudaDriverError: From<R::Error> + From<R::BuildError>,
 {
     #[must_use]
     pub const fn exact_activations(&self) -> bool {
@@ -2835,7 +3043,9 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
                     &operand_dtypes,
                     &mut micros,
                 )?;
-                ("refresh", touched, "none", resolved, kernels, uniforms, micros)
+                (
+                    "refresh", touched, "none", resolved, kernels, uniforms, micros,
+                )
             }
             Err(refused) => {
                 let prior = same_policy.then(|| PriorKernels {
@@ -3020,7 +3230,11 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         let rows = symbols.first().copied().unwrap_or(0);
         let moved = (*self.shapes_template)
             .as_ref()
-            .filter(|(base, varying, _)| varying.first() != Some(&true) || rows >= ROW_CLASS_MIN || base.first() == Some(&rows))
+            .filter(|(base, varying, _)| {
+                varying.first() != Some(&true)
+                    || rows >= ROW_CLASS_MIN
+                    || base.first() == Some(&rows)
+            })
             .and_then(|template| apply_symbols_template(template, symbols));
         if moved.is_none() {
             let template = (*self.shapes_template).as_ref();
@@ -3049,10 +3263,11 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
     ) -> Result<(Shapes, Vec<BoundOp>), CudaDriverError> {
         let mut moved = symbols.to_vec();
         moved[0] = rows;
-        let shapes = infer(&self.program, &moved).map_err(|_| CudaDriverError::UnsupportedGraph {
-            node: NodeId(0),
-            reason: "shape inference failed",
-        })?;
+        let shapes =
+            infer(&self.program, &moved).map_err(|_| CudaDriverError::UnsupportedGraph {
+                node: NodeId(0),
+                reason: "shape inference failed",
+            })?;
         let (bound, _, _) = bind_resolved(
             &self.program,
             &shapes,
@@ -3072,7 +3287,9 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
     fn learn_rows_at_build(&mut self, symbols: &[u64], numeric_policy: NumericPolicy) {
         let rows = self.bound_rows;
         self.learn_shapes_template(symbols, learning_rows(rows));
-        let Some(others) = learning_rows(rows).filter(|_| !symbols.is_empty() && rows_enumerable(&self.resolved)) else {
+        let Some(others) =
+            learning_rows(rows).filter(|_| !symbols.is_empty() && rows_enumerable(&self.resolved))
+        else {
             return;
         };
         let started = Instant::now();
@@ -3102,7 +3319,12 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
             moved
         };
         let mut points = vec![symbols.to_vec()];
-        points.extend(wide_rows.into_iter().flatten().map(|rows| moved_alone(0, rows)));
+        points.extend(
+            wide_rows
+                .into_iter()
+                .flatten()
+                .map(|rows| moved_alone(0, rows)),
+        );
         points.extend((1..symbols.len()).map(|index| moved_alone(index, symbols[index] + 1)));
         let joint: Vec<u64> = symbols
             .iter()
@@ -3114,7 +3336,10 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
             })
             .collect();
         points.push(joint);
-        let inferred: Option<Vec<Shapes>> = points.iter().map(|point| infer(&self.program, point).ok()).collect();
+        let inferred: Option<Vec<Shapes>> = points
+            .iter()
+            .map(|point| infer(&self.program, point).ok())
+            .collect();
         let binds: Option<Vec<(&[u64], &Shapes)>> = inferred
             .as_ref()
             .map(|all| points.iter().map(Vec::as_slice).zip(all).collect());
@@ -3208,17 +3433,34 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
             let current = &self.resolved[position];
             let same_plan = |other: &BoundOp| {
                 between.len() == previous.len()
-                    && crate::cuda::same_text_modulo_extents_on_target(target, other, current, packed, numeric_policy, device)
+                    && crate::cuda::same_text_modulo_extents_on_target(
+                        target,
+                        other,
+                        current,
+                        packed,
+                        numeric_policy,
+                        device,
+                    )
             };
             let first = same_plan(&previous[position]);
             let second = same_plan(&between[position]);
             if !(first && second) {
-                proxima_telemetry::debug!(position = position as u64, kind = current.kind.name(), "row template refused: kernel text plan differs");
+                proxima_telemetry::debug!(
+                    position = position as u64,
+                    kind = current.kind.name(),
+                    "row template refused: kernel text plan differs"
+                );
                 return Ok(false);
             }
             for other in [&previous[position], &between[position]] {
-                if other.extents != current.extents && !self.emits_same_text(other, position, numeric_policy)? {
-                    proxima_telemetry::debug!(position = position as u64, kind = current.kind.name(), "row template refused: emitted text differs");
+                if other.extents != current.extents
+                    && !self.emits_same_text(other, position, numeric_policy)?
+                {
+                    proxima_telemetry::debug!(
+                        position = position as u64,
+                        kind = current.kind.name(),
+                        "row template refused: emitted text differs"
+                    );
                     return Ok(false);
                 }
             }
@@ -3419,7 +3661,10 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
             .iter()
             .try_fold(0_u64, |count, node| {
                 count
-                    .checked_add(cuda_device_bytes(self.shapes.of(*node), self.node_dtype(*node)?)?)
+                    .checked_add(cuda_device_bytes(
+                        self.shapes.of(*node),
+                        self.node_dtype(*node)?,
+                    )?)
                     .ok_or(CudaDriverError::ResourceOverflow)
             })?
             .max(host_workspace);
@@ -3633,7 +3878,9 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
     pub fn carry_state(&mut self, pairs: &[(NodeId, NodeId)]) -> bool {
         let wanted = pairs.to_vec();
         if self.carry.state.selects(&wanted) {
-            return self.drive_state(StateEvent::Select { pairs: wanted }).is_ok();
+            return self
+                .drive_state(StateEvent::Select { pairs: wanted })
+                .is_ok();
         }
         let swappable = self.constraints.is_none()
             && pairs.iter().all(|(input, output)| {
@@ -3644,10 +3891,14 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         if !swappable || self.carry.state.has_live() {
             return false;
         }
-        self.drive_state(StateEvent::Select { pairs: wanted }).is_ok()
+        self.drive_state(StateEvent::Select { pairs: wanted })
+            .is_ok()
     }
 
-    fn drive_state(&mut self, event: StateEvent<NodeId>) -> Result<Vec<(NodeId, Vec<f32>)>, CudaDriverError> {
+    fn drive_state(
+        &mut self,
+        event: StateEvent<NodeId>,
+    ) -> Result<Vec<(NodeId, Vec<f32>)>, CudaDriverError> {
         let commands = self.carry.state.step(event)?;
         let mut drained = Vec::new();
         for command in commands {
@@ -3675,18 +3926,29 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
 
     fn park_state(&mut self, input: NodeId, output: NodeId) {
         if let Some(buffer) = self.arena.buffers.remove(&input) {
-            self.driver.parked_state.lock().insert(input, (output, buffer));
+            self.driver
+                .parked_state
+                .lock()
+                .insert(input, (output, buffer));
         }
     }
 
-    fn drain_state(&mut self, input: NodeId, output: NodeId) -> Result<Option<(NodeId, Vec<f32>)>, CudaDriverError> {
+    fn drain_state(
+        &mut self,
+        input: NodeId,
+        output: NodeId,
+    ) -> Result<Option<(NodeId, Vec<f32>)>, CudaDriverError> {
         let Some(buffer) = self.arena.buffers.remove(&input) else {
             return Ok(None);
         };
         self.read_state(output, buffer).map(Some)
     }
 
-    fn read_state(&mut self, output: NodeId, buffer: CudaGraphBuffer<R>) -> Result<(NodeId, Vec<f32>), CudaDriverError> {
+    fn read_state(
+        &mut self,
+        output: NodeId,
+        buffer: CudaGraphBuffer<R>,
+    ) -> Result<(NodeId, Vec<f32>), CudaDriverError> {
         let CudaGraphBuffer::Activation(slice) = buffer else {
             return Err(CudaDriverError::BindingContract);
         };
@@ -3729,11 +3991,16 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
     /// (anything but the graph-output format). The same set keeps live state; a different set
     /// requires [`Self::drain_appended_rows`] first. Every decision comes from [`KvCarry`]; this
     /// method only runs the commands it returns.
-    pub fn carry_rows(&mut self, pairs: &[(NodeId, NodeId, NumericFormat)], cached_rows: u64) -> bool {
+    pub fn carry_rows(
+        &mut self,
+        pairs: &[(NodeId, NodeId, NumericFormat)],
+        cached_rows: u64,
+    ) -> bool {
         let encodes: Option<BTreeMap<NodeId, KvEncode>> = pairs
             .iter()
             .map(|(input, _, format)| {
-                let encode = kv_encode(self.driver.runtime.emit_target(), format).filter(|_| format.is_identity_of(&NumericFormat::default()));
+                let encode = kv_encode(self.driver.runtime.emit_target(), format)
+                    .filter(|_| format.is_identity_of(&NumericFormat::default()));
                 encode.map(|encode| (*input, encode))
             })
             .collect();
@@ -3779,21 +4046,42 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         self.shapes.of(node).iter().skip(1).product()
     }
 
-    fn drive_rows(&mut self, event: KvEvent<NodeId>) -> Result<Vec<(NodeId, Vec<f32>)>, CudaDriverError> {
+    fn drive_rows(
+        &mut self,
+        event: KvEvent<NodeId>,
+    ) -> Result<Vec<(NodeId, Vec<f32>)>, CudaDriverError> {
         let commands = self.carry.rows.step(event)?;
         let mut drained = Vec::new();
         for command in commands {
             match command {
                 KvCommand::Adopt { input } => self.adopt_parked_rows(input)?,
                 KvCommand::Park { input, valid_rows } => self.park_rows(input, valid_rows),
-                KvCommand::Grow { input, to_elements, keep_elements } => {
+                KvCommand::Grow {
+                    input,
+                    to_elements,
+                    keep_elements,
+                } => {
                     self.grow_cache(input, to_elements as usize, keep_elements as usize)?;
                 }
-                KvCommand::AppendCopy { input, output, offset_elements, count_elements } => {
-                    self.copy_rows(input, output, offset_elements as usize, count_elements as usize)?;
+                KvCommand::AppendCopy {
+                    input,
+                    output,
+                    offset_elements,
+                    count_elements,
+                } => {
+                    self.copy_rows(
+                        input,
+                        output,
+                        offset_elements as usize,
+                        count_elements as usize,
+                    )?;
                 }
                 KvCommand::Truncate { .. } => {}
-                KvCommand::Drain { input, valid_rows, row_width } => {
+                KvCommand::Drain {
+                    input,
+                    valid_rows,
+                    row_width,
+                } => {
                     drained.extend(self.drain_rows(input, valid_rows, row_width)?);
                 }
             }
@@ -3808,15 +4096,20 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         let capacity_elements = buffer_elements(&buffer);
         self.arena.buffers.insert(input, buffer);
         self.arena.resident_sources.remove(&input);
-        self.carry
-            .rows
-            .step(KvEvent::Resident { input, valid_rows, capacity_elements })?;
+        self.carry.rows.step(KvEvent::Resident {
+            input,
+            valid_rows,
+            capacity_elements,
+        })?;
         Ok(())
     }
 
     fn park_rows(&mut self, input: NodeId, valid_rows: u64) {
         if let Some(buffer) = self.arena.buffers.remove(&input) {
-            self.driver.parked_appends.lock().insert(input, (valid_rows, buffer));
+            self.driver
+                .parked_appends
+                .lock()
+                .insert(input, (valid_rows, buffer));
         }
     }
 
@@ -3837,7 +4130,8 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         let Some(buffer) = self.arena.buffers.remove(&input) else {
             return Ok(None);
         };
-        self.read_valid_rows(input, valid_rows, row_width, buffer).map(Some)
+        self.read_valid_rows(input, valid_rows, row_width, buffer)
+            .map(Some)
     }
 
     fn read_valid_rows(
@@ -3896,7 +4190,8 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
                 new_rows: self.shapes.of(pair.output).first().copied().unwrap_or(0),
             })
             .collect();
-        self.drive_rows(KvEvent::RowsAppended { appended }).map(|_| ())
+        self.drive_rows(KvEvent::RowsAppended { appended })
+            .map(|_| ())
     }
 
     /// The verify step kept `kept` of the rows it appended; the rest are dropped by moving the
@@ -3905,17 +4200,26 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         self.drive_rows(KvEvent::Accepted { kept }).map(|_| ())
     }
 
-    fn grow_cache(&mut self, input: NodeId, to_elements: usize, keep_elements: usize) -> Result<(), CudaDriverError> {
+    fn grow_cache(
+        &mut self,
+        input: NodeId,
+        to_elements: usize,
+        keep_elements: usize,
+    ) -> Result<(), CudaDriverError> {
         let Some(CudaGraphBuffer::Activation(current)) = self.arena.buffers.get(&input) else {
             return Err(CudaDriverError::MissingBuffer(input));
         };
         let mut grown = self.driver.alloc_activation(to_elements, current.dtype)?;
         let preserved = keep_elements.min(current.elements()) * device_element_bytes(current.dtype);
         if preserved > 0 {
-            self.driver.runtime.copy_range(&current.bytes, 0..preserved, &mut grown.bytes, 0)?;
+            self.driver
+                .runtime
+                .copy_range(&current.bytes, 0..preserved, &mut grown.bytes, 0)?;
         }
         self.arena.allocations += 1;
-        self.arena.buffers.insert(input, CudaGraphBuffer::Activation(grown));
+        self.arena
+            .buffers
+            .insert(input, CudaGraphBuffer::Activation(grown));
         Ok(())
     }
 
@@ -3933,10 +4237,18 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
             return Err(CudaDriverError::MissingBuffer(input));
         };
         let appended = match self.arena.buffers.get(&output) {
-            Some(CudaGraphBuffer::Activation(source)) => self.driver.encode_into_cache(encode, &source.bytes, &mut cache.bytes, offset, count),
+            Some(CudaGraphBuffer::Activation(source)) => self.driver.encode_into_cache(
+                encode,
+                &source.bytes,
+                &mut cache.bytes,
+                offset,
+                count,
+            ),
             _ => Err(CudaDriverError::MissingBuffer(output)),
         };
-        self.arena.buffers.insert(input, CudaGraphBuffer::Activation(cache));
+        self.arena
+            .buffers
+            .insert(input, CudaGraphBuffer::Activation(cache));
         appended
     }
 
@@ -3951,7 +4263,9 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
             .carry
             .state
             .pairs()
-            .filter(|(input, output)| self.arena.buffers.contains_key(*output) && self.arena.buffers.contains_key(*input))
+            .filter(|(input, output)| {
+                self.arena.buffers.contains_key(*output) && self.arena.buffers.contains_key(*input)
+            })
             .map(|(input, _)| *input)
             .collect();
         if let Ok(commands) = self.carry.state.step(StateEvent::StepFinished { ready }) {
@@ -3964,7 +4278,10 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
     }
 
     fn swap_buffers(&mut self, input: NodeId, output: NodeId) {
-        let (Some(next), Some(previous)) = (self.arena.buffers.remove(&output), self.arena.buffers.remove(&input)) else {
+        let (Some(next), Some(previous)) = (
+            self.arena.buffers.remove(&output),
+            self.arena.buffers.remove(&input),
+        ) else {
             return;
         };
         self.arena.buffers.insert(input, next);
@@ -3999,7 +4316,8 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         resident_names: Option<&BTreeSet<&str>>,
     ) -> Result<(Evaluated, Vec<crate::OpGpuTiming>), CudaDriverError> {
         let mut launches: Vec<LaunchEvents<R>> = Vec::with_capacity(self.resolved.len());
-        let evaluated = self.execute_named_launch_events(named, resident_names, Some(&mut launches))?;
+        let evaluated =
+            self.execute_named_launch_events(named, resident_names, Some(&mut launches))?;
         let timings = launches
             .iter()
             .map(|launch| self.op_timing(launch))
@@ -4013,7 +4331,11 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         let elapsed = R::elapsed(&launch.start, &launch.end)?;
         let reduce_path = self.kernels[launch.position].reduce_path;
         // a reduce names the kernel path it ran so per-op tables, which read `kind`, show it
-        let kind = if reduce_path.is_empty() { bound.kind.name() } else { reduce_path };
+        let kind = if reduce_path.is_empty() {
+            bound.kind.name()
+        } else {
+            reduce_path
+        };
         Ok(crate::OpGpuTiming {
             node: bound.node,
             kind,
@@ -4130,7 +4452,11 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
                 resident_misses += 1;
             }
             let upload_call_started = Instant::now();
-            let input_dtype = self.program.get(node.0 as usize).map(Op::dtype).ok_or(CudaDriverError::MissingBuffer(node))?;
+            let input_dtype = self
+                .program
+                .get(node.0 as usize)
+                .map(Op::dtype)
+                .ok_or(CudaDriverError::MissingBuffer(node))?;
             match block {
                 QuantizedBlock::Float32(values) => {
                     self.driver
@@ -4155,12 +4481,13 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
                         });
                     }
                     match other {
-                        QuantizedBlock::PackedStrided { .. } => self
-                            .driver
-                            .upload_runs(&mut self.arena, node, other)?,
-                        _ => self
-                            .driver
-                            .upload_bytes(&mut self.arena, node, packed_bytes(other))?,
+                        QuantizedBlock::PackedStrided { .. } => {
+                            self.driver.upload_runs(&mut self.arena, node, other)?
+                        }
+                        _ => {
+                            self.driver
+                                .upload_bytes(&mut self.arena, node, packed_bytes(other))?
+                        }
                     }
                 }
             }
@@ -4317,8 +4644,13 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
                     );
                 }
             } else if let BoundOpKind::Constant { value } = bound.kind {
-                self.driver
-                    .materialize_constant(&mut self.arena, bound.node, value, output_len, bound.dtype)?;
+                self.driver.materialize_constant(
+                    &mut self.arena,
+                    bound.node,
+                    value,
+                    output_len,
+                    bound.dtype,
+                )?;
             } else {
                 let deferred_fault = fault_array.as_ref().and_then(|array| {
                     fault_windows
@@ -4333,7 +4665,8 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
                     function_lookup_us += lookup_started.map_or(0, elapsed_micros);
                 }
                 if release_plan.pooled.contains(&bound.node) {
-                    self.arena.seat_pooled(bound.node, device_bytes(bound), bound.dtype);
+                    self.arena
+                        .seat_pooled(bound.node, device_bytes(bound), bound.dtype);
                 }
                 let launch_started = host_timing.then(Instant::now);
                 let operand_bytes_before = if op_events.is_some() {
@@ -4396,7 +4729,12 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
                     ));
                 }
                 if event_timing && let Some(event) = try_record_event(&self.driver.runtime) {
-                    event_rows.push((bound.node, format!("{}:{}", bound.kind.name(), kernel.entry), output_len, event));
+                    event_rows.push((
+                        bound.node,
+                        format!("{}:{}", bound.kind.name(), kernel.entry),
+                        output_len,
+                        event,
+                    ));
                 }
             }
             if trace_outputs && self.outputs.contains(&bound.node) {
@@ -4479,7 +4817,9 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(12);
-            for (rank, (node, micros, output_len, entry)) in timing_rows.iter().take(top_rows).enumerate() {
+            for (rank, (node, micros, output_len, entry)) in
+                timing_rows.iter().take(top_rows).enumerate()
+            {
                 eprintln!(
                     "cuda_timing_top rank={} node={:?} elapsed_ms={:.3} output_len={} entry={}",
                     rank + 1,
@@ -4496,10 +4836,20 @@ where CudaDriverError: From<R::Error> + From<R::BuildError>
         let mut results = Vec::with_capacity(self.outputs.len());
         let readback_started = timing.then(std::time::Instant::now);
         for node in &self.outputs {
-            if self.carry.state.pairs().any(|(input, output)| output == node && self.carry.state.is_live(input)) {
+            if self
+                .carry
+                .state
+                .pairs()
+                .any(|(input, output)| output == node && self.carry.state.is_live(input))
+            {
                 continue;
             }
-            if self.carry.rows.pairs().any(|pair| pair.output == *node && self.carry.rows.is_live(&pair.input)) {
+            if self
+                .carry
+                .rows
+                .pairs()
+                .any(|pair| pair.output == *node && self.carry.rows.is_live(&pair.input))
+            {
                 continue;
             }
             if trace_outputs {
@@ -4680,7 +5030,11 @@ fn block_length(block: &QuantizedBlock<'_>) -> usize {
     }
 }
 
-fn add_one_kernel(input: NodeId, output: NodeId, elements: usize) -> Result<CudaKernel, CudaDriverError> {
+fn add_one_kernel(
+    input: NodeId,
+    output: NodeId,
+    elements: usize,
+) -> Result<CudaKernel, CudaDriverError> {
     Ok(CudaKernel {
         source: String::from(
             r#"
@@ -4698,13 +5052,8 @@ fn add_one_kernel(input: NodeId, output: NodeId, elements: usize) -> Result<Cuda
             Binding::Output(output),
             Binding::Uniforms,
         ],
-        grid: CudaGridSpec::launch(
-            output,
-            elements as u64,
-            None,
-            "add_one",
-        )
-        .map_err(|_| CudaDriverError::IdleLaunch)?,
+        grid: CudaGridSpec::launch(output, elements as u64, None, "add_one")
+            .map_err(|_| CudaDriverError::IdleLaunch)?,
         extra_outputs: Vec::new(),
         prologue: Vec::new(),
         route_compaction_words: 0,
@@ -4762,7 +5111,8 @@ fn encode_kernel(rendered: &RenderedEncode, threads: usize) -> Result<CudaKernel
         source: rendered.source.clone(),
         entry: rendered.entry.clone(),
         bindings: vec![Binding::Input(node), Binding::Output(node)],
-        grid: CudaGridSpec::launch(node, threads as u64, None, "encode_rows").map_err(|_| CudaDriverError::IdleLaunch)?,
+        grid: CudaGridSpec::launch(node, threads as u64, None, "encode_rows")
+            .map_err(|_| CudaDriverError::IdleLaunch)?,
         extra_outputs: Vec::new(),
         prologue: Vec::new(),
         route_compaction_words: 0,
@@ -4784,22 +5134,25 @@ fn launch_blocks(grid: &CudaGridSpec) -> Result<u32, CudaDriverError> {
 
 #[cfg(test)]
 mod tests {
+    use super::PoolSchedule;
     use super::{
-        CudaDriver, CudaDriverError, CudaFunction, PRECOMPILED_ADD_ONE_PTX,
-        add_one_kernel, cached_ptx, launch_blocks, packed_bytes, packed_codec,
-        resolve_cuda_include_dir, store_ptx, validate_cuda_dtype,
+        CudaDriver, CudaDriverError, CudaFunction, PRECOMPILED_ADD_ONE_PTX, add_one_kernel,
+        cached_ptx, launch_blocks, packed_bytes, packed_codec, resolve_cuda_include_dir, store_ptx,
+        validate_cuda_dtype,
     };
     use crate::cuda::CudaGridSpec;
-    use cudarc::driver::{LaunchConfig, PushKernelArg};
-    use crate::gpu_runtime::GpuRuntime;
     use crate::cuda_kernel_cache::CacheKey;
     use crate::cuda_ptx_store::PtxStore;
+    use crate::gpu_runtime::GpuRuntime;
     use crate::lowering::Codec;
+    use cudarc::driver::{LaunchConfig, PushKernelArg};
     use cudarc::nvrtc::{CompileOptions, Ptx};
     use proxima_numeric::block_layout::BlockLayout;
-    use super::PoolSchedule;
-    use proxima_tensor::{BoundOp, BoundOpKind, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, bind_with_fusion, infer, map};
     use proxima_numeric::{DType, EncodeRule, FormatCodec, NumericPolicy, ScaleArithmetic};
+    use proxima_tensor::{
+        BoundOp, BoundOpKind, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce,
+        ReduceInit, ScalarOp, append, bind_with_fusion, infer, map,
+    };
 
     const KERNEL_CACHE_DIR_VAR: &str = "PROXIMA_CUDA_KERNEL_CACHE_DIR";
 
@@ -4881,8 +5234,14 @@ mod tests {
             .collect()
     }
 
-    fn quantize_on_gpu(driver: &CudaDriver, layout: BlockLayout, values: &[f32], arithmetic: ScaleArithmetic) -> Vec<u8> {
-        let bytes = (QUANTIZE_WIDTH / usize::from(layout.elements) * usize::from(layout.block_bytes)) as u64;
+    fn quantize_on_gpu(
+        driver: &CudaDriver,
+        layout: BlockLayout,
+        values: &[f32],
+        arithmetic: ScaleArithmetic,
+    ) -> Vec<u8> {
+        let bytes = (QUANTIZE_WIDTH / usize::from(layout.elements)
+            * usize::from(layout.block_bytes)) as u64;
         let strides = [QUANTIZE_WIDTH as i64, 1].into_iter().collect();
         let bound = BoundOp {
             node: NodeId(1),
@@ -4894,20 +5253,29 @@ mod tests {
                 arithmetic,
             },
         };
-        let kernel = crate::cuda::emit_cuda_with_policy(&bound, &Default::default(), NumericPolicy::default())
-            .expect("a q8_1 run layout emits a quantize kernel");
+        let kernel = crate::cuda::emit_cuda_with_policy(
+            &bound,
+            &Default::default(),
+            NumericPolicy::default(),
+        )
+        .expect("a q8_1 run layout emits a quantize kernel");
         let groups = (values.len() / 32) as i64;
         let words = driver
             .launch_f32(&kernel, &[values], &groups.to_le_bytes())
             .expect("the quantize kernel launches");
         let written = (bytes as usize) * QUANTIZE_ROWS;
-        words.iter().flat_map(|word| word.to_ne_bytes()).take(written).collect()
+        words
+            .iter()
+            .flat_map(|word| word.to_ne_bytes())
+            .take(written)
+            .collect()
     }
 
     fn cpu_quantize(layout: &BlockLayout, values: &[f32]) -> Vec<u8> {
         let blocks = values.len() / usize::from(layout.elements);
         let mut packed = vec![0u8; blocks * usize::from(layout.block_bytes)];
-        proxima_gguf::quant::block_layout_encode::quantize(layout, values, &mut packed).expect("the cpu encoder takes the layout");
+        proxima_gguf::quant::block_layout_encode::quantize(layout, values, &mut packed)
+            .expect("the cpu encoder takes the layout");
         packed
     }
 
@@ -4928,17 +5296,34 @@ mod tests {
     fn gpu_and_cpu_grouped_quantize_each_match_their_llama_rounding_exactly() {
         let driver = CudaDriver::new(0).expect("a cuda device");
         let values = activation_values();
-        let single = quantize_on_gpu(&driver, BlockLayout::Q8_1, &values, ScaleArithmetic::Quotient);
-        let grouped = quantize_on_gpu(&driver, BlockLayout::Q8_1_GROUPED, &values, ScaleArithmetic::Quotient);
-        assert_eq!(grouped, regrouped(&single), "each warp writes its own header word and codes");
+        let single = quantize_on_gpu(
+            &driver,
+            BlockLayout::Q8_1,
+            &values,
+            ScaleArithmetic::Quotient,
+        );
+        let grouped = quantize_on_gpu(
+            &driver,
+            BlockLayout::Q8_1_GROUPED,
+            &values,
+            ScaleArithmetic::Quotient,
+        );
+        assert_eq!(
+            grouped,
+            regrouped(&single),
+            "each warp writes its own header word and codes"
+        );
 
         let cpu = cpu_quantize(&BlockLayout::Q8_1_GROUPED, &values);
         assert_eq!(grouped.len(), cpu.len());
-        for (block, (gpu_block, cpu_block)) in grouped.chunks(144).zip(cpu.chunks(144)).enumerate() {
+        for (block, (gpu_block, cpu_block)) in grouped.chunks(144).zip(cpu.chunks(144)).enumerate()
+        {
             for run in 0..4 {
                 let start = (block * 4 + run) * 32;
                 let run_values = &values[start..start + 32];
-                let amax = run_values.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+                let amax = run_values
+                    .iter()
+                    .fold(0.0f32, |peak, value| peak.max(value.abs()));
                 let scale = amax / 127.0;
                 let scale_bits = half::f16::from_f32(scale).to_bits().to_le_bytes();
                 let codes = 16 + run * 32..16 + run * 32 + 32;
@@ -4952,25 +5337,59 @@ mod tests {
                     };
                     let gpu_code = gpu_block[codes.start + offset] as i8;
                     let cpu_code = cpu_block[codes.start + offset] as i8;
-                    assert_eq!(i32::from(gpu_code), gpu_expected as i32, "block {block} run {run} element {offset}: gpu code is roundf(x / d)");
-                    assert_eq!(i32::from(cpu_code), cpu_expected as i32, "block {block} run {run} element {offset}: cpu code is roundf(x * (1 / d))");
+                    assert_eq!(
+                        i32::from(gpu_code),
+                        gpu_expected as i32,
+                        "block {block} run {run} element {offset}: gpu code is roundf(x / d)"
+                    );
+                    assert_eq!(
+                        i32::from(cpu_code),
+                        cpu_expected as i32,
+                        "block {block} run {run} element {offset}: cpu code is roundf(x * (1 / d))"
+                    );
                     gpu_sum += i32::from(gpu_code);
                     cpu_sum += i32::from(cpu_code);
                 }
                 let header = run * 4..run * 4 + 4;
-                for (side, block_bytes, sum) in [("gpu", gpu_block, gpu_sum), ("cpu", cpu_block, cpu_sum)] {
-                    let stored_sum = half::f16::from_f32(scale * sum as f32).to_bits().to_le_bytes();
-                    assert_eq!(block_bytes[header.start..header.start + 2], scale_bits, "block {block} run {run}: {side} f16 scale");
-                    assert_eq!(block_bytes[header.start + 2..header.end], stored_sum, "block {block} run {run}: {side} stored sum is f16(d * sum of its codes)");
+                for (side, block_bytes, sum) in
+                    [("gpu", gpu_block, gpu_sum), ("cpu", cpu_block, cpu_sum)]
+                {
+                    let stored_sum = half::f16::from_f32(scale * sum as f32)
+                        .to_bits()
+                        .to_le_bytes();
+                    assert_eq!(
+                        block_bytes[header.start..header.start + 2],
+                        scale_bits,
+                        "block {block} run {run}: {side} f16 scale"
+                    );
+                    assert_eq!(
+                        block_bytes[header.start + 2..header.end],
+                        stored_sum,
+                        "block {block} run {run}: {side} stored sum is f16(d * sum of its codes)"
+                    );
                 }
             }
         }
     }
 
-    const NEAR_TIE_UNIT_PEAK_BITS: [u32; 6] = [0x3d11_2244, 0x3d31_62c5, 0x3d51_a346, 0x3d71_e3c7, 0x3f30_60c1, 0x3f50_a142];
+    const NEAR_TIE_UNIT_PEAK_BITS: [u32; 6] = [
+        0x3d11_2244,
+        0x3d31_62c5,
+        0x3d51_a346,
+        0x3d71_e3c7,
+        0x3f30_60c1,
+        0x3f50_a142,
+    ];
     const NEAR_TIE_UNIT_PEAK_RECIPROCAL_CODES: [i8; 6] = [4, 5, 6, 7, 87, 103];
     const NEAR_TIE_UNIT_PEAK_QUOTIENT_CODES: [i8; 6] = [5, 6, 7, 8, 88, 104];
-    const NEAR_TIE_WIDE_PEAK_BITS: [u32; 6] = [0x3d32_ff98, 0x3d95_2a54, 0x3dd0_d4dc, 0x3e06_3fb2, 0x3e24_14f6, 0x3e41_ea3a];
+    const NEAR_TIE_WIDE_PEAK_BITS: [u32; 6] = [
+        0x3d32_ff98,
+        0x3d95_2a54,
+        0x3dd0_d4dc,
+        0x3e06_3fb2,
+        0x3e24_14f6,
+        0x3e41_ea3a,
+    ];
     const NEAR_TIE_WIDE_PEAK_RECIPROCAL_CODES: [i8; 6] = [2, 3, 4, 5, 6, 7];
     const NEAR_TIE_WIDE_PEAK_QUOTIENT_CODES: [i8; 6] = [1, 2, 3, 4, 5, 6];
 
@@ -4989,29 +5408,73 @@ mod tests {
 
     /// The host loop of `block_codec` run under the same bound arithmetic the device kernel renders.
     fn host_quantize(layout: BlockLayout, values: &[f32], arithmetic: ScaleArithmetic) -> Vec<u8> {
-        let rule = EncodeRule { arithmetic, ..layout.encode_rule().expect("q8_1 has a rule") };
-        let codec = FormatCodec::block_with_rule(&layout, rule).expect("q8_1 runs under an integer rule");
+        let rule = EncodeRule {
+            arithmetic,
+            ..layout.encode_rule().expect("q8_1 has a rule")
+        };
+        let codec =
+            FormatCodec::block_with_rule(&layout, rule).expect("q8_1 runs under an integer rule");
         let mut out = vec![0u8; codec.packed_len(values.len()).expect("whole blocks")];
-        codec.encode(values, &mut out).expect("the host encodes the groups");
+        codec
+            .encode(values, &mut out)
+            .expect("the host encodes the groups");
         out
     }
 
     fn codes_at(packed: &[u8], group: usize, lanes: std::ops::Range<usize>) -> Vec<i8> {
-        packed[group * 36 + 4..group * 36 + 36][lanes].iter().map(|byte| *byte as i8).collect()
+        packed[group * 36 + 4..group * 36 + 36][lanes]
+            .iter()
+            .map(|byte| *byte as i8)
+            .collect()
     }
 
     #[test]
-    fn gpu_reciprocal_multiply_quantize_equals_the_llama_mmq_port_on_near_ties_and_quotient_does_not() {
+    fn gpu_reciprocal_multiply_quantize_equals_the_llama_mmq_port_on_near_ties_and_quotient_does_not()
+     {
         let driver = CudaDriver::new(0).expect("a cuda device");
         let values = near_tie_values();
-        let reciprocal = quantize_on_gpu(&driver, BlockLayout::Q8_1, &values, ScaleArithmetic::ReciprocalMultiply);
-        let quotient = quantize_on_gpu(&driver, BlockLayout::Q8_1, &values, ScaleArithmetic::Quotient);
-        assert_eq!(reciprocal, host_quantize(BlockLayout::Q8_1, &values, ScaleArithmetic::ReciprocalMultiply), "device reciprocal-multiply bytes against block_codec under the same rule");
-        assert_eq!(quotient, host_quantize(BlockLayout::Q8_1, &values, ScaleArithmetic::Quotient), "device quotient bytes against block_codec under the same rule");
-        assert_eq!(codes_at(&reciprocal, 0, 1..7), NEAR_TIE_UNIT_PEAK_RECIPROCAL_CODES);
-        assert_eq!(codes_at(&reciprocal, 1, 1..7), NEAR_TIE_WIDE_PEAK_RECIPROCAL_CODES);
-        assert_eq!(codes_at(&quotient, 0, 1..7), NEAR_TIE_UNIT_PEAK_QUOTIENT_CODES);
-        assert_eq!(codes_at(&quotient, 1, 1..7), NEAR_TIE_WIDE_PEAK_QUOTIENT_CODES);
+        let reciprocal = quantize_on_gpu(
+            &driver,
+            BlockLayout::Q8_1,
+            &values,
+            ScaleArithmetic::ReciprocalMultiply,
+        );
+        let quotient = quantize_on_gpu(
+            &driver,
+            BlockLayout::Q8_1,
+            &values,
+            ScaleArithmetic::Quotient,
+        );
+        assert_eq!(
+            reciprocal,
+            host_quantize(
+                BlockLayout::Q8_1,
+                &values,
+                ScaleArithmetic::ReciprocalMultiply
+            ),
+            "device reciprocal-multiply bytes against block_codec under the same rule"
+        );
+        assert_eq!(
+            quotient,
+            host_quantize(BlockLayout::Q8_1, &values, ScaleArithmetic::Quotient),
+            "device quotient bytes against block_codec under the same rule"
+        );
+        assert_eq!(
+            codes_at(&reciprocal, 0, 1..7),
+            NEAR_TIE_UNIT_PEAK_RECIPROCAL_CODES
+        );
+        assert_eq!(
+            codes_at(&reciprocal, 1, 1..7),
+            NEAR_TIE_WIDE_PEAK_RECIPROCAL_CODES
+        );
+        assert_eq!(
+            codes_at(&quotient, 0, 1..7),
+            NEAR_TIE_UNIT_PEAK_QUOTIENT_CODES
+        );
+        assert_eq!(
+            codes_at(&quotient, 1, 1..7),
+            NEAR_TIE_WIDE_PEAK_QUOTIENT_CODES
+        );
         assert_ne!(reciprocal, quotient);
     }
 
@@ -5019,30 +5482,50 @@ mod tests {
     fn gpu_quantize_with_no_configuration_equals_the_layout_rule_on_near_ties() {
         let driver = CudaDriver::new(0).expect("a cuda device");
         let values = near_tie_values();
-        let own = BlockLayout::Q8_1.encode_rule().expect("q8_1 has a rule").arithmetic;
+        let own = BlockLayout::Q8_1
+            .encode_rule()
+            .expect("q8_1 has a rule")
+            .arithmetic;
         let default = ScaleArithmetic::for_rows(1, NumericPolicy::bit_exact());
         assert_eq!(default, own);
-        assert_eq!(quantize_on_gpu(&driver, BlockLayout::Q8_1, &values, default), host_quantize(BlockLayout::Q8_1, &values, own));
+        assert_eq!(
+            quantize_on_gpu(&driver, BlockLayout::Q8_1, &values, default),
+            host_quantize(BlockLayout::Q8_1, &values, own)
+        );
     }
 
     #[test]
     fn gpu_reciprocal_multiply_grouped_quantize_is_four_flat_runs_behind_one_header() {
         let driver = CudaDriver::new(0).expect("a cuda device");
         let values = near_tie_values();
-        let flat = quantize_on_gpu(&driver, BlockLayout::Q8_1, &values, ScaleArithmetic::ReciprocalMultiply);
-        let grouped = quantize_on_gpu(&driver, BlockLayout::Q8_1_GROUPED, &values, ScaleArithmetic::ReciprocalMultiply);
+        let flat = quantize_on_gpu(
+            &driver,
+            BlockLayout::Q8_1,
+            &values,
+            ScaleArithmetic::ReciprocalMultiply,
+        );
+        let grouped = quantize_on_gpu(
+            &driver,
+            BlockLayout::Q8_1_GROUPED,
+            &values,
+            ScaleArithmetic::ReciprocalMultiply,
+        );
         assert_eq!(grouped, regrouped(&flat));
     }
 
     #[test]
     fn cuda_idle_grid_is_refused_before_any_device_call() {
         let grid = CudaGridSpec::idle();
-        assert!(matches!(launch_blocks(&grid), Err(CudaDriverError::IdleLaunch)));
+        assert!(matches!(
+            launch_blocks(&grid),
+            Err(CudaDriverError::IdleLaunch)
+        ));
     }
 
     #[test]
     fn launch_blocks_covers_a_grid_at_the_default_block_width() {
-        let grid = CudaGridSpec::launch(NodeId(1), 1_000_000, None, "test").expect("nonzero threads");
+        let grid =
+            CudaGridSpec::launch(NodeId(1), 1_000_000, None, "test").expect("nonzero threads");
 
         assert!(matches!(launch_blocks(&grid), Ok(3907)));
     }
@@ -5113,13 +5596,19 @@ mod tests {
     }
 
     fn run_ptx(driver: &CudaDriver, function: &CudaFunction) -> Vec<f32> {
-        let device_input = driver.runtime.stream().clone_htod(&INPUT).expect("upload input");
+        let device_input = driver
+            .runtime
+            .stream()
+            .clone_htod(&INPUT)
+            .expect("upload input");
         let mut device_output = driver
-            .runtime.stream()
+            .runtime
+            .stream()
             .alloc_zeros::<f32>(INPUT.len())
             .expect("alloc output");
         let device_uniforms = driver
-            .runtime.stream()
+            .runtime
+            .stream()
             .clone_htod(&3u32.to_ne_bytes())
             .expect("upload uniforms");
         let mut args = driver.runtime.stream().launch_builder(function);
@@ -5134,7 +5623,8 @@ mod tests {
         unsafe { args.launch(config) }.expect("ptx launch");
         driver.runtime.stream().synchronize().expect("ptx sync");
         driver
-            .runtime.stream()
+            .runtime
+            .stream()
             .clone_dtoh(&device_output)
             .expect("ptx readback")
     }
@@ -5199,18 +5689,36 @@ mod tests {
             .expect("the add-one probe has three elements");
 
         let first = runtime();
-        let first_function = first.runtime.build_function(&kernel).expect("first runtime build");
-        assert_eq!(first.kernel_compilations(), 1, "the first runtime compiles the kernel once");
-        assert_eq!(first.disk_cache_hits(), 0, "the first runtime finds an empty cache");
+        let first_function = first
+            .runtime
+            .build_function(&kernel)
+            .expect("first runtime build");
+        assert_eq!(
+            first.kernel_compilations(),
+            1,
+            "the first runtime compiles the kernel once"
+        );
+        assert_eq!(
+            first.disk_cache_hits(),
+            0,
+            "the first runtime finds an empty cache"
+        );
 
         let second = runtime();
-        let second_function = second.runtime.build_function(&kernel).expect("second runtime build");
+        let second_function = second
+            .runtime
+            .build_function(&kernel)
+            .expect("second runtime build");
         assert_eq!(
             second.kernel_compilations(),
             0,
             "the second runtime must load the stored image, not call nvrtc"
         );
-        assert_eq!(second.disk_cache_hits(), 1, "the second runtime reads one stored entry");
+        assert_eq!(
+            second.disk_cache_hits(),
+            1,
+            "the second runtime reads one stored entry"
+        );
         assert_eq!(
             run_ptx(&second, &second_function),
             run_ptx(&first, &first_function),
@@ -5400,9 +5908,19 @@ mod tests {
 
     fn relength_fixture(rows: u64) -> Result<RelengthFixture, String> {
         let mut program = Vec::new();
-        let input = |shape: Vec<Extent>| Op::Input { dtype: DType::FLOAT32, shape, name: None };
-        let lhs = append(&mut program, input(vec![Extent::Symbolic(0), Extent::Static(8)]));
-        let rhs = append(&mut program, input(vec![Extent::Static(8), Extent::Static(4)]));
+        let input = |shape: Vec<Extent>| Op::Input {
+            dtype: DType::FLOAT32,
+            shape,
+            name: None,
+        };
+        let lhs = append(
+            &mut program,
+            input(vec![Extent::Symbolic(0), Extent::Static(8)]),
+        );
+        let rhs = append(
+            &mut program,
+            input(vec![Extent::Static(8), Extent::Static(4)]),
+        );
         let product = append(
             &mut program,
             Op::Elementwise {
@@ -5433,7 +5951,10 @@ mod tests {
             .map_err(|error| format!("bind: {error:?}"))?;
         let kernels = bound
             .iter()
-            .map(|op| crate::cuda::emit_cuda(op, &Default::default()).map_err(|error| format!("emit: {error:?}")))
+            .map(|op| {
+                crate::cuda::emit_cuda(op, &Default::default())
+                    .map_err(|error| format!("emit: {error:?}"))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok((bound, kernels, vec![sum]))
     }
@@ -5458,13 +5979,22 @@ mod tests {
         use crate::cuda_encode::CudaEncode;
         use crate::encode_render::format_encode_kernel;
 
-        let dialect = CudaEncode { target: Target::CUDA };
+        let dialect = CudaEncode {
+            target: Target::CUDA,
+        };
         let mut compiled = 0usize;
         for format in proxima_numeric::NumericFormat::every() {
-            let Ok(rendered) = format_encode_kernel(&dialect, &format, "probe_encode") else { continue };
+            let Ok(rendered) = format_encode_kernel(&dialect, &format, "probe_encode") else {
+                continue;
+            };
             let header_dir = super::cuda_header_dir(&rendered.source).expect("a cuda include dir");
-            super::compile_ptx_with_opts(&rendered.source, super::nvrtc_options(header_dir.as_deref()))
-                .unwrap_or_else(|error| panic!("{format:?} does not compile: {error}\n{}", rendered.source));
+            super::compile_ptx_with_opts(
+                &rendered.source,
+                super::nvrtc_options(header_dir.as_deref()),
+            )
+            .unwrap_or_else(|error| {
+                panic!("{format:?} does not compile: {error}\n{}", rendered.source)
+            });
             compiled += 1;
         }
         assert!(compiled > 0, "no encode kernel was compiled");
@@ -5478,13 +6008,19 @@ mod tests {
         use proxima_numeric::{FormatCodec, NumericFormat};
 
         let driver = CudaDriver::new(0).expect("a cuda device");
-        let dialect = CudaEncode { target: Target::CUDA };
+        let dialect = CudaEncode {
+            target: Target::CUDA,
+        };
         let guard_byte = u8::MAX;
         let offset = core::mem::size_of::<u64>();
         let mut covered = Vec::new();
         for format in NumericFormat::every() {
-            let Ok(rendered) = format_encode_kernel(&dialect, &format, "probe_encode") else { continue };
-            let NumericFormat::Scalar(layout) = &format else { panic!("{format:?} rendered without a scalar layout") };
+            let Ok(rendered) = format_encode_kernel(&dialect, &format, "probe_encode") else {
+                continue;
+            };
+            let NumericFormat::Scalar(layout) = &format else {
+                panic!("{format:?} rendered without a scalar layout")
+            };
             let maximum = layout.max_normal();
             let half_ulp = (0..=layout.mantissa_bits).fold(1.0, |scale, _| scale * 0.5);
             let infinity = maximum / (maximum * 0.0);
@@ -5507,28 +6043,71 @@ mod tests {
                 maximum * maximum * maximum * maximum,
                 infinity,
             ];
-            let mut values: Vec<_> = magnitudes.iter().flat_map(|value| [*value, -*value]).collect();
+            let mut values: Vec<_> = magnitudes
+                .iter()
+                .flat_map(|value| [*value, -*value])
+                .collect();
             values.extend([nan, -nan]);
             while values.len() % rendered.elements_per_thread != 0 {
                 values.push(1.0);
             }
             let codec = FormatCodec::for_format(&format).expect("a rendered format resolves");
             let mut expected = vec![0u8; codec.packed_len(values.len()).expect("whole elements")];
-            codec.encode(&values, &mut expected).expect("the host encodes");
+            codec
+                .encode(&values, &mut expected)
+                .expect("the host encodes");
 
-            let rows = EncodeRows { element_count: values.len(), byte_offset: offset };
-            let source = driver.runtime.stream().clone_htod::<u8, _>(bytemuck::cast_slice(values.as_slice())).expect("upload rows");
-            let mut destination = driver.runtime.stream().clone_htod(&vec![guard_byte; offset + expected.len() + offset]).expect("upload guard");
-            driver.encode_rows(&rendered, &format, &source, &mut destination, rows).expect("the encode launches");
-            driver.runtime.stream().synchronize().expect("the encode completes");
-            let device = driver.runtime.stream().clone_dtoh(&destination).expect("read back");
+            let rows = EncodeRows {
+                element_count: values.len(),
+                byte_offset: offset,
+            };
+            let source = driver
+                .runtime
+                .stream()
+                .clone_htod::<u8, _>(bytemuck::cast_slice(values.as_slice()))
+                .expect("upload rows");
+            let mut destination = driver
+                .runtime
+                .stream()
+                .clone_htod(&vec![guard_byte; offset + expected.len() + offset])
+                .expect("upload guard");
+            driver
+                .encode_rows(&rendered, &format, &source, &mut destination, rows)
+                .expect("the encode launches");
+            driver
+                .runtime
+                .stream()
+                .synchronize()
+                .expect("the encode completes");
+            let device = driver
+                .runtime
+                .stream()
+                .clone_dtoh(&destination)
+                .expect("read back");
 
-            assert!(device[..offset].iter().all(|byte| *byte == guard_byte), "{format:?}: bytes before the offset changed");
-            assert!(device[offset + expected.len()..].iter().all(|byte| *byte == guard_byte), "{format:?}: bytes past the range changed");
+            assert!(
+                device[..offset].iter().all(|byte| *byte == guard_byte),
+                "{format:?}: bytes before the offset changed"
+            );
+            assert!(
+                device[offset + expected.len()..]
+                    .iter()
+                    .all(|byte| *byte == guard_byte),
+                "{format:?}: bytes past the range changed"
+            );
             let width = rendered.bytes_per_thread;
-            for (index, (device_code, host_code)) in device[offset..offset + expected.len()].chunks(width).zip(expected.chunks(width)).enumerate() {
+            for (index, (device_code, host_code)) in device[offset..offset + expected.len()]
+                .chunks(width)
+                .zip(expected.chunks(width))
+                .enumerate()
+            {
                 let first = index * rendered.elements_per_thread;
-                assert_eq!(device_code, host_code, "{format:?} element {first}: input bits {:#010x}, device {device_code:?}, host {host_code:?}", values[first].to_bits());
+                assert_eq!(
+                    device_code,
+                    host_code,
+                    "{format:?} element {first}: input bits {:#010x}, device {device_code:?}, host {host_code:?}",
+                    values[first].to_bits()
+                );
             }
             covered.push(format);
         }
@@ -5536,10 +6115,17 @@ mod tests {
         assert!(!covered.is_empty(), "no format was encoded on the device");
     }
 
-    fn carry_cache_bytes<Row: cudarc::driver::DeviceRepr>(driver: &CudaDriver, cache: &cudarc::driver::CudaSlice<Row>) -> Vec<u8> {
+    fn carry_cache_bytes<Row: cudarc::driver::DeviceRepr>(
+        driver: &CudaDriver,
+        cache: &cudarc::driver::CudaSlice<Row>,
+    ) -> Vec<u8> {
         let bytes = cache.len() * core::mem::size_of::<Row>();
         let view = unsafe { cache.transmute::<u8>(bytes) }.expect("the cache reads as bytes");
-        driver.runtime.stream().clone_dtoh(&view).expect("read the cache back")
+        driver
+            .runtime
+            .stream()
+            .clone_dtoh(&view)
+            .expect("read the cache back")
     }
 
     fn carry_sentinel_cache<Row: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits>(
@@ -5547,10 +6133,19 @@ mod tests {
         bytes: usize,
     ) -> cudarc::driver::CudaSlice<Row> {
         let words = bytes.div_ceil(core::mem::size_of::<Row>());
-        let mut cache = driver.runtime.stream().alloc_zeros::<Row>(words).expect("allocate the sentinel cache");
+        let mut cache = driver
+            .runtime
+            .stream()
+            .alloc_zeros::<Row>(words)
+            .expect("allocate the sentinel cache");
         let total = words * core::mem::size_of::<Row>();
-        let mut view = unsafe { cache.transmute_mut::<u8>(total) }.expect("the cache writes as bytes");
-        driver.runtime.stream().memcpy_htod(&vec![u8::MAX; total], &mut view).expect("fill the sentinel");
+        let mut view =
+            unsafe { cache.transmute_mut::<u8>(total) }.expect("the cache writes as bytes");
+        driver
+            .runtime
+            .stream()
+            .memcpy_htod(&vec![u8::MAX; total], &mut view)
+            .expect("fill the sentinel");
         cache
     }
 
@@ -5561,22 +6156,64 @@ mod tests {
 
         let driver = CudaDriver::new(0).expect("a cuda device");
         let format = NumericFormat::default();
-        let encode = kv_encode(driver.runtime.emit_target(), &format).expect("the graph output format renders an encode");
-        let NumericFormat::Scalar(layout) = &format else { panic!("the graph output format is a scalar") };
+        let encode = kv_encode(driver.runtime.emit_target(), &format)
+            .expect("the graph output format renders an encode");
+        let NumericFormat::Scalar(layout) = &format else {
+            panic!("the graph output format is a scalar")
+        };
         let maximum = layout.max_normal();
         let infinity = maximum / (maximum * 0.0);
         let nan = infinity - infinity;
-        let rows = [maximum * 0.0, -maximum * 0.0, 1.0, 0.1, maximum, layout.min_subnormal() * 0.5, infinity, -infinity, nan, -nan];
-        let source = driver.runtime.stream().clone_htod::<u8, _>(bytemuck::cast_slice(rows.as_slice())).expect("upload rows");
+        let rows = [
+            maximum * 0.0,
+            -maximum * 0.0,
+            1.0,
+            0.1,
+            maximum,
+            layout.min_subnormal() * 0.5,
+            infinity,
+            -infinity,
+            nan,
+            -nan,
+        ];
+        let source = driver
+            .runtime
+            .stream()
+            .clone_htod::<u8, _>(bytemuck::cast_slice(rows.as_slice()))
+            .expect("upload rows");
         let word = core::mem::size_of_val(&rows[0]);
         let offset = 3;
         let filler = vec![rows[2] * 7.5; offset + rows.len() + offset];
-        let mut encoded = driver.runtime.stream().clone_htod::<u8, _>(bytemuck::cast_slice(filler.as_slice())).expect("upload cache");
-        let mut copied = driver.runtime.stream().clone_htod::<u8, _>(bytemuck::cast_slice(filler.as_slice())).expect("upload cache");
-        driver.encode_into_cache(&encode, &source, &mut encoded, offset, rows.len()).expect("the carry encodes");
-        driver.runtime.stream().memcpy_dtod(&source.slice(0..rows.len() * word), &mut copied.slice_mut(offset * word..(offset + rows.len()) * word)).expect("the old copy");
-        driver.runtime.stream().synchronize().expect("the carry completes");
-        assert_eq!(carry_cache_bytes(&driver, &encoded), carry_cache_bytes(&driver, &copied));
+        let mut encoded = driver
+            .runtime
+            .stream()
+            .clone_htod::<u8, _>(bytemuck::cast_slice(filler.as_slice()))
+            .expect("upload cache");
+        let mut copied = driver
+            .runtime
+            .stream()
+            .clone_htod::<u8, _>(bytemuck::cast_slice(filler.as_slice()))
+            .expect("upload cache");
+        driver
+            .encode_into_cache(&encode, &source, &mut encoded, offset, rows.len())
+            .expect("the carry encodes");
+        driver
+            .runtime
+            .stream()
+            .memcpy_dtod(
+                &source.slice(0..rows.len() * word),
+                &mut copied.slice_mut(offset * word..(offset + rows.len()) * word),
+            )
+            .expect("the old copy");
+        driver
+            .runtime
+            .stream()
+            .synchronize()
+            .expect("the carry completes");
+        assert_eq!(
+            carry_cache_bytes(&driver, &encoded),
+            carry_cache_bytes(&driver, &copied)
+        );
     }
 
     #[test]
@@ -5587,36 +6224,73 @@ mod tests {
         let driver = CudaDriver::new(0).expect("a cuda device");
         let mut covered = Vec::new();
         for format in NumericFormat::every() {
-            let Some(encode) = kv_encode(driver.runtime.emit_target(), &format) else { continue };
+            let Some(encode) = kv_encode(driver.runtime.emit_target(), &format) else {
+                continue;
+            };
             if format.is_identity_of(&NumericFormat::default()) {
                 continue;
             }
-            let NumericFormat::Scalar(layout) = &format else { continue };
+            let NumericFormat::Scalar(layout) = &format else {
+                continue;
+            };
             let maximum = layout.max_normal();
-            let mut values = vec![1.0, -1.0, 0.1, maximum / 3.0, maximum, -maximum * 2.0, layout.min_subnormal(), maximum * 0.0];
+            let mut values = vec![
+                1.0,
+                -1.0,
+                0.1,
+                maximum / 3.0,
+                maximum,
+                -maximum * 2.0,
+                layout.min_subnormal(),
+                maximum * 0.0,
+            ];
             while values.len() % encode.rendered.elements_per_thread != 0 {
                 values.push(0.5);
             }
             let codec = FormatCodec::for_format(&format).expect("a rendered format resolves");
             let mut expected = vec![0u8; codec.packed_len(values.len()).expect("whole elements")];
-            codec.encode(&values, &mut expected).expect("the host encodes");
+            codec
+                .encode(&values, &mut expected)
+                .expect("the host encodes");
             let skipped = encode.rendered.elements_per_thread * 2;
             let byte_offset = format.packed_len(skipped).expect("whole blocks");
-            let source = driver.runtime.stream().clone_htod::<u8, _>(bytemuck::cast_slice(values.as_slice())).expect("upload rows");
-            let mut cache = carry_sentinel_cache(&driver, byte_offset + expected.len() + byte_offset);
+            let source = driver
+                .runtime
+                .stream()
+                .clone_htod::<u8, _>(bytemuck::cast_slice(values.as_slice()))
+                .expect("upload rows");
+            let mut cache =
+                carry_sentinel_cache(&driver, byte_offset + expected.len() + byte_offset);
             let before = carry_cache_bytes(&driver, &cache);
-            driver.encode_into_cache(&encode, &source, &mut cache, skipped, values.len()).expect("the carry encodes");
-            driver.runtime.stream().synchronize().expect("the carry completes");
+            driver
+                .encode_into_cache(&encode, &source, &mut cache, skipped, values.len())
+                .expect("the carry encodes");
+            driver
+                .runtime
+                .stream()
+                .synchronize()
+                .expect("the carry completes");
             let after = carry_cache_bytes(&driver, &cache);
-            assert_eq!(after[byte_offset..byte_offset + expected.len()], expected[..], "{format:?}: the rows are not the host codec's bytes");
-            assert_eq!(after[..byte_offset], before[..byte_offset], "{format:?}: rows before the offset changed");
-            assert_eq!(after[byte_offset + expected.len()..], before[byte_offset + expected.len()..], "{format:?}: rows past the range changed");
+            assert_eq!(
+                after[byte_offset..byte_offset + expected.len()],
+                expected[..],
+                "{format:?}: the rows are not the host codec's bytes"
+            );
+            assert_eq!(
+                after[..byte_offset],
+                before[..byte_offset],
+                "{format:?}: rows before the offset changed"
+            );
+            assert_eq!(
+                after[byte_offset + expected.len()..],
+                before[byte_offset + expected.len()..],
+                "{format:?}: rows past the range changed"
+            );
             covered.push(format);
         }
         assert!(!covered.is_empty(), "no narrow format was carried");
     }
 }
-
 
 /// A [`GpuRuntime`] that moves no data and runs no kernel: it appends every device call to a shared
 /// log, so a test can prove what the shared executor uploads, downloads and launches with no GPU.
@@ -6039,10 +6713,7 @@ mod recording_runtime {
             Err(RecordingFailure::EventsUnsupported)
         }
 
-        fn elapsed(
-            _start: &Infallible,
-            _end: &Infallible,
-        ) -> Result<Duration, RecordingFailure> {
+        fn elapsed(_start: &Infallible, _end: &Infallible) -> Result<Duration, RecordingFailure> {
             Err(RecordingFailure::EventsUnsupported)
         }
 
@@ -6085,8 +6756,14 @@ mod recording_runtime {
         }
 
         fn events(&self) -> Vec<Event> {
-            self.runtime.log.lock().iter().map(|(_, event)| event.clone()).collect()
-        }    }
+            self.runtime
+                .log
+                .lock()
+                .iter()
+                .map(|(_, event)| event.clone())
+                .collect()
+        }
+    }
 
     const INPUT: u32 = 8;
     const HIDDEN: u32 = 5;
@@ -6215,14 +6892,27 @@ mod recording_runtime {
             .map(|(_, kernel)| (kernel.reduce_path, kernel.entry.as_str()))
             .collect();
 
-        assert!(!reduces.is_empty(), "the matmuls reach the plan as reduce kernels");
+        assert!(
+            !reduces.is_empty(),
+            "the matmuls reach the plan as reduce kernels"
+        );
         for (path, entry) in reduces {
-            assert!(!path.is_empty(), "a reduce kernel carries the path its emitter chose: {entry}");
-            assert_eq!(path.starts_with("mma-gemm"), entry.contains("_mma"), "{path} against {entry}");
+            assert!(
+                !path.is_empty(),
+                "a reduce kernel carries the path its emitter chose: {entry}"
+            );
+            assert_eq!(
+                path.starts_with("mma-gemm"),
+                entry.contains("_mma"),
+                "{path} against {entry}"
+            );
         }
         for (bound, kernel) in plan.resolved.iter().zip(&plan.kernels) {
             if !matches!(bound.kind, BoundOpKind::Reduce { .. }) {
-                assert_eq!(kernel.reduce_path, "", "only a reduce fold names a reduce path");
+                assert_eq!(
+                    kernel.reduce_path, "",
+                    "only a reduce fold names a reduce path"
+                );
             }
         }
     }
@@ -6238,25 +6928,41 @@ mod recording_runtime {
         let mut plan = driver
             .plan_with_config(&program, &[], &[out], &named, &RuntimeConfig::default())
             .expect("the recording driver plans the two-layer program");
-        plan.execute_named(&named, None).expect("the recording runtime executes the plan");
-        let allocs: Vec<usize> = driver.events().iter().filter_map(|event| match event {
-            Event::Alloc { bytes, .. } => Some(*bytes),
-            _ => None,
-        }).collect();
-        let uploads: Vec<usize> = driver.events().iter().filter_map(|event| match event {
-            Event::Upload { bytes, .. } | Event::UploadInPlace { bytes, .. } => Some(*bytes),
-            _ => None,
-        }).collect();
+        plan.execute_named(&named, None)
+            .expect("the recording runtime executes the plan");
+        let allocs: Vec<usize> = driver
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                Event::Alloc { bytes, .. } => Some(*bytes),
+                _ => None,
+            })
+            .collect();
+        let uploads: Vec<usize> = driver
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                Event::Upload { bytes, .. } | Event::UploadInPlace { bytes, .. } => Some(*bytes),
+                _ => None,
+            })
+            .collect();
         // captured at c432312aa17, before activations were sized from the device scalar table
         assert_eq!(allocs, vec![160, 20, 60, 12, 12], "alloc bytes in order");
-        assert_eq!(uploads, vec![160, 60, 32, 96, 104, 96, 104, 72], "upload bytes in order");
+        assert_eq!(
+            uploads,
+            vec![160, 60, 32, 96, 104, 96, 104, 72],
+            "upload bytes in order"
+        );
     }
 
     fn dtype_of_class(class: DeviceClass) -> DType {
         proxima_numeric::float_layout::NAMED_LAYOUTS
             .iter()
             .map(|(layout, _)| DType::Layout(*layout))
-            .find(|dtype| device_scalar(*dtype).is_some_and(|scalar| scalar.class == class && dtype.is_float()))
+            .find(|dtype| {
+                device_scalar(*dtype)
+                    .is_some_and(|scalar| scalar.class == class && dtype.is_float())
+            })
             .expect("proxima-numeric names a layout of the class")
     }
 
@@ -6265,11 +6971,18 @@ mod recording_runtime {
         let narrow = dtype_of_class(DeviceClass::Half);
         let values = [0.0, 1.0, -2.5, 0.15625, 1024.0, -65504.0];
         Numeric::new(&narrow.numeric_format(), &values).expect("the values are whole elements");
-        let device = CudaDriver::<RecordingRuntime>::to_device(narrow, &values).expect("values narrow");
-        assert_eq!(device.len(), values.len() * narrow.size_bytes(), "the narrow bytes per element");
-        let restored = CudaDriver::<RecordingRuntime>::from_device(narrow, &device).expect("bytes widen");
+        let device =
+            CudaDriver::<RecordingRuntime>::to_device(narrow, &values).expect("values narrow");
+        assert_eq!(
+            device.len(),
+            values.len() * narrow.size_bytes(),
+            "the narrow bytes per element"
+        );
+        let restored =
+            CudaDriver::<RecordingRuntime>::from_device(narrow, &device).expect("bytes widen");
         let format = narrow.numeric_format();
-        let widened = Numeric::new(&format, &restored).expect("the restored values are whole elements");
+        let widened =
+            Numeric::new(&format, &restored).expect("the restored values are whole elements");
         assert_eq!(widened.values(), values);
     }
 
@@ -6278,12 +6991,22 @@ mod recording_runtime {
         let plain = float_kernel_dtype().expect("the hardware word has a named layout");
         let values = [1.5, -2.0, 3.25];
         Numeric::new(&plain.numeric_format(), &values).expect("the values are whole elements");
-        let device = CudaDriver::<RecordingRuntime>::to_device(plain, &values).expect("values pass through");
-        assert!(matches!(device, Cow::Borrowed(_)), "the word class allocates nothing");
-        assert_eq!(device.as_ptr(), values.as_ptr().cast::<u8>(), "the bytes are the caller's own");
-        let restored = CudaDriver::<RecordingRuntime>::from_device(plain, &device).expect("bytes read back");
+        let device =
+            CudaDriver::<RecordingRuntime>::to_device(plain, &values).expect("values pass through");
+        assert!(
+            matches!(device, Cow::Borrowed(_)),
+            "the word class allocates nothing"
+        );
+        assert_eq!(
+            device.as_ptr(),
+            values.as_ptr().cast::<u8>(),
+            "the bytes are the caller's own"
+        );
+        let restored =
+            CudaDriver::<RecordingRuntime>::from_device(plain, &device).expect("bytes read back");
         let format = plain.numeric_format();
-        let widened = Numeric::new(&format, &restored).expect("the restored values are whole elements");
+        let widened =
+            Numeric::new(&format, &restored).expect("the restored values are whole elements");
         assert_eq!(widened.values(), values);
     }
 
@@ -6451,7 +7174,11 @@ mod recording_runtime {
         let weight_first = weight_values((HIDDEN * INPUT) as usize, 1.0);
         let weight_second = weight_values((OUTPUT * HIDDEN) as usize, 7.0);
         let activation = weight_values(INPUT as usize, 3.0);
-        let named = named_blocks(weight_first.as_slice(), weight_second.as_slice(), activation.as_slice());
+        let named = named_blocks(
+            weight_first.as_slice(),
+            weight_second.as_slice(),
+            activation.as_slice(),
+        );
         let driver = CudaDriver::<RecordingRuntime>::recording();
         let resident = BTreeSet::from(["w0", "w1"]);
         for _ in 0..2 {
@@ -6463,8 +7190,15 @@ mod recording_runtime {
                 .expect("the recording runtime executes the plan");
         }
         let all = driver.events();
-        for bytes in [size_of_val(weight_first.as_slice()), size_of_val(weight_second.as_slice())] {
-            assert_eq!(uploads_of(&all, bytes), 1, "a {bytes}-byte weight uploads once across both plans");
+        for bytes in [
+            size_of_val(weight_first.as_slice()),
+            size_of_val(weight_second.as_slice()),
+        ] {
+            assert_eq!(
+                uploads_of(&all, bytes),
+                1,
+                "a {bytes}-byte weight uploads once across both plans"
+            );
         }
     }
 
@@ -6474,7 +7208,11 @@ mod recording_runtime {
         let weight_first = weight_values((HIDDEN * INPUT) as usize, 1.0);
         let weight_second = weight_values((OUTPUT * HIDDEN) as usize, 7.0);
         let activation = weight_values(INPUT as usize, 3.0);
-        let named = named_blocks(weight_first.as_slice(), weight_second.as_slice(), activation.as_slice());
+        let named = named_blocks(
+            weight_first.as_slice(),
+            weight_second.as_slice(),
+            activation.as_slice(),
+        );
         let driver = CudaDriver::<RecordingRuntime>::recording();
         let mut plan = driver
             .plan(&program, &[], &[out], NumericPolicy::default(), &named)
@@ -6507,7 +7245,11 @@ mod recording_runtime {
         let weight_first = weight_values((HIDDEN * INPUT) as usize, 1.0);
         let weight_second = weight_values((OUTPUT * HIDDEN) as usize, 7.0);
         let activation = weight_values(INPUT as usize, 3.0);
-        let named = named_blocks(weight_first.as_slice(), weight_second.as_slice(), activation.as_slice());
+        let named = named_blocks(
+            weight_first.as_slice(),
+            weight_second.as_slice(),
+            activation.as_slice(),
+        );
         let driver = CudaDriver::<RecordingRuntime>::recording();
         let mut plan = driver
             .plan(&program, &[], &[out], NumericPolicy::default(), &named)
@@ -6520,9 +7262,19 @@ mod recording_runtime {
             .refit_symbols(&[], NumericPolicy::default())
             .expect("refit shape inference succeeds");
         let after = driver.events();
-        assert!(refitted, "a named plan carries no constraints, so it refits in place");
-        for bytes in [size_of_val(weight_first.as_slice()), size_of_val(weight_second.as_slice())] {
-            assert_eq!(uploads_of(&after[before..], bytes), 0, "refit uploads no {bytes}-byte weight");
+        assert!(
+            refitted,
+            "a named plan carries no constraints, so it refits in place"
+        );
+        for bytes in [
+            size_of_val(weight_first.as_slice()),
+            size_of_val(weight_second.as_slice()),
+        ] {
+            assert_eq!(
+                uploads_of(&after[before..], bytes),
+                0,
+                "refit uploads no {bytes}-byte weight"
+            );
         }
     }
 
@@ -6550,20 +7302,32 @@ mod recording_runtime {
         let original = plan.kernels[0].source.clone();
         let replacement = format!("{original}\n// refit text");
 
-        plan.execute_named(&named, None).expect("the first execute runs");
+        plan.execute_named(&named, None)
+            .expect("the first execute runs");
         let first = driver.events();
-        assert!(plan.replace_kernel_source(0, replacement.clone()), "position 0 exists");
-        plan.execute_named(&named, None).expect("the second execute runs");
+        assert!(
+            plan.replace_kernel_source(0, replacement.clone()),
+            "position 0 exists"
+        );
+        plan.execute_named(&named, None)
+            .expect("the second execute runs");
         let all = driver.events();
         let second = &all[first.len()..];
 
-        assert_eq!(launched_sources(&first)[0], original, "the first execute launches the planned source");
+        assert_eq!(
+            launched_sources(&first)[0],
+            original,
+            "the first execute launches the planned source"
+        );
         assert_eq!(
             launched_sources(second)[0],
             replacement,
             "the execute after a replacement launches a function built from the new source"
         );
-        assert!(!plan.replace_kernel_source(usize::MAX, String::new()), "an absent position replaces nothing");
+        assert!(
+            !plan.replace_kernel_source(usize::MAX, String::new()),
+            "an absent position replaces nothing"
+        );
     }
 
     #[test]
@@ -6583,9 +7347,19 @@ mod recording_runtime {
             plan.execute_named_launch_events(&named, None, Some(&mut launches))
         });
 
-        assert!(evaluated.is_ok(), "event timing on a runtime without events must not fail the execute: {:?}", evaluated.err());
-        assert!(launches.is_empty(), "a runtime that records no events returns no timings");
-        assert!(!launches_of(&driver.events()).is_empty(), "the execute still launched its kernels");
+        assert!(
+            evaluated.is_ok(),
+            "event timing on a runtime without events must not fail the execute: {:?}",
+            evaluated.err()
+        );
+        assert!(
+            launches.is_empty(),
+            "a runtime that records no events returns no timings"
+        );
+        assert!(
+            !launches_of(&driver.events()).is_empty(),
+            "the execute still launched its kernels"
+        );
     }
 
     #[test]
@@ -6595,34 +7369,58 @@ mod recording_runtime {
         let weight_second = weight_values((OUTPUT * HIDDEN) as usize, 7.0);
         let activation = weight_values(INPUT as usize, 3.0);
         let named = named_blocks(&weight_first, &weight_second, &activation);
-        let driver = CudaDriver::<RecordingRuntime>::recording_on(RecordingRuntime::on_target(Target::hip_wave(64)));
+        let driver = CudaDriver::<RecordingRuntime>::recording_on(RecordingRuntime::on_target(
+            Target::hip_wave(64),
+        ));
         let mut plan = driver
             .plan_with_config(&program, &[], &[out], &named, &RuntimeConfig::default())
             .expect("the recording driver plans the two-layer program under a HIP target");
         let policy = plan.numeric_policy;
         let device = driver.runtime.emit_device();
         let cuda_differs = (0..plan.resolved.len()).any(|position| {
-            let cuda = crate::cuda::emit_on_target(Target::CUDA, &plan.resolved[position], &plan.packed_operands, policy, device, &OperandDtypes::new())
-                .expect("the op emits as CUDA too");
+            let cuda = crate::cuda::emit_on_target(
+                Target::CUDA,
+                &plan.resolved[position],
+                &plan.packed_operands,
+                policy,
+                device,
+                &OperandDtypes::new(),
+            )
+            .expect("the op emits as CUDA too");
             cuda.source != plan.kernels[position].source
         });
 
-        assert!(cuda_differs, "the plan's kernels are HIP text, which CUDA emission does not reproduce");
+        assert!(
+            cuda_differs,
+            "the plan's kernels are HIP text, which CUDA emission does not reproduce"
+        );
         for position in 0..plan.resolved.len() {
             let previous = plan.resolved[position].clone();
             assert!(
-                plan.emits_same_text(&previous, position, policy).expect("the op re-emits"),
+                plan.emits_same_text(&previous, position, policy)
+                    .expect("the op re-emits"),
                 "position {position}: the comparison emits under the runtime's HIP target, so it matches the plan's own text"
             );
         }
-        let before: Vec<String> = plan.kernels.iter().map(|kernel| kernel.source.clone()).collect();
+        let before: Vec<String> = plan
+            .kernels
+            .iter()
+            .map(|kernel| kernel.source.clone())
+            .collect();
         let bound = plan.resolved.clone();
         for (position, next) in bound.iter().enumerate() {
             plan.follow_rows(position, next, policy, &mut FollowMicros::default())
                 .expect("a HIP plan refits its grid under its own target");
         }
-        let after: Vec<String> = plan.kernels.iter().map(|kernel| kernel.source.clone()).collect();
-        assert_eq!(before, after, "refitting an unchanged op keeps its HIP text");
+        let after: Vec<String> = plan
+            .kernels
+            .iter()
+            .map(|kernel| kernel.source.clone())
+            .collect();
+        assert_eq!(
+            before, after,
+            "refitting an unchanged op keeps its HIP text"
+        );
     }
 
     use std::collections::HashSet;
@@ -6630,11 +7428,12 @@ mod recording_runtime {
     use proxima_primitives::sync::mpsc::channel;
     use proxima_primitives::sync::oneshot;
 
-    use crate::owner_config::OwnerConfig;
     use crate::device_owner::{
-        Command, Completion, DeviceHandle, DeviceKey, DeviceOwner, Frame, RegisterRequest, ResidentRef,
-        DeviceOwnerError, OwnerFlow, StepOutcome, block_on_thread, launch_on_thread, run_device_owner,
+        Command, Completion, DeviceHandle, DeviceKey, DeviceOwner, DeviceOwnerError, Frame,
+        OwnerFlow, RegisterRequest, ResidentRef, StepOutcome, block_on_thread, launch_on_thread,
+        run_device_owner,
     };
+    use crate::owner_config::OwnerConfig;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// An owned weight or activation block, generic over its element so the test spells no format.
@@ -6655,7 +7454,11 @@ mod recording_runtime {
         }
 
         fn event_log(&self) -> Vec<Event> {
-            self.log.lock().iter().map(|(_, event)| event.clone()).collect()
+            self.log
+                .lock()
+                .iter()
+                .map(|(_, event)| event.clone())
+                .collect()
         }
     }
 
@@ -6694,7 +7497,11 @@ mod recording_runtime {
     where
         for<'block> QuantizedBlock<'block>: From<&'block Block>,
     {
-        DeviceOwner::new(DeviceKey(0), CudaDriver::recording_on(runtime), plan_capacity)
+        DeviceOwner::new(
+            DeviceKey(0),
+            CudaDriver::recording_on(runtime),
+            plan_capacity,
+        )
     }
 
     const RECORDING_PLAN_CAPACITY: usize = 8;
@@ -6709,7 +7516,8 @@ mod recording_runtime {
 
     fn recording_open(
         runtime: RecordingRuntime,
-    ) -> impl FnMut() -> Result<CudaDriver<RecordingRuntime>, CudaDriverError> + Send + 'static {
+    ) -> impl FnMut() -> Result<CudaDriver<RecordingRuntime>, CudaDriverError> + Send + 'static
+    {
         move || Ok(CudaDriver::recording_on(runtime.clone()))
     }
 
@@ -6717,12 +7525,15 @@ mod recording_runtime {
     fn counting_open(
         attempts: &Arc<AtomicUsize>,
         failures: usize,
-    ) -> impl FnMut() -> Result<CudaDriver<RecordingRuntime>, CudaDriverError> + Send + 'static {
+    ) -> impl FnMut() -> Result<CudaDriver<RecordingRuntime>, CudaDriverError> + Send + 'static
+    {
         let attempts = Arc::clone(attempts);
         move || {
             let attempt = attempts.fetch_add(1, Ordering::SeqCst);
             if attempt < failures {
-                Err(CudaDriverError::Driver("no CUDA device on this host".into()))
+                Err(CudaDriverError::Driver(
+                    "no CUDA device on this host".into(),
+                ))
             } else {
                 Ok(CudaDriver::recording_on(RecordingRuntime::new()))
             }
@@ -6735,16 +7546,31 @@ mod recording_runtime {
         steps: usize,
     ) -> usize {
         let activation = Held(Arc::clone(&request.blocks[2].1.0));
-        let lease = handle.register(request).await.expect("the owner registers the plan");
+        let lease = handle
+            .register(request)
+            .await
+            .expect("the owner registers the plan");
         let completion = Completion::new();
         let mut frame = Frame::default();
         let mut done = 0;
         for _ in 0..steps {
             frame.clear();
-            frame.residents.extend((0..2).map(|slot| ResidentRef { slot, address: 0, len: 0 }));
-            frame.dynamic.push(("x".into(), Held(Arc::clone(&activation.0))));
-            match handle.step(&lease, frame, &completion).await.expect("the owner steps the plan") {
-                StepOutcome::Done { frame: returned, .. } => {
+            frame.residents.extend((0..2).map(|slot| ResidentRef {
+                slot,
+                address: 0,
+                len: 0,
+            }));
+            frame
+                .dynamic
+                .push(("x".into(), Held(Arc::clone(&activation.0))));
+            match handle
+                .step(&lease, frame, &completion)
+                .await
+                .expect("the owner steps the plan")
+            {
+                StepOutcome::Done {
+                    frame: returned, ..
+                } => {
                     frame = returned;
                     done += 1;
                 }
@@ -6759,7 +7585,11 @@ mod recording_runtime {
     fn the_owner_runs_every_device_call_on_one_thread_that_is_not_a_caller() {
         let runtime = RecordingRuntime::new();
         let owner_runtime = runtime.clone();
-        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(64), recording_open(owner_runtime));
+        let (handle, owner) = launch_on_thread(
+            DeviceKey(0),
+            &recording_config(64),
+            recording_open(owner_runtime),
+        );
         let weight_first = Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0));
         let weight_second = Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0));
         let activation = Arc::from(weight_values(INPUT as usize, 3.0));
@@ -6776,7 +7606,10 @@ mod recording_runtime {
                 })
             })
             .collect();
-        let results: Vec<_> = callers.into_iter().map(|caller| caller.join().expect("caller ran")).collect();
+        let results: Vec<_> = callers
+            .into_iter()
+            .map(|caller| caller.join().expect("caller ran"))
+            .collect();
         block_on_thread(handle.shutdown()).expect("the owner shuts down");
         owner.join().expect("the owner thread ends");
 
@@ -6804,12 +7637,17 @@ mod recording_runtime {
             .expect("the recording driver plans the two-layer program");
         plan.mark_resident(&BTreeSet::from(["w0", "w1"]));
         for _ in 0..steps {
-            plan.execute_named(&named, None).expect("the direct plan executes");
+            plan.execute_named(&named, None)
+                .expect("the direct plan executes");
         }
 
         let runtime = RecordingRuntime::new();
         let owner_runtime = runtime.clone();
-        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), recording_open(owner_runtime));
+        let (handle, owner) = launch_on_thread(
+            DeviceKey(0),
+            &recording_config(8),
+            recording_open(owner_runtime),
+        );
         let request = owner_request(
             &Arc::from(weight_first),
             &Arc::from(weight_second),
@@ -6820,14 +7658,22 @@ mod recording_runtime {
         owner.join().expect("the owner thread ends");
 
         assert_eq!(done, steps);
-        assert_eq!(runtime.event_log(), direct.events(), "the owner issues the direct driver's device calls");
+        assert_eq!(
+            runtime.event_log(),
+            direct.events(),
+            "the owner issues the direct driver's device calls"
+        );
     }
 
     #[test]
     fn release_and_step_racing_from_two_tasks_linearize() {
         let runtime = RecordingRuntime::new();
         let owner_runtime = runtime.clone();
-        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), recording_open(owner_runtime));
+        let (handle, owner) = launch_on_thread(
+            DeviceKey(0),
+            &recording_config(8),
+            recording_open(owner_runtime),
+        );
         let request = owner_request(
             &Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0)),
             &Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0)),
@@ -6851,9 +7697,19 @@ mod recording_runtime {
         block_on_thread(handle.shutdown()).expect("the owner shuts down");
         owner.join().expect("the owner thread ends");
 
-        assert_eq!(done, 100, "every step succeeds whichever side of a release it lands on");
+        assert_eq!(
+            done, 100,
+            "every step succeeds whichever side of a release it lands on"
+        );
         assert!(released, "every release is answered");
-        assert_eq!(runtime.event_threads().into_iter().collect::<HashSet<_>>().len(), 1);
+        assert_eq!(
+            runtime
+                .event_threads()
+                .into_iter()
+                .collect::<HashSet<_>>()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -6867,16 +7723,28 @@ mod recording_runtime {
         let config = RuntimeConfig::default();
         let direct = CudaDriver::<RecordingRuntime>::recording();
         let mut plan = direct
-            .plan_with_activation_policy(&program, &[], &[out], config.numeric, config.exact_activations, &named)
+            .plan_with_activation_policy(
+                &program,
+                &[],
+                &[out],
+                config.numeric,
+                config.exact_activations,
+                &named,
+            )
             .expect("the recording driver plans the two-layer program by activation policy");
         plan.mark_resident(&BTreeSet::from(["w0", "w1"]));
         for _ in 0..steps {
-            plan.execute_named(&named, None).expect("the direct plan executes");
+            plan.execute_named(&named, None)
+                .expect("the direct plan executes");
         }
 
         let runtime = RecordingRuntime::new();
         let owner_runtime = runtime.clone();
-        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), recording_open(owner_runtime));
+        let (handle, owner) = launch_on_thread(
+            DeviceKey(0),
+            &recording_config(8),
+            recording_open(owner_runtime),
+        );
         let mut request = owner_request(
             &Arc::from(weight_first),
             &Arc::from(weight_second),
@@ -6888,7 +7756,11 @@ mod recording_runtime {
         owner.join().expect("the owner thread ends");
 
         assert_eq!(done, steps);
-        assert_eq!(runtime.event_log(), direct.events(), "the owner plans by activation policy as the direct driver does");
+        assert_eq!(
+            runtime.event_log(),
+            direct.events(),
+            "the owner plans by activation policy as the direct driver does"
+        );
     }
 
     #[test]
@@ -6911,12 +7783,19 @@ mod recording_runtime {
         });
 
         let second = block_on_thread(answer).expect("the owner answers the second register");
-        assert!(second.is_ok(), "the abandoned register's plan slot was freed");
+        assert!(
+            second.is_ok(),
+            "the abandoned register's plan slot was freed"
+        );
     }
 
     #[test]
     fn steps_report_their_owner_completion_sequence_in_order() {
-        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), recording_open(RecordingRuntime::new()));
+        let (handle, owner) = launch_on_thread(
+            DeviceKey(0),
+            &recording_config(8),
+            recording_open(RecordingRuntime::new()),
+        );
         let request = owner_request(
             &Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0)),
             &Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0)),
@@ -6925,16 +7804,33 @@ mod recording_runtime {
         let activation = Arc::clone(&request.blocks[2].1.0);
 
         let sequences = block_on_thread(async {
-            let lease = handle.register(request).await.expect("the owner registers the plan");
+            let lease = handle
+                .register(request)
+                .await
+                .expect("the owner registers the plan");
             let completion = Completion::new();
             let mut frame = Frame::default();
             let mut sequences = Vec::new();
             for _ in 0..3 {
                 frame.clear();
-                frame.residents.extend((0..2).map(|slot| ResidentRef { slot, address: 0, len: 0 }));
-                frame.dynamic.push(("x".into(), Held(Arc::clone(&activation))));
-                match handle.step(&lease, frame, &completion).await.expect("the owner steps the plan") {
-                    StepOutcome::Done { frame: returned, sequence, .. } => {
+                frame.residents.extend((0..2).map(|slot| ResidentRef {
+                    slot,
+                    address: 0,
+                    len: 0,
+                }));
+                frame
+                    .dynamic
+                    .push(("x".into(), Held(Arc::clone(&activation))));
+                match handle
+                    .step(&lease, frame, &completion)
+                    .await
+                    .expect("the owner steps the plan")
+                {
+                    StepOutcome::Done {
+                        frame: returned,
+                        sequence,
+                        ..
+                    } => {
                         frame = returned;
                         sequences.push(sequence);
                     }
@@ -6946,29 +7842,48 @@ mod recording_runtime {
         block_on_thread(handle.shutdown()).expect("the owner shuts down");
         owner.join().expect("the owner thread ends");
 
-        assert_eq!(sequences, vec![0, 1, 2], "the owner numbers its completed steps from zero");
+        assert_eq!(
+            sequences,
+            vec![0, 1, 2],
+            "the owner numbers its completed steps from zero"
+        );
     }
 
     #[test]
     fn snapshot_names_the_recording_device_and_counts_graph_activity() {
-        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), recording_open(RecordingRuntime::new()));
+        let (handle, owner) = launch_on_thread(
+            DeviceKey(0),
+            &recording_config(8),
+            recording_open(RecordingRuntime::new()),
+        );
         let request = owner_request(
             &Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0)),
             &Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0)),
             &Arc::from(weight_values(INPUT as usize, 3.0)),
         );
 
-        let before = block_on_thread(handle.snapshot()).expect("a snapshot opens the device and reads it");
+        let before =
+            block_on_thread(handle.snapshot()).expect("a snapshot opens the device and reads it");
         let done = block_on_thread(drive_plan(handle.clone(), request, 1));
         let after = block_on_thread(handle.snapshot()).expect("the owner snapshots after the step");
         block_on_thread(handle.shutdown()).expect("the owner shuts down");
         owner.join().expect("the owner thread ends");
 
-        assert_eq!(before.identity, "recording:0", "the identity is the recording runtime's own");
+        assert_eq!(
+            before.identity, "recording:0",
+            "the identity is the recording runtime's own"
+        );
         assert_eq!(after.identity, before.identity);
-        assert_eq!((before.graph_uploads, before.graph_launches), (0, 0), "no step has run yet");
+        assert_eq!(
+            (before.graph_uploads, before.graph_launches),
+            (0, 0),
+            "no step has run yet"
+        );
         assert_eq!(done, 1);
-        assert!(after.graph_launches > 0, "one step launches at least one graph");
+        assert!(
+            after.graph_launches > 0,
+            "one step launches at least one graph"
+        );
         assert!(after.graph_uploads > 0, "one step uploads its inputs");
     }
 
@@ -6984,10 +7899,20 @@ mod recording_runtime {
             request: Box::new(owner_request(&weight_first, &weight_second, &activation)),
             reply,
         });
-        let lease = block_on_thread(answer).expect("the owner answers").expect("the owner registers the plan");
+        let lease = block_on_thread(answer)
+            .expect("the owner answers")
+            .expect("the owner registers the plan");
 
-        assert_eq!(Arc::strong_count(&activation), 1, "the dynamic block is not retained");
-        assert_eq!(Arc::strong_count(&weight_first), 2, "a resident block is retained");
+        assert_eq!(
+            Arc::strong_count(&activation),
+            1,
+            "the dynamic block is not retained"
+        );
+        assert_eq!(
+            Arc::strong_count(&weight_first),
+            2,
+            "a resident block is retained"
+        );
         drop(lease);
     }
 
@@ -6996,38 +7921,68 @@ mod recording_runtime {
     #[test]
     fn an_owner_whose_open_fails_answers_with_the_open_error_and_retries() {
         let attempts = Arc::new(AtomicUsize::new(0));
-        let (handle, owner) =
-            launch_on_thread(DeviceKey(0), &recording_config(8), counting_open(&attempts, 1));
+        let (handle, owner) = launch_on_thread(
+            DeviceKey(0),
+            &recording_config(8),
+            counting_open(&attempts, 1),
+        );
         let weight_first = Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0));
         let weight_second = Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0));
         let activation = Arc::from(weight_values(INPUT as usize, 3.0));
 
-        let first = block_on_thread(handle.register(owner_request(&weight_first, &weight_second, &activation)));
-        let second = block_on_thread(handle.register(owner_request(&weight_first, &weight_second, &activation)));
+        let first = block_on_thread(handle.register(owner_request(
+            &weight_first,
+            &weight_second,
+            &activation,
+        )));
+        let second = block_on_thread(handle.register(owner_request(
+            &weight_first,
+            &weight_second,
+            &activation,
+        )));
         block_on_thread(handle.shutdown()).expect("the owner shuts down");
         owner.join().expect("the owner thread ends");
 
         assert!(
-            matches!(first, Err(DeviceOwnerError::Driver(CudaDriverError::Driver(_)))),
+            matches!(
+                first,
+                Err(DeviceOwnerError::Driver(CudaDriverError::Driver(_)))
+            ),
             "the first register carries the open error"
         );
-        assert!(second.is_ok(), "the next register retries the open and plans");
-        assert_eq!(attempts.load(Ordering::SeqCst), 2, "one failed open and one retry");
+        assert!(
+            second.is_ok(),
+            "the next register retries the open and plans"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            2,
+            "one failed open and one retry"
+        );
     }
 
     #[test]
     fn release_and_shutdown_never_open_the_device() {
         let attempts = Arc::new(AtomicUsize::new(0));
-        let (handle, owner) =
-            launch_on_thread(DeviceKey(0), &recording_config(8), counting_open(&attempts, 0));
+        let (handle, owner) = launch_on_thread(
+            DeviceKey(0),
+            &recording_config(8),
+            counting_open(&attempts, 0),
+        );
         same_block(&handle, &held(&weight_values(1, 0.0)));
 
-        block_on_thread(handle.release_names(vec!["w0".into()])).expect("an unopened owner acks the release");
-        block_on_thread(handle.release_ranges(Vec::new())).expect("an unopened owner acks the range release");
+        block_on_thread(handle.release_names(vec!["w0".into()]))
+            .expect("an unopened owner acks the release");
+        block_on_thread(handle.release_ranges(Vec::new()))
+            .expect("an unopened owner acks the range release");
         block_on_thread(handle.shutdown()).expect("an unopened owner shuts down");
         owner.join().expect("the owner thread ends");
 
-        assert_eq!(attempts.load(Ordering::SeqCst), 0, "no command that needs the device ran");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            0,
+            "no command that needs the device ran"
+        );
     }
 
     #[test]
@@ -7041,11 +7996,20 @@ mod recording_runtime {
             request: Box::new(owner_request(&weight_first, &weight_second, &activation)),
             reply,
         });
-        let lease = block_on_thread(answer).expect("the owner answers").expect("the owner registers the plan");
+        let lease = block_on_thread(answer)
+            .expect("the owner answers")
+            .expect("the owner registers the plan");
 
         let mut short = Frame::default();
-        short.residents.extend((0..2).map(|slot| ResidentRef { slot, address: 0, len: 0 }));
-        short.dynamic.push(("x".into(), Held(Arc::from(weight_values(INPUT as usize - 1, 3.0)))));
+        short.residents.extend((0..2).map(|slot| ResidentRef {
+            slot,
+            address: 0,
+            len: 0,
+        }));
+        short.dynamic.push((
+            "x".into(),
+            Held(Arc::from(weight_values(INPUT as usize - 1, 3.0))),
+        ));
         let completion = Completion::new();
         let flow = owner.serve(Command::Step {
             lease: lease.clone(),
@@ -7055,18 +8019,26 @@ mod recording_runtime {
         let stepped = block_on_thread(completion.wait()).expect("the owner answered the step");
 
         let mut queued = Frame::default();
-        queued.dynamic.push(("x".into(), Held(Arc::clone(&activation))));
+        queued
+            .dynamic
+            .push(("x".into(), Held(Arc::clone(&activation))));
         let queued_completion = Completion::new();
         DeviceOwner::<RecordingRuntime, _>::reject(Command::Step {
             lease,
             frame: queued,
             completion: queued_completion.sender(),
         });
-        let rejected = block_on_thread(queued_completion.wait()).expect("the owner answered the rejection");
+        let rejected =
+            block_on_thread(queued_completion.wait()).expect("the owner answered the rejection");
 
         assert_eq!(flow, OwnerFlow::Drain, "a driver failure drains the owner");
         assert!(
-            matches!(stepped, Err(DeviceOwnerError::Driver(CudaDriverError::InputContractChanged { .. }))),
+            matches!(
+                stepped,
+                Err(DeviceOwnerError::Driver(
+                    CudaDriverError::InputContractChanged { .. }
+                ))
+            ),
             "a short activation breaks the planned input contract"
         );
         assert!(
@@ -7086,11 +8058,15 @@ mod recording_runtime {
             request: Box::new(owner_request(&weight_first, &weight_second, &activation)),
             reply,
         });
-        let lease = block_on_thread(answer).expect("the owner answers").expect("the owner registers the plan");
+        let lease = block_on_thread(answer)
+            .expect("the owner answers")
+            .expect("the owner registers the plan");
         let (commands, mut queue) = channel(1);
         let handle = DeviceHandle::new(DeviceKey(0), commands);
         let mut frame = Frame::default();
-        frame.dynamic.push(("x".into(), Held(Arc::clone(&activation))));
+        frame
+            .dynamic
+            .push(("x".into(), Held(Arc::clone(&activation))));
         let caller = thread::spawn(move || {
             let completion = Completion::new();
             block_on_thread(handle.step(&lease, frame, &completion))
@@ -7098,7 +8074,9 @@ mod recording_runtime {
 
         let command = block_on_thread(queue.recv()).expect("the step reached the owner queue");
         drop(command);
-        let answered = caller.join().expect("the caller thread ends instead of hanging");
+        let answered = caller
+            .join()
+            .expect("the caller thread ends instead of hanging");
 
         assert!(
             matches!(answered, Err(DeviceOwnerError::Stopped)),
@@ -7117,12 +8095,20 @@ mod recording_runtime {
             request: Box::new(owner_request(&weight_first, &weight_second, &activation)),
             reply,
         });
-        let lease = block_on_thread(answer).expect("the owner answers").expect("the owner registers the plan");
+        let lease = block_on_thread(answer)
+            .expect("the owner answers")
+            .expect("the owner registers the plan");
         let (commands, mut queue) = channel(1);
         let handle = DeviceHandle::new(DeviceKey(0), commands);
         let mut frame = Frame::default();
-        frame.residents.extend((0..2).map(|slot| ResidentRef { slot, address: 0, len: 0 }));
-        frame.dynamic.push(("x".into(), Held(Arc::clone(&activation))));
+        frame.residents.extend((0..2).map(|slot| ResidentRef {
+            slot,
+            address: 0,
+            len: 0,
+        }));
+        frame
+            .dynamic
+            .push(("x".into(), Held(Arc::clone(&activation))));
         let caller = thread::spawn(move || {
             let completion = Completion::new();
             block_on_thread(handle.step(&lease, frame, &completion))
@@ -7132,7 +8118,11 @@ mod recording_runtime {
         let flow = owner.serve(command);
         let answered = caller.join().expect("the caller thread ends");
 
-        assert_eq!(flow, OwnerFlow::Continue, "a completed step keeps the owner serving");
+        assert_eq!(
+            flow,
+            OwnerFlow::Continue,
+            "a completed step keeps the owner serving"
+        );
         assert!(
             matches!(answered, Ok(StepOutcome::Done { sequence: 0, .. })),
             "the first completed step answers its value with sequence zero"
@@ -7149,7 +8139,11 @@ mod recording_runtime {
 
         let answered = block_on_thread(completion.wait());
 
-        assert_eq!(answered.as_deref(), Some("reply b"), "the late reply of the cancelled step is discarded");
+        assert_eq!(
+            answered.as_deref(),
+            Some("reply b"),
+            "the late reply of the cancelled step is discarded"
+        );
 
         let dropped = completion.sender();
         let current = completion.sender();
@@ -7158,21 +8152,36 @@ mod recording_runtime {
 
         let after_drop = block_on_thread(completion.wait());
 
-        assert_eq!(after_drop.as_deref(), Some("reply c"), "a stale sender dropped late does not answer stopped");
+        assert_eq!(
+            after_drop.as_deref(),
+            Some("reply c"),
+            "a stale sender dropped late does not answer stopped"
+        );
     }
 
     #[test]
     fn a_command_sent_after_shutdown_is_closed_not_stopped() {
-        let (handle, owner) = launch_on_thread(DeviceKey(0), &recording_config(8), recording_open(RecordingRuntime::new()));
+        let (handle, owner) = launch_on_thread(
+            DeviceKey(0),
+            &recording_config(8),
+            recording_open(RecordingRuntime::new()),
+        );
         block_on_thread(handle.shutdown()).expect("the owner shuts down");
         owner.join().expect("the owner thread ends");
         let weight_first = Arc::from(weight_values((HIDDEN * INPUT) as usize, 1.0));
         let weight_second = Arc::from(weight_values((OUTPUT * HIDDEN) as usize, 7.0));
         let activation = Arc::from(weight_values(INPUT as usize, 3.0));
 
-        let late = block_on_thread(handle.register(owner_request(&weight_first, &weight_second, &activation)));
+        let late = block_on_thread(handle.register(owner_request(
+            &weight_first,
+            &weight_second,
+            &activation,
+        )));
 
-        assert!(matches!(late, Err(DeviceOwnerError::Closed)), "the command was never accepted");
+        assert!(
+            matches!(late, Err(DeviceOwnerError::Closed)),
+            "the command was never accepted"
+        );
     }
 
     #[test]

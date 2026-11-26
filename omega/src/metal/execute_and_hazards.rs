@@ -44,7 +44,8 @@ pub(super) fn plan_with_placed_inputs(
     options: (bool, bool),
 ) -> Result<Plan, MetalError> {
     let (requested_policy, layout) = numeric;
-    let numeric_policy = layout.map_or(requested_policy, |layout| layout.apply_to(requested_policy));
+    let numeric_policy =
+        layout.map_or(requested_policy, |layout| layout.apply_to(requested_policy));
     let (fuse_cached_attention, wavefront_schedule) = options;
     let diagnostics = MetalDiagnostics::from_env();
     #[cfg(feature = "instrument")]
@@ -314,10 +315,11 @@ pub(super) fn execute_plan_inner(
     #[cfg(feature = "instrument")]
     counter!(BLOCK_UPLOAD_TICKS, elapsed_ticks(block_upload_started));
 
-    let command_buffer = new_labeled_command_buffer(&queue, "omega.single.execute_plan_inner", &plan.diagnostics)
-        .ok_or_else(|| MetalError::CompileFailed {
-            log: "command queue refused to hand out a command buffer".to_string(),
-        })?;
+    let command_buffer =
+        new_labeled_command_buffer(&queue, "omega.single.execute_plan_inner", &plan.diagnostics)
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: "command queue refused to hand out a command buffer".to_string(),
+            })?;
 
     // ONE `MTLComputeCommandEncoder` for the whole program, opened here and
     // `endEncoding()`d once below, after every op has been encoded into it --
@@ -1269,8 +1271,9 @@ pub fn try_write_placed_buffer_f32(
 ) -> Result<(), MetalError> {
     let byte_length = f32_byte_length(buffer, byte_offset, source.len())?;
     validate_placed_buffer_range(buffer, byte_offset, byte_length)?;
-    // SAFETY: `source` exposes `byte_length` initialized bytes, and f32 storage is valid as bytes.
-    let source_bytes = unsafe { core::slice::from_raw_parts(source.as_ptr().cast::<u8>(), byte_length) };
+    let source_bytes =
+        // SAFETY: `source` exposes `byte_length` initialized bytes, and f32 storage is valid as bytes.
+        unsafe { core::slice::from_raw_parts(source.as_ptr().cast::<u8>(), byte_length) };
     // SAFETY: validation proves `byte_offset` is within or one past the buffer's allocation.
     let destination = unsafe { buffer.contents().as_ptr().cast::<u8>().add(byte_offset) };
     // SAFETY: validation proves the destination span lies in the shared buffer; the source span is `source`'s f32 bytes.
@@ -1854,8 +1857,7 @@ pub(super) struct HazardState {
     /// can tell an input that reads the writer's own node from a buffer
     /// identity two unrelated nodes happen to share.
     #[cfg(feature = "instrument")]
-    pub(super) writer_nodes:
-        std::collections::HashMap<HazardId, NodeId>,
+    pub(super) writer_nodes: std::collections::HashMap<HazardId, NodeId>,
     /// Dispatching positions encoded since the last barrier this state saw.
     #[cfg(feature = "instrument")]
     pub(super) dispatches_since_barrier: u64,
@@ -1907,12 +1909,7 @@ impl HazardState {
     /// Records one encoded op after its hazard step: the node that now owns
     /// the output buffer identity, and the run length since the last barrier.
     #[cfg(feature = "instrument")]
-    pub(super) fn note_dispatch(
-        &mut self,
-        output: HazardId,
-        node: NodeId,
-        barrier_fired: bool,
-    ) {
+    pub(super) fn note_dispatch(&mut self, output: HazardId, node: NodeId, barrier_fired: bool) {
         if barrier_fired {
             self.dispatches_since_barrier = 0;
         }
@@ -2336,10 +2333,7 @@ pub(super) fn register_skipped_output(
 ) -> Result<(), MetalError> {
     let (buffer, offset) = match placement {
         Some((buffer, offset)) => (buffer.clone(), offset),
-        None => (
-            allocate_buffer(device, bound.output_len(), bound.dtype)?,
-            0,
-        ),
+        None => (allocate_buffer(device, bound.output_len(), bound.dtype)?, 0),
     };
     device_buffers.insert(bound.node, (buffer, offset));
     Ok(())
@@ -2354,7 +2348,8 @@ mod placed_format_tests {
 
     fn stored_bytes(buffer: &PlacedBuffer, len: usize) -> Vec<u8> {
         // the buffer is cpu-visible placed memory with no gpu work in flight and callers pass at most its length
-        unsafe { core::slice::from_raw_parts(buffer.contents().as_ptr().cast::<u8>(), len) }.to_vec()
+        unsafe { core::slice::from_raw_parts(buffer.contents().as_ptr().cast::<u8>(), len) }
+            .to_vec()
     }
 
     fn codec(format: &NumericFormat) -> FormatCodec {
@@ -2364,7 +2359,14 @@ mod placed_format_tests {
     #[test]
     fn bf16_placed_roundtrips_special_values() {
         let buffer = allocate_placed_buffer(16).expect("allocates BF16 fixture bytes");
-        let values = [0.0f32, -0.0, 1.5, f32::INFINITY, f32::NEG_INFINITY, f32::NAN];
+        let values = [
+            0.0f32,
+            -0.0,
+            1.5,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ];
         let bf16 = codec(&NumericFormat::BFloat16);
         write_placed_buffer(&buffer, 0, &bf16, &values).expect("bf16 encodes");
         let actual = read_placed_buffer(&buffer, 0, &bf16, values.len()).expect("bf16 decodes");
@@ -2381,14 +2383,16 @@ mod placed_format_tests {
     fn bf16_and_f16_bytes_match_the_half_crate_on_k_like_rows() {
         let values = k_like_rows(256);
         let buffer = allocate_placed_buffer(512).expect("allocates fixture bytes");
-        write_placed_buffer(&buffer, 0, &codec(&NumericFormat::BFloat16), &values).expect("bf16 encodes");
+        write_placed_buffer(&buffer, 0, &codec(&NumericFormat::BFloat16), &values)
+            .expect("bf16 encodes");
         let expected: Vec<u8> = values
             .iter()
             .flat_map(|value| half::bf16::from_f32(*value).to_bits().to_le_bytes())
             .collect();
         assert_eq!(stored_bytes(&buffer, 512), expected);
 
-        write_placed_buffer(&buffer, 0, &codec(&NumericFormat::Float16), &values).expect("f16 encodes");
+        write_placed_buffer(&buffer, 0, &codec(&NumericFormat::Float16), &values)
+            .expect("f16 encodes");
         let expected: Vec<u8> = values
             .iter()
             .flat_map(|value| half::f16::from_f32(*value).to_bits().to_le_bytes())
@@ -2399,22 +2403,43 @@ mod placed_format_tests {
     #[test]
     fn a_respelled_layout_stores_and_loads_the_same_bytes_and_bits_as_its_named_spelling() {
         let values = k_like_rows(256);
-        for named in [FloatLayout::BF32, FloatLayout::F16, FloatLayout::BF16, FloatLayout::E5M2_SATURATING] {
-            let respelled = FloatLayout { bias_override: Some(named.bias()), ..named };
+        for named in [
+            FloatLayout::BF32,
+            FloatLayout::F16,
+            FloatLayout::BF16,
+            FloatLayout::E5M2_SATURATING,
+        ] {
+            let respelled = FloatLayout {
+                bias_override: Some(named.bias()),
+                ..named
+            };
             let by_name = allocate_placed_buffer(1024).expect("allocates named-layout bytes");
             let by_data = allocate_placed_buffer(1024).expect("allocates respelled-layout bytes");
             let named_codec = codec(&NumericFormat::Scalar(named));
             let data_codec = codec(&NumericFormat::Scalar(respelled));
 
             write_placed_buffer(&by_name, 0, &named_codec, &values).expect("named layout encodes");
-            write_placed_buffer(&by_data, 0, &data_codec, &values).expect("respelled layout encodes");
+            write_placed_buffer(&by_data, 0, &data_codec, &values)
+                .expect("respelled layout encodes");
 
-            assert_eq!(stored_bytes(&by_data, 1024), stored_bytes(&by_name, 1024), "{named:?}");
-            let expected = read_placed_buffer(&by_name, 0, &named_codec, values.len()).expect("decodes");
-            let actual = read_placed_buffer(&by_data, 0, &data_codec, values.len()).expect("decodes");
             assert_eq!(
-                actual.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
-                expected.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                stored_bytes(&by_data, 1024),
+                stored_bytes(&by_name, 1024),
+                "{named:?}"
+            );
+            let expected =
+                read_placed_buffer(&by_name, 0, &named_codec, values.len()).expect("decodes");
+            let actual =
+                read_placed_buffer(&by_data, 0, &data_codec, values.len()).expect("decodes");
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
                 "{named:?}"
             );
         }
@@ -2469,7 +2494,13 @@ mod placed_format_tests {
         let buffer = allocate_placed_buffer(4).expect("allocates BF8 fixture bytes");
         let bf8 = codec(&NumericFormat::BFloat8);
         // SAFETY: the buffer holds 4 bytes and nothing else reads it here.
-        unsafe { core::ptr::copy_nonoverlapping([0x7du8, 0x7e, 0x7f, 0xfd].as_ptr(), buffer.contents().as_ptr().cast::<u8>(), 4) };
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                [0x7du8, 0x7e, 0x7f, 0xfd].as_ptr(),
+                buffer.contents().as_ptr().cast::<u8>(),
+                4,
+            )
+        };
 
         let decoded = read_placed_buffer(&buffer, 0, &bf8, 4).expect("bf8 decodes");
 
@@ -2484,7 +2515,8 @@ mod placed_format_tests {
         let signalling = [f32::from_bits(0x7f80_0001), f32::from_bits(0xff80_0001)];
 
         write_placed_buffer(&buffer, 0, &f32_codec, &signalling).expect("f32 encodes");
-        let loaded = read_placed_buffer(&buffer, 0, &f32_codec, signalling.len()).expect("f32 decodes");
+        let loaded =
+            read_placed_buffer(&buffer, 0, &f32_codec, signalling.len()).expect("f32 decodes");
 
         let loaded_bits: Vec<u32> = loaded.iter().map(|value| value.to_bits()).collect();
         assert_eq!(loaded_bits, [0x7f80_0001, 0xff80_0001]);
@@ -2494,11 +2526,15 @@ mod placed_format_tests {
     fn a_q4_0_placed_round_trip_stores_the_host_encode_and_reads_the_host_decode_bit_for_bit() {
         let values = k_like_rows(96);
         let q4_0 = codec(&NumericFormat::Q4_0);
-        let packed_len = q4_0.packed_len(values.len()).expect("96 values are three whole blocks");
+        let packed_len = q4_0
+            .packed_len(values.len())
+            .expect("96 values are three whole blocks");
         let mut host_packed = vec![0u8; packed_len];
-        q4_0.encode(&values, &mut host_packed).expect("host encodes q4_0");
+        q4_0.encode(&values, &mut host_packed)
+            .expect("host encodes q4_0");
         let mut host_slots = vec![core::mem::MaybeUninit::<f32>::uninit(); values.len()];
-        q4_0.decode(&host_packed, &mut host_slots).expect("host decodes q4_0");
+        q4_0.decode(&host_packed, &mut host_slots)
+            .expect("host decodes q4_0");
         let host_decoded: Vec<u32> = host_slots
             .iter()
             // decode returned Ok, which initialises every slot of its output
@@ -2524,7 +2560,11 @@ mod placed_format_tests {
 
         assert_eq!(
             refused,
-            Err(NumericError::InputNotElementMultiple { format: "q4_0", found: 33, elements: 32 })
+            Err(NumericError::InputNotElementMultiple {
+                format: "q4_0",
+                found: 33,
+                elements: 32
+            })
         );
     }
 
@@ -2537,7 +2577,11 @@ mod placed_format_tests {
 
         assert_eq!(
             refused,
-            Err(NumericError::InputNotElementMultiple { format: "q4_0", found: 33, elements: 32 })
+            Err(NumericError::InputNotElementMultiple {
+                format: "q4_0",
+                found: 33,
+                elements: 32
+            })
         );
     }
 
@@ -2547,13 +2591,18 @@ mod placed_format_tests {
         let buffer = allocate_placed_buffer(len).expect("allocates sentinel fixture bytes");
         let length = placed_buffer_len(&buffer);
         // SAFETY: the buffer holds `length` bytes of cpu-visible placed memory with no gpu work in flight.
-        unsafe { core::ptr::write_bytes(buffer.contents().as_ptr().cast::<u8>(), SENTINEL, length) };
+        unsafe {
+            core::ptr::write_bytes(buffer.contents().as_ptr().cast::<u8>(), SENTINEL, length)
+        };
         buffer
     }
 
     fn assert_all_sentinel(buffer: &PlacedBuffer) {
         let bytes = stored_bytes(buffer, placed_buffer_len(buffer));
-        assert!(bytes.iter().all(|byte| *byte == SENTINEL), "a refused placed call wrote: {bytes:02x?}");
+        assert!(
+            bytes.iter().all(|byte| *byte == SENTINEL),
+            "a refused placed call wrote: {bytes:02x?}"
+        );
     }
 
     #[test]
@@ -2564,7 +2613,13 @@ mod placed_format_tests {
 
         let refused = write_placed_buffer(&buffer, past_end, &bf16, &[1.5, 2.5, -3.0, 4.0]);
 
-        assert_eq!(refused, Err(NumericError::OutputSizeMismatch { found: 0, expected: 8 }));
+        assert_eq!(
+            refused,
+            Err(NumericError::OutputSizeMismatch {
+                found: 0,
+                expected: 8
+            })
+        );
         assert_all_sentinel(&buffer);
     }
 
@@ -2576,7 +2631,13 @@ mod placed_format_tests {
 
         let refused = write_placed_buffer(&buffer, offset, &bf16, &[1.5, 2.5, -3.0, 4.0]);
 
-        assert_eq!(refused, Err(NumericError::OutputSizeMismatch { found: 4, expected: 8 }));
+        assert_eq!(
+            refused,
+            Err(NumericError::OutputSizeMismatch {
+                found: 4,
+                expected: 8
+            })
+        );
         assert_all_sentinel(&buffer);
     }
 
@@ -2588,7 +2649,13 @@ mod placed_format_tests {
 
         let refused = read_placed_buffer(&buffer, past_end, &bf16, 4);
 
-        assert_eq!(refused, Err(NumericError::OutputSizeMismatch { found: 4, expected: 0 }));
+        assert_eq!(
+            refused,
+            Err(NumericError::OutputSizeMismatch {
+                found: 4,
+                expected: 0
+            })
+        );
         assert_all_sentinel(&buffer);
     }
 
@@ -2600,7 +2667,13 @@ mod placed_format_tests {
 
         let refused = read_placed_buffer(&buffer, offset, &bf16, 4);
 
-        assert_eq!(refused, Err(NumericError::OutputSizeMismatch { found: 4, expected: 2 }));
+        assert_eq!(
+            refused,
+            Err(NumericError::OutputSizeMismatch {
+                found: 4,
+                expected: 2
+            })
+        );
         assert_all_sentinel(&buffer);
     }
 
@@ -2614,7 +2687,11 @@ mod placed_format_tests {
         (0..count)
             .map(|index| {
                 let gaussian: f32 = (0..6).map(|_| uniform()).sum::<f32>() - 3.0;
-                if index % 37 == 0 { gaussian * 8.0 } else { gaussian }
+                if index % 37 == 0 {
+                    gaussian * 8.0
+                } else {
+                    gaussian
+                }
             })
             .collect()
     }
