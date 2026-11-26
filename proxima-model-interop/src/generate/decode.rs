@@ -31,6 +31,14 @@ use proxima_core::ProximaError;
 /// One chunk width's program with its logits root, cache roots and content hash.
 type ChunkWidthProgram = (usize, Vec<Op>, NodeId, Vec<LayerCacheRoots>, u64);
 
+/// Whether the step must build a per-step expert table. A GPU accepts one
+/// only when a per-expert plan installed slab copies; a per-layer contiguous
+/// low stack is already the ordinary block under the checkpoint name, and a
+/// high table beside it would re-upload the full stack past the staging guard.
+pub(super) fn needs_expert_source_table(uses_gpu: bool, per_expert_plan: bool) -> bool {
+    !uses_gpu || per_expert_plan
+}
+
 /// one attention layer's leaf name and padded row widths: what [`LoadedModel::attention_layer_cache`] sizes the cache from.
 #[derive(Clone, Copy)]
 struct AttentionCacheRows<'name> {
@@ -5995,30 +6003,40 @@ not read this cache format; only the single-row decode kernel reads it from the 
                             Vec<proxima_tensor::cpu::ExpertEntry<'_>>,
                         )> = Vec::new();
                         // a GPU engine never substitutes these sources (see the
-                        // `expert_source_substitutions` arm below), so skip the build
-                        let expert_sources = if runtime.uses_gpu() && !self.hobbit_plan_active() {
-                            None
-                        } else {
-                            let expert_sources =
-                                step_guard.sources_for_step(&mut expert_entries_scratch)?;
-                            // the slab keys its sources by the decode program's nodes; a
-                            // verify program numbers the same weight leaves differently
-                            Some(if recurrent_verify.is_some() {
-                                expert_sources
-                                    .into_iter()
-                                    .map(|(node, source)| {
-                                        let name = self
-                                            .program
-                                            .get(node.0 as usize)
-                                            .and_then(Op::name)
-                                            .ok_or(InteropError::MissingEvaluatedNode { node })?;
-                                        Ok((find_input_node(active_program, name)?, source))
-                                    })
-                                    .collect::<Result<BTreeMap<_, _>, InteropError>>()?
+                        // `expert_source_substitutions` arm below), so skip the
+                        // build unless a per-expert plan installed slab copies;
+                        // a per-layer contiguous low stack is already the
+                        // ordinary block under the checkpoint name, and a high
+                        // table beside it would re-upload the full stack past
+                        // the staging reduction guard
+                        let per_expert_plan = self.hobbit_plan_active()
+                            && self.hobbit_low_stacks.is_empty();
+                        let expert_sources =
+                            if needs_expert_source_table(runtime.uses_gpu(), per_expert_plan) {
+                                let expert_sources =
+                                    step_guard.sources_for_step(&mut expert_entries_scratch)?;
+                                // the slab keys its sources by the decode program's nodes; a
+                                // verify program numbers the same weight leaves differently
+                                Some(if recurrent_verify.is_some() {
+                                    expert_sources
+                                        .into_iter()
+                                        .map(|(node, source)| {
+                                            let name = self
+                                                .program
+                                                .get(node.0 as usize)
+                                                .and_then(Op::name)
+                                                .ok_or(InteropError::MissingEvaluatedNode {
+                                                    node,
+                                                })?;
+                                            Ok((find_input_node(active_program, name)?, source))
+                                        })
+                                        .collect::<Result<BTreeMap<_, _>, InteropError>>()?
+                                } else {
+                                    expert_sources
+                                })
                             } else {
-                                expert_sources
-                            })
-                        };
+                                None
+                            };
                         #[cfg(feature = "gpu")]
                         let mut all_low_expert_scratch = Vec::new();
                         #[cfg(feature = "gpu")]

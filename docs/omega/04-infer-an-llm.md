@@ -32,10 +32,10 @@ The four generation entry points are all in `proxima-model-interop/src/generate/
 
 | entry point | line | shape |
 |---|---|---|
-| `generate_with_serving_config` | `:2662` | prompt text in, `(ids, text, stopped_by_eos)` out |
-| `generate_from_prefix` | `:2911` | continue from a token prefix |
-| `generate_from_ids` | `:2967` | exact ids in, no tokenizer round trip |
-| `generate_streaming` | `:3546` | yields tokens as they are produced |
+| `generate_with_serving_config` | `:2670` | prompt text in, `(ids, text, stopped_by_eos)` out |
+| `generate_from_prefix` | `:2919` | continue from a token prefix |
+| `generate_from_ids` | `:2975` | exact ids in, no tokenizer round trip |
+| `generate_streaming` | `:3554` | yields tokens as they are produced |
 
 `generate_from_ids` is the one a parity harness uses: it removes the tokenizer from the comparison and leaves only the graph.
 

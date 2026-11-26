@@ -45,3 +45,16 @@ fn hobbit_expert_real_qwen35moe_exposes_routed_boundaries() {
         "each qwen35moe layer exposes the pre-gather boundary"
     );
 }
+
+/// A per-layer contiguous low stack is already the ordinary block under the
+/// checkpoint name, so the GPU must not build a second high table beside it.
+/// A per-expert plan still needs the table because its substitution lives in
+/// the slab, not in the named blocks.
+#[test]
+fn hobbit_universal_gpu_builds_the_table_only_for_a_per_expert_plan() {
+    use super::decode::needs_expert_source_table;
+
+    assert!(!needs_expert_source_table(true, false));
+    assert!(needs_expert_source_table(true, true));
+    assert!(needs_expert_source_table(false, false));
+}
