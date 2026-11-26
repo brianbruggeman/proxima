@@ -1246,8 +1246,18 @@ impl<'model> ServingConfig<'model> {
 }
 
 /// the one serving default policy; a partial `numeric_policy` table overlays it per field.
+///
+/// `input_rounding` is granted because every incumbent rounds a wider dense-MMA operand to the
+/// weight's stored float layout: ggml-cuda's `ggml_cuda_mul_mat_cublas` sets
+/// `compute_type = src0->type` and converts src1 to it (`ggml-cuda.cu:1621`, `:1475`);
+/// ggml-metal's `kernel_mul_mm` stages src1 into threadgroup memory as the weight's half or
+/// bfloat type `S1` (`kernels/mul_mm.metal:267`, instantiated at `:852`/`:854`); ggml-cpu's
+/// `type_traits_cpu` gives F16 and BF16 weights a `vec_dot_type` of F16 and BF16, so src1 is
+/// converted before the dot (`ggml-cpu.c:225`, `:398`, `:1328`).
 pub(crate) const fn serving_numeric_policy() -> NumericPolicy {
-    NumericPolicy::llama_relaxed().with_epilogue_sources(true)
+    NumericPolicy::llama_relaxed()
+        .with_epilogue_sources(true)
+        .with_input_rounding(true)
 }
 
 impl Default for ServingConfig<'static> {
@@ -2176,15 +2186,19 @@ mod tests {
     /// The declared default is [`NumericPolicy::llama_relaxed`] with
     /// `epilogue_sources` granted, so the RMSNorm apply folds into its
     /// sum-of-squares reduce (one dispatch per norm row, llama.cpp's
-    /// `kernel_rms_norm_fuse_impl` shape). A silent default change here
+    /// `kernel_rms_norm_fuse_impl` shape), and `input_rounding` granted, so a
+    /// wider dense-MMA operand rounds once to the weight's stored float
+    /// layout like every incumbent. A silent default change here
     /// would be exactly the regression this branch's own defect report
     /// named: the serving path narrowing back to a stricter policy nobody
     /// asked for.
     #[test]
-    fn default_numeric_policy_is_llama_relaxed_with_epilogue_sources() {
+    fn default_numeric_policy_is_llama_relaxed_with_epilogue_sources_and_input_rounding() {
         assert_eq!(
             ServingConfig::default().numeric_policy,
-            NumericPolicy::llama_relaxed().with_epilogue_sources(true)
+            NumericPolicy::llama_relaxed()
+                .with_epilogue_sources(true)
+                .with_input_rounding(true)
         );
     }
 
