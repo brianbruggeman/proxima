@@ -43,6 +43,19 @@ harnesses should read the files above by relative path.
   sentence and it is under ~50 lines, do it in the same turn. "Flagging, not
   building" and "want me to?" are for work that is large, contested, or
   destructive. Surfacing a defect and leaving it is not discipline.
+- **No bespoke paths.** A change lands in the shared omega lowering that every
+  backend lowers from. It never lands as backend-specific kernel text, a
+  policy rule inside one backend's emitter, or a kernel in the CPU evaluator.
+  If the shared lowering does not exist yet, build that lowering; the
+  bespoke path is not an interim.
+- **No fixed weights until the format is within the lowered kernel.** A format
+  is carried by the bound tensor or codec into the lowered kernel and passed
+  as a parameter. Code never picks one, whether by name, by constant, or by a
+  property search (widest, half width, most mantissa bits). It never rounds or
+  recodes to a weight's stored format as a policy default outside that kernel.
+  `numeric-format-guard` blocks a no-input function that returns a format, and
+  `bespoke-path-guard` blocks a writer brief that changes backend or
+  CPU-evaluator code without naming its `shared lowering:`.
 
 ## Before adding a type
 
