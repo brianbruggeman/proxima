@@ -13,6 +13,8 @@ use proxima_tensor::{
     correct_packed_matmul_layouts, derive_activation_quantize, prune_dead,
 };
 
+#[cfg(feature = "std")]
+use crate::config::DenseMmaInputLayout;
 use crate::lowering::{Codec, PackedOperands};
 
 #[derive(Debug, Clone, Copy)]
@@ -87,6 +89,24 @@ pub fn binding_policy(numeric: NumericPolicy, executes: &Executes) -> NumericPol
     narrowed.with_flat_activation_blocks(
         narrowed.flat_activation_blocks || executes.forms.contains(Form::Int8DotReduce),
     )
+}
+
+/// The numeric policy a configured plan runs under: the caller's `numeric` plus the configured
+/// dense MMA input layout's grant ([`DenseMmaInputLayout::apply_to`]) for every device grant; the
+/// reference executor (`Executes::CPU`) keeps `numeric`. This is the one place the layout rule is
+/// applied, so Metal, CUDA/HIP and wgpu plans of one config round their inputs alike. Compose it
+/// with [`binding_policy`], which adds the grant's narrowing at bind time.
+#[cfg(feature = "std")]
+#[must_use]
+pub fn configured_policy(
+    numeric: NumericPolicy,
+    layout: DenseMmaInputLayout,
+    executes: &Executes,
+) -> NumericPolicy {
+    if *executes == Executes::CPU {
+        return numeric;
+    }
+    layout.apply_to(numeric)
 }
 
 /// Binds `program` for `executes` and runs the passes that grant asks for.
@@ -231,6 +251,26 @@ mod tests {
             binding_policy(numeric, &executes(&Target::CUDA)),
             cuda,
             "binding twice changes nothing"
+        );
+    }
+
+    #[test]
+    fn the_default_layout_grants_input_rounding_to_a_cuda_grant_and_not_to_the_cpu_grant() {
+        let numeric = NumericPolicy::llama_relaxed();
+        let layout = DenseMmaInputLayout::default();
+        assert!(!numeric.input_rounding);
+        assert!(configured_policy(numeric, layout, &executes(&Target::CUDA)).input_rounding);
+        assert!(configured_policy(numeric, layout, &executes(&Target::HIP)).input_rounding);
+        assert_eq!(configured_policy(numeric, layout, &Executes::CPU), numeric);
+    }
+
+    #[test]
+    fn an_explicit_unrounded_layout_leaves_input_rounding_ungranted_on_a_cuda_grant() {
+        let numeric = NumericPolicy::llama_relaxed();
+        let layout = DenseMmaInputLayout::explicit(DenseMmaInputLayout::derived().layout);
+        assert_eq!(
+            configured_policy(numeric, layout, &executes(&Target::CUDA)),
+            numeric
         );
     }
 

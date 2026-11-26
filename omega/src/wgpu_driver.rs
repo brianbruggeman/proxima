@@ -51,7 +51,7 @@ use proxima_tensor::{
     TensorError, infer, resolve_named_blocks,
 };
 
-use crate::bind_plan::{BindConfig, bind_plan};
+use crate::bind_plan::{BindConfig, bind_plan, configured_policy};
 use crate::config::{ResourceConstraints, RuntimeConfig};
 use crate::error::EmitError;
 use crate::lowering::{Binding, Codec, PackedOperands, gather_count, reduction_dims};
@@ -717,7 +717,7 @@ pub fn plan_named_with_config(
         symbols,
         &blocks,
         outputs,
-        config.numeric,
+        configured_policy(config.numeric, config.dense_mma_input_layout, &executes()),
         Some(config),
     )
 }

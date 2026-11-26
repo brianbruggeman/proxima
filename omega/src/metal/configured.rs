@@ -74,7 +74,11 @@ pub fn plan_named_with_config_and_placed_inputs(
         });
     }
     // Fragment selection is a Metal lowering permission, not a tensor-bind rewrite permission.
-    let plan_numeric_policy = config.dense_mma_input_layout.apply_to(config.numeric);
+    let plan_numeric_policy = crate::bind_plan::configured_policy(
+        config.numeric,
+        config.dense_mma_input_layout,
+        &super::executes(),
+    );
     let prepared = prepare_with_options(
         program,
         symbols,

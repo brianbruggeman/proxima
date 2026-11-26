@@ -33,7 +33,7 @@ use proxima_core::kv_carry::{
 };
 use proxima_primitives::sync::blocking::Mutex;
 
-use crate::bind_plan::{BindConfig, bind_plan, finish_bound};
+use crate::bind_plan::{BindConfig, bind_plan, configured_policy, finish_bound};
 use crate::config::{ResourceConstraints, RuntimeConfig};
 use crate::cuda::target::Target;
 use crate::cuda::{
@@ -1456,7 +1456,11 @@ where
     ) -> Result<DevicePlan<R>, CudaDriverError> {
         let policy = PlanPolicy {
             activation_storage: None,
-            numeric_policy: config.numeric,
+            numeric_policy: configured_policy(
+                config.numeric,
+                config.dense_mma_input_layout,
+                &self.runtime.executes(),
+            ),
             exact_activations: config.exact_activations,
             config: Some(config),
         };

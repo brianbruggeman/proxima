@@ -44,8 +44,9 @@ pub(super) fn plan_with_placed_inputs(
     options: (bool, bool),
 ) -> Result<Plan, MetalError> {
     let (requested_policy, layout) = numeric;
-    let numeric_policy =
-        layout.map_or(requested_policy, |layout| layout.apply_to(requested_policy));
+    let numeric_policy = layout.map_or(requested_policy, |layout| {
+        crate::bind_plan::configured_policy(requested_policy, layout, &executes())
+    });
     let (fuse_cached_attention, wavefront_schedule) = options;
     let diagnostics = MetalDiagnostics::from_env();
     #[cfg(feature = "instrument")]
