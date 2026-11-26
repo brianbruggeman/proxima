@@ -28,6 +28,7 @@
 
 use alloc::string::String;
 
+use proxima_numeric::FloatLayout;
 use proxima_numeric::all_lanes_mask;
 use proxima_numeric::codec::Codec;
 
@@ -64,6 +65,10 @@ pub struct Target {
     /// the numeric format name the tensor-core instruction takes as a multiplicand
     /// (`[contraction] cuda_mma_operand`); empty where `card_asm` is false.
     pub mma_operand: &'static str,
+    /// the name of the integer layout every uniform field and index occupies on
+    /// this target (`[contraction] cuda_word`); the host writes `width / 8` bytes
+    /// per field and the device struct spells a type of exactly that width.
+    pub word: &'static str,
 }
 
 impl Target {
@@ -77,6 +82,7 @@ impl Target {
         bfloat_type: "__nv_bfloat16",
         card_asm: true,
         mma_operand: crate::sized::CUDA_MMA_OPERAND,
+        word: crate::sized::CUDA_WORD,
     };
 
     /// AMD HIP C++ at the CDNA wavefront width.
@@ -88,6 +94,7 @@ impl Target {
         bfloat_type: "__hip_bfloat16",
         card_asm: false,
         mma_operand: "",
+        word: crate::sized::CUDA_WORD,
     };
 
     /// HIP at an explicit wavefront width: [`HIP_WAVE64`] for CDNA, 32 for
@@ -113,6 +120,11 @@ impl Target {
     /// The codec of [`Self::mma_operand`], the format a plain float operand is split into for the tensor-core tile.
     pub fn mma_operand_codec(&self) -> Option<Codec> {
         Codec::from_name(self.mma_operand)
+    }
+
+    /// The layout of [`Self::word`], resolved by name; `None` when the configured name is unknown.
+    pub fn word_layout(&self) -> Option<FloatLayout> {
+        FloatLayout::from_name(self.word)
     }
 
     /// `warpSize - 1`, the mask that isolates a lane index inside its wave.
@@ -167,7 +179,11 @@ impl Target {
     /// renderer that builds its source without [`crate::cuda::preamble`] must
     /// still start from this, or its `_sync` call names an undefined token.
     pub(crate) fn lane_mask_define(&self) -> String {
-        alloc::format!("{}#define {LANE_MASK_TOKEN} {}\n", self.wave_width_guard(), self.lane_mask_literal())
+        alloc::format!(
+            "{}#define {LANE_MASK_TOKEN} {}\n",
+            self.wave_width_guard(),
+            self.lane_mask_literal()
+        )
     }
 
     /// For HIP, the preprocessor guard that refuses text built for another wavefront width: hipRTC
@@ -178,9 +194,9 @@ impl Target {
             return String::new();
         }
         alloc::format!(
-                "#if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != {wave}\n#error \"omega HIP text built for {wave}-lane waves\"\n#endif\n",
-                wave = self.wave
-            )
+            "#if defined(__AMDGCN_WAVEFRONT_SIZE) && __AMDGCN_WAVEFRONT_SIZE != {wave}\n#error \"omega HIP text built for {wave}-lane waves\"\n#endif\n",
+            wave = self.wave
+        )
     }
 
     /// For HIP, the kernel-entry check that traps when the device runs another width than the text
@@ -190,14 +206,20 @@ impl Target {
         if self.language != KernelLanguage::Hip {
             return String::new();
         }
-        alloc::format!("    if (warpSize != {}) {{ __builtin_trap(); }}\n", self.wave)
+        alloc::format!(
+            "    if (warpSize != {}) {{ __builtin_trap(); }}\n",
+            self.wave
+        )
     }
 
     /// A complete statement that broadcasts `value` from `lane` into `dest`.
     /// The shuffle is only ever rendered with its destination, so a caller
     /// cannot emit the call as a discarded bare expression.
     pub(crate) fn shfl_broadcast_into(&self, dest: &str, value: &str, lane: &str) -> String {
-        alloc::format!("{dest} = __shfl_sync({}, {value}, {lane});", self.lane_mask())
+        alloc::format!(
+            "{dest} = __shfl_sync({}, {value}, {lane});",
+            self.lane_mask()
+        )
     }
 
     /// The `warp_partials[N]` extent a block-wide merge needs: one slot per

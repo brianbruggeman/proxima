@@ -1,5 +1,5 @@
-use proxima_tensor::{NodeId};
-use proxima_numeric::{DType};
+use proxima_numeric::DType;
+use proxima_tensor::NodeId;
 
 /// Everything [`crate::msl::emit`] can reject.
 ///
@@ -101,7 +101,9 @@ pub enum EmitError {
 
     /// No metal emitter renders [`proxima_tensor::BoundOpKind::BlockQuantize`] yet; the CPU
     /// interpreter runs it.
-    #[error("node {node} is a block quantize op, which no metal emitter in this crate supports yet")]
+    #[error(
+        "node {node} is a block quantize op, which no metal emitter in this crate supports yet"
+    )]
     BlockQuantizeNotSupported { node: NodeId },
 
     /// Candidate B's integration (`R9/PROGRESS.md`'s own "Candidate B"
@@ -180,7 +182,9 @@ pub enum EmitError {
     /// no sink term: only the decode split draws one. Rejected rather than
     /// rendered without the sink, which would normalize every head by the
     /// wrong denominator.
-    #[error("node {node} is a cached attention bind with an attention sink the selected kernel form cannot draw: {reason}")]
+    #[error(
+        "node {node} is a cached attention bind with an attention sink the selected kernel form cannot draw: {reason}"
+    )]
     CachedAttentionSinkNotSupported { node: NodeId, reason: &'static str },
 
     #[error("node {node} cannot select cached-attention MMA precision {precision}: {reason}")]
@@ -281,6 +285,12 @@ pub enum EmitError {
     #[cfg(feature = "cuda")]
     #[error("node {node} is a {kind} op, which the cuda emitter does not support yet")]
     CudaUnsupportedOpKind { node: NodeId, kind: &'static str },
+
+    /// The target's configured uniform word (`[contraction] cuda_word`) names no
+    /// signed 64-bit integer layout the card-C emitter can spell.
+    #[cfg(feature = "cuda")]
+    #[error("the cuda uniform word `{name}` is not a layout the card-C emitter can spell")]
+    CudaUnsupportedWord { name: &'static str },
 
     /// `wgsl::emit_wgsl` has no `Q3_K` unpack function -- `crate::msl`'s own
     /// `Codec::Q3K` is metal-only so far (`wgpu_driver::packed_operands_of`

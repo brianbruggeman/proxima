@@ -109,6 +109,12 @@ grouped_min_tokens = 64
 # resolves through `Codec::from_name`; emitted only when the `cuda` feature is active.
 cuda_mma_operand = "float16"
 
+# the integer layout name every runtime `Uniforms` field and 64-bit index occupies in emitted
+# card-C. A device fact `Target::word` resolves through `FloatLayout::from_name`; the host writes
+# `width / 8` bytes per field and the device struct spells a type of exactly that width. emitted
+# only when the `cuda` feature is active.
+cuda_word = "int64"
+
 [tiled_gemm]
 # below this many activation rows (tokens) in one dispatch, the row-blocked
 # packed-matmul kernel (`push_packed_row_blocked_body`) runs instead of the

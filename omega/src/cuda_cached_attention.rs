@@ -2,9 +2,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use proxima_tensor::{BoundOp, BoundOpKind, ScorePlanes};
 use proxima_numeric::codec::Codec;
 use proxima_numeric::{DType, NumericPolicy};
+use proxima_tensor::{BoundOp, BoundOpKind, ScorePlanes};
 
 use crate::cuda_layout::layout_load_cuda;
 use crate::identity::description_fingerprint;
@@ -12,7 +12,8 @@ use crate::msl::layout_render::readable_scalar_cache;
 
 use crate::cuda::mma_gemm::MMA_INSTRUCTION;
 use crate::cuda::{
-    CudaAttentionClass, WORD_C, cuda_cached_attention_class, cuda_float_literal, preamble, type_token,
+    CudaAttentionClass, cuda_cached_attention_class, cuda_float_literal, preamble, type_token,
+    word_c,
 };
 use crate::cuda_cached_attention_mma::{MMA_ATTENTION_BODY, MMA_ATTENTION_HELPERS};
 use crate::cuda_cached_attention_tiled::{
@@ -53,11 +54,21 @@ pub(crate) fn cached_attention_entry_name(
     } else {
         String::new()
     };
-    let mma_token = if cached_attention_uses_mma(&resolved.kind, numeric_policy) { "_mma16x8x8h" } else { "" };
+    let mma_token = if cached_attention_uses_mma(&resolved.kind, numeric_policy) {
+        "_mma16x8x8h"
+    } else {
+        ""
+    };
     let tile_token = cached_attention_tile_rows(&resolved.kind, numeric_policy)
-        .map_or_else(String::new, |tile_rows| format!("_tq{tile_rows}{mma_token}"));
+        .map_or_else(String::new, |tile_rows| {
+            format!("_tq{tile_rows}{mma_token}")
+        });
     let split_token = split_chunks.map_or_else(String::new, |chunks| format!("_sk{chunks}"));
-    let plane_token = if planes_of(&resolved.kind) == ScorePlanes::Whole { "_wp" } else { "" };
+    let plane_token = if planes_of(&resolved.kind) == ScorePlanes::Whole {
+        "_wp"
+    } else {
+        ""
+    };
     let bounds_token = if cached_attention_runtime_bounds(&resolved.kind) {
         String::from("_rtb")
     } else {
@@ -85,7 +96,14 @@ pub(crate) fn render_cached_attention_cuda(
     } else {
         String::new()
     };
-    render_attention(resolved, entry, "", &unsplit_tail(resolved, numeric_policy), &helpers, quantized)
+    render_attention(
+        resolved,
+        entry,
+        "",
+        &unsplit_tail(resolved, numeric_policy),
+        &helpers,
+        quantized,
+    )
 }
 
 fn unsplit_tail(resolved: &BoundOp, numeric_policy: NumericPolicy) -> String {
@@ -119,7 +137,11 @@ pub(crate) fn render_attention(
     let Some(class) = cuda_cached_attention_class(&resolved.kind) else {
         return Err(EmitError::CudaUnsupportedOpKind {
             node: resolved.node,
-            kind: if planes == ScorePlanes::Whole { "cached_attention_whole_planes" } else { "cached_attention" },
+            kind: if planes == ScorePlanes::Whole {
+                "cached_attention_whole_planes"
+            } else {
+                "cached_attention"
+            },
         });
     };
     if planes == ScorePlanes::Whole && quantized.iter().any(Option::is_some) {
@@ -128,7 +150,11 @@ pub(crate) fn render_attention(
             kind: "cached_attention_whole_planes_packed",
         });
     }
-    let pair_dim = if planes == ScorePlanes::Whole { "head_dim" } else { "rotary_dim / 2" };
+    let pair_dim = if planes == ScorePlanes::Whole {
+        "head_dim"
+    } else {
+        "rotary_dim / 2"
+    };
     let BoundOpKind::CachedAttention {
         operands,
         cached_key_rows,
@@ -164,8 +190,12 @@ pub(crate) fn render_attention(
         .collect::<Vec<String>>()
         .join(",\n    ");
     let cached_rows_decl = match class {
-        CudaAttentionClass::CachedBound => String::from("const long long cached_key_rows = (long long)in8[0];"),
-        CudaAttentionClass::Static => format!("constexpr long long cached_key_rows = {cached_key_rows}LL;"),
+        CudaAttentionClass::CachedBound => {
+            String::from("const long long cached_key_rows = (long long)in8[0];")
+        }
+        CudaAttentionClass::Static => {
+            format!("constexpr long long cached_key_rows = {cached_key_rows}LL;")
+        }
     };
     let cached_lower = match *cached_lower_inclusive {
         i64::MIN => String::from("-9223372036854775807LL"),
@@ -191,16 +221,23 @@ pub(crate) fn render_attention(
         )
     };
     let mut source = String::new();
-    let header_element = if reads.narrow() { crate::cuda::target::Target::CUDA.bfloat_type } else { reads.compute };
-    preamble(crate::cuda::target::Target::CUDA, &mut source, header_element);
+    let header_element = if reads.narrow() {
+        crate::cuda::target::Target::CUDA.bfloat_type
+    } else {
+        reads.compute
+    };
+    let word_c = word_c(&crate::cuda::target::Target::CUDA)?;
+    preamble(
+        crate::cuda::target::Target::CUDA,
+        &mut source,
+        header_element,
+    );
     source.push_str(&cache_helpers(&reads));
     source.push_str(helpers);
     let runtime_bounds = cached_attention_runtime_bounds(&resolved.kind);
     let (uniform_fields, bounds_decl) = if runtime_bounds {
         (
-            format!(
-                " {WORD_C} new_key_rows; {WORD_C} new_upper; {WORD_C} cached_lower;"
-            ),
+            format!(" {word_c} new_key_rows; {word_c} new_upper; {word_c} cached_lower;"),
             String::from(
                 "const long long new_key_rows = u_ptr->new_key_rows;\n\
                  \x20   const long long new_upper = u_ptr->new_upper;\n\
@@ -218,7 +255,7 @@ pub(crate) fn render_attention(
         )
     };
     source.push_str(&format!(
-        "struct Uniforms {{ {WORD_C} total_elements;{uniform_fields} }};\n\n"
+        "struct Uniforms {{ {word_c} total_elements;{uniform_fields} }};\n\n"
     ));
     source.push_str(&format!(
         "extern \"C\" __global__ void {entry}(\n    {params},\n    float* __restrict__ out,\n    const Uniforms* __restrict__ u_ptr{extra_param}) {{\n"
@@ -379,9 +416,15 @@ impl KvReads {
 
 fn cache_read(format: Option<&Codec>, compute: &'static str) -> Option<CacheRead> {
     let Some(format) = format else {
-        return Some(CacheRead { element: compute, format: None });
+        return Some(CacheRead {
+            element: compute,
+            format: None,
+        });
     };
-    readable_scalar_cache(format).map(|(_, element)| CacheRead { element, format: Some(*format) })
+    readable_scalar_cache(format).map(|(_, element)| CacheRead {
+        element,
+        format: Some(*format),
+    })
 }
 
 fn load_name(layout: &impl core::fmt::Debug) -> String {
@@ -398,7 +441,9 @@ pub(crate) fn cached_attention_kv_admits(key: &Codec, value: &Codec) -> Result<(
         if plain || readable_scalar_cache(format).is_some() {
             Ok(())
         } else {
-            Err(format!("a {format:?} cache is not a whole-byte scalar layout the typed load reads"))
+            Err(format!(
+                "a {format:?} cache is not a whole-byte scalar layout the typed load reads"
+            ))
         }
     })
 }
@@ -411,10 +456,21 @@ pub(crate) fn cached_attention_kv_reads(
         .iter()
         .enumerate()
         .any(|(index, format)| format.is_some() && !CACHED_KV_OPERANDS.contains(&index));
-    let [even, odd, value] = CACHED_KV_OPERANDS.map(|index| quantized.get(index).and_then(Option::as_ref));
-    let compute = type_token(crate::cuda::target::Target::CUDA, resolved.node, resolved.dtype)?;
+    let [even, odd, value] =
+        CACHED_KV_OPERANDS.map(|index| quantized.get(index).and_then(Option::as_ref));
+    let compute = type_token(
+        crate::cuda::target::Target::CUDA,
+        resolved.node,
+        resolved.dtype,
+    )?;
     let reads = (even == odd)
-        .then(|| Some(KvReads { compute, key: cache_read(even, compute)?, value: cache_read(value, compute)? }))
+        .then(|| {
+            Some(KvReads {
+                compute,
+                key: cache_read(even, compute)?,
+                value: cache_read(value, compute)?,
+            })
+        })
         .flatten();
     match reads {
         Some(reads) if !packed_elsewhere => Ok(reads),
@@ -450,13 +506,26 @@ fn cache_helpers(reads: &KvReads) -> String {
 
 fn role_helpers(role: &str, read: &CacheRead, compute: &str) -> String {
     let element = read.element;
-    let layout = read.format.as_ref().and_then(readable_scalar_cache).map(|(layout, _)| layout);
+    let layout = read
+        .format
+        .as_ref()
+        .and_then(readable_scalar_cache)
+        .map(|(layout, _)| layout);
     let (scalar, quad) = match &layout {
         None => (String::from("p[i]"), format!("*(const {compute}4*)&p[i]")),
         Some(layout) => {
             let load = load_name(layout);
             let at = |offset: &str| format!("{load}((unsigned int)p[i + {offset}])");
-            (at("0"), format!("make_{compute}4({}, {}, {}, {})", at("0"), at("1"), at("2"), at("3")))
+            (
+                at("0"),
+                format!(
+                    "make_{compute}4({}, {}, {}, {})",
+                    at("0"),
+                    at("1"),
+                    at("2"),
+                    at("3")
+                ),
+            )
         }
     };
     format!(
@@ -467,7 +536,12 @@ fn role_helpers(role: &str, read: &CacheRead, compute: &str) -> String {
 
 fn kv_entry_token(reads: &KvReads) -> String {
     let part = |tag: &str, read: &CacheRead| {
-        read.format.as_ref().and_then(readable_scalar_cache).map_or_else(String::new, |(layout, _)| format!("_{tag}{}", description_fingerprint(&layout)))
+        read.format
+            .as_ref()
+            .and_then(readable_scalar_cache)
+            .map_or_else(String::new, |(layout, _)| {
+                format!("_{tag}{}", description_fingerprint(&layout))
+            })
     };
     format!("{}{}", part("k", &reads.key), part("v", &reads.value))
 }

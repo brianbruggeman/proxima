@@ -10,10 +10,13 @@ use alloc::string::String;
 use proxima_numeric::ScaleArithmetic;
 use proxima_numeric::block_layout::BlockLayout;
 pub use proxima_tensor::Missing;
-use proxima_tensor::{ACTIVATION_GROUP_ELEMENTS, ACTIVATION_REACH, BoundOp, BoundOpKind, is_int8_run_layout, quantize_rule_is_served};
+use proxima_tensor::{
+    ACTIVATION_GROUP_ELEMENTS, ACTIVATION_REACH, BoundOp, BoundOpKind, is_int8_run_layout,
+    quantize_rule_is_served,
+};
 
-use super::{CudaGridSpec, EmitError, MAX_GRID_BLOCKS, WORD_C};
 use super::target::Target;
+use super::{CudaGridSpec, EmitError, MAX_GRID_BLOCKS, word_c};
 use crate::grid::checked_product;
 
 const QUANTIZE_THREADS: u64 = 256;
@@ -58,7 +61,12 @@ pub(crate) fn producer_missing(layout: &BlockLayout) -> Result<(), Missing> {
 }
 
 fn servable_layout(resolved: &BoundOp) -> Result<(&BlockLayout, ScaleArithmetic), EmitError> {
-    let BoundOpKind::BlockQuantize { layout, operands, arithmetic } = &resolved.kind else {
+    let BoundOpKind::BlockQuantize {
+        layout,
+        operands,
+        arithmetic,
+    } = &resolved.kind
+    else {
         return Err(EmitError::RenderKindMismatch {
             node: resolved.node,
             expected: "block_quantize",
@@ -68,10 +76,17 @@ fn servable_layout(resolved: &BoundOp) -> Result<(&BlockLayout, ScaleArithmetic)
     let dense_source = operands
         .first()
         .is_some_and(|(_, layout, _)| layout.base == 0 && layout.strides.last() == Some(&1));
-    match (producer_missing(layout).is_ok(), layout.block_bytes % 4 == 0, dense_source) {
+    match (
+        producer_missing(layout).is_ok(),
+        layout.block_bytes % 4 == 0,
+        dense_source,
+    ) {
         (true, true, true) => Ok((layout, *arithmetic)),
         (false, _, _) => Err(unsupported(resolved, "block_quantize_layout")),
-        (_, false, _) => Err(unsupported(resolved, "block_quantize_block_bytes_not_word_sized")),
+        (_, false, _) => Err(unsupported(
+            resolved,
+            "block_quantize_block_bytes_not_word_sized",
+        )),
         (_, _, false) => Err(unsupported(resolved, "block_quantize_source_not_dense")),
     }
 }
@@ -124,11 +139,19 @@ fn scale_and_code(arithmetic: ScaleArithmetic, reach: i32) -> String {
 /// The device function one warp runs on one 32-element group `group` of `layout`: absmax scale,
 /// codes under `arithmetic`, and the scaled code sum beside the scale, at the group's run offsets.
 pub(super) fn quantize_device(layout: &BlockLayout, arithmetic: ScaleArithmetic) -> String {
-    let reach = layout.encode_rule().map_or(ACTIVATION_REACH, |rule| rule.divisor);
+    let reach = layout
+        .encode_rule()
+        .map_or(ACTIVATION_REACH, |rule| rule.divisor);
     let scale_and_code = scale_and_code(arithmetic, reach);
     let runs = layout.runs();
-    let (scale_base, scale_stride) = (layout.run_scale_byte(0), layout.run_scale_byte(runs.min(2) - 1) - layout.run_scale_byte(0));
-    let (code_base, code_stride) = (layout.run_code_byte(0), layout.run_code_byte(runs.min(2) - 1) - layout.run_code_byte(0));
+    let (scale_base, scale_stride) = (
+        layout.run_scale_byte(0),
+        layout.run_scale_byte(runs.min(2) - 1) - layout.run_scale_byte(0),
+    );
+    let (code_base, code_stride) = (
+        layout.run_code_byte(0),
+        layout.run_code_byte(runs.min(2) - 1) - layout.run_code_byte(0),
+    );
     format!(
         "__device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float *out, long long group, unsigned int lane, bool live) {{\n\
          \x20   float x = in[group * 32 + lane];\n\
@@ -163,9 +186,10 @@ pub(super) fn render_block_quantize(
     let (layout, arithmetic) = servable_layout(resolved)?;
     let device = quantize_device(layout, arithmetic);
     let lane_mask_define = target.lane_mask_define();
+    let word_c = word_c(&target)?;
     Ok(format!(
         "#include <{header}>\n{lane_mask_define}{device}\n\
-         struct Uniforms {{ {WORD_C} groups; }};\n\n\
+         struct Uniforms {{ {word_c} groups; }};\n\n\
          extern \"C\" __global__ void __launch_bounds__({QUANTIZE_THREADS}) {entry}(\n\
          \x20   const float* __restrict__ in0,\n\
          \x20   float* __restrict__ out,\n\

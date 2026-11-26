@@ -418,6 +418,8 @@ fn emit_sizing_consts() {
         out.push_str(&format!(
             "pub const CUDA_MMA_OPERAND: &str = {cuda_mma_operand:?};\n"
         ));
+        let cuda_word = resolve_str(&root, "contraction", "cuda_word");
+        out.push_str(&format!("pub const CUDA_WORD: &str = {cuda_word:?};\n"));
     }
 
     if env::var_os("CARGO_FEATURE_METAL_TILED_GEMM").is_some() {

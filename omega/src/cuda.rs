@@ -1117,8 +1117,9 @@ fn refit_extent_fields_in_place(
     kernel.prologue = prologue;
     Ok(())
 }
-/// The numeric format of every runtime `Uniforms` word and every 64-bit index in
-/// emitted card-C. The host writes `WORD.width() / 8` bytes per field; the device
+/// The card-C spelling of [`Target::word`], the layout of every runtime `Uniforms`
+/// word and every 64-bit index in emitted card-C, derived from the layout rather
+/// than written twice. The host writes `width / 8` bytes per field; the device
 /// struct must spell a type of exactly that width.
 ///
 /// `long` is never that type. HIP and CUDA device compilation inherits the host
@@ -1127,18 +1128,26 @@ fn refit_extent_fields_in_place(
 /// read four bytes early, extents become zero, offsets wrap, and the mismatch
 /// surfaces later as a failed copy after a launch that already ran. `long long`
 /// is 8 bytes on every card-C target.
-pub const WORD: FloatLayout = FloatLayout::INT64;
+///
+/// # Errors
+/// [`EmitError::CudaUnsupportedWord`] when the configured name resolves to no
+/// signed 64-bit integer layout.
+pub(crate) fn word_c(target: &Target) -> Result<&'static str, EmitError> {
+    target
+        .word_layout()
+        .as_ref()
+        .and_then(card_c_integer)
+        .ok_or(EmitError::CudaUnsupportedWord { name: target.word })
+}
 
-/// The card-C spelling of [`WORD`], derived from the layout rather than written
-/// twice. `long long` is 64 bits on every card-C target; `long` is not.
-pub const WORD_C: &str = match card_c_integer(&WORD) {
-    Some(spelling) => spelling,
-    None => panic!("the uniform word must be an integer layout"),
-};
-
-const _: () = assert!(WORD.width() == 64);
-const _: () = assert!(WORD.width() as usize / 8 == core::mem::size_of::<i64>());
-const _: () = assert!(WORD.is_signed_integer());
+/// The bytes the host writes per uniform field on `target`.
+#[cfg(any(test, feature = "cuda-driver"))]
+fn word_bytes(target: &Target) -> Result<usize, EmitError> {
+    target
+        .word_layout()
+        .map(|layout| layout.width() as usize / 8)
+        .ok_or(EmitError::CudaUnsupportedWord { name: target.word })
+}
 
 /// The fixed-width card-C spelling of the signed 64-bit integer word. The
 /// mapping is deliberately narrow: a caller that needs another width adds the
@@ -1154,9 +1163,9 @@ pub(crate) const fn card_c_integer(layout: &FloatLayout) -> Option<&'static str>
 
 /// Packs the runtime ABI for the f32 elementwise CUDA kernels.
 ///
-/// The host and device words are both derived from [`WORD`], so the two sides
-/// cannot drift: every field is `WORD.width() / 8` bytes on the host and
-/// [`WORD_C`] in the emitted struct. Keeping the packer beside the emitter makes
+/// The host and device words are both derived from [`Target::word`], so the two sides
+/// cannot drift: every field is `word.width() / 8` bytes on the host and
+/// [`word_c`] in the emitted struct. Keeping the packer beside the emitter makes
 /// the source layout and the host layout one contract. `cuda_driver::launch`
 /// (this crate's own `cuda-driver` feature) is the one non-test caller — the
 /// `cuda` feature alone is the dependency-free emitter this module's own doc
@@ -1246,8 +1255,8 @@ fn push_cuda_gather_uniforms(bytes: &mut Vec<u8>, bound: &BoundOp, rank_len: usi
 
 /// Packs every CUDA/HIP graph ABI currently emitted by this module.
 /// The field order mirrors the `Uniforms` declarations in the renderers;
-/// every field is [`WORD_C`], so the host representation is fixed at
-/// `WORD.width() / 8`-byte words. This is the host half of the ABI contract and
+/// every field is [`word_c`], so the host representation is fixed at
+/// `word.width() / 8`-byte words. This is the host half of the ABI contract and
 /// is available with the `cuda-driver` feature (or in this crate's tests), which
 /// is what a conformance benchmark or an external driver calls.
 #[cfg(any(test, feature = "cuda-driver"))]
@@ -1421,17 +1430,18 @@ fn assert_no_host_width_long(source: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The number of [`WORD`]-sized fields a `struct Uniforms` body declares.
+/// The number of [`Target::word`]-sized fields a `struct Uniforms` body declares.
 #[cfg(any(test, feature = "cuda-driver"))]
 fn uniform_word_count(source: &str) -> Result<usize, String> {
     let Some(body) = uniform_struct_body(source) else {
         return Ok(0);
     };
+    let word_c = word_c(&Target::CUDA).map_err(|error| error.to_string())?;
     let mut total = 0usize;
     for field in body.split(';').map(str::trim).filter(|field| !field.is_empty()) {
-        if !field.starts_with(WORD_C) {
+        if !field.starts_with(word_c) {
             return Err(format!(
-                "a uniform field is not {WORD_C}: `{field}`"
+                "a uniform field is not {word_c}: `{field}`"
             ));
         }
         let mut count = 1usize;
@@ -1454,8 +1464,8 @@ fn uniform_word_count(source: &str) -> Result<usize, String> {
 }
 
 /// Checks one emitted kernel's `Uniforms` against its host pack: every field is
-/// [`WORD_C`], every 64-bit index is `long long`, and the packed byte length is
-/// the struct's word count times [`WORD`]'s width. Shared by the crate's tests
+/// [`word_c`], every 64-bit index is `long long`, and the packed byte length is
+/// the struct's word count times [`Target::word`]'s width. Shared by the crate's tests
 /// and the public conformance benchmark so the two cannot drift.
 ///
 /// # Errors
@@ -1467,11 +1477,11 @@ pub fn check_uniform_abi(kernel: &CudaKernel, packed: &[u8]) -> Result<usize, St
         assert_no_host_width_long(&stage.source)?;
     }
     let words = uniform_word_count(&kernel.source)?;
-    let expected = words * (WORD.width() as usize / 8);
+    let word_bytes = word_bytes(&Target::CUDA).map_err(|error| error.to_string())?;
+    let expected = words * word_bytes;
     if expected != packed.len() {
         return Err(format!(
-            "{words} device words of {} bytes, {} host bytes",
-            WORD.width() as usize / 8,
+            "{words} device words of {word_bytes} bytes, {} host bytes",
             packed.len()
         ));
     }
@@ -1485,9 +1495,10 @@ fn render_leaf(
     constant: Option<f32>,
 ) -> Result<String, EmitError> {
     let element_type = type_token(target, resolved.node, resolved.dtype)?;
+    let word_c = word_c(&target)?;
     let mut source = String::new();
     preamble(target, &mut source, element_type);
-    source.push_str(&format!("struct Uniforms {{ {WORD_C} total_elements; }};\n\n"));
+    source.push_str(&format!("struct Uniforms {{ {word_c} total_elements; }};\n\n"));
     kernel_signature(target, &mut source, &[], 0, 0, entry, element_type);
     source.push_str("    if (gid >= u.total_elements) { return; }\n");
     match constant {
@@ -1558,9 +1569,10 @@ fn render_moe_topk(target: Target, resolved: &BoundOp, entry: &str) -> Result<St
     let lane_bits = target.lane_bits();
     let shuffle_start = target.wave / 2;
     let mask = target.lane_mask();
+    let word_c = word_c(&target)?;
     let mut source = String::new();
     preamble(target, &mut source, "float");
-    source.push_str(&format!("struct Uniforms {{ {WORD_C} unused; }};\n\n"));
+    source.push_str(&format!("struct Uniforms {{ {word_c} unused; }};\n\n"));
     let weight_scores_parameter = if selected_score {
         "    const float* __restrict__ weight_scores,\n"
     } else {
@@ -2698,18 +2710,23 @@ fn kernel_signature_with_operand_types(
     source.push_str("    long long gid = (long long)blockIdx.x * (long long)blockDim.x + (long long)threadIdx.x;\n");
 }
 
-fn push_gather_uniform_fields(source: &mut String, gather_count: usize, rank_len: usize) {
+fn push_gather_uniform_fields(
+    source: &mut String,
+    word_c: &str,
+    gather_count: usize,
+    rank_len: usize,
+) {
     if gather_count == 0 {
         return;
     }
-    source.push_str(&format!("    {WORD_C} gather_index_base[{gather_count}];\n"));
+    source.push_str(&format!("    {word_c} gather_index_base[{gather_count}];\n"));
     source.push_str(&format!(
-        "    {WORD_C} gather_index_strides[{gather_count}][{rank_len}];\n"
+        "    {word_c} gather_index_strides[{gather_count}][{rank_len}];\n"
     ));
     source.push_str(&format!(
-        "    {WORD_C} gather_element_stride[{gather_count}];\n"
+        "    {word_c} gather_element_stride[{gather_count}];\n"
     ));
-    source.push_str(&format!("    {WORD_C} gather_extent[{gather_count}];\n"));
+    source.push_str(&format!("    {word_c} gather_extent[{gather_count}];\n"));
 }
 
 /// Emits the out-of-range check for one just-fetched, not-yet-clamped
@@ -2946,6 +2963,7 @@ fn render_elementwise(
     quantized: &[Option<Codec>],
     operand_types: &[&'static str],
 ) -> Result<String, EmitError> {
+    let word_c = word_c(&target)?;
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
@@ -2957,13 +2975,13 @@ fn render_elementwise(
     preamble(target, &mut source, element_type);
 
     source.push_str("struct Uniforms {\n");
-    source.push_str(&format!("    {WORD_C} total_elements;\n"));
-    source.push_str(&format!("    {WORD_C} extents[{rank_len}];\n"));
-    source.push_str(&format!("    {WORD_C} operand_base[{operand_count}];\n"));
+    source.push_str(&format!("    {word_c} total_elements;\n"));
+    source.push_str(&format!("    {word_c} extents[{rank_len}];\n"));
+    source.push_str(&format!("    {word_c} operand_base[{operand_count}];\n"));
     source.push_str(&format!(
-        "    {WORD_C} operand_strides[{operand_count}][{rank_len}];\n"
+        "    {word_c} operand_strides[{operand_count}][{rank_len}];\n"
     ));
-    push_gather_uniform_fields(&mut source, gather_count, rank_len);
+    push_gather_uniform_fields(&mut source, word_c, gather_count, rank_len);
     source.push_str("};\n\n");
 
     kernel_signature_with_operand_types(
@@ -4243,6 +4261,7 @@ fn render_reduce(
     device: EmitDevice,
     grouped: Option<&GroupedGemm>,
 ) -> Result<(String, &'static str), EmitError> {
+    let word_c = word_c(&target)?;
     let BoundOpKind::Reduce {
         reduce_op,
         init,
@@ -4307,28 +4326,28 @@ fn render_reduce(
     }
 
     source.push_str("struct Uniforms {\n");
-    source.push_str(&format!("    {WORD_C} output_total;\n"));
-    source.push_str(&format!("    {WORD_C} reduction_total;\n"));
-    source.push_str(&format!("    {WORD_C} output_extents[{output_rank_len}];\n"));
-    source.push_str(&format!("    {WORD_C} reduction_extents[{reduce_rank_len}];\n"));
-    source.push_str(&format!("    {WORD_C} operand_base[{operand_count}];\n"));
+    source.push_str(&format!("    {word_c} output_total;\n"));
+    source.push_str(&format!("    {word_c} reduction_total;\n"));
+    source.push_str(&format!("    {word_c} output_extents[{output_rank_len}];\n"));
+    source.push_str(&format!("    {word_c} reduction_extents[{reduce_rank_len}];\n"));
+    source.push_str(&format!("    {word_c} operand_base[{operand_count}];\n"));
     source.push_str(&format!(
-        "    {WORD_C} operand_strides[{operand_count}][{rank_len}];\n"
+        "    {word_c} operand_strides[{operand_count}][{rank_len}];\n"
     ));
-    source.push_str(&format!("    {WORD_C} out_base;\n"));
-    source.push_str(&format!("    {WORD_C} out_strides[{rank_len}];\n"));
+    source.push_str(&format!("    {word_c} out_base;\n"));
+    source.push_str(&format!("    {word_c} out_strides[{rank_len}];\n"));
     if epilogue_operand_count > 0 {
         source.push_str(&format!(
-            "    {WORD_C} epilogue_operand_base[{epilogue_operand_count}];\n"
+            "    {word_c} epilogue_operand_base[{epilogue_operand_count}];\n"
         ));
         source.push_str(&format!(
-            "    {WORD_C} epilogue_operand_strides[{epilogue_operand_count}][{output_rank_len}];\n"
+            "    {word_c} epilogue_operand_strides[{epilogue_operand_count}][{output_rank_len}];\n"
         ));
     }
     if is_broadcast_epilogue {
-        source.push_str(&format!("    {WORD_C} broadcast_out_strides[{rank_len}];\n"));
+        source.push_str(&format!("    {word_c} broadcast_out_strides[{rank_len}];\n"));
     }
-    push_gather_uniform_fields(&mut source, gather_count, rank_len);
+    push_gather_uniform_fields(&mut source, word_c, gather_count, rank_len);
     source.push_str("};\n\n");
 
     kernel_signature(
@@ -4442,6 +4461,7 @@ fn render_scan(
     entry: &str,
     quantized: &[Option<Codec>],
 ) -> Result<String, EmitError> {
+    let word_c = word_c(&target)?;
     let BoundOpKind::Reduce {
         reduce_op, init, ..
     } = &resolved.kind
@@ -4466,16 +4486,16 @@ fn render_scan(
     preamble(target, &mut source, element_type);
 
     source.push_str("struct Uniforms {\n");
-    source.push_str(&format!("    {WORD_C} outer_total;\n"));
-    source.push_str(&format!("    {WORD_C} inner_len;\n"));
-    source.push_str(&format!("    {WORD_C} outer_extents[{outer_rank_len}];\n"));
-    source.push_str(&format!("    {WORD_C} operand_base[{operand_count}];\n"));
+    source.push_str(&format!("    {word_c} outer_total;\n"));
+    source.push_str(&format!("    {word_c} inner_len;\n"));
+    source.push_str(&format!("    {word_c} outer_extents[{outer_rank_len}];\n"));
+    source.push_str(&format!("    {word_c} operand_base[{operand_count}];\n"));
     source.push_str(&format!(
-        "    {WORD_C} operand_strides[{operand_count}][{rank_len}];\n"
+        "    {word_c} operand_strides[{operand_count}][{rank_len}];\n"
     ));
-    source.push_str(&format!("    {WORD_C} out_base;\n"));
-    source.push_str(&format!("    {WORD_C} out_strides[{rank_len}];\n"));
-    push_gather_uniform_fields(&mut source, gather_count, rank_len);
+    source.push_str(&format!("    {word_c} out_base;\n"));
+    source.push_str(&format!("    {word_c} out_strides[{rank_len}];\n"));
+    push_gather_uniform_fields(&mut source, word_c, gather_count, rank_len);
     source.push_str("};\n\n");
 
     kernel_signature(target, &mut source, quantized, 0, gather_count, entry, element_type);
@@ -5522,17 +5542,34 @@ mod tests {
     /// while a bare `long` would be 32 bits under LLP64.
     #[test]
     fn the_uniform_word_is_a_fixed_width_sixty_four_bit_integer() {
-        assert_eq!(WORD, FloatLayout::INT64);
-        assert_eq!(WORD.width(), 64);
-        assert!(WORD.is_integer());
-        assert!(WORD.is_signed_integer());
-        assert_eq!(WORD.width() as usize / 8, core::mem::size_of::<i64>());
-        assert_eq!(card_c_integer(&WORD), Some(WORD_C));
-        assert_eq!(WORD_C, "long long");
+        for target in [Target::CUDA, Target::HIP, Target::hip_wave(32)] {
+            let word = target.word_layout().expect("the default word names a layout");
+            assert_eq!(word.width(), 64);
+            assert!(word.is_integer());
+            assert!(word.is_signed_integer());
+            assert_eq!(word.width() as usize / 8, core::mem::size_of::<i64>());
+            assert_eq!(card_c_integer(&word), Some("long long"));
+            assert_eq!(word_c(&target), Ok("long long"));
+            assert_eq!(word_bytes(&target), Ok(8));
+        }
+    }
+
+    /// A word name no layout answers to is a typed error at the first emit, not a panic.
+    #[test]
+    fn an_unknown_uniform_word_is_a_typed_error() {
+        let target = Target {
+            word: "no_such_layout",
+            ..Target::CUDA
+        };
+
+        assert_eq!(
+            word_c(&target),
+            Err(EmitError::CudaUnsupportedWord { name: "no_such_layout" })
+        );
     }
 
     /// The host packer and the device struct are two views of one numeric word:
-    /// every field is [`WORD`] on the host and [`WORD_C`] on the device, so the
+    /// every field is [`Target::word`] on the host and [`word_c`] on the device, so the
     /// packed byte length is the struct's word count times the word width.
     /// `long` would satisfy neither side: under LLP64 it is four bytes while the
     /// packer writes eight, which is the shifted-field failure this pins.
