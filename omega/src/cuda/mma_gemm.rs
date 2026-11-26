@@ -514,10 +514,14 @@ pub(super) fn push_mma_gemm_body(
         ));
     }
 
+    for rep in 0..ACT_REPS {
+        source.push_str(&format!("    float act_values{rep}[8];\n"));
+        push_act_load(source, plan, &reduce_dims, reduce_rank, rep, "0");
+    }
     source.push_str(&format!(
         "    for (long long stage_first = 0; stage_first < u.reduction_total; stage_first += {STAGE_K}) {{\n"
     ));
-    source.push_str("        float scale = 0.0f;\n        float minimum = 0.0f;\n");
+    source.push_str("        float scale = 0.0f, minimum = 0.0f;\n");
     source.push_str("        __align__(16) __half2 weight_pairs[4];\n");
     source.push_str("        #pragma unroll\n        for (int pair = 0; pair < 4; pair++) { weight_pairs[pair] = __float2half2_rn(0.0f); }\n");
     if plain {
@@ -565,63 +569,6 @@ pub(super) fn push_mma_gemm_body(
         let row = format!("load_row + {}", rep * FEATURE_TILE);
         source.push_str("        {
 ");
-        source.push_str("        float act_values[8];
-");
-        source.push_str("        #pragma unroll
-        for (int slot = 0; slot < 8; slot++) { act_values[slot] = 0.0f; }
-");
-        source.push_str(&format!("        if (token_ok{rep} && stage_first + load_segment < u.reduction_total) {{
-"));
-        source.push_str("            long long reduce_rest = stage_first + load_segment;
-");
-        source.push_str(&format!("            long long reduce_coord[{reduce_rank}];
-"));
-        source.push_str("            long long reduce_offset = 0;
-");
-        for (index, dim) in reduce_dims.iter().enumerate().rev() {
-            source.push_str(&format!(
-                "            reduce_coord[{index}] = reduce_rest % u.reduction_extents[{index}]; reduce_rest /= u.reduction_extents[{index}];
-            reduce_offset += reduce_coord[{index}] * u.operand_strides[{activation}][{dim}];
-"
-            ));
-        }
-        let last = reduce_rank - 1;
-        source.push_str(&format!(
-            "            const long long segment_index = token_offset{rep} + reduce_offset;
-            if (u.operand_strides[{activation}][{inner}] == 1 && (u.reduction_extents[{last}] & 7) == 0 && (segment_index & 3) == 0) {{
-                const float4 first = *(const float4 *)(in{activation} + segment_index);
-                const float4 second = *(const float4 *)(in{activation} + segment_index + 4);
-                act_values[0] = first.x; act_values[1] = first.y; act_values[2] = first.z; act_values[3] = first.w;
-                act_values[4] = second.x; act_values[5] = second.y; act_values[6] = second.z; act_values[7] = second.w;
-            }} else {{
-",
-            inner = reduce_dims[last]
-        ));
-        source.push_str("            #pragma unroll
-            for (int slot = 0; slot < 8; slot++) {
-");
-        source.push_str(&format!(
-            "                act_values[slot] = in{activation}[token_offset{rep} + reduce_offset];
-"
-        ));
-        source.push_str(&format!(
-            "                reduce_coord[{last}]++; reduce_offset += u.operand_strides[{activation}][{}];
-",
-            reduce_dims[last]
-        ));
-        for index in (1..reduce_rank).rev() {
-            source.push_str(&format!(
-                "                if (reduce_coord[{index}] == u.reduction_extents[{index}]) {{ reduce_offset -= reduce_coord[{index}] * u.operand_strides[{activation}][{}]; reduce_coord[{index}] = 0; reduce_coord[{prev}]++; reduce_offset += u.operand_strides[{activation}][{}]; }}
-",
-                reduce_dims[index],
-                reduce_dims[index - 1],
-                prev = index - 1
-            ));
-        }
-        source.push_str("            }
-            }
-        }
-");
         source.push_str("        __align__(16) __half2 high_pairs[4];
 ");
         if !single {
@@ -635,22 +582,22 @@ pub(super) fn push_mma_gemm_body(
         source.push_str("        #pragma unroll
         for (int pair = 0; pair < 4; pair++) {
 ");
-        source.push_str("            __half high_a = __float2half_rn(act_values[2 * pair]);
-");
-        source.push_str("            __half high_b = __float2half_rn(act_values[2 * pair + 1]);
-");
+        source.push_str(&format!("            __half high_a = __float2half_rn(act_values{rep}[2 * pair]);
+"));
+        source.push_str(&format!("            __half high_b = __float2half_rn(act_values{rep}[2 * pair + 1]);
+"));
         source.push_str("            high_pairs[pair] = __halves2half2(high_a, high_b);
 ");
         if !single {
-            source.push_str("            low_pairs[pair] = __halves2half2(__float2half_rn(act_values[2 * pair] - __half2float(high_a)), __float2half_rn(act_values[2 * pair + 1] - __half2float(high_b)));
-");
+            source.push_str(&format!("            low_pairs[pair] = __halves2half2(__float2half_rn(act_values{rep}[2 * pair] - __half2float(high_a)), __float2half_rn(act_values{rep}[2 * pair + 1] - __half2float(high_b)));
+"));
         }
         if has_minimum && single {
             source.push_str("            half_sum += __half2float(high_a) + __half2float(high_b);
 ");
         } else if has_minimum {
-            source.push_str("            half_sum += act_values[2 * pair] + act_values[2 * pair + 1];
-");
+            source.push_str(&format!("            half_sum += act_values{rep}[2 * pair] + act_values{rep}[2 * pair + 1];
+"));
         }
         source.push_str("        }
 ");
@@ -676,6 +623,13 @@ pub(super) fn push_mma_gemm_body(
 ");
     }
     source.push_str("        __syncthreads();\n");
+    source.push_str(&format!(
+        "        if (stage_first + {STAGE_K} < u.reduction_total) {{\n"
+    ));
+    for rep in 0..ACT_REPS {
+        push_act_load(source, plan, &reduce_dims, reduce_rank, rep, &format!("stage_first + {STAGE_K}"));
+    }
+    source.push_str("        }\n");
 
     for half_index in 0..2usize {
         source.push_str("        {
@@ -802,6 +756,62 @@ pub(super) fn push_mma_gemm_body(
         "feature_first + warp_feature * 16 + group + (slot >> 1) * 8",
         &token_expr,
     )
+}
+
+fn push_act_load(
+    source: &mut String,
+    plan: &MmaGemm,
+    reduce_dims: &[u16],
+    reduce_rank: usize,
+    rep: usize,
+    stage: &str,
+) {
+    let activation = plan.activation;
+    source.push_str(&format!(
+        "        #pragma unroll
+        for (int slot = 0; slot < 8; slot++) {{ act_values{rep}[slot] = 0.0f; }}
+        if (token_ok{rep} && {stage} + load_segment < u.reduction_total) {{
+            long long reduce_rest = {stage} + load_segment;
+            long long reduce_coord[{reduce_rank}];
+            long long reduce_offset = 0;
+"
+    ));
+    for (index, dim) in reduce_dims.iter().enumerate().rev() {
+        source.push_str(&format!(
+            "            reduce_coord[{index}] = reduce_rest % u.reduction_extents[{index}]; reduce_rest /= u.reduction_extents[{index}];
+            reduce_offset += reduce_coord[{index}] * u.operand_strides[{activation}][{dim}];
+"
+        ));
+    }
+    let last = reduce_rank - 1;
+    let inner = reduce_dims[last];
+    source.push_str(&format!(
+        "            const long long segment_index = token_offset{rep} + reduce_offset;
+            if (u.operand_strides[{activation}][{inner}] == 1 && (u.reduction_extents[{last}] & 7) == 0 && (segment_index & 3) == 0) {{
+                const float4 first = *(const float4 *)(in{activation} + segment_index);
+                const float4 second = *(const float4 *)(in{activation} + segment_index + 4);
+                act_values{rep}[0] = first.x; act_values{rep}[1] = first.y; act_values{rep}[2] = first.z; act_values{rep}[3] = first.w;
+                act_values{rep}[4] = second.x; act_values{rep}[5] = second.y; act_values{rep}[6] = second.z; act_values{rep}[7] = second.w;
+            }} else {{
+            #pragma unroll
+            for (int slot = 0; slot < 8; slot++) {{
+                act_values{rep}[slot] = in{activation}[token_offset{rep} + reduce_offset];
+                reduce_coord[{last}]++; reduce_offset += u.operand_strides[{activation}][{inner}];
+"
+    ));
+    for index in (1..reduce_rank).rev() {
+        source.push_str(&format!(
+            "                if (reduce_coord[{index}] == u.reduction_extents[{index}]) {{ reduce_offset -= reduce_coord[{index}] * u.operand_strides[{activation}][{}]; reduce_coord[{index}] = 0; reduce_coord[{prev}]++; reduce_offset += u.operand_strides[{activation}][{}]; }}
+",
+            reduce_dims[index],
+            reduce_dims[index - 1],
+            prev = index - 1
+        ));
+    }
+    source.push_str("            }
+            }
+        }
+");
 }
 
 pub(super) fn push_tile_origin(
