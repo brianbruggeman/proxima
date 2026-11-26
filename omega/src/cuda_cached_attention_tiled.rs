@@ -19,19 +19,21 @@ const MMA_HEAD_DIMS: core::ops::RangeInclusive<u64> = 64..=256;
 
 const MMA_HEAD_DIM_STEP: u64 = 16;
 
-fn rounds_operands(policy: NumericPolicy) -> bool {
-    policy.activation_quantization || policy.input_rounding
+fn rounds_operands(policy: NumericPolicy, planes: ScorePlanes) -> bool {
+    policy.activation_quantization || (policy.input_rounding && planes == ScorePlanes::Whole)
 }
 
-/// The tensor-core body rounds Q, K and V to half precision, which only a policy that grants
-/// activation quantization or `input_rounding` accepts (see `rounds_operands`); paired and whole-plane ops alike take it
-/// when their head width meets the mma width rule, and otherwise stay on the full-precision
-/// shared-memory body.
+/// The tensor-core body rounds Q, K and V to half precision, which a policy that grants
+/// activation quantization accepts for any op, and `input_rounding` accepts for whole-plane ops
+/// only (see `rounds_operands`). Paired attention computes the incumbent's arithmetic only once
+/// its stage value is lowered (PROXNUM-749), so `input_rounding` alone must not move it onto the
+/// tensor-core body. An accepted op takes it when its head width meets the mma width rule, and
+/// otherwise stays on the full-precision shared-memory body.
 pub(crate) fn cached_attention_uses_mma(kind: &BoundOpKind, numeric_policy: NumericPolicy) -> bool {
-    let BoundOpKind::CachedAttention { head_dim, .. } = kind else {
+    let BoundOpKind::CachedAttention { head_dim, planes, .. } = kind else {
         return false;
     };
-    rounds_operands(numeric_policy)
+    rounds_operands(numeric_policy, *planes)
         && mma_head_dim_fits(*head_dim)
         && cached_attention_tile_rows(kind, numeric_policy).is_some()
 }
@@ -44,9 +46,9 @@ fn head_dim_fits(head_dim: u64, planes: ScorePlanes, numeric_policy: NumericPoli
     match planes {
         ScorePlanes::Whole => {
             (head_dim > 0 && head_dim.is_multiple_of(4) && head_dim <= LANE_FLOATS)
-                || (rounds_operands(numeric_policy) && mma_head_dim_fits(head_dim))
+                || (rounds_operands(numeric_policy, planes) && mma_head_dim_fits(head_dim))
         }
-        _ if rounds_operands(numeric_policy) => mma_head_dim_fits(head_dim),
+        _ if rounds_operands(numeric_policy, planes) => mma_head_dim_fits(head_dim),
         _ => head_dim == LANE_FLOATS,
     }
 }
