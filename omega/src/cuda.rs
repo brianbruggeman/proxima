@@ -5384,6 +5384,21 @@ mod tests {
     }
 
     #[test]
+    fn whole_attention_at_an_mma_width_takes_the_tensor_core_body_under_input_rounding() {
+        let policy = NumericPolicy::llama_relaxed().with_input_rounding(true);
+        let kernel = emit_cuda_with_policy(&whole_attention_op(64, 6, 64), &no_packed(), policy).expect("whole attention emits");
+
+        assert!(kernel.entry.contains("_tq32_mma"), "{}", kernel.entry);
+    }
+
+    #[test]
+    fn whole_attention_at_an_mma_width_keeps_the_scalar_tiled_body_under_plain_llama_relaxed() {
+        let kernel = emit_cuda_with_policy(&whole_attention_op(64, 6, 64), &no_packed(), NumericPolicy::llama_relaxed()).expect("whole attention emits");
+
+        assert!(kernel.entry.contains("_tq32") && !kernel.entry.contains("_mma"), "{}", kernel.entry);
+    }
+
+    #[test]
     fn whole_attention_off_the_mma_widths_keeps_the_scalar_tiled_body_under_a_quantizing_policy() {
         let policy = NumericPolicy::bit_exact().with_activation_quantization(true);
         let kernel = emit_cuda_with_policy(&whole_attention_op(64, 6, 36), &no_packed(), policy).expect("whole attention emits");
@@ -6961,6 +6976,22 @@ mod tests {
             assert!(!kernel.entry.contains("_grp1"), "{}", kernel.entry);
             assert!(grouped_pair(&bound, codec).is_none());
         }
+    }
+
+    #[test]
+    fn a_stored_mma_operand_weight_gemm_rounds_the_activation_once_under_either_rounding_permission() {
+        let bound = dense_expert_free_op(128, 512, 200);
+        let codec = Target::CUDA.mma_operand_codec().expect("the cuda target names its mma operand");
+        let quantized = operand_codecs(&bound, &packed_expert_weight(&bound, codec));
+        let single = |policy: NumericPolicy| {
+            mma_gemm_plan(&bound, &quantized, policy)
+                .expect("several-token gemm takes the mma plan")
+                .single_activation
+        };
+
+        assert!(single(NumericPolicy::llama_relaxed().with_input_rounding(true)));
+        assert!(single(NumericPolicy::llama_relaxed().with_activation_quantization(true)));
+        assert!(!single(NumericPolicy::llama_relaxed()));
     }
 
     #[test]

@@ -19,14 +19,19 @@ const MMA_HEAD_DIMS: core::ops::RangeInclusive<u64> = 64..=256;
 
 const MMA_HEAD_DIM_STEP: u64 = 16;
 
-/// The tensor-core body rounds Q, K and V to half precision, which only a policy that quantizes
-/// activations accepts; paired and whole-plane ops alike take it when their head width meets the
-/// mma width rule, and otherwise stay on the full-precision shared-memory body.
+fn rounds_operands(policy: NumericPolicy) -> bool {
+    policy.activation_quantization || policy.input_rounding
+}
+
+/// The tensor-core body rounds Q, K and V to half precision, which only a policy that grants
+/// activation quantization or `input_rounding` accepts (see `rounds_operands`); paired and whole-plane ops alike take it
+/// when their head width meets the mma width rule, and otherwise stay on the full-precision
+/// shared-memory body.
 pub(crate) fn cached_attention_uses_mma(kind: &BoundOpKind, numeric_policy: NumericPolicy) -> bool {
     let BoundOpKind::CachedAttention { head_dim, .. } = kind else {
         return false;
     };
-    numeric_policy.activation_quantization
+    rounds_operands(numeric_policy)
         && mma_head_dim_fits(*head_dim)
         && cached_attention_tile_rows(kind, numeric_policy).is_some()
 }
@@ -39,9 +44,9 @@ fn head_dim_fits(head_dim: u64, planes: ScorePlanes, numeric_policy: NumericPoli
     match planes {
         ScorePlanes::Whole => {
             (head_dim > 0 && head_dim.is_multiple_of(4) && head_dim <= LANE_FLOATS)
-                || (numeric_policy.activation_quantization && mma_head_dim_fits(head_dim))
+                || (rounds_operands(numeric_policy) && mma_head_dim_fits(head_dim))
         }
-        _ if numeric_policy.activation_quantization => mma_head_dim_fits(head_dim),
+        _ if rounds_operands(numeric_policy) => mma_head_dim_fits(head_dim),
         _ => head_dim == LANE_FLOATS,
     }
 }

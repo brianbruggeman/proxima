@@ -187,7 +187,8 @@ pub(super) fn mma_gemm_plan_for(
             activation,
             codec,
             plain_weight,
-            single_activation: numeric_policy.activation_quantization,
+            single_activation: numeric_policy.activation_quantization
+                || (numeric_policy.input_rounding && !plain_weight && Some(codec) == Target::CUDA.mma_operand_codec()),
             int8,
             feature_positions,
             token_positions,
