@@ -68,6 +68,7 @@ use proxima_tensor::{
     Layout, Lookup, NodeId, Op, ReduceInit, Refusal, ScalarOp, ScorePlanes, StepArg,
 };
 
+use crate::backend::cuda::dialect::Cuda;
 use crate::cuda_cached_attention::{
     cached_attention_entry_name, cached_attention_runtime_bounds, render_cached_attention_cuda,
 };
@@ -84,6 +85,7 @@ use crate::lowering::{
     gather_is_reduction_invariant, gather_slots, is_cooperative_reduce_op, operand_dtype,
     program_operand_dtypes, reduction_dims,
 };
+use crate::render::HardwareScalar;
 use target::Target;
 
 mod block_dot;
@@ -1840,21 +1842,24 @@ pub(crate) fn type_token(
     node: NodeId,
     dtype: DType,
 ) -> Result<&'static str, EmitError> {
-    match device_scalar(dtype) {
-        Some(DeviceScalar {
-            class: DeviceClass::Half,
-            ..
-        }) => Ok("__half"),
-        Some(DeviceScalar {
-            class: DeviceClass::Bfloat,
-            ..
-        }) => Ok(target.bfloat_type),
-        Some(DeviceScalar {
-            class: DeviceClass::Word,
-            scalar,
-            ..
-        }) => Ok(scalar),
-        None => Err(EmitError::UnsupportedDType {
+    let dialect = Cuda { target };
+    let narrow = match dtype {
+        DType::Layout(layout) => {
+            HardwareScalar::of(&dialect, &layout).and_then(|row| dialect.token(row))
+        }
+        _ => None,
+    };
+    match (device_scalar(dtype), narrow) {
+        (
+            Some(DeviceScalar {
+                class: DeviceClass::Word,
+                scalar,
+                ..
+            }),
+            _,
+        ) => Ok(scalar),
+        (Some(_), Some(token)) => Ok(token),
+        (Some(_), None) | (None, _) => Err(EmitError::UnsupportedDType {
             node,
             dtype,
             backend: target.language_name(),

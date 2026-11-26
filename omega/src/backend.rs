@@ -66,6 +66,8 @@
 //! so a wrapper would relocate the impl without enabling any composition. The
 //! free-function pair stays.
 
+#[cfg(feature = "cuda")]
+pub mod cuda;
 #[cfg(feature = "cuda-driver")]
 pub mod hip;
 #[cfg(feature = "wgpu-backend")]

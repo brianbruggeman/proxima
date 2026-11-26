@@ -50,6 +50,10 @@ pub mod command_buffer_plan;
 
 #[cfg(feature = "std")]
 pub mod backend;
+#[cfg(all(feature = "cuda", not(feature = "std")))]
+pub mod backend {
+    pub mod cuda;
+}
 #[cfg(feature = "alloc")]
 pub mod bind_plan;
 #[cfg(feature = "std")]
