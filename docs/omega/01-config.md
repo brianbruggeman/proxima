@@ -150,7 +150,7 @@ The real output repeats that block once more under `Caused by:`, because two lay
 
 `constraints` is a `ResourceConstraints` (`config.rs:525`) of three optional byte ceilings: `max_host_tensor_bytes` (`:528`), `max_device_buffer_bytes` (`:531`) and `max_single_device_buffer_bytes` (`:534`). `None` means no ceiling; `Some(0)` is a validation error, because a zero-byte ceiling is a typo rather than a policy.
 
-`numeric` is `proxima_numeric::NumericPolicy` (`proxima-numeric/src/numeric.rs:27`), ten booleans that each permit one class of rewriting: `contraction`, `reassociation`, `nan_assumptions`, `signed_zero`, `approx_functions`, `epilogue_sources`, `activation_quantization`, `bf16_input_rounding`, `flash_narrowing` and `accumulator_narrowing`. All ten are `false` in `NumericPolicy::bit_exact()` (`numeric.rs:126`), which is the default here, so a fresh omega config refuses every rewrite that could change a bit.
+`numeric` is `proxima_numeric::NumericPolicy` (`proxima-numeric/src/numeric.rs:27`), ten booleans that each permit one class of rewriting: `contraction`, `reassociation`, `nan_assumptions`, `signed_zero`, `approx_functions`, `epilogue_sources`, `activation_quantization`, `input_rounding`, `flash_narrowing` and `accumulator_narrowing`. All ten are `false` in `NumericPolicy::bit_exact()` (`numeric.rs:126`), which is the default here, so a fresh omega config refuses every rewrite that could change a bit.
 
 ## 6. Two sibling configs
 

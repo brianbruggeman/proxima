@@ -143,8 +143,8 @@ mod configured_runtime_tests {
         assert_eq!(from_default, None);
         let oracle_policy =
             DenseMmaInputLayout::explicit(FloatLayout::BF16).apply_to(configured.numeric_policy);
-        assert!(oracle_policy.bf16_input_rounding, "the cpu oracle gets the grant the plan gets");
-        assert!(!configured.numeric_policy.bf16_input_rounding);
+        assert!(oracle_policy.input_rounding, "the cpu oracle gets the grant the plan gets");
+        assert!(!configured.numeric_policy.input_rounding);
     }
 
     fn negate_program() -> Vec<Op> {

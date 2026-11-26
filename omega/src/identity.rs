@@ -465,7 +465,7 @@ pub(crate) const fn numeric_policy_cache_token(policy: NumericPolicy) -> [u8; 2]
     if policy.activation_quantization {
         bits |= 0b0100_0000;
     }
-    if policy.bf16_input_rounding {
+    if policy.input_rounding {
         bits |= 0b1000_0000;
     }
     [HEX[(bits >> 4) as usize], HEX[(bits & 0x0f) as usize]]
@@ -1318,9 +1318,9 @@ mod numeric_policy_cache_token_tests {
     }
 
     #[test]
-    fn bf16_input_rounding_permission_changes_the_cache_token() {
+    fn input_rounding_permission_changes_the_cache_token() {
         let exact = NumericPolicy::llama_relaxed();
-        let rounded = exact.with_bf16_input_rounding(true);
+        let rounded = exact.with_input_rounding(true);
         assert_ne!(
             numeric_policy_cache_token(exact),
             numeric_policy_cache_token(rounded)

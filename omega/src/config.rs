@@ -194,11 +194,11 @@ impl DenseMmaInputLayout {
     }
 
     /// The one rule turning a configured layout into the plan's numeric policy: grants
-    /// `bf16_input_rounding` when derived or bf16, else returns `policy` unchanged.
+    /// `input_rounding` when derived or bf16, else returns `policy` unchanged.
     #[must_use]
     pub fn apply_to(self, policy: NumericPolicy) -> NumericPolicy {
         if self.uses_bf16_input_rounding() {
-            policy.with_bf16_input_rounding(true)
+            policy.with_input_rounding(true)
         } else {
             policy
         }
@@ -1101,9 +1101,9 @@ mod tests {
     #[test]
     fn apply_to_grants_input_rounding_for_derived_and_bf16_only() {
         let base = NumericPolicy::llama_relaxed();
-        assert!(!base.bf16_input_rounding);
-        assert!(DenseMmaInputLayout::derived().apply_to(base).bf16_input_rounding);
-        assert!(DenseMmaInputLayout::explicit(FloatLayout::BF16).apply_to(base).bf16_input_rounding);
+        assert!(!base.input_rounding);
+        assert!(DenseMmaInputLayout::derived().apply_to(base).input_rounding);
+        assert!(DenseMmaInputLayout::explicit(FloatLayout::BF16).apply_to(base).input_rounding);
         assert_eq!(DenseMmaInputLayout::explicit(FloatLayout::BF32).apply_to(base), base);
     }
 

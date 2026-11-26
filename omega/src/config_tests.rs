@@ -45,7 +45,7 @@ const CLEAN_ENVIRONMENT: [(&str, Option<&str>); 34] = [
     ("OMEGA_WEIGHT_CONVERSION", None),
     ("OMEGA_MOE_GROUPING", None),
     ("OMEGA_DENSE_MMA_INPUT_LAYOUT", None),
-    ("OMEGA_NUMERIC_BF16_INPUT_ROUNDING", None),
+    ("OMEGA_NUMERIC_INPUT_ROUNDING", None),
     ("OMEGA_HIP_WAVE", None),
     ("OMEGA_HIP_DEVICE", None),
     ("OMEGA_KV_PADDING", None),
@@ -164,7 +164,7 @@ fn runtime_config_defaults_preserve_legacy_values() {
     assert!(!config.numeric.signed_zero);
     assert!(!config.numeric.approx_functions);
     assert!(!config.numeric.epilogue_sources);
-    assert!(!config.numeric.bf16_input_rounding);
+    assert!(!config.numeric.input_rounding);
     assert_eq!(
         config.dense_mma_input_layout,
         DenseMmaInputLayout::derived()
@@ -554,7 +554,7 @@ fn runtime_config_requires_measurement_samples() {
 #[test]
 fn runtime_config_numeric_permissions_round_trip_independently() {
     let source =
-        "[numeric]\ncontraction = true\napprox_functions = true\nbf16_input_rounding = true\n";
+        "[numeric]\ncontraction = true\napprox_functions = true\ninput_rounding = true\n";
     let from_serde: RuntimeConfig = toml::from_str(source).expect("numeric TOML deserializes");
     assert!(from_serde.numeric.contraction);
     assert!(!from_serde.numeric.reassociation);
@@ -562,7 +562,7 @@ fn runtime_config_numeric_permissions_round_trip_independently() {
     assert!(!from_serde.numeric.signed_zero);
     assert!(from_serde.numeric.approx_functions);
     assert!(!from_serde.numeric.epilogue_sources);
-    assert!(from_serde.numeric.bf16_input_rounding);
+    assert!(from_serde.numeric.input_rounding);
 
     let serialized = toml::to_string(&from_serde).expect("runtime config serializes");
     let serde_round_trip: RuntimeConfig =
@@ -584,7 +584,7 @@ fn runtime_config_numeric_permissions_round_trip_independently() {
             NumericPolicy::bit_exact()
                 .with_contraction(true)
                 .with_approx_functions(true)
-                .with_bf16_input_rounding(true),
+                .with_input_rounding(true),
         )
         .build()
         .expect("numeric builder config validates");

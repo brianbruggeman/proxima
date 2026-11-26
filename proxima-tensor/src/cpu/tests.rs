@@ -16716,7 +16716,7 @@ async fn one_end_aligned_query_equals_the_last_row_of_the_full_prefill_attention
 }
 
 #[cfg(feature = "config")]
-mod bf16_input_rounding {
+mod input_rounding {
     use super::*;
     use crate::config::TensorExecutionConfig;
     use crate::op::ReduceInit;
@@ -16860,7 +16860,7 @@ mod bf16_input_rounding {
     fn granted_policy_rounds_the_f32_operand_to_bf16_before_a_bf16_weight_matmul() {
         let (bytes, weight, activation) = fixture();
         let actual = run(
-            NumericPolicy::bit_exact().with_bf16_input_rounding(true),
+            NumericPolicy::bit_exact().with_input_rounding(true),
             &bytes,
             &activation,
         );

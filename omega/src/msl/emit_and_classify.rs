@@ -7,7 +7,7 @@ use super::*;
 
 /// The tile layout a dense MMA stages its operands in when the config does not name one: bfloat16
 /// tiles exactly when a bfloat16 operand is present AND either every operand is bfloat16 (nothing is
-/// rounded) or the policy grants [`NumericRewrite::Bf16InputRounding`] (the other operand is then
+/// rounded) or the policy grants [`NumericRewrite::InputRounding`] (the other operand is then
 /// rounded to bf16, as llama.cpp does); otherwise binary32 tiles, which
 /// read the bfloat16 operand through its layout and keep the other operand unrounded.
 pub(crate) fn default_dense_mma_input_layout(
@@ -5320,7 +5320,7 @@ pub(crate) fn has_dense_bf16_mma_candidate(
     classify_dense_batched_gemm(
         resolved,
         &quantized,
-        numeric_policy.with_bf16_input_rounding(true),
+        numeric_policy.with_input_rounding(true),
         *reduce_op,
         *init,
         output_axes,

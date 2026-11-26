@@ -225,7 +225,7 @@ mod tests {
             .with_approx_functions(bits & 0b0001_0000 != 0)
             .with_epilogue_sources(bits & 0b0010_0000 != 0)
             .with_activation_quantization(bits & 0b0100_0000 != 0)
-            .with_bf16_input_rounding(bits & 0b1000_0000 != 0)
+            .with_input_rounding(bits & 0b1000_0000 != 0)
     }
 
     #[test]

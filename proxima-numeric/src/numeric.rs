@@ -85,12 +85,13 @@ pub struct NumericPolicy {
     #[cfg_attr(feature = "config", setting(default = false))]
     #[cfg_attr(feature = "config", serde(default))]
     pub activation_quantization: bool,
-    /// Permits rounding a wider dense-MMA operand to BF16 fragments when the
-    /// selected plan input layout is BF16. This changes input bits before the
+    /// Permits rounding a wider dense-MMA operand once, to the narrower stored
+    /// float layout the selected plan multiplies in. The layout comes from the
+    /// plan, never from this permission. This changes input bits before the
     /// multiply and is independent of contraction or reduction order.
     #[cfg_attr(feature = "config", setting(default = false))]
     #[cfg_attr(feature = "config", serde(default))]
-    pub bf16_input_rounding: bool,
+    pub input_rounding: bool,
     /// Permits binding cached attention with the f32 online-softmax arithmetic instead of llama.cpp's
     /// default flash arithmetic (f16 query/key/value, f16 accumulator). The CPU withholds it and
     /// computes what the incumbent computes; a backend whose kernels are f32 until they emit f16
@@ -155,7 +156,7 @@ impl NumericPolicy {
             approx_functions: false,
             epilogue_sources: false,
             activation_quantization: false,
-            bf16_input_rounding: false,
+            input_rounding: false,
             flash_narrowing: false,
             accumulator_narrowing: false,
             flat_activation_blocks: false,
@@ -180,7 +181,7 @@ impl NumericPolicy {
             approx_functions: false,
             epilogue_sources: false,
             activation_quantization: false,
-            bf16_input_rounding: false,
+            input_rounding: false,
             flash_narrowing: false,
             accumulator_narrowing: false,
             flat_activation_blocks: false,
@@ -201,7 +202,7 @@ impl NumericPolicy {
             approx_functions: true,
             epilogue_sources: false,
             activation_quantization: false,
-            bf16_input_rounding: false,
+            input_rounding: false,
             flash_narrowing: false,
             accumulator_narrowing: false,
             flat_activation_blocks: false,
@@ -221,7 +222,7 @@ impl NumericPolicy {
             && (!required.approx_functions || self.approx_functions)
             && (!required.epilogue_sources || self.epilogue_sources)
             && (!required.activation_quantization || self.activation_quantization)
-            && (!required.bf16_input_rounding || self.bf16_input_rounding)
+            && (!required.input_rounding || self.input_rounding)
             && (!required.flash_narrowing || self.flash_narrowing)
     }
 
@@ -275,8 +276,8 @@ impl NumericPolicy {
     }
 
     #[must_use]
-    pub const fn with_bf16_input_rounding(mut self, bf16_input_rounding: bool) -> Self {
-        self.bf16_input_rounding = bf16_input_rounding;
+    pub const fn with_input_rounding(mut self, input_rounding: bool) -> Self {
+        self.input_rounding = input_rounding;
         self
     }
 
@@ -344,9 +345,9 @@ pub enum NumericRewrite {
     /// Rounding a packed-weight matvec's activation vector to int8 so the dot
     /// product runs as integer `dp4a`. Needs `activation_quantization` alone.
     ActivationQuantization,
-    /// Rounding a wider dense-matrix operand to BF16 fragments before MMA.
-    /// Needs `bf16_input_rounding` alone.
-    Bf16InputRounding,
+    /// Rounding a wider dense-matrix operand to the plan's narrower float layout before MMA.
+    /// Needs `input_rounding` alone.
+    InputRounding,
     /// Merging a multiply and an add into one hardware FMA.
     FmaContraction,
     /// Reordering an associative reduction as a tree instead of a left fold.
@@ -390,8 +391,8 @@ impl NumericRewrite {
                 activation_quantization: true,
                 ..NumericPolicy::bit_exact()
             },
-            Self::Bf16InputRounding => NumericPolicy {
-                bf16_input_rounding: true,
+            Self::InputRounding => NumericPolicy {
+                input_rounding: true,
                 accumulator_narrowing: false,
                 ..NumericPolicy::bit_exact()
             },
@@ -415,7 +416,7 @@ impl NumericRewrite {
 }
 
 /// Whether a dense matmul stages its operands as bf16 tiles: a bf16 operand is present AND either
-/// every operand is bf16 (nothing is rounded) or `policy` grants [`NumericRewrite::Bf16InputRounding`]
+/// every operand is bf16 (nothing is rounded) or `policy` grants [`NumericRewrite::InputRounding`]
 /// (the f32 operand is then rounded to bf16, round-to-nearest-even, as llama.cpp does).
 ///
 /// The one predicate the Metal emitter's tile-layout choice and the CPU evaluator's operand rounding
@@ -427,7 +428,7 @@ pub fn dense_matmul_uses_bf16_tiles(
     all_operands_bf16: bool,
 ) -> bool {
     has_bf16_operand
-        && (all_operands_bf16 || admit(policy, NumericRewrite::Bf16InputRounding).is_ok())
+        && (all_operands_bf16 || admit(policy, NumericRewrite::InputRounding).is_ok())
 }
 
 /// The one admission check every rewrite site calls before firing — a typed
@@ -554,18 +555,18 @@ mod tests {
     }
 
     #[test]
-    fn bf16_input_rounding_is_granted_only_by_its_own_permission() {
+    fn input_rounding_is_granted_only_by_its_own_permission() {
         assert!(
             admit(
                 NumericPolicy::llama_relaxed(),
-                NumericRewrite::Bf16InputRounding
+                NumericRewrite::InputRounding
             )
             .is_err()
         );
         assert!(
             admit(
-                NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
-                NumericRewrite::Bf16InputRounding
+                NumericPolicy::llama_relaxed().with_input_rounding(true),
+                NumericRewrite::InputRounding
             )
             .is_ok()
         );
@@ -573,7 +574,7 @@ mod tests {
 
     #[test]
     fn dense_matmul_takes_bf16_tiles_by_operand_mix_and_grant() {
-        let granted = NumericPolicy::bit_exact().with_bf16_input_rounding(true);
+        let granted = NumericPolicy::bit_exact().with_input_rounding(true);
         let withheld = NumericPolicy::bit_exact();
         assert!(
             dense_matmul_uses_bf16_tiles(granted, true, false),

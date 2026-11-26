@@ -50,8 +50,8 @@ silently widen into F32 MMA. The selected layout flows through `resolve_step`,
 MSL emission, and pipeline identity.
 
 Rounding an F32 activation to BF16 is a separate numerical rewrite from FMA
-contraction and reduction reassociation. `NumericRewrite::Bf16InputRounding`
-requires its own `NumericPolicy::bf16_input_rounding` permission. The configured
+contraction and reduction reassociation. `NumericRewrite::InputRounding`
+requires its own `NumericPolicy::input_rounding` permission. The configured
 planner derives that permission from `auto`/`bf16` fragment selection and
 passes it through the common `admit` check; direct emitters without that
 permission decline the BF16 dense tile. The permission is part of numeric

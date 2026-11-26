@@ -2854,7 +2854,7 @@ fn programmable_tiled_float_storage_codec_pairs_admit_with_both_rewrites() {
         let block = classify_dense_batched_gemm(
             &bound,
             &codecs,
-            NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
+            NumericPolicy::llama_relaxed().with_input_rounding(true),
             reduce_op,
             init,
             output_axes,
@@ -2883,7 +2883,7 @@ fn programmable_tiled_float_storage_codec_pairs_admit_with_both_rewrites() {
         classify_dense_batched_gemm(
             &single_token,
             &[None, Some(Codec::BFloat16)],
-            NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
+            NumericPolicy::llama_relaxed().with_input_rounding(true),
             reduce_op,
             init,
             output_axes,
@@ -2980,7 +2980,7 @@ fn programmable_tiled_ragged_k_and_feature_tail_keep_bounds_masks() {
     let kernel = emit(
         &bound,
         &packed,
-        NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
+        NumericPolicy::llama_relaxed().with_input_rounding(true),
     )
     .expect("ragged float-storage dense emits");
 
@@ -3058,7 +3058,7 @@ fn programmable_tiled_numeric_policy_requires_both_rewrites() {
         classify_dense_batched_gemm(
             &bound,
             &packed,
-            NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
+            NumericPolicy::llama_relaxed().with_input_rounding(true),
             reduce_op,
             init,
             output_axes,
@@ -3084,7 +3084,7 @@ fn programmable_tiled_numeric_policy_requires_both_rewrites() {
         classify_dense_batched_gemm(
             &bound,
             &mixed,
-            NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
+            NumericPolicy::llama_relaxed().with_input_rounding(true),
             reduce_op,
             init,
             output_axes,
@@ -3103,7 +3103,7 @@ fn programmable_tiled_grid_emit_and_cache_follow_one_admission() {
         (bound.operands()[1].0, Codec::Float16),
     ]);
 
-    let admitted_policy = NumericPolicy::llama_relaxed().with_bf16_input_rounding(true);
+    let admitted_policy = NumericPolicy::llama_relaxed().with_input_rounding(true);
     let admitted = emit(&bound, &packed, admitted_policy).expect("admitted emits");
     assert!(admitted.source.contains("simdgroup_bfloat8x8"));
     assert!(admitted.source.contains("as_type<bfloat>"));
@@ -3189,7 +3189,7 @@ fn programmable_tiled_classifier_follows_ownership_for_reversed_operand_order() 
             let block = classify_dense_batched_gemm(
                 &bound,
                 &codecs,
-                NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
+                NumericPolicy::llama_relaxed().with_input_rounding(true),
                 reduce_op,
                 init,
                 output_axes,
@@ -11866,7 +11866,7 @@ fn dense_bf16_weight_read_parenthesizes_the_compound_offset() {
         emit(
             &bound,
             &packed,
-            NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
+            NumericPolicy::llama_relaxed().with_input_rounding(true),
         )
         .expect("bf16 dense weight emits")
     });
@@ -12450,7 +12450,7 @@ fn router_bf16_weight_without_input_rounding_permission_takes_the_float_tile_mma
     };
     assert_eq!(bound.extents, vec![512, 2048, 256], "the flint chunk-4 router extents");
     let serving_policy = NumericPolicy::llama_relaxed().with_epilogue_sources(true);
-    assert!(!serving_policy.bf16_input_rounding, "the serving default grants no activation rounding");
+    assert!(!serving_policy.input_rounding, "the serving default grants no activation rounding");
 
     for codecs in [[Some(Codec::BFloat16), None], [None, Some(Codec::BFloat16)]] {
         let block = classify_dense_batched_gemm(&bound, &codecs, serving_policy, reduce_op, init, output_axes, &EmitKnobs::default())
@@ -12465,7 +12465,7 @@ fn router_bf16_weight_without_input_rounding_permission_takes_the_float_tile_mma
     assert!(source.contains("simdgroup_float8x8") && !source.contains("simdgroup_bfloat8x8"), "activations stay f32, so tiles are f32");
     assert!(!source.contains("simd_sum("), "no cooperative reduce remains");
 
-    let rounded = emit(&bound, &packed, serving_policy.with_bf16_input_rounding(true)).expect("router emits").source;
+    let rounded = emit(&bound, &packed, serving_policy.with_input_rounding(true)).expect("router emits").source;
     assert!(rounded.contains("simdgroup_bfloat8x8"), "granting the permission selects bf16 tiles");
 }
 
@@ -12478,7 +12478,7 @@ fn router_bf16_weight_without_input_rounding_permission_takes_the_float_tile_mma
 fn router_bf16_tile_stages_weights_and_activations_with_wide_loads() {
     let (bound, weight_node) = router_shaped_op(512, 2048, 256);
     let packed = BTreeMap::from([(weight_node, Codec::BFloat16)]);
-    let policy = NumericPolicy::llama_relaxed().with_epilogue_sources(true).with_bf16_input_rounding(true);
+    let policy = NumericPolicy::llama_relaxed().with_epilogue_sources(true).with_input_rounding(true);
     let source = emit(&bound, &packed, policy).expect("router emits").source;
 
     assert!(source.contains("threadgroup bfloat weight_tile[") || source.contains("(threadgroup bfloat *)tg_shared"), "bf16 tiles\n{source}");
@@ -12514,7 +12514,7 @@ fn dense_tile_staging_takes_the_same_wide_path_for_every_stored_weight_format() 
         let (name, codec, vectors) = ("bf16", Some(Codec::BFloat16), "uint4 w_vec[2];");
         let (bound, weight_node) = router_shaped_op(512, 2048, 256);
         let packed: BTreeMap<_, _> = codec.map(|codec| (weight_node, codec)).into_iter().collect();
-        let policy = NumericPolicy::llama_relaxed().with_epilogue_sources(true).with_bf16_input_rounding(true);
+        let policy = NumericPolicy::llama_relaxed().with_epilogue_sources(true).with_input_rounding(true);
         let source = emit(&bound, &packed, policy).expect("router emits").source;
         assert!(source.contains("long w_row = tiitg / 2;"), "{name}\n{source}");
         assert!(!source.contains(vectors), "{name}: a same-format weight decodes nothing\n{source}");
@@ -12590,7 +12590,7 @@ fn uniform_expert_source_rewrites_the_scalar_read_of_every_descriptor_codec() {
 fn router_dense_k_loop_is_versioned_on_hoisted_uniform_predicates() {
     let (bound, weight_node) = router_shaped_op(512, 2048, 256);
     let packed = BTreeMap::from([(weight_node, Codec::BFloat16)]);
-    let policy = NumericPolicy::llama_relaxed().with_epilogue_sources(true).with_bf16_input_rounding(true);
+    let policy = NumericPolicy::llama_relaxed().with_epilogue_sources(true).with_input_rounding(true);
     let source = emit(&bound, &packed, policy).expect("router emits").source;
 
     let predicates = source.find("bool w_fast = ").expect("weight predicate is hoisted");
