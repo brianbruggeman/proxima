@@ -469,18 +469,19 @@ pub fn stream_cached_attention_llama_flash(
     #[cfg(feature = "std")]
     {
         SCRATCH.with(|cell| match cell.try_borrow_mut() {
-            Ok(mut scratch) => run(&mut scratch, Options { workers: None, interleaved }, queries, keys, values, output, extents, rotary, score),
-            Err(_) => run(&mut Scratch::default(), Options { workers: None, interleaved }, queries, keys, values, output, extents, rotary, score),
+            Ok(mut scratch) => run_with_kernels(HalfKernels::detect(), &mut scratch, Options { workers: None, interleaved }, queries, keys, values, output, extents, rotary, score),
+            Err(_) => run_with_kernels(HalfKernels::detect(), &mut Scratch::default(), Options { workers: None, interleaved }, queries, keys, values, output, extents, rotary, score),
         })
     }
     #[cfg(not(feature = "std"))]
     {
-        run(&mut Scratch::default(), Options { workers: None, interleaved }, queries, keys, values, output, extents, rotary, score)
+        run_with_kernels(HalfKernels::detect(), &mut Scratch::default(), Options { workers: None, interleaved }, queries, keys, values, output, extents, rotary, score)
     }
 }
 
 #[expect(clippy::too_many_arguments, reason = "the layout bundle of the public entry, passed through")]
-fn run(
+fn run_with_kernels(
+    kernels: HalfKernels,
     scratch: &mut Scratch,
     options: Options,
     queries: [&[f32]; 2],
@@ -517,7 +518,6 @@ fn run(
     {
         return false;
     }
-    let kernels = HalfKernels::detect();
     let ranges = [
         Range {
             keys: keys[0],
@@ -819,8 +819,34 @@ mod threading_tests {
             .collect()
     }
 
+    fn fnv1a_64(words: &[u32]) -> u64 {
+        words.iter().flat_map(|word| word.to_le_bytes()).fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn the_llama_flash_output_bits_are_pinned_per_kernel_arm() {
+        let pinned = [
+            (HalfKernels::Scalar, 10_599_872_314_474_134_997u64),
+            (HalfKernels::for_aarch64(true), 13_038_706_667_357_578_758u64),
+            (HalfKernels::for_aarch64(false), 15_229_381_928_038_787_706u64),
+        ];
+        let actual: alloc::vec::Vec<(HalfKernels, u64)> =
+            pinned.iter().map(|(kernels, _)| (*kernels, fnv1a_64(&fixture_bits(*kernels, 1)))).collect();
+        assert_eq!(actual, pinned);
+    }
+
     #[test]
     fn worker_threads_reproduce_the_single_thread_result_bit_for_bit() {
+        let outputs: alloc::vec::Vec<alloc::vec::Vec<u32>> =
+            [1usize, 2, 5].iter().map(|workers| fixture_bits(HalfKernels::detect(), *workers)).collect();
+        assert_eq!(outputs[0], outputs[1]);
+        assert_eq!(outputs[0], outputs[2]);
+    }
+
+    fn fixture_bits(kernels: HalfKernels, workers: usize) -> alloc::vec::Vec<u32> {
         let (rows, cached, kv_heads, groups, head_dim) = (24usize, 40usize, 2usize, 3usize, 64usize);
         let pair = head_dim / 2;
         let mut state = 0x1234_5678_9abc_def0u64;
@@ -849,24 +875,20 @@ mod threading_tests {
                 CausalBand { lower_inclusive: i64::MIN, upper_inclusive: 0 },
             ],
         };
-        let mut outputs = alloc::vec::Vec::new();
-        for workers in [1usize, 2, 5] {
-            let mut output = alloc::vec![0f32; rows * kv_heads * groups * head_dim];
-            assert!(run(
-                &mut Scratch::default(),
-                Options { workers: Some(workers), interleaved: false },
-                [&query_even, &query_odd],
-                [[&cached_even, &cached_odd], [&new_even, &new_odd]],
-                [&cached_value, &new_value],
-                &mut output,
-                &extents,
-                &rotary,
-                &score,
-            ));
-            outputs.push(output.iter().map(|value| value.to_bits()).collect::<alloc::vec::Vec<u32>>());
-        }
-        assert_eq!(outputs[0], outputs[1]);
-        assert_eq!(outputs[0], outputs[2]);
+        let mut output = alloc::vec![0f32; rows * kv_heads * groups * head_dim];
+        assert!(run_with_kernels(
+            kernels,
+            &mut Scratch::default(),
+            Options { workers: Some(workers), interleaved: false },
+            [&query_even, &query_odd],
+            [[&cached_even, &cached_odd], [&new_even, &new_odd]],
+            [&cached_value, &new_value],
+            &mut output,
+            &extents,
+            &rotary,
+            &score,
+        ));
+        output.iter().map(|value| value.to_bits()).collect()
     }
 }
 
