@@ -435,6 +435,7 @@ fn load_name(layout: &impl core::fmt::Debug) -> String {
 ///
 /// # Errors
 /// A message naming the format the render cannot read.
+#[cfg(feature = "std")]
 pub(crate) fn cached_attention_kv_admits(key: &Codec, value: &Codec) -> Result<(), String> {
     [key, value].into_iter().try_for_each(|format| {
         let plain = format.is_identity_of(&Codec::default());

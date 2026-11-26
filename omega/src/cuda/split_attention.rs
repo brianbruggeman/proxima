@@ -1,5 +1,5 @@
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use proxima_numeric::codec::Codec;
