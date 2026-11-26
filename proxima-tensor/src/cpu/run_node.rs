@@ -200,7 +200,9 @@ pub(super) fn run_node_into_with_round_sink<B: Deref<Target = [f32]> + Sync>(
                         run_embedding_gather_quantized(resolved, buffers, &lookup, block, output)
                     }
                 }
-                None => run_elementwise_dispatch(resolved, buffers, session, output, numeric_policy),
+                None => {
+                    run_elementwise_dispatch(resolved, buffers, session, output, numeric_policy)
+                }
             }
         }
         BoundOpKind::Reduce {
@@ -506,7 +508,11 @@ pub(super) fn apply_plain_reduce_epilogue(
     let mut full_coordinate = vec![0u64; resolved.extents.len()];
 
     for row in 0..odometer_len(&extents_local[..outer_rank]) {
-        unflatten_into(row, &extents_local[..outer_rank], &mut local_coordinate[..outer_rank]);
+        unflatten_into(
+            row,
+            &extents_local[..outer_rank],
+            &mut local_coordinate[..outer_rank],
+        );
         full_coordinate.fill(0);
         for (index, &axis) in output_axes.iter().enumerate() {
             full_coordinate[axis as usize] = local_coordinate[index];
@@ -659,7 +665,11 @@ pub(super) fn apply_broadcast_reduce_epilogue(
         return;
     }
     for (row, target) in output[..total].chunks_exact_mut(row_len).enumerate() {
-        unflatten_into(row as u64, outer_extents, &mut coordinate[..outer_extents.len()]);
+        unflatten_into(
+            row as u64,
+            outer_extents,
+            &mut coordinate[..outer_extents.len()],
+        );
         for (slot, (_, layout, _)) in epilogue_operands.iter().enumerate() {
             running[slot] = layout.offset_of(&coordinate);
         }
@@ -734,7 +744,10 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
             || *attention_sink
             || *cached_key_rows != 0
             || rotary_dim != head_dim
-            || matches!(arithmetic, crate::bind::CachedAttentionArithmetic::LlamaFlash { .. })
+            || matches!(
+                arithmetic,
+                crate::bind::CachedAttentionArithmetic::LlamaFlash { .. }
+            )
             || operands.iter().any(|(_, layout, lookup)| {
                 lookup.is_some() || layout.base != 0 || layout.strides.last().copied() != Some(1)
             })
@@ -1097,7 +1110,8 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
             )
         }
         crate::bind::CachedAttentionArithmetic::LlamaFlash { interleaved } => {
-            crate::physical::stream_cached_attention_llama_flash(
+            crate::physical::stream_cached_attention_staged(
+                &crate::physical::half_accumulate_stages(),
                 planes,
                 key_planes,
                 value_planes,

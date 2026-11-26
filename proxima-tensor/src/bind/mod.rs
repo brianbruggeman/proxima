@@ -61,8 +61,8 @@ use core::cell::{Cell, RefCell};
 use core::future::Future;
 
 use arrayvec::ArrayVec;
-use proxima_numeric::block_layout::BlockLayout;
 use proxima_numeric::ScaleArithmetic;
+use proxima_numeric::block_layout::BlockLayout;
 use proxima_primitives::pipe::Pipe;
 use smallvec::SmallVec;
 
@@ -102,10 +102,12 @@ mod gdn_moe_fusion_apply;
 mod cached_attention_epilogue_liveness;
 mod activation_layout;
 mod activation_quantize;
+mod attention_stages;
 mod coalesce;
 mod executes;
 #[cfg(feature = "identity-copy-alias")]
 mod identity_copy_alias;
+mod product_contraction;
 mod refit_cached_attention;
 mod refresh;
 #[cfg(feature = "instrument")]
@@ -114,7 +116,6 @@ mod rows_template;
 #[cfg(feature = "top-fraction-fusion")]
 mod top_fraction_fusion;
 mod twin_elementwise;
-mod product_contraction;
 pub use activation_layout::{
     ACTIVATION_GROUP_ELEMENTS, ACTIVATION_REACH, Missing, is_int8_run_layout,
     quantize_rule_is_served,
@@ -123,6 +124,7 @@ pub use activation_quantize::{
     activation_is_flat, collapsed_extent, derive_activation_quantize, is_derived, quantize_op,
     repoint, underive_block_quantize,
 };
+pub use attention_stages::{AttentionStages, AttentionStagesError, KeyBlock, Normalize, ScaleSite};
 pub use builder_compose_window::*;
 pub use cached_attention_epilogue_liveness::*;
 pub use coalesce::coalesce_dims;
@@ -134,7 +136,10 @@ pub use executes::{
 pub use gdn_moe_fusion_apply::*;
 #[cfg(feature = "identity-copy-alias")]
 use identity_copy_alias::apply_identity_copy_alias;
-pub use product_contraction::{ContractionForm, ProductContraction, contraction_form, dense_batched_contraction, gathered_operand_count, is_product_of, product_contraction, unit_batched_product_contraction};
+pub use product_contraction::{
+    ContractionForm, ProductContraction, contraction_form, dense_batched_contraction,
+    gathered_operand_count, is_product_of, product_contraction, unit_batched_product_contraction,
+};
 pub use refit_cached_attention::{
     changed_nodes, refit_cached_attention_at, refit_cached_attention_rows, touched_positions,
     touches_changed,

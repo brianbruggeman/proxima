@@ -5,6 +5,8 @@
 //! exponent range, with the special-value policy and the bias as separate decisions rather than
 //! baked into an enum. [`crate::float_layout_codec`] is the one piece of arithmetic over it.
 
+use crate::float_layout_codec::layout_supported;
+
 /// How a layout treats the all-ones exponent and finite overflow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Specials {
@@ -35,7 +37,9 @@ pub enum SignEncoding {
 }
 
 /// What a NaN becomes when `f32` is narrowed into a layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum NanNarrow {
     /// Sign, top payload bits and a set quiet bit survive (IEEE 754-2019 6.2.3, "preserve the
     /// payload to the extent possible"; `half` `f32_to_bf16` convert.rs:13, `f32_to_f16_fallback`
@@ -48,7 +52,9 @@ pub enum NanNarrow {
 }
 
 /// What a reserved NaN code becomes when a layout is widened to `f32`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum NanWiden {
     /// The payload is kept and the quiet bit is set (`half` `bf16_to_f32` convert.rs:96-98,
     /// `f16_to_f32_fallback` binary16/arch.rs:702-704).
@@ -61,7 +67,9 @@ pub enum NanWiden {
 }
 
 /// The NaN payload policy of one layout: the data the codec reads instead of a threshold on width.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub struct NanPolicy {
     /// What narrowing `f32` into the layout does to a NaN.
     pub narrow: NanNarrow,
@@ -428,6 +436,43 @@ impl FloatLayout {
     }
 }
 
+/// The widest float layout [`crate::float_layout_codec`] executes, found by the codec's own
+/// predicate over [`NAMED_LAYOUTS`] so a consumer names the property and spells no format.
+#[must_use]
+pub const fn widest_executable_float() -> FloatLayout {
+    let mut best = NAMED_LAYOUTS[0].0;
+    let mut index = 1;
+    while index < NAMED_LAYOUTS.len() {
+        let candidate = NAMED_LAYOUTS[index].0;
+        let executable = candidate.is_float() && matches!(layout_supported(&candidate), Ok(()));
+        if executable && (!best.is_float() || candidate.width() > best.width()) {
+            best = candidate;
+        }
+        index += 1;
+    }
+    best
+}
+
+/// The float layout of half [`widest_executable_float`]'s width that keeps the most mantissa bits:
+/// the layout a half-precision kernel computes in, read from [`NAMED_LAYOUTS`].
+#[must_use]
+pub const fn half_width_float() -> FloatLayout {
+    let target = widest_executable_float().width() / 2;
+    let mut best = NAMED_LAYOUTS[0].0;
+    let mut index = 1;
+    while index < NAMED_LAYOUTS.len() {
+        let candidate = NAMED_LAYOUTS[index].0;
+        if candidate.is_float()
+            && candidate.width() == target
+            && (best.width() != target || candidate.mantissa_bits > best.mantissa_bits)
+        {
+            best = candidate;
+        }
+        index += 1;
+    }
+    best
+}
+
 /// The one list of named layouts, as constant names and spellings. A macro rather than a `const`
 /// because the scalar codec instantiates itself once per row at compile time
 /// ([`crate::float_layout_codec`]): `named_layout_table!(callback!(prefix...))` expands to
@@ -583,12 +628,11 @@ mod tests {
     fn unnamed_e8m3_slice_route_matches_the_per_element_codec() {
         let unnamed = unnamed_e8m3();
         let mut state = 0x2545_f491_4f6c_dd1d_u64;
-        let values: std::vec::Vec<f32> = core::iter::from_fn(|| {
-            Some(f32::from_bits(xorshift(&mut state) as u32))
-        })
-        .filter(|value| value.is_finite() && e8m3_oracle(*value).is_some())
-        .take(1024)
-        .collect();
+        let values: std::vec::Vec<f32> =
+            core::iter::from_fn(|| Some(f32::from_bits(xorshift(&mut state) as u32)))
+                .filter(|value| value.is_finite() && e8m3_oracle(*value).is_some())
+                .take(1024)
+                .collect();
         let mut packed = std::vec![0_u8; values.len() * 2];
 
         crate::float_layout_codec::encode_slice(&unnamed, &values, &mut packed)
@@ -658,16 +702,26 @@ mod tests {
     #[test]
     fn e8m0_has_no_zero_code_zero_is_two_to_the_minus_127_per_element_and_per_slice() {
         let layout = FloatLayout::F8_E8M0;
-        let expected_bits = [(0x00_u8, 0x0040_0000_u32), (0x01, 0x0080_0000), (0x7f, 1.0f32.to_bits()), (0xfe, 0x7f00_0000)];
+        let expected_bits = [
+            (0x00_u8, 0x0040_0000_u32),
+            (0x01, 0x0080_0000),
+            (0x7f, 1.0f32.to_bits()),
+            (0xfe, 0x7f00_0000),
+        ];
         let codes: std::vec::Vec<u8> = (0..=u8::MAX).collect();
         let mut slice = std::vec![0.0f32; codes.len()];
 
-        crate::float_layout_codec::decode_slice(&layout, &codes, &mut slice).expect("e8m0 is a supported layout");
+        crate::float_layout_codec::decode_slice(&layout, &codes, &mut slice)
+            .expect("e8m0 is a supported layout");
 
         for (code, bits) in expected_bits {
             let element = crate::float_layout_codec::decode(u32::from(code), layout);
             assert_eq!(element.to_bits(), bits, "per-element code {code:#04x}");
-            assert_eq!(slice[usize::from(code)].to_bits(), bits, "slice code {code:#04x}");
+            assert_eq!(
+                slice[usize::from(code)].to_bits(),
+                bits,
+                "slice code {code:#04x}"
+            );
         }
         assert!(crate::float_layout_codec::decode(0xff, layout).is_nan());
         assert!(slice[0xff].is_nan());
@@ -679,8 +733,13 @@ mod tests {
     fn e8m0_encodes_zero_and_values_below_the_smallest_code_to_code_zero() {
         let layout = FloatLayout::F8_E8M0;
 
-        let codes = [0.0f32, f32::from_bits(1), 2.0f32.powi(-127), 2.0f32.powi(-126)]
-            .map(|value| crate::float_layout_codec::encode(value, layout));
+        let codes = [
+            0.0f32,
+            f32::from_bits(1),
+            2.0f32.powi(-127),
+            2.0f32.powi(-126),
+        ]
+        .map(|value| crate::float_layout_codec::encode(value, layout));
 
         assert_eq!(codes, [0, 0, 0, 1]);
     }

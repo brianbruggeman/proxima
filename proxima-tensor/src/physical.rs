@@ -8,7 +8,9 @@
 use crate::bind::ScorePlanes;
 
 mod llama_flash;
-pub use llama_flash::stream_cached_attention_llama_flash;
+#[cfg(feature = "std")]
+pub(crate) use llama_flash::half_accumulate_stages;
+pub use llama_flash::stream_cached_attention_staged;
 
 /// One key/value range (cached or new) for [`stream_cached_attention`].
 #[cfg(test)]

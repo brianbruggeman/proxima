@@ -10,9 +10,12 @@
 
 mod tiled;
 
-use half::f16;
+use proxima_numeric::float_layout::{half_width_float, widest_executable_float};
+use proxima_numeric::float_layout_codec::{decode, encode_with};
+use proxima_numeric::{Overflow, Rounding};
 
 use super::{AttentionExtents, CachedAttentionRotary, CachedAttentionScore};
+use crate::bind::{AttentionStages, KeyBlock, Normalize, ScaleSite};
 
 #[cfg(any(not(target_arch = "aarch64"), test))]
 const STEP: usize = 32;
@@ -22,11 +25,66 @@ const LANES: usize = 8;
 const ARRAYS: usize = 4;
 
 fn half_bits(value: f32) -> u16 {
-    f16::from_f32(value).to_bits()
+    let mut nan_count = 0;
+    encode_with(
+        value,
+        half_width_float(),
+        Rounding::NearestTiesEven,
+        Overflow::Format,
+        &mut nan_count,
+    ) as u16
 }
 
 fn half_value(bits: u16) -> f32 {
-    f16::from_bits(bits).to_f32()
+    decode(u32::from(bits), half_width_float())
+}
+
+/// The one stage value this evaluator lowers: half-layout operands and accumulator, wide score,
+/// probability, rescale and running sum, one key per step.
+pub(crate) fn half_accumulate_stages() -> AttentionStages {
+    AttentionStages {
+        query: half_width_float(),
+        key: half_width_float(),
+        value: half_width_float(),
+        score: widest_executable_float(),
+        probability: widest_executable_float(),
+        rescale: widest_executable_float(),
+        accumulator: half_width_float(),
+        running: widest_executable_float(),
+        scale: ScaleSite::AfterScore,
+        block: KeyBlock::Fixed {
+            softmax: 1,
+            accumulate: 1,
+        },
+        max_offset_bits: None,
+        exp_flush_below_bits: None,
+        normalize: Normalize::Reciprocal,
+    }
+}
+
+/// Field-by-field equality of two stage values, layouts by [`proxima_numeric::FloatLayout::is_identity_of`].
+fn same_stages(left: &AttentionStages, right: &AttentionStages) -> bool {
+    let layouts = |stages: &AttentionStages| {
+        [
+            stages.query,
+            stages.key,
+            stages.value,
+            stages.score,
+            stages.probability,
+            stages.rescale,
+            stages.accumulator,
+            stages.running,
+        ]
+    };
+    layouts(left)
+        .iter()
+        .zip(layouts(right))
+        .all(|(held, wanted)| held.is_identity_of(&wanted))
+        && left.scale == right.scale
+        && left.block == right.block
+        && left.max_offset_bits == right.max_offset_bits
+        && left.exp_flush_below_bits == right.exp_flush_below_bits
+        && left.normalize == right.normalize
 }
 
 /// Which instruction set the half-precision kernels run on, decided once per call.
@@ -70,7 +128,11 @@ impl HalfKernels {
     /// The kernel family an aarch64 host runs, by whether it has f16 vector arithmetic.
     #[cfg(any(target_arch = "aarch64", test))]
     pub(super) const fn for_aarch64(has_fp16_vectors: bool) -> Self {
-        if has_fp16_vectors { Self::NeonFp16 } else { Self::NeonF32 }
+        if has_fp16_vectors {
+            Self::NeonFp16
+        } else {
+            Self::NeonF32
+        }
     }
 
     /// f32 to f16 bits, `ggml_fp32_to_fp16_row` / `_mm256_cvtps_ph(.., 0)`.
@@ -160,14 +222,21 @@ pub(super) mod neon_twin {
             for (array, lanes) in sum.iter_mut().enumerate() {
                 for (lane, accumulator) in lanes.iter_mut().enumerate() {
                     let index = step + array * FP16_LANES + lane;
-                    *accumulator = fma_half(*accumulator, half_value(key[index]), half_value(query[index]));
+                    *accumulator = fma_half(
+                        *accumulator,
+                        half_value(key[index]),
+                        half_value(query[index]),
+                    );
                 }
             }
         }
         let add_half = |left: f32, right: f32| round_half(f64::from(left + right));
-        let first: [f32; FP16_LANES] = core::array::from_fn(|lane| add_half(sum[0][lane], sum[2][lane]));
-        let second: [f32; FP16_LANES] = core::array::from_fn(|lane| add_half(sum[1][lane], sum[3][lane]));
-        let folded: [f32; FP16_LANES] = core::array::from_fn(|lane| add_half(first[lane], second[lane]));
+        let first: [f32; FP16_LANES] =
+            core::array::from_fn(|lane| add_half(sum[0][lane], sum[2][lane]));
+        let second: [f32; FP16_LANES] =
+            core::array::from_fn(|lane| add_half(sum[1][lane], sum[3][lane]));
+        let folded: [f32; FP16_LANES] =
+            core::array::from_fn(|lane| add_half(first[lane], second[lane]));
         let lanes: [f32; 4] = core::array::from_fn(|lane| folded[lane] + folded[lane + 4]);
         let mut total = f64::from((lanes[0] + lanes[1]) + (lanes[2] + lanes[3]));
         for index in main..key.len() {
@@ -192,7 +261,11 @@ pub(super) mod neon_twin {
         let factor_half = half_value(half_bits(factor));
         for (index, value) in accumulator.iter_mut().enumerate() {
             *value = if index < main {
-                half_bits(fma_half(half_value(*value), half_value(row[index]), factor_half))
+                half_bits(fma_half(
+                    half_value(*value),
+                    half_value(row[index]),
+                    factor_half,
+                ))
             } else {
                 half_bits(half_value(*value) + half_value(row[index]) * factor)
             };
@@ -207,12 +280,17 @@ pub(super) mod neon_twin {
             for (array, lanes) in sum.iter_mut().enumerate() {
                 for (lane, accumulator) in lanes.iter_mut().enumerate() {
                     let index = step + array * F32_LANES + lane;
-                    *accumulator = libm::fmaf(half_value(key[index]), half_value(query[index]), *accumulator);
+                    *accumulator = libm::fmaf(
+                        half_value(key[index]),
+                        half_value(query[index]),
+                        *accumulator,
+                    );
                 }
             }
         }
-        let lanes: [f32; F32_LANES] =
-            core::array::from_fn(|lane| (sum[0][lane] + sum[2][lane]) + (sum[1][lane] + sum[3][lane]));
+        let lanes: [f32; F32_LANES] = core::array::from_fn(|lane| {
+            (sum[0][lane] + sum[2][lane]) + (sum[1][lane] + sum[3][lane])
+        });
         let mut total = f64::from((lanes[0] + lanes[1]) + (lanes[2] + lanes[3]));
         for index in main..key.len() {
             total += f64::from(half_value(key[index]) * half_value(query[index]));
@@ -241,9 +319,9 @@ pub(super) mod neon_twin {
 }
 
 pub(super) mod scalar {
+    use super::half_bits;
     #[cfg(any(not(target_arch = "aarch64"), test))]
     use super::{ARRAYS, LANES, STEP, half_value};
-    use super::half_bits;
 
     pub(in crate::physical) fn convert(source: &[f32], destination: &mut [u16]) {
         for (slot, value) in destination.iter_mut().zip(source) {
@@ -261,12 +339,17 @@ pub(super) mod scalar {
             for (array, lanes) in sum.iter_mut().enumerate() {
                 for (lane, accumulator) in lanes.iter_mut().enumerate() {
                     let index = step + array * LANES + lane;
-                    *accumulator = libm::fmaf(half_value(key[index]), half_value(query[index]), *accumulator);
+                    *accumulator = libm::fmaf(
+                        half_value(key[index]),
+                        half_value(query[index]),
+                        *accumulator,
+                    );
                 }
             }
         }
-        let lanes: [f32; LANES] =
-            core::array::from_fn(|lane| (sum[0][lane] + sum[2][lane]) + (sum[1][lane] + sum[3][lane]));
+        let lanes: [f32; LANES] = core::array::from_fn(|lane| {
+            (sum[0][lane] + sum[2][lane]) + (sum[1][lane] + sum[3][lane])
+        });
         let folded: [f32; 4] = core::array::from_fn(|lane| lanes[lane] + lanes[lane + 4]);
         let mut total = f64::from((folded[0] + folded[1]) + (folded[2] + folded[3]));
         for index in main..key.len() {
@@ -301,8 +384,9 @@ pub(super) mod scalar {
 mod x86 {
     use core::arch::x86_64::{
         __m128i, __m256, _mm_add_ps, _mm_cvtss_f32, _mm_hadd_ps, _mm_loadu_si128, _mm_storeu_si128,
-        _mm256_add_ps, _mm256_castps256_ps128, _mm256_cvtph_ps, _mm256_cvtps_ph, _mm256_extractf128_ps,
-        _mm256_fmadd_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_setzero_ps,
+        _mm256_add_ps, _mm256_castps256_ps128, _mm256_cvtph_ps, _mm256_cvtps_ph,
+        _mm256_extractf128_ps, _mm256_fmadd_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps,
+        _mm256_setzero_ps,
     };
 
     use super::{ARRAYS, LANES, STEP, half_bits, half_value};
@@ -316,7 +400,12 @@ mod x86 {
 
     #[target_feature(enable = "avx2,fma,f16c")]
     unsafe fn store_half(pointer: *mut u16, value: __m256) {
-        unsafe { _mm_storeu_si128(pointer.cast::<__m128i>(), _mm256_cvtps_ph::<NEAREST_EVEN>(value)) }
+        unsafe {
+            _mm_storeu_si128(
+                pointer.cast::<__m128i>(),
+                _mm256_cvtps_ph::<NEAREST_EVEN>(value),
+            )
+        }
     }
 
     #[target_feature(enable = "avx2,fma,f16c")]
@@ -324,7 +413,10 @@ mod x86 {
         let main = source.len() & !(LANES - 1);
         for index in (0..main).step_by(LANES) {
             unsafe {
-                store_half(destination.as_mut_ptr().add(index), _mm256_loadu_ps(source.as_ptr().add(index)));
+                store_half(
+                    destination.as_mut_ptr().add(index),
+                    _mm256_loadu_ps(source.as_ptr().add(index)),
+                );
             }
         }
         for index in main..source.len() {
@@ -349,7 +441,10 @@ mod x86 {
         sum[0] = _mm256_add_ps(sum[0], sum[2]);
         sum[1] = _mm256_add_ps(sum[1], sum[3]);
         sum[0] = _mm256_add_ps(sum[0], sum[1]);
-        let folded = _mm_add_ps(_mm256_castps256_ps128(sum[0]), _mm256_extractf128_ps::<1>(sum[0]));
+        let folded = _mm_add_ps(
+            _mm256_castps256_ps128(sum[0]),
+            _mm256_extractf128_ps::<1>(sum[0]),
+        );
         let pairs = _mm_hadd_ps(folded, folded);
         let mut total = f64::from(_mm_cvtss_f32(_mm_hadd_ps(pairs, pairs)));
         for index in main..key.len() {
@@ -380,12 +475,17 @@ mod x86 {
         for index in (0..fused).step_by(LANES) {
             unsafe {
                 let pointer = accumulator.as_mut_ptr().add(index);
-                let updated = _mm256_fmadd_ps(load_half(row.as_ptr().add(index)), factor_lanes, load_half(pointer));
+                let updated = _mm256_fmadd_ps(
+                    load_half(row.as_ptr().add(index)),
+                    factor_lanes,
+                    load_half(pointer),
+                );
                 store_half(pointer, updated);
             }
         }
         for index in fused..accumulator.len() {
-            accumulator[index] = half_bits(half_value(accumulator[index]) + half_value(row[index]) * factor);
+            accumulator[index] =
+                half_bits(half_value(accumulator[index]) + half_value(row[index]) * factor);
         }
     }
 }
@@ -399,7 +499,13 @@ struct Options {
 }
 
 /// The head vector as ggml lays it out: split halves or interleaved pairs, then the pass-through tail.
-fn assemble_head(target: &mut [f32], even: &[f32], odd: &[f32], pass: Option<&[f32]>, interleaved: bool) {
+fn assemble_head(
+    target: &mut [f32],
+    even: &[f32],
+    odd: &[f32],
+    pass: Option<&[f32]>,
+    interleaved: bool,
+) {
     let pair = even.len();
     if interleaved {
         for index in 0..pair {
@@ -452,11 +558,29 @@ fn expf(value: f32) -> f32 {
     }
 }
 
-/// [`super::stream_cached_attention_split_gqa`]'s contract and layouts, computed the way llama.cpp's
-/// default CPU attention computes them.
+impl HalfKernels {
+    /// The kernels that compute `stages`, when `stages` is field-equal to the layouts they compute in;
+    /// `None` otherwise, which the caller reports as not lowerable. The one fast-path selection site.
+    fn select(stages: &AttentionStages) -> Option<Self> {
+        same_stages(stages, &half_accumulate_stages()).then(Self::detect)
+    }
+}
+
+/// [`super::stream_cached_attention_split_gqa`]'s contract and layouts, with each stage narrowed
+/// through its [`AttentionStages`] layout. Only the value [`half_accumulate_stages`] builds is
+/// lowered today (the operands and the accumulator in the half layout, the score, probability and
+/// running sum in the widest, one key per step, a reciprocal at the end); any other returns `false`
+/// and leaves `output` untouched.
+///
+/// Composes [`proxima_numeric::float_layout_codec::encode_with`] and `decode` through the kernels'
+/// narrowing, and the vector kernels when the stage layouts equal the ones they compute in.
 #[must_use]
-#[expect(clippy::too_many_arguments, reason = "the layout bundle of the sibling online kernel plus the head-vector order")]
-pub fn stream_cached_attention_llama_flash(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the layout bundle of the sibling online kernel plus the head-vector order"
+)]
+pub fn stream_cached_attention_staged(
+    stages: &AttentionStages,
     queries: [&[f32]; 2],
     keys: [[&[f32]; 2]; 2],
     values: [&[f32]; 2],
@@ -466,20 +590,68 @@ pub fn stream_cached_attention_llama_flash(
     score: &CachedAttentionScore<'_>,
     interleaved: bool,
 ) -> bool {
+    let Some(kernels) = HalfKernels::select(stages) else {
+        return false;
+    };
     #[cfg(feature = "std")]
     {
         SCRATCH.with(|cell| match cell.try_borrow_mut() {
-            Ok(mut scratch) => run_with_kernels(HalfKernels::detect(), &mut scratch, Options { workers: None, interleaved }, queries, keys, values, output, extents, rotary, score),
-            Err(_) => run_with_kernels(HalfKernels::detect(), &mut Scratch::default(), Options { workers: None, interleaved }, queries, keys, values, output, extents, rotary, score),
+            Ok(mut scratch) => run_with_kernels(
+                kernels,
+                &mut scratch,
+                Options {
+                    workers: None,
+                    interleaved,
+                },
+                queries,
+                keys,
+                values,
+                output,
+                extents,
+                rotary,
+                score,
+            ),
+            Err(_) => run_with_kernels(
+                kernels,
+                &mut Scratch::default(),
+                Options {
+                    workers: None,
+                    interleaved,
+                },
+                queries,
+                keys,
+                values,
+                output,
+                extents,
+                rotary,
+                score,
+            ),
         })
     }
     #[cfg(not(feature = "std"))]
     {
-        run_with_kernels(HalfKernels::detect(), &mut Scratch::default(), Options { workers: None, interleaved }, queries, keys, values, output, extents, rotary, score)
+        run_with_kernels(
+            kernels,
+            &mut Scratch::default(),
+            Options {
+                workers: None,
+                interleaved,
+            },
+            queries,
+            keys,
+            values,
+            output,
+            extents,
+            rotary,
+            score,
+        )
     }
 }
 
-#[expect(clippy::too_many_arguments, reason = "the layout bundle of the public entry, passed through")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the layout bundle of the public entry, passed through"
+)]
 fn run_with_kernels(
     kernels: HalfKernels,
     scratch: &mut Scratch,
@@ -548,7 +720,9 @@ fn run_with_kernels(
                     &mut scratch.stage[..head_dim],
                     &range.keys[0][source..source + pair_dim],
                     &range.keys[1][source..source + pair_dim],
-                    range.pass_keys.map(|pass_keys| &pass_keys[pass_source..pass_source + pass_dim]),
+                    range
+                        .pass_keys
+                        .map(|pass_keys| &pass_keys[pass_source..pass_source + pass_dim]),
                     options.interleaved,
                 );
                 kernels.convert(&scratch.stage[..head_dim], destination);
@@ -581,7 +755,9 @@ fn run_with_kernels(
     let tiled = (query_rows >= tiled::TILE_Q).then(|| tiled::TiledData::build(&shared));
     let tiled = tiled.as_ref();
     let row_len = kv_heads * groups * head_dim;
-    let workers = options.workers.unwrap_or_else(|| worker_count(query_rows, cached_rows + new_rows, row_len));
+    let workers = options
+        .workers
+        .unwrap_or_else(|| worker_count(query_rows, cached_rows + new_rows, row_len));
     if workers <= 1 {
         let mut local = Local::new(head_dim);
         for (query_row, out) in output.chunks_mut(row_len).enumerate() {
@@ -620,7 +796,9 @@ fn worker_count(query_rows: usize, key_rows: usize, row_len: usize) -> usize {
         if query_rows < 2 || query_rows * key_rows * row_len < MIN_WORK {
             return 1;
         }
-        std::thread::available_parallelism().map_or(1, usize::from).min(query_rows)
+        std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(query_rows)
     }
     #[cfg(not(feature = "std"))]
     {
@@ -702,7 +880,10 @@ impl Shared<'_> {
                 local.accumulator[..head_dim].fill(0);
                 let mut running_sum = 0.0f32;
                 let mut running_max = f32::NEG_INFINITY;
-                for (range_index, (base, rows)) in [(0, cached_rows), (cached_rows, new_rows)].into_iter().enumerate() {
+                for (range_index, (base, rows)) in [(0, cached_rows), (cached_rows, new_rows)]
+                    .into_iter()
+                    .enumerate()
+                {
                     let band = &score.bands[range_index];
                     for key_row in 0..rows {
                         let key_position = if range_index == 0 {
@@ -715,7 +896,9 @@ impl Shared<'_> {
                             continue;
                         }
                         let target = (base + key_row) * row_width + kv_head * head_dim;
-                        let weighted = kernels.dot(&keys[target..target + head_dim], &local.query[..head_dim]) * score.scale;
+                        let weighted = kernels
+                            .dot(&keys[target..target + head_dim], &local.query[..head_dim])
+                            * score.scale;
                         let previous_max = running_max;
                         let mut rescale = 1.0f32;
                         let mut weight = 1.0f32;
@@ -726,7 +909,11 @@ impl Shared<'_> {
                         } else {
                             weight = expf(weighted - running_max);
                         }
-                        kernels.mad(&mut local.accumulator[..head_dim], &values[target..target + head_dim], weight);
+                        kernels.mad(
+                            &mut local.accumulator[..head_dim],
+                            &values[target..target + head_dim],
+                            weight,
+                        );
                         running_sum = running_sum * rescale + weight;
                     }
                 }
@@ -738,9 +925,16 @@ impl Shared<'_> {
                         running_sum += expf(sink - running_max);
                     }
                 }
-                let inverse = if running_sum == 0.0 { 0.0 } else { 1.0 / running_sum };
+                let inverse = if running_sum == 0.0 {
+                    0.0
+                } else {
+                    1.0 / running_sum
+                };
                 let output_start = query_head * head_dim;
-                for (slot, bits) in out[output_start..output_start + head_dim].iter_mut().zip(&local.accumulator[..head_dim]) {
+                for (slot, bits) in out[output_start..output_start + head_dim]
+                    .iter_mut()
+                    .zip(&local.accumulator[..head_dim])
+                {
                     *slot = half_value(*bits) * inverse;
                 }
             }
@@ -748,9 +942,14 @@ impl Shared<'_> {
     }
 }
 
-
 impl Shared<'_> {
-    fn attend(&self, tiled: Option<&tiled::TiledData>, query_row: usize, out: &mut [f32], local: &mut Local) {
+    fn attend(
+        &self,
+        tiled: Option<&tiled::TiledData>,
+        query_row: usize,
+        out: &mut [f32],
+        local: &mut Local,
+    ) {
         match tiled {
             Some(data) => self.attend_row_tiled(data, query_row, out, local),
             None => self.attend_row(query_row, out, local),
@@ -767,7 +966,9 @@ mod tests {
     use super::*;
 
     fn lcg(state: &mut u64) -> f32 {
-        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((*state >> 33) as f32 / (1u64 << 31) as f32) * 8.0 - 4.0
     }
 
@@ -783,7 +984,11 @@ mod tests {
             for _ in 0..200 {
                 let key = halves(&mut state, length);
                 let query = halves(&mut state, length);
-                assert_eq!(kernels.dot(&key, &query).to_bits(), scalar::dot(&key, &query).to_bits(), "dot n={length}");
+                assert_eq!(
+                    kernels.dot(&key, &query).to_bits(),
+                    scalar::dot(&key, &query).to_bits(),
+                    "dot n={length}"
+                );
                 let factor = lcg(&mut state);
                 let mut simd = halves(&mut state, length);
                 let mut reference = simd.clone();
@@ -807,47 +1012,102 @@ mod tests {
 
 #[cfg(test)]
 mod threading_tests {
-    use super::super::{CausalBand, CachedAttentionScore};
+    use super::super::{CachedAttentionScore, CausalBand};
     use super::*;
 
     fn random(state: &mut u64, length: usize) -> alloc::vec::Vec<f32> {
         (0..length)
             .map(|_| {
-                *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                *state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 ((*state >> 33) as f32 / (1u64 << 31) as f32) * 6.0 - 3.0
             })
             .collect()
     }
 
     fn fnv1a_64(words: &[u32]) -> u64 {
-        words.iter().flat_map(|word| word.to_le_bytes()).fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-        })
+        words
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+            })
     }
+
+    #[cfg(target_arch = "aarch64")]
+    const PINNED: [(HalfKernels, u64); 3] = [
+        (HalfKernels::Scalar, 10_599_872_314_474_134_997),
+        (HalfKernels::for_aarch64(true), 13_038_706_667_357_578_758),
+        (HalfKernels::for_aarch64(false), 15_229_381_928_038_787_706),
+    ];
 
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn the_llama_flash_output_bits_are_pinned_per_kernel_arm() {
-        let pinned = [
-            (HalfKernels::Scalar, 10_599_872_314_474_134_997u64),
-            (HalfKernels::for_aarch64(true), 13_038_706_667_357_578_758u64),
-            (HalfKernels::for_aarch64(false), 15_229_381_928_038_787_706u64),
-        ];
-        let actual: alloc::vec::Vec<(HalfKernels, u64)> =
-            pinned.iter().map(|(kernels, _)| (*kernels, fnv1a_64(&fixture_bits(*kernels, 1)))).collect();
-        assert_eq!(actual, pinned);
+        let actual: alloc::vec::Vec<(HalfKernels, u64)> = PINNED
+            .iter()
+            .map(|(kernels, _)| (*kernels, fnv1a_64(&fixture_bits(*kernels, 1, None))))
+            .collect();
+        assert_eq!(actual, PINNED);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn the_staged_entry_built_from_fields_reproduces_the_pinned_llama_flash_bits() {
+        let stages = AttentionStages {
+            query: half_width_float(),
+            key: half_width_float(),
+            value: half_width_float(),
+            score: widest_executable_float(),
+            probability: widest_executable_float(),
+            rescale: widest_executable_float(),
+            accumulator: half_width_float(),
+            running: widest_executable_float(),
+            scale: ScaleSite::AfterScore,
+            block: KeyBlock::Fixed {
+                softmax: 1,
+                accumulate: 1,
+            },
+            max_offset_bits: None,
+            exp_flush_below_bits: None,
+            normalize: Normalize::Reciprocal,
+        };
+        let detected = HalfKernels::detect();
+        let (_, pinned) = PINNED
+            .iter()
+            .find(|(kernels, _)| *kernels == detected)
+            .expect("the detected arm has a pinned hash");
+        assert_eq!(fnv1a_64(&fixture_bits(detected, 1, Some(&stages))), *pinned);
+    }
+
+    #[test]
+    fn the_staged_entry_refuses_a_stage_value_it_does_not_lower() {
+        let wide = AttentionStages::ONLINE;
+        let output_bits = fixture_bits(HalfKernels::detect(), 1, Some(&wide));
+        assert!(
+            output_bits.iter().all(|bits| *bits == 0),
+            "an unlowerable value must leave the output untouched"
+        );
     }
 
     #[test]
     fn worker_threads_reproduce_the_single_thread_result_bit_for_bit() {
-        let outputs: alloc::vec::Vec<alloc::vec::Vec<u32>> =
-            [1usize, 2, 5].iter().map(|workers| fixture_bits(HalfKernels::detect(), *workers)).collect();
+        let outputs: alloc::vec::Vec<alloc::vec::Vec<u32>> = [1usize, 2, 5]
+            .iter()
+            .map(|workers| fixture_bits(HalfKernels::detect(), *workers, None))
+            .collect();
         assert_eq!(outputs[0], outputs[1]);
         assert_eq!(outputs[0], outputs[2]);
     }
 
-    fn fixture_bits(kernels: HalfKernels, workers: usize) -> alloc::vec::Vec<u32> {
-        let (rows, cached, kv_heads, groups, head_dim) = (24usize, 40usize, 2usize, 3usize, 64usize);
+    fn fixture_bits(
+        kernels: HalfKernels,
+        workers: usize,
+        stages: Option<&AttentionStages>,
+    ) -> alloc::vec::Vec<u32> {
+        let (rows, cached, kv_heads, groups, head_dim) =
+            (24usize, 40usize, 2usize, 3usize, 64usize);
         let pair = head_dim / 2;
         let mut state = 0x1234_5678_9abc_def0u64;
         let query_even = random(&mut state, rows * kv_heads * groups * pair);
@@ -866,28 +1126,69 @@ mod threading_tests {
             query_groups: groups as u64,
             head_dim: head_dim as u64,
         };
-        let rotary = CachedAttentionRotary { rotary_dim: head_dim as u64, pass: None, planes: crate::bind::ScorePlanes::Paired };
+        let rotary = CachedAttentionRotary {
+            rotary_dim: head_dim as u64,
+            pass: None,
+            planes: crate::bind::ScorePlanes::Paired,
+        };
         let score = CachedAttentionScore {
             scale: 0.125,
             sinks: None,
             bands: [
-                CausalBand { lower_inclusive: i64::MIN, upper_inclusive: i64::MAX },
-                CausalBand { lower_inclusive: i64::MIN, upper_inclusive: 0 },
+                CausalBand {
+                    lower_inclusive: i64::MIN,
+                    upper_inclusive: i64::MAX,
+                },
+                CausalBand {
+                    lower_inclusive: i64::MIN,
+                    upper_inclusive: 0,
+                },
             ],
         };
         let mut output = alloc::vec![0f32; rows * kv_heads * groups * head_dim];
-        assert!(run_with_kernels(
-            kernels,
-            &mut Scratch::default(),
-            Options { workers: Some(workers), interleaved: false },
-            [&query_even, &query_odd],
-            [[&cached_even, &cached_odd], [&new_even, &new_odd]],
-            [&cached_value, &new_value],
-            &mut output,
-            &extents,
-            &rotary,
-            &score,
-        ));
+        let planes = (
+            [&query_even[..], &query_odd[..]],
+            [
+                [&cached_even[..], &cached_odd[..]],
+                [&new_even[..], &new_odd[..]],
+            ],
+            [&cached_value[..], &new_value[..]],
+        );
+        match stages {
+            Some(stages) => {
+                let lowered = stream_cached_attention_staged(
+                    stages,
+                    planes.0,
+                    planes.1,
+                    planes.2,
+                    &mut output,
+                    &extents,
+                    &rotary,
+                    &score,
+                    false,
+                );
+                assert_eq!(
+                    lowered,
+                    same_stages(stages, &half_accumulate_stages()),
+                    "only the one supported value is lowered"
+                );
+            }
+            None => assert!(run_with_kernels(
+                kernels,
+                &mut Scratch::default(),
+                Options {
+                    workers: Some(workers),
+                    interleaved: false
+                },
+                planes.0,
+                planes.1,
+                planes.2,
+                &mut output,
+                &extents,
+                &rotary,
+                &score,
+            )),
+        }
         output.iter().map(|value| value.to_bits()).collect()
     }
 }
@@ -903,11 +1204,19 @@ mod aarch64_twin_tests {
     }
 
     fn fixed_key() -> alloc::vec::Vec<u16> {
-        bits(&(0..64).map(|index| ((index * 7 % 13) as f32 - 6.0) * 0.375).collect::<alloc::vec::Vec<f32>>())
+        bits(
+            &(0..64)
+                .map(|index| ((index * 7 % 13) as f32 - 6.0) * 0.375)
+                .collect::<alloc::vec::Vec<f32>>(),
+        )
     }
 
     fn fixed_query() -> alloc::vec::Vec<u16> {
-        bits(&(0..64).map(|index| ((index * 5 % 11) as f32 - 5.0) * 0.5).collect::<alloc::vec::Vec<f32>>())
+        bits(
+            &(0..64)
+                .map(|index| ((index * 5 % 11) as f32 - 5.0) * 0.5)
+                .collect::<alloc::vec::Vec<f32>>(),
+        )
     }
 
     fn half(value: f64) -> f32 {
@@ -968,13 +1277,19 @@ mod aarch64_twin_tests {
     #[test]
     fn the_fp16_twin_matches_the_hand_expanded_macro_sequence() {
         let (key, query) = (fixed_key(), fixed_query());
-        assert_eq!(neon_twin::dot_fp16(&key, &query).to_bits(), hand_expanded_fp16_dot(&key, &query).to_bits());
+        assert_eq!(
+            neon_twin::dot_fp16(&key, &query).to_bits(),
+            hand_expanded_fp16_dot(&key, &query).to_bits()
+        );
     }
 
     #[test]
     fn the_f32_twin_matches_the_hand_expanded_macro_sequence() {
         let (key, query) = (fixed_key(), fixed_query());
-        assert_eq!(neon_twin::dot_f32(&key, &query).to_bits(), hand_expanded_f32_dot(&key, &query).to_bits());
+        assert_eq!(
+            neon_twin::dot_f32(&key, &query).to_bits(),
+            hand_expanded_f32_dot(&key, &query).to_bits()
+        );
     }
 
     #[test]
@@ -985,7 +1300,12 @@ mod aarch64_twin_tests {
         let expected: alloc::vec::Vec<u16> = accumulator
             .iter()
             .zip(&row)
-            .map(|(value, x)| half_bits(half(f64::from(half_value(*x)) * f64::from(half(f64::from(factor))) + f64::from(half_value(*value)))))
+            .map(|(value, x)| {
+                half_bits(half(
+                    f64::from(half_value(*x)) * f64::from(half(f64::from(factor)))
+                        + f64::from(half_value(*value)),
+                ))
+            })
             .collect();
         neon_twin::mad_fp16(&mut accumulator, &row, factor);
         assert_eq!(accumulator, expected);
@@ -1012,7 +1332,11 @@ mod aarch64_twin_tests {
         let query = bits(&[1.0; 64]);
         let avx = HalfKernels::Scalar.dot(&key, &query);
         let fp16 = neon_twin::dot_fp16(&key, &query);
-        assert_ne!(avx.to_bits(), fp16.to_bits(), "the f16 accumulating dot must visibly differ from the f32 accumulating one");
+        assert_ne!(
+            avx.to_bits(),
+            fp16.to_bits(),
+            "the f16 accumulating dot must visibly differ from the f32 accumulating one"
+        );
     }
 }
 
@@ -1024,7 +1348,9 @@ mod pairing_order_tests {
     fn random(state: &mut u64, length: usize) -> alloc::vec::Vec<f32> {
         (0..length)
             .map(|_| {
-                *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                *state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 ((*state >> 33) as f32 / (1u64 << 31) as f32) * 16.0 - 8.0
             })
             .collect()
@@ -1040,7 +1366,10 @@ mod pairing_order_tests {
         assemble_head(&mut split, &even, &odd, Some(&tail), false);
         assemble_head(&mut interleaved, &even, &odd, Some(&tail), true);
         assert_eq!(split, [10.0, 11.0, 12.0, 20.0, 21.0, 22.0, 30.0, 31.0]);
-        assert_eq!(interleaved, [10.0, 20.0, 11.0, 21.0, 12.0, 22.0, 30.0, 31.0]);
+        assert_eq!(
+            interleaved,
+            [10.0, 20.0, 11.0, 21.0, 12.0, 22.0, 30.0, 31.0]
+        );
     }
 
     /// One query row, one kv head, every key visible: the kernel and a memory-order reference built
@@ -1063,13 +1392,23 @@ mod pairing_order_tests {
             query_groups: 1,
             head_dim: head_dim as u64,
         };
-        let rotary = CachedAttentionRotary { rotary_dim: head_dim as u64, pass: None, planes: crate::bind::ScorePlanes::Paired };
+        let rotary = CachedAttentionRotary {
+            rotary_dim: head_dim as u64,
+            pass: None,
+            planes: crate::bind::ScorePlanes::Paired,
+        };
         let score = CachedAttentionScore {
             scale: 0.125,
             sinks: None,
             bands: [
-                CausalBand { lower_inclusive: i64::MIN, upper_inclusive: i64::MAX },
-                CausalBand { lower_inclusive: i64::MIN, upper_inclusive: i64::MAX },
+                CausalBand {
+                    lower_inclusive: i64::MIN,
+                    upper_inclusive: i64::MAX,
+                },
+                CausalBand {
+                    lower_inclusive: i64::MIN,
+                    upper_inclusive: i64::MAX,
+                },
             ],
         };
         // the reference runs the same kernel family the op does, so this
@@ -1083,7 +1422,13 @@ mod pairing_order_tests {
             let (mut max, mut sum) = (f32::NEG_INFINITY, 0.0f32);
             for key in 0..keys {
                 let mut row = alloc::vec![0f32; head_dim];
-                assemble_head(&mut row, &key_even[key * pair..][..pair], &key_odd[key * pair..][..pair], None, interleaved);
+                assemble_head(
+                    &mut row,
+                    &key_even[key * pair..][..pair],
+                    &key_odd[key * pair..][..pair],
+                    None,
+                    interleaved,
+                );
                 let row: alloc::vec::Vec<u16> = row.iter().map(|value| half_bits(*value)).collect();
                 let weighted = kernels.dot(&row, &query) * 0.125;
                 let (mut rescale, mut weight) = (1.0f32, 1.0f32);
@@ -1094,16 +1439,23 @@ mod pairing_order_tests {
                 } else {
                     weight = expf(weighted - max);
                 }
-                let value: alloc::vec::Vec<u16> = values[key * head_dim..][..head_dim].iter().map(|raw| half_bits(*raw)).collect();
+                let value: alloc::vec::Vec<u16> = values[key * head_dim..][..head_dim]
+                    .iter()
+                    .map(|raw| half_bits(*raw))
+                    .collect();
                 kernels.mad(&mut accumulator, &value, weight);
                 sum = sum * rescale + weight;
             }
-            accumulator.iter().map(|bits| (half_value(*bits) * (1.0 / sum)).to_bits()).collect()
+            accumulator
+                .iter()
+                .map(|bits| (half_value(*bits) * (1.0 / sum)).to_bits())
+                .collect()
         };
         let mut results = alloc::vec::Vec::new();
         for interleaved in [false, true] {
             let mut output = alloc::vec![0f32; head_dim];
-            assert!(stream_cached_attention_llama_flash(
+            assert!(stream_cached_attention_staged(
+                &half_accumulate_stages(),
                 [&query_even, &query_odd],
                 [[&[], &[]], [&key_even, &key_odd]],
                 [&[], &values],
@@ -1114,19 +1466,39 @@ mod pairing_order_tests {
                 interleaved,
             ));
             let bits: alloc::vec::Vec<u32> = output.iter().map(|value| value.to_bits()).collect();
-            assert_eq!(bits, reference(interleaved), "kernel vs memory-order reference, interleaved={interleaved}");
+            assert_eq!(
+                bits,
+                reference(interleaved),
+                "kernel vs memory-order reference, interleaved={interleaved}"
+            );
             results.push(bits);
         }
         let dot_in = |interleaved: bool, key: usize| {
             let mut query = alloc::vec![0f32; head_dim];
             assemble_head(&mut query, &query_even, &query_odd, None, interleaved);
             let mut row = alloc::vec![0f32; head_dim];
-            assemble_head(&mut row, &key_even[key * pair..][..pair], &key_odd[key * pair..][..pair], None, interleaved);
-            let to_bits = |values: &[f32]| values.iter().map(|value| half_bits(*value)).collect::<alloc::vec::Vec<u16>>();
+            assemble_head(
+                &mut row,
+                &key_even[key * pair..][..pair],
+                &key_odd[key * pair..][..pair],
+                None,
+                interleaved,
+            );
+            let to_bits = |values: &[f32]| {
+                values
+                    .iter()
+                    .map(|value| half_bits(*value))
+                    .collect::<alloc::vec::Vec<u16>>()
+            };
             kernels.dot(&to_bits(&row), &to_bits(&query)).to_bits()
         };
-        let differing_keys = (0..keys).filter(|key| dot_in(false, *key) != dot_in(true, *key)).count();
-        assert!(differing_keys > 0, "summing the same products in the two memory orders must round differently for some key");
+        let differing_keys = (0..keys)
+            .filter(|key| dot_in(false, *key) != dot_in(true, *key))
+            .count();
+        assert!(
+            differing_keys > 0,
+            "summing the same products in the two memory orders must round differently for some key"
+        );
     }
 }
 
@@ -1159,7 +1531,9 @@ mod amplification_tests {
             let mut plane = |length: usize| -> alloc::vec::Vec<f32> {
                 (0..length)
                     .map(|_| {
-                        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                        state = state
+                            .wrapping_mul(6364136223846793005)
+                            .wrapping_add(1442695040888963407);
                         ((state >> 33) as f32 / (1u64 << 31) as f32) * 6.0 - 3.0
                     })
                     .collect()
@@ -1185,23 +1559,54 @@ mod amplification_tests {
                 query_groups: 1,
                 head_dim: HEAD_DIM as u64,
             };
-            let rotary = CachedAttentionRotary { rotary_dim: HEAD_DIM as u64, pass: None, planes: crate::bind::ScorePlanes::Paired };
+            let rotary = CachedAttentionRotary {
+                rotary_dim: HEAD_DIM as u64,
+                pass: None,
+                planes: crate::bind::ScorePlanes::Paired,
+            };
             let score = CachedAttentionScore {
                 scale: 0.125,
                 sinks: None,
                 bands: [
-                    CausalBand { lower_inclusive: i64::MIN, upper_inclusive: i64::MAX },
-                    CausalBand { lower_inclusive: i64::MIN, upper_inclusive: 0 },
+                    CausalBand {
+                        lower_inclusive: i64::MIN,
+                        upper_inclusive: i64::MAX,
+                    },
+                    CausalBand {
+                        lower_inclusive: i64::MIN,
+                        upper_inclusive: 0,
+                    },
                 ],
             };
             let queries = [&self.query_even[..], &self.query_odd[..]];
-            let keys = [[&self.cached_even[..], &self.cached_odd[..]], [&self.new_even[..], &self.new_odd[..]]];
+            let keys = [
+                [&self.cached_even[..], &self.cached_odd[..]],
+                [&self.new_even[..], &self.new_odd[..]],
+            ];
             let values = [&self.cached_value[..], &self.new_value[..]];
             let mut output = alloc::vec![0f32; ROWS * HEAD_DIM];
             let ran = if llama {
-                stream_cached_attention_llama_flash(queries, keys, values, &mut output, &extents, &rotary, &score, false)
+                stream_cached_attention_staged(
+                    &half_accumulate_stages(),
+                    queries,
+                    keys,
+                    values,
+                    &mut output,
+                    &extents,
+                    &rotary,
+                    &score,
+                    false,
+                )
             } else {
-                stream_cached_attention_split_gqa(queries, keys, values, &mut output, extents, rotary, score)
+                stream_cached_attention_split_gqa(
+                    queries,
+                    keys,
+                    values,
+                    &mut output,
+                    extents,
+                    rotary,
+                    score,
+                )
             };
             assert!(ran, "the fixture's layout must fit the kernel");
             output
@@ -1213,24 +1618,31 @@ mod amplification_tests {
             .zip(right)
             .enumerate()
             .map(|(index, (a, b))| (index, (a - b).abs()))
-            .fold((0, 0.0f32), |best, next| if next.1 > best.1 { next } else { best })
+            .fold(
+                (0, 0.0f32),
+                |best, next| if next.1 > best.1 { next } else { best },
+            )
     }
 
     fn half_ulp_at(value: f32) -> f32 {
-        let bits = f16::from_f32(value.abs()).to_bits();
-        (f16::from_bits(bits + 1).to_f32() - f16::from_bits(bits).to_f32()).abs()
+        let bits = half_bits(value.abs());
+        (half_value(bits + 1) - half_value(bits)).abs()
     }
 
     /// The f32 value halfway between two neighbouring binary16 values, and its neighbour one binary32
     /// ulp away on the side that rounds to the other binary16 value.
     fn tie_and_flip(near: f32) -> (f32, f32) {
-        let low = f16::from_f32(near);
-        let high = f16::from_bits(low.to_bits() + 1);
-        let tie = (low.to_f32() + high.to_f32()) / 2.0;
+        let low = half_bits(near);
+        let high = low + 1;
+        let tie = (half_value(low) + half_value(high)) / 2.0;
         let (down, up) = (tie.next_down(), tie.next_up());
-        let tie_half = f16::from_f32(tie);
-        let flipped = if f16::from_f32(up) != tie_half { up } else { down };
-        assert_ne!(f16::from_f32(flipped), tie_half, "one binary32 ulp off a tie must cross the binary16 rounding boundary");
+        let tie_half = half_bits(tie);
+        let flipped = if half_bits(up) != tie_half { up } else { down };
+        assert_ne!(
+            half_bits(flipped),
+            tie_half,
+            "one binary32 ulp off a tie must cross the binary16 rounding boundary"
+        );
         (tie, flipped)
     }
 
@@ -1242,7 +1654,11 @@ mod amplification_tests {
         let before = nudged.cached_even[slot];
         nudged.cached_even[slot] = before.next_up();
         assert_ne!(base.cached_even[slot], nudged.cached_even[slot]);
-        assert_eq!(f16::from_f32(before), f16::from_f32(nudged.cached_even[slot]), "the nudge must stay inside one binary16 rounding interval");
+        assert_eq!(
+            half_bits(before),
+            half_bits(nudged.cached_even[slot]),
+            "the nudge must stay inside one binary16 rounding interval"
+        );
         assert_eq!(base.run(true), nudged.run(true));
     }
 
@@ -1271,7 +1687,13 @@ mod amplification_tests {
     /// Moves each cached operand element in turn from a binary16 rounding tie to the binary32 neighbour
     /// that rounds the other way, one trial per element.
     fn sweep(operand: Operand, slots: usize) -> Sweep {
-        let mut result = Sweep { trials: 0, llama_moved: 0, llama_largest_move_in_output_ulps: 0.0, llama_largest_move: 0.0, online_largest_move: 0.0 };
+        let mut result = Sweep {
+            trials: 0,
+            llama_moved: 0,
+            llama_largest_move_in_output_ulps: 0.0,
+            llama_largest_move: 0.0,
+            online_largest_move: 0.0,
+        };
         for slot in 0..slots {
             let mut base = Fixture::random();
             let mut nudged = Fixture::random();
@@ -1284,7 +1706,9 @@ mod amplification_tests {
             result.trials += 1;
             if llama_diff > 0.0 {
                 result.llama_moved += 1;
-                result.llama_largest_move_in_output_ulps = result.llama_largest_move_in_output_ulps.max(llama_diff / half_ulp_at(llama_base[index]));
+                result.llama_largest_move_in_output_ulps = result
+                    .llama_largest_move_in_output_ulps
+                    .max(llama_diff / half_ulp_at(llama_base[index]));
             }
             result.llama_largest_move = result.llama_largest_move.max(llama_diff);
             result.online_largest_move = result.online_largest_move.max(online_diff);
@@ -1293,13 +1717,22 @@ mod amplification_tests {
     }
 
     #[test]
-    fn a_binary32_ulp_across_a_binary16_rounding_tie_moves_llama_flash_by_binary16_ulps_not_binary32_roundoff() {
+    fn a_binary32_ulp_across_a_binary16_rounding_tie_moves_llama_flash_by_binary16_ulps_not_binary32_roundoff()
+     {
         let output = Fixture::random().run(true);
-        let peak = output.iter().fold(0.0f32, |best, value| best.max(value.abs()));
+        let peak = output
+            .iter()
+            .fold(0.0f32, |best, value| best.max(value.abs()));
         let binary16_ulp = half_ulp_at(peak);
-        for (operand, slots) in [(Operand::Key, CACHED * PAIR), (Operand::Value, CACHED * HEAD_DIM)] {
+        for (operand, slots) in [
+            (Operand::Key, CACHED * PAIR),
+            (Operand::Value, CACHED * HEAD_DIM),
+        ] {
             let swept = sweep(operand, slots);
-            assert!(swept.llama_moved > 0, "{operand:?}: some tie flips must reach the llama flash output");
+            assert!(
+                swept.llama_moved > 0,
+                "{operand:?}: some tie flips must reach the llama flash output"
+            );
             assert!(
                 swept.llama_largest_move >= binary16_ulp,
                 "{operand:?}: llama flash largest move {} must reach one binary16 ulp {binary16_ulp} at the peak output {peak}",
