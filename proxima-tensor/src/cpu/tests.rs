@@ -13046,8 +13046,9 @@ fn a_reduce_where_activation_and_packed_weight_share_a_kept_output_axis_is_rejec
 /// [`matmul_f16_f32`]/[`matmul_bf16_f32`] call shape but pack a value to
 /// a different bit pattern, so the byte-packing step is the one thing
 /// each case varies.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 enum HalfPrecisionKind {
+    #[default]
     F16,
     Bf16,
 }
@@ -13187,6 +13188,71 @@ async fn dot_half_precision_rejects_a_malformed_shape(#[case] kind: HalfPrecisio
     ));
 }
 
+/// One activation vector and one `[rows, width]` weight per entry of
+/// `row_counts`, each folded by multiply-then-add -- the matmul shape
+/// `is_quantized_matmul_operand` recognizes. Returns the program and the
+/// fold node of every weight, in `row_counts` order.
+fn half_precision_projection_program(row_counts: &[u32], width: u32) -> (Vec<Op>, Vec<NodeId>) {
+    let mut program = Vec::new();
+    let activation_node = f32_block(&mut program, &[Extent::Static(width)]);
+    let sums = row_counts
+        .iter()
+        .map(|&rows| {
+            let weight = block(
+                &mut program,
+                DType::UINT8,
+                &[Extent::Static(rows), Extent::Static(width)],
+            );
+            let product = append(
+                &mut program,
+                Op::Elementwise {
+                    dtype: DType::FLOAT32,
+                    body: ScalarOp::Multiply,
+                    operands: alloc::vec![
+                        (weight, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                        (activation_node, IndexMap::Affine(map::projection(2, &[1]))),
+                    ],
+                    name: None,
+                },
+            );
+            append(
+                &mut program,
+                Op::Reduce(Reduce {
+                    dtype: DType::FLOAT32,
+                    body: ScalarOp::Add,
+                    init: ReduceInit::Zero,
+                    operand: product,
+                    in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                    out_map: IndexMap::Affine(map::projection(2, &[0])),
+                    keep: Keep::Reduce,
+                    name: Some("half_precision_matmul".into()),
+                }),
+            )
+        })
+        .collect();
+    (program, sums)
+}
+
+/// The blocks [`half_precision_projection_program`] binds: the activation,
+/// then each weight's packed bytes under `kind`'s codec.
+fn half_precision_blocks<'bytes>(
+    kind: HalfPrecisionKind,
+    activation: QuantizedBlock<'bytes>,
+    weights: &[&'bytes [u8]],
+) -> Vec<QuantizedBlock<'bytes>> {
+    let codec = match kind {
+        HalfPrecisionKind::F16 => Codec::Float16,
+        HalfPrecisionKind::Bf16 => Codec::BFloat16,
+    };
+    let mut blocks = alloc::vec![activation];
+    blocks.extend(
+        weights
+            .iter()
+            .map(|&bytes| QuantizedBlock::Packed { codec, bytes }),
+    );
+    blocks
+}
+
 /// End-to-end: a `Float16`/`BFloat16` [`QuantizedBlock`] weight bound
 /// through [`evaluate_quantized`]'s full `Op` graph (elementwise
 /// multiply feeding an add-reduce -- the matmul shape
@@ -13211,57 +13277,14 @@ async fn evaluate_quantized_executes_a_half_precision_weight_end_to_end(
     let activation = random_vec(43, K as usize);
     let weight_bytes = kind.pack(&weights_f32);
 
-    let mut program = Vec::new();
-    let weight = block(
-        &mut program,
-        DType::UINT8,
-        &[Extent::Static(ROWS), Extent::Static(K)],
+    let (program, sums) = half_precision_projection_program(&[ROWS], K);
+    let blocks = half_precision_blocks(
+        kind,
+        QuantizedBlock::from(activation.as_slice()),
+        &[weight_bytes.as_slice()],
     );
-    let activation_node = f32_block(&mut program, &[Extent::Static(K)]);
-    let product = append(
-        &mut program,
-        Op::Elementwise {
-            dtype: DType::FLOAT32,
-            body: ScalarOp::Multiply,
-            operands: alloc::vec![
-                (weight, IndexMap::Affine(map::projection(2, &[0, 1]))),
-                (activation_node, IndexMap::Affine(map::projection(2, &[1]))),
-            ],
-            name: None,
-        },
-    );
-    let sum = append(
-        &mut program,
-        Op::Reduce(Reduce {
-            dtype: DType::FLOAT32,
-            body: ScalarOp::Add,
-            init: ReduceInit::Zero,
-            operand: product,
-            in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
-            out_map: IndexMap::Affine(map::projection(2, &[0])),
-            keep: Keep::Reduce,
-            name: Some("half_precision_matmul".into()),
-        }),
-    );
-
-    let blocks = match kind {
-        HalfPrecisionKind::F16 => alloc::vec![
-            QuantizedBlock::Packed {
-                codec: Codec::Float16,
-                bytes: &weight_bytes
-            },
-            QuantizedBlock::Float32(&activation)
-        ],
-        HalfPrecisionKind::Bf16 => alloc::vec![
-            QuantizedBlock::Packed {
-                codec: Codec::BFloat16,
-                bytes: &weight_bytes
-            },
-            QuantizedBlock::Float32(&activation)
-        ],
-    };
-    let evaluated = evaluate_quantized(&program, &[], &blocks, &[sum])
-        .expect("half-precision matmul evaluates");
+    let evaluated =
+        evaluate_quantized(&program, &[], &blocks, &sums).expect("half-precision matmul evaluates");
     let actual = evaluated.root();
 
     let mut dequantized = vec![0.0f32; (ROWS * K) as usize];
@@ -13312,6 +13335,86 @@ async fn evaluate_quantized_executes_a_half_precision_weight_end_to_end(
     assert!(
         max_diff < 1e-4,
         "half-precision matmul ({kind:?}) disagrees with the dequantize-then-fold reference: max_diff={max_diff}"
+    );
+}
+
+fn pool_bytes<Element>(pool: &[Vec<Element>]) -> usize {
+    pool.iter()
+        .map(|buffer| buffer.capacity() * size_of::<Element>())
+        .sum()
+}
+
+/// Bytes the scratch pools hold between two steps, by `capacity()` (what the
+/// allocator keeps), not `len()`: every `free_buffers` entry plus every
+/// wide-pool entry, each at its own element width.
+fn scratch_pool_bytes(pools: &BufferPools) -> usize {
+    pool_bytes(&pools.0) + pool_bytes(&pools.1)
+}
+
+/// A serving loop re-runs one program per token with the same scratch pools.
+/// Three packed matmul weights of 512, 1024 and 2048 elements, every output
+/// smaller than the smallest weight, must leave no widened copy of any weight
+/// in those pools, and the pools must not grow from step 1 to step 4. The
+/// incumbent reads the packed weight in place with no widened copy; here
+/// `assemble_step`'s `dense_packed_nodes` dequantizes every such weight into a
+/// pooled buffer before the node loop on every step.
+#[test]
+#[ignore = "PROXNUM-753: packed weights are widened into the scratch pools every step"]
+fn half_precision_weights_leave_no_widened_copy_in_the_scratch_pools_across_steps() {
+    const WIDTH: u32 = 64;
+    const ROW_COUNTS: [u32; 3] = [8, 16, 32];
+    const STEPS: usize = 4;
+    let smallest_weight_elements = (ROW_COUNTS[0] * WIDTH) as usize;
+
+    let kind = HalfPrecisionKind::default();
+    let activation = random_vec(43, WIDTH as usize);
+    let weight_bytes: Vec<Vec<u8>> = ROW_COUNTS
+        .iter()
+        .map(|&rows| kind.pack(&random_vec(41 + u64::from(rows), (rows * WIDTH) as usize)))
+        .collect();
+    let weight_slices: Vec<&[u8]> = weight_bytes.iter().map(Vec::as_slice).collect();
+    let (program, sums) = half_precision_projection_program(&ROW_COUNTS, WIDTH);
+    let blocks = half_precision_blocks(
+        kind,
+        QuantizedBlock::from(activation.as_slice()),
+        &weight_slices,
+    );
+
+    let mut pools = BufferPools::default();
+    let mut validated = None;
+    let mut held_bytes = Vec::new();
+    let mut largest_pooled_buffer = Vec::new();
+    for _ in 0..STEPS {
+        let evaluated = evaluate_quantized_with_scratch(
+            &program,
+            &[],
+            &blocks,
+            &sums,
+            &mut pools,
+            &mut validated,
+        )
+        .expect("three packed matmuls evaluate");
+        assert_eq!(
+            evaluated.root().len(),
+            ROW_COUNTS[2] as usize,
+            "degenerate gate: no output compared"
+        );
+        drop(evaluated);
+        held_bytes.push(scratch_pool_bytes(&pools));
+        largest_pooled_buffer.push(pools.0.iter().map(Vec::capacity).max().unwrap_or(0));
+    }
+
+    assert!(
+        held_bytes[STEPS - 1] <= held_bytes[0],
+        "scratch pools grew between step 1 and step {STEPS}: held bytes per step {held_bytes:?}"
+    );
+    assert!(
+        largest_pooled_buffer
+            .iter()
+            .all(|&capacity| capacity < smallest_weight_elements),
+        "a widened copy of a packed weight stays in free_buffers after the step: largest pooled \
+         buffer per step {largest_pooled_buffer:?} elements, smallest weight \
+         {smallest_weight_elements} elements, held bytes per step {held_bytes:?}"
     );
 }
 
