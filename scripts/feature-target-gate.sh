@@ -72,6 +72,9 @@ done
 # test target, without the examples and integration tests that need std.
 # crate:@libtestrun:feature-set is `cargo val --lib` plus those features: it RUNS the lib's
 # tests, because a std-gated test tree that compiles can still be red and nothing else runs it.
+# crate:@testrun:test-name is `cargo val -p crate --test test-name`: it RUNS one integration test
+# and needs a nonzero passed= count. It is selected whenever any crate is selected, even if its
+# own crate did not change, because its subject is the whole workspace (a source-rules scan).
 # crate:@nodefault:feature-set is `cargo check --all-targets --no-default-features`
 # plus those features: it compiles TEST targets for a feature set that excludes the
 # crate's default features (omega defaults to metal; std,cuda never builds with it).
@@ -108,6 +111,7 @@ matrix=(
     "proxima-model-interop:std,metal,moe-expert-prefetch"
     "proxima-numeric:std"
     "proxima-numeric:config"
+    "proxima-numeric:@testrun:source_rules_scan"
     "proxima-gguf:"
     "proxima-tokenizer:"
     "proxima-tokenizer:hf"
@@ -298,24 +302,42 @@ printf '%s\n' "$selection" | while IFS=$'\t' read -r crate reason; do
     printf 'feature-target-gate: selected %s (%s)\n' "$crate" "$reason"
 done
 
+# a @testrun row's subject is the whole workspace, so any selected crate selects it
+row_selected() {
+    case " $crates " in
+        *" $1 "*) return 0 ;;
+    esac
+    [ "$2" = "@testrun" ] && [ -n "$crates" ]
+}
+
 if [ "$list" = 1 ]; then
     rows=0
     for row in "${matrix[@]}"; do
-        case " $crates " in
-            *" ${row%%:*} "*) printf 'feature-target-gate: row %s\n' "$row"; rows=$((rows + 1)) ;;
-        esac
+        IFS=: read -r row_crate row_kind _ <<< "$row"
+        if row_selected "$row_crate" "$row_kind"; then
+            printf 'feature-target-gate: row %s\n' "$row"
+            rows=$((rows + 1))
+        fi
     done
     printf 'feature-target-gate: --list %s crates, %s rows, nothing run\n' "$(printf '%s\n' "$crates" | wc -w | tr -d ' ')" "$rows"
     exit 0
 fi
 
+# prints ok/FAIL for a `cargo val` run; zero passed tests reads like a pass, so it fails
+report_run_count() {
+    local run_count
+    run_count="$(printf '%s\n' "$1" | grep -E '^SUMMARY ' | grep -oE 'passed=[0-9]+' | grep -oE '[0-9]+' | tail -1 || true)"
+    if [ -z "$run_count" ] || [ "$run_count" = 0 ]; then
+        printf 'FAIL (no SUMMARY line or 0 tests passed)\n'
+        return 1
+    fi
+    printf 'ok (%s tests run)\n' "$run_count"
+}
+
 failed=0
 ran=0
 while IFS=: read -r crate features tier_features; do
-    case " $crates " in
-        *" $crate "*) ;;
-        *) continue ;;
-    esac
+    row_selected "$crate" "$features" || continue
     verb=(check)
     format_args=(--message-format short)
     if [ "$features" = "@nostd" ]; then
@@ -340,6 +362,11 @@ while IFS=: read -r crate features tier_features; do
             label="$crate lib test (default features)"
             args=(-p "$crate" --lib)
         fi
+    elif [ "$features" = "@testrun" ]; then
+        verb=(val)
+        format_args=()
+        label="$crate integration test $tier_features"
+        args=(-p "$crate" --test "$tier_features")
     elif [ "$features" = "@nodefault" ]; then
         label="$crate --all-targets --no-default-features --features $tier_features"
         args=(-p "$crate" --all-targets --no-default-features --features "$tier_features")
@@ -357,14 +384,8 @@ while IFS=: read -r crate features tier_features; do
             printf 'FAIL (%s errors)\n' "$errors"
             printf '%s\n' "$output" | grep -E '^error|^  -->' | head -20
             failed=1
-        elif [ "$features" = "@libtestrun" ]; then
-            run_count="$(printf '%s\n' "$output" | grep -E '^SUMMARY ' | grep -oE 'passed=[0-9]+' | grep -oE '[0-9]+' | tail -1 || true)"
-            if [ -z "$run_count" ] || [ "$run_count" = 0 ]; then
-                printf 'FAIL (no SUMMARY line or 0 tests passed)\n'
-                failed=1
-            else
-                printf 'ok (%s tests run)\n' "$run_count"
-            fi
+        elif [ "$features" = "@libtestrun" ] || [ "$features" = "@testrun" ]; then
+            report_run_count "$output" || failed=1
         else
             printf 'ok\n'
         fi
