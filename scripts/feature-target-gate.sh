@@ -125,6 +125,7 @@ matrix=(
     "proxima-tokenizer:@nostd:"
     "proxima-autograd:@nostd:alloc"
     "proxima-omega:@nostd:alloc"
+    "proxima-omega:@nostd:alloc,cuda"
     "proxima-omega:@nostd:"
     "proxima-model-interop:@nostd:"
 )
