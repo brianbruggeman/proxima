@@ -14,6 +14,7 @@ If you have ten minutes, read [00](./00-hello-tensor.md). If you want the number
 - [05: speech, whisper](./05-speech-whisper.md) — which pieces of a whisper pipeline exist today (log-mel front end, cross-attention, conv1d, rope tables), each shown with the test that proves it, and the exact point where an audio file would fall off the end. That point is out of date: `Model::transcribe` (`proxima-model-interop/src/families/encoder_decoder_host.rs:687`) now takes a waveform to a transcript, and `transcript::ids_and_text_match_the_reference` (`proxima-model-interop/tests/whisper.rs:1216`) asserts the reference token ids, end-of-text and text for one fixture wav at 16 kHz, language `en`. The page itself is unchanged.
 - [06: diffusion](./06-diffusion.md) — the same treatment for image generation: adaLN modulation, non-causal attention, norm without affine and layer taps exist and are differentiable, and the FLUX.2 klein image path (Euler scheduler, VAE decode, checkpoint reader) runs end to end on Metal; the page carries the 2026-11-24 measurements.
 - [07: comparisons](./07-comparisons.md) — omega against burn, PyTorch, llama.cpp, whisper.cpp and stable-diffusion.cpp. Every row is a measured number with its command, hardware, run count and variation, or a named gap with the missing artifact. The first number is the one that hurts: whisper on Metal takes about 1.5x as long as whisper.cpp greedy for tiny and 47.2x for large-v3-turbo, which was not re-measured (section 5). LLM results depend on the model: flint decode is 0.904x of llama.cpp, granite is behind (section 2). FLUX.2 klein is 0.82x of sd.cpp on wall time and loses on DiT load, 6.3 s warm against 1.74-1.87 s (section 6).
+- [08: the IR](./08-the-ir.md) — the IR from the lowest algebra up: the five `Op` variants and 17 `ScalarOp`s, how `Elementwise` and `Reduce` compose (a matmul is a `Reduce` over a product body), the eight fused `BoundOpKind` forms, what binding adds, and how a backend lowers it with `Dialect` plus `render::{load, store}`. Ends with the map of what is not yet that simple transform and a five-line checklist. Read before designing or changing any lowering.
 
 ## Dependency graph
 
@@ -27,6 +28,7 @@ graph TD
   P05["05 speech: whisper"]
   P06["06 diffusion"]
   P07["07 comparisons"]
+  P08["08 the IR"]
   P00 --> P01
   P01 --> P02
   P02 --> P03
@@ -38,6 +40,7 @@ graph TD
   P04 --> P07
   P05 --> P07
   P06 --> P07
+  P02 --> P08
 ```
 
 ## Relationship to the rest of the tree
