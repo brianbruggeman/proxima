@@ -7654,6 +7654,50 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_mma_operand_weight_gemm_prefetches_the_next_stage_into_a_register() {
+        let bound = dense_expert_free_op(128, 512, 200);
+        let codec = Target::CUDA
+            .mma_operand_codec()
+            .expect("the cuda target names its mma operand");
+        let packed = packed_expert_weight(&bound, codec);
+        let rounded = NumericPolicy::llama_relaxed().with_input_rounding(true);
+        let kernel = emit_cuda_with_policy(&bound, &packed, rounded).expect("emit succeeds");
+        let source = kernel.source.as_str();
+        let load = "(__half2 *)&weight_next";
+        let loop_start = source
+            .find("for (long long stage_first")
+            .expect("the stage loop is emitted");
+        let guard = source
+            .find("if (stage_first + 32 < u.reduction_total)")
+            .expect("the prefetch guard is emitted");
+
+        assert_eq!(source.matches(load).count(), 2, "{source}");
+        assert!(
+            source[..loop_start].contains(load),
+            "stage zero loads before the loop"
+        );
+        assert!(
+            source[guard..].contains(load),
+            "the next stage loads inside the prefetch guard"
+        );
+        assert!(
+            source.contains("weight_q[load_row][load_segment] = weight_next;"),
+            "the stage stores the register"
+        );
+        assert!(
+            !source.contains("weight_pairs"),
+            "the direct path decodes no in-stage weight"
+        );
+
+        let split = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
+            .expect("emit succeeds");
+        assert!(
+            !split.source.contains("weight_next"),
+            "the split high/low activation path loads the weight in-stage"
+        );
+    }
+
+    #[test]
     fn a_packed_weight_gemm_keeps_the_scratch_fragment_and_the_scale_fold() {
         let bound = dense_expert_free_op(128, 512, 200);
         let operand = Target::CUDA.mma_operand_codec();

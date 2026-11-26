@@ -503,6 +503,7 @@ pub(super) fn push_mma_gemm_body(
     let reduce_rank = reduce_dims.len();
     let has_minimum = shape.has_minimum;
     let direct = shape.unit_scale && !has_minimum && route.is_none();
+    let prefetch_weight = direct && !plan.plain_weight && plan.single_activation;
     let accumulator = if direct { "acc" } else { "scratch" };
     let (block_bytes, block_elements) = (shape.block_bytes, shape.block_elements);
     let decode = shape.decode;
@@ -605,6 +606,10 @@ pub(super) fn push_mma_gemm_body(
         ));
     }
 
+    if prefetch_weight {
+        source.push_str("    uint4 weight_next;\n");
+        push_weight_load(source, weight, &shape, "0");
+    }
     for rep in 0..ACT_REPS {
         source.push_str(&format!("    float act_values{rep}[8];\n"));
         push_act_load(source, plan, &reduce_dims, reduce_rank, rep, "0");
@@ -612,18 +617,23 @@ pub(super) fn push_mma_gemm_body(
     source.push_str(&format!(
         "    for (long long stage_first = 0; stage_first < u.reduction_total; stage_first += {STAGE_K}) {{\n"
     ));
-    source.push_str("        float scale = 0.0f, minimum = 0.0f;\n");
-    source.push_str("        __align__(16) __half2 weight_pairs[4];\n");
-    source.push_str("        #pragma unroll\n        for (int pair = 0; pair < 4; pair++) { weight_pairs[pair] = __float2half2_rn(0.0f); }\n");
-    if plain {
-        source.push_str("        __align__(16) __half2 weight_low_pairs[4];\n");
-        source.push_str("        #pragma unroll\n        for (int pair = 0; pair < 4; pair++) { weight_low_pairs[pair] = __float2half2_rn(0.0f); }\n");
-    }
-    source
-        .push_str("        if (feature_ok && stage_first + load_segment < u.reduction_total) {\n");
-    source.push_str("            long long element = weight_row + stage_first + load_segment;\n");
-    if plain {
-        source.push_str(&format!(
+    if prefetch_weight {
+        source.push_str("        *(uint4 *)&weight_q[load_row][load_segment] = weight_next;\n");
+    } else {
+        source.push_str("        float scale = 0.0f, minimum = 0.0f;\n");
+        source.push_str("        __align__(16) __half2 weight_pairs[4];\n");
+        source.push_str("        #pragma unroll\n        for (int pair = 0; pair < 4; pair++) { weight_pairs[pair] = __float2half2_rn(0.0f); }\n");
+        if plain {
+            source.push_str("        __align__(16) __half2 weight_low_pairs[4];\n");
+            source.push_str("        #pragma unroll\n        for (int pair = 0; pair < 4; pair++) { weight_low_pairs[pair] = __float2half2_rn(0.0f); }\n");
+        }
+        source.push_str(
+            "        if (feature_ok && stage_first + load_segment < u.reduction_total) {\n",
+        );
+        source
+            .push_str("            long long element = weight_row + stage_first + load_segment;\n");
+        if plain {
+            source.push_str(&format!(
             "            {element_type} weight_values[8];
             #pragma unroll
             for (int slot = 0; slot < 8; slot++) {{ weight_values[slot] = in{weight}[element + slot]; }}
@@ -637,20 +647,21 @@ pub(super) fn push_mma_gemm_body(
             }}
 "
         ));
-    } else {
-        source.push_str(&format!(
+        } else {
+            source.push_str(&format!(
             "            const unsigned char *block = (const unsigned char *)in{weight} + (element / {block_elements}) * {block_bytes};\n"
         ));
-        source.push_str(&format!(
+            source.push_str(&format!(
             "            {decode}(block, (unsigned int)(element % {block_elements}), weight_pairs, &scale, &minimum);\n"
         ));
-    }
-    source.push_str("        }\n");
-    source.push_str(
-        "        *(uint4 *)&weight_q[load_row][load_segment] = *(const uint4 *)weight_pairs;\n",
-    );
-    if plain {
-        source.push_str("        *(uint4 *)&weight_lo[load_row][load_segment] = *(const uint4 *)weight_low_pairs;\n");
+        }
+        source.push_str("        }\n");
+        source.push_str(
+            "        *(uint4 *)&weight_q[load_row][load_segment] = *(const uint4 *)weight_pairs;\n",
+        );
+        if plain {
+            source.push_str("        *(uint4 *)&weight_lo[load_row][load_segment] = *(const uint4 *)weight_low_pairs;\n");
+        }
     }
     if !direct {
         source.push_str("        if ((load_segment & 15) == 0) {\n");
@@ -748,6 +759,9 @@ pub(super) fn push_mma_gemm_body(
     source.push_str(&format!(
         "        if (stage_first + {STAGE_K} < u.reduction_total) {{\n"
     ));
+    if prefetch_weight {
+        push_weight_load(source, weight, &shape, &format!("stage_first + {STAGE_K}"));
+    }
     for rep in 0..ACT_REPS {
         push_act_load(
             source,
@@ -905,6 +919,21 @@ pub(super) fn push_mma_gemm_body(
         "feature_first + warp_feature * 16 + group + (slot >> 1) * 8",
         &token_expr,
     )
+}
+
+fn push_weight_load(source: &mut String, weight: usize, shape: &CodecShape, stage: &str) {
+    let (block_bytes, block_elements, decode) =
+        (shape.block_bytes, shape.block_elements, shape.decode);
+    source.push_str(&format!(
+        "        weight_next = make_uint4(0u, 0u, 0u, 0u);
+        if (feature_ok && {stage} + load_segment < u.reduction_total) {{
+            float prefetch_scale = 1.0f, prefetch_minimum = 0.0f;
+            long long element = weight_row + {stage} + load_segment;
+            const unsigned char *block = (const unsigned char *)in{weight} + (element / {block_elements}) * {block_bytes};
+            {decode}(block, (unsigned int)(element % {block_elements}), (__half2 *)&weight_next, &prefetch_scale, &prefetch_minimum);
+        }}
+"
+    ));
 }
 
 fn push_act_load(
