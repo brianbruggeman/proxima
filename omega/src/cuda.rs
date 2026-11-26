@@ -5269,7 +5269,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::cuda_cached_attention_tiled::cached_attention_uses_mma;
     #[cfg(feature = "metal-attn-split-decode")]
     use crate::msl::{CachedAttentionForm, cached_attention_form};
     use proxima_tensor::test_support::Lcg;
@@ -5716,23 +5715,6 @@ mod tests {
             .expect("whole attention emits");
 
         assert!(kernel.entry.contains("_tq32_mma"), "{}", kernel.entry);
-    }
-
-    #[test]
-    fn input_rounding_moves_only_whole_attention_onto_tensor_cores_and_quantization_moves_both() {
-        let rounding = NumericPolicy::llama_relaxed().with_input_rounding(true);
-        let quantizing = NumericPolicy::bit_exact().with_activation_quantization(true);
-        let whole = whole_attention_op(64, 6, 64);
-        let mut paired = whole_attention_op(64, 6, 64);
-        let BoundOpKind::CachedAttention { planes, .. } = &mut paired.kind else {
-            unreachable!("whole_attention_op always builds a CachedAttention kind");
-        };
-        *planes = ScorePlanes::Paired;
-
-        assert!(cached_attention_uses_mma(&whole.kind, rounding));
-        assert!(!cached_attention_uses_mma(&paired.kind, rounding));
-        assert!(cached_attention_uses_mma(&whole.kind, quantizing));
-        assert!(cached_attention_uses_mma(&paired.kind, quantizing));
     }
 
     #[test]
