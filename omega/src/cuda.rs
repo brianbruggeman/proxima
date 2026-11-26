@@ -7629,6 +7629,56 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_mma_operand_weight_gemm_accumulates_straight_into_the_output_fragments() {
+        let bound = dense_expert_free_op(128, 512, 200);
+        let codec = Target::CUDA
+            .mma_operand_codec()
+            .expect("the cuda target names its mma operand");
+        let packed = packed_expert_weight(&bound, codec);
+        let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
+            .expect("emit succeeds");
+
+        assert!(kernel.entry.contains("_mma"), "{}", kernel.entry);
+        assert!(
+            !kernel.source.contains("scratch0"),
+            "a unit-scale weight needs no scratch fragment"
+        );
+        assert!(
+            !kernel.source.contains("weight_scale"),
+            "a unit-scale weight stages no scale"
+        );
+        assert!(
+            kernel.source.contains("mma_m16n8k8(acc0"),
+            "the mma accumulates into acc"
+        );
+    }
+
+    #[test]
+    fn a_packed_weight_gemm_keeps_the_scratch_fragment_and_the_scale_fold() {
+        let bound = dense_expert_free_op(128, 512, 200);
+        let operand = Target::CUDA.mma_operand_codec();
+        let codec = grouped_codecs()
+            .find(|codec| Some(*codec) != operand && codec.scale().is_some())
+            .expect("a packed mma codec");
+        let packed = packed_expert_weight(&bound, codec);
+        let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
+            .expect("emit succeeds");
+
+        assert!(
+            kernel.source.contains("scratch0"),
+            "{codec:?}: the scratch fragment stays"
+        );
+        assert!(
+            kernel.source.contains("mma_m16n8k8(scratch0"),
+            "{codec:?}: the mma accumulates into scratch"
+        );
+        assert!(
+            kernel.source.contains("weight_scale"),
+            "{codec:?}: the scale is staged"
+        );
+    }
+
+    #[test]
     fn an_activation_by_constant_product_takes_the_tiled_entry_with_no_packed_operand() {
         for (rows, width, tokens) in [(128, 512, 200), (201, 400, 3000)] {
             let bound = dense_expert_free_op(rows, width, tokens);

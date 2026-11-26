@@ -67,6 +67,8 @@ struct CodecShape {
     block_bytes: usize,
     block_elements: usize,
     has_minimum: bool,
+    /// the format is a scalar with no block scale, so the decoded weight already is the value
+    unit_scale: bool,
 }
 
 fn codec_shape(codec: Codec) -> Option<CodecShape> {
@@ -118,6 +120,7 @@ fn codec_shape(codec: Codec) -> Option<CodecShape> {
         block_bytes,
         block_elements,
         has_minimum,
+        unit_scale: codec.scale().is_none(),
     })
 }
 
@@ -499,6 +502,8 @@ pub(super) fn push_mma_gemm_body(
     let reduce_dims = reduction_dims(resolved, output_axes);
     let reduce_rank = reduce_dims.len();
     let has_minimum = shape.has_minimum;
+    let direct = shape.unit_scale && !has_minimum && route.is_none();
+    let accumulator = if direct { "acc" } else { "scratch" };
     let (block_bytes, block_elements) = (shape.block_bytes, shape.block_elements);
     let decode = shape.decode;
     let single = plan.single_activation;
@@ -583,9 +588,11 @@ pub(super) fn push_mma_gemm_body(
             "    __shared__ __align__(16) __half act_low[{TOKEN_TILE}][{STAGE_PAD}];\n"
         ));
     }
-    source.push_str(&format!(
-        "    __shared__ float weight_scale[{FEATURE_TILE}][2];\n"
-    ));
+    if !direct {
+        source.push_str(&format!(
+            "    __shared__ float weight_scale[{FEATURE_TILE}][2];\n"
+        ));
+    }
     if has_minimum {
         source.push_str(&format!(
             "    __shared__ float weight_minimum[{FEATURE_TILE}][2];\n"
@@ -645,12 +652,14 @@ pub(super) fn push_mma_gemm_body(
     if plain {
         source.push_str("        *(uint4 *)&weight_lo[load_row][load_segment] = *(const uint4 *)weight_low_pairs;\n");
     }
-    source.push_str("        if ((load_segment & 15) == 0) {\n");
-    source.push_str("            weight_scale[load_row][load_segment >> 4] = scale;\n");
-    if has_minimum {
-        source.push_str("            weight_minimum[load_row][load_segment >> 4] = minimum;\n");
+    if !direct {
+        source.push_str("        if ((load_segment & 15) == 0) {\n");
+        source.push_str("            weight_scale[load_row][load_segment >> 4] = scale;\n");
+        if has_minimum {
+            source.push_str("            weight_minimum[load_row][load_segment >> 4] = minimum;\n");
+        }
+        source.push_str("        }\n");
     }
-    source.push_str("        }\n");
 
     for rep in 0..ACT_REPS {
         let row = format!("load_row + {}", rep * FEATURE_TILE);
@@ -756,7 +765,7 @@ pub(super) fn push_mma_gemm_body(
             "        {
 ",
         );
-        for tile in 0..WARP_TILES {
+        for tile in (0..WARP_TILES).filter(|_| !direct) {
             source.push_str(&format!(
                 "            float scratch{tile}[4] = {{0.0f, 0.0f, 0.0f, 0.0f}};
 "
@@ -781,12 +790,12 @@ pub(super) fn push_mma_gemm_body(
                 String::new()
             } else {
                 format!(
-                    "                    mma_m16n8k8(scratch{{tile}}, a_low, a_high, *(const unsigned int *)&act_low[token_row][{k_base}]);\n"
+                    "                    mma_m16n8k8({accumulator}{{tile}}, a_low, a_high, *(const unsigned int *)&act_low[token_row][{k_base}]);\n"
                 )
             };
             let low_weight = if plain {
                 format!(
-                    "                    mma_m16n8k8(scratch{{tile}}, w_low_a, w_low_b, *(const unsigned int *)&act_high[token_row][{k_base}]);\n"
+                    "                    mma_m16n8k8({accumulator}{{tile}}, w_low_a, w_low_b, *(const unsigned int *)&act_high[token_row][{k_base}]);\n"
                 )
             } else {
                 String::new()
@@ -796,7 +805,7 @@ pub(super) fn push_mma_gemm_body(
                 source.push_str(&format!(
                     "                if ({first} + warp_token * {WARP_TOKENS} + {} < {limit}) {{
                     const int token_row = warp_token * {WARP_TOKENS} + {} + group;
-                    mma_m16n8k8(scratch{tile}, a_low, a_high, *(const unsigned int *)&act_high[token_row][{k_base}]);
+                    mma_m16n8k8({accumulator}{tile}, a_low, a_high, *(const unsigned int *)&act_high[token_row][{k_base}]);
 {}                }}
 ",
                     tile * 8,
@@ -809,11 +818,13 @@ pub(super) fn push_mma_gemm_body(
 ",
             );
         }
-        source.push_str(&format!(
-            "            const float scale_low = weight_scale[warp_feature * 16 + group][{half_index}];
+        if !direct {
+            source.push_str(&format!(
+                "            const float scale_low = weight_scale[warp_feature * 16 + group][{half_index}];
             const float scale_high = weight_scale[warp_feature * 16 + group + 8][{half_index}];
 "
-        ));
+            ));
+        }
         if has_minimum {
             source.push_str(&format!(
                 "            const float minimum_low = weight_minimum[warp_feature * 16 + group][{half_index}];
@@ -821,7 +832,7 @@ pub(super) fn push_mma_gemm_body(
 "
             ));
         }
-        for tile in 0..WARP_TILES {
+        for tile in (0..WARP_TILES).filter(|_| !direct) {
             source.push_str(&format!(
                 "            if ({first} + warp_token * {WARP_TOKENS} + {} < {limit}) {{
 ",
