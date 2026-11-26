@@ -1287,7 +1287,7 @@ pub const Q5_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q5_0::QK5_0;
 /// Same non-K-quant, flat, one-element-per-block shape `Q8_0`/`Q4_0`
 /// take: never the row-blocked (`classify_packed_row_block`) path; the
 /// tiled-GEMM path reads it through its `tiled_decode` description
-/// ([`DecodeSource::Scalar`], staged as 32-element blocks), and every other
+/// (`DecodeSource::Scalar`, staged as 32-element blocks), and every other
 /// path uses the generic per-element accessor.
 pub const FLOAT16_BLOCK_BYTES: usize = proxima_gguf::quant::f16::BLOCK_BYTES;
 

@@ -3,8 +3,8 @@
 //! Teaching pointer: [`crate::float_layout_codec`] holds the scalar slice loop (`encode_body`,
 //! `decode_body`) and [`crate::block_codec`] the block loops (`encode_run`, `decode_run`).
 //! [`FormatCodec::scalar`] instantiates the scalar loop once per row of the named-layout table
-//! ([`crate::float_layout::named_layout_table`]) and [`FormatCodec::block`] the block loops once per
-//! row of the block table ([`crate::block_layout::named_block_table`]), each with the layout as a
+//! (`crate::float_layout::named_layout_table`) and [`FormatCodec::block`] the block loops once per
+//! row of the block table (`crate::block_layout::named_block_table`), each with the layout as a
 //! literal constant, so every shift, mask, plane address and magic number is folded from the
 //! layout's fields. Resolve at allocation time and keep the `Copy` value: a call is then one
 //! indirect jump, where [`crate::encode::encode_blocks`] re-resolves the format on every call and

@@ -159,6 +159,8 @@ impl FloatLayout {
     /// OCP MX v1.0 FP6 E3M2: bias 3, no inf or nan, max normal 28.0 (page 12, section 5.3.2, Table 4).
     pub const E3M2: Self = Self::ieee_like(3, 2, Specials::None);
     pub const E2M3: Self = Self::ieee_like(2, 3, Specials::None);
+    /// IEEE binary32 (exponent 8, mantissa 23): the f32 layout, and what `DType::FLOAT32` is. Despite
+    /// the `BF` prefix it is not a bfloat.
     pub const BF32: Self = Self::ieee_like(8, 23, Specials::InfinityOnOverflow);
     pub const BF16: Self = Self::ieee_like(8, 7, Specials::InfinityOnOverflow);
     pub const BF8: Self = Self::E5M2;

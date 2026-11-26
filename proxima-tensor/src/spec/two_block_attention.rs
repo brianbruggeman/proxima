@@ -384,7 +384,7 @@ pub const PLANE_NEW_READS: (&str, &str) = ("wui->swugi", "wui->swugi");
 /// `q`, `k_new` and `k_cache` are the rotated (even, odd) halves; `cache_mask`
 /// masks the cached block in the graph (`None` leaves it to the executor's
 /// `cached_len`); `neg_infinity_local` and `attention_sink` are as in
-/// [`append_local_block_and_combine_with_reads`]; `cache_reads` and `new_reads`
+/// `append_local_block_and_combine_with_reads`; `cache_reads` and `new_reads`
 /// are the key operand maps over the cache and the new block.
 /// `neg_infinity_first` emits a missing `-inf` before the local block's scores
 /// instead of between them and their select, the order the single-range MoE

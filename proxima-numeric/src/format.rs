@@ -235,6 +235,9 @@ impl LevelFormat {
 
 /// One numeric storage format.
 ///
+/// The wider sibling of [`DType`]: `Scalar` is the one-number case a `DType`
+/// can name, and `Block` and `Levels` are the formats it cannot.
+///
 /// `Self::Block` carries a whole [`BlockLayout`] (520 bytes measured) against a `Scalar`'s 8
 /// bytes, so this enum is 520 bytes wide. It is never heap-allocated and every value in
 /// [`Self::ALL`] is a compile-time constant; boxing the block arm would trade a `memcpy` the

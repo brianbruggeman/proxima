@@ -3,7 +3,7 @@
 //! Teaching pointer: [`crate::float_layout_codec`] does this for one stored number per element;
 //! this does it for a block of them. `encode_run` and `decode_run` are the two loops, written once
 //! over a [`BlockLayout`]. [`FormatCodec::block`] instantiates them once per row of
-//! the block table ([`crate::block_layout::named_block_table`]) with the layout as a literal
+//! the block table (`crate::block_layout::named_block_table`) with the layout as a literal
 //! constant, so the element count, byte count, every plane address, the scale and min offsets, the
 //! multiplier and the bias are folded from the layout's fields. A layout that is not in the table
 //! (the K-quant, grouped and codebook families, or a layout with no name) has no instantiation and

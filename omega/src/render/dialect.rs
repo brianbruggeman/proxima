@@ -20,7 +20,11 @@ pub enum Intrinsic {
     Abs,
 }
 
-/// The target-language spelling of the render steps.
+/// The target-language spelling of the render steps: the per-machine spelling every backend
+/// lowering is meant to be, with machines differing in facts and not in code.
+///
+/// Not there yet: spelling a [`ScalarOp`](proxima_tensor::op::ScalarOp) is not a method here, so
+/// each backend still writes it itself (`docs/omega/08-the-ir.md`, section 6).
 pub trait Dialect {
     /// The type name of a hardware scalar, or `None` when the dialect does not spell that row.
     fn scalar(&self, scalar: HardwareScalar) -> Option<Cow<'static, str>>;

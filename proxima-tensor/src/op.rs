@@ -75,6 +75,7 @@ pub const SLIDING_CACHED_LEN_INPUT: &str = "cached_len_swa";
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "config", serde(rename_all = "snake_case"))]
 pub enum ScalarOp {
+    /// Returns its one operand unchanged: a copy, or a pure re-addressing.
     Identity,
     Add,
     Subtract,
@@ -83,14 +84,23 @@ pub enum ScalarOp {
     Maximum,
     Minimum,
     Negate,
+    /// `1 / x`.
     Reciprocal,
+    /// `e^x`.
     Exponential,
+    /// Natural logarithm.
     Logarithm,
     SquareRoot,
     Tanh,
+    /// Gauss error function.
     Erf,
+    /// `lhs > rhs`, encoded as `1` where true and `0` where false in the
+    /// output dtype, so a comparison is a number a body can multiply or select on.
     Greater,
+    /// `lhs == rhs`, encoded as `1` or `0` like [`ScalarOp::Greater`].
     Equal,
+    /// Operands `(condition, if_true, if_false)`: yields `if_true` where
+    /// `condition` is nonzero, else `if_false`.
     Select,
 }
 
@@ -139,9 +149,13 @@ impl ScalarOp {
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "config", serde(rename_all = "snake_case"))]
 pub enum ReduceInit {
+    /// The identity of `Add`: a sum starts here.
     Zero,
+    /// The identity of `Multiply`: a product starts here.
     One,
+    /// The identity of `Maximum`: a max starts here, so any element beats it.
     NegativeInfinity,
+    /// The identity of `Minimum`: a min starts here, so any element beats it.
     PositiveInfinity,
     /// Seed from the first element — the form `argmax` needs, since no
     /// synthetic identity exists for a `(value, index)` accumulator.
@@ -180,7 +194,9 @@ pub struct Reduce {
     pub name: Option<String>,
 }
 
-/// The four generators.
+/// The five generators: three leaves ([`Op::Input`], [`Op::Iota`],
+/// [`Op::Constant`]) and the two general ops ([`Op::Elementwise`],
+/// [`Op::Reduce`]). See `docs/omega/08-the-ir.md`.
 ///
 /// `Eq` is deliberately absent: [`Op::Constant`] carries an `f32`, and the
 /// only ways to keep `Eq` were to store the literal as raw bits (unreadable

@@ -35,7 +35,7 @@
 //! pair, which needs `proxima_tensor::cpu`'s std-gated `Evaluated`/`QuantizedBlock`
 //! even with every concrete backend (`cpu`/`metal`/`wgpu-backend`) off.
 //!
-//! `train` (default-off): adds [`train`], a forward+backward+optimizer step
+//! `train` (default-off): adds `train`, a forward+backward+optimizer step
 //! over `proxima-autograd` configured by one `TrainConfig`. It owns
 //! `m_<parameter>`/`v_<parameter>` across steps and stops at the dense-gradient
 //! case; inference builds never compile it.

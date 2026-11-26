@@ -5,7 +5,8 @@
 //! the wide scalar the steps compute in. `msl::dialect::Msl` is the first dialect.
 //!
 //! Teaching pointer: `proxima_numeric::float_layout_codec::{decode, encode}` is the CPU algorithm
-//! these functions render step for step.
+//! these functions render step for step. `docs/omega/08-the-ir.md` builds the IR a backend lowers
+//! and says which of that lowering is already shared here and which is still per backend.
 
 mod dialect;
 mod hardware;

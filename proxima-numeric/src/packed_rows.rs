@@ -2,7 +2,7 @@
 //!
 //! Composes [`FormatCodec`] (`for_format`, `packed_len`, `encode`) for the write and
 //! [`decode_blocks`] for the read: the bytes are the store, and a consumer that needs wide values
-//! decodes the range it reads into a scratch it owns. [`Numeric`](crate::Numeric) is the borrowed
+//! decodes the range it reads into a scratch it owns. [`Numeric`] is the borrowed
 //! value that carries a format over wide values; this is the owned container that carries a
 //! format over the packed bytes, so a binary32 run is just the format whose codec packs four
 //! bytes per value. No branch here names a format.

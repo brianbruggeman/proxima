@@ -14,11 +14,13 @@ use super::*;
 /// rather than being folded away into bare tuple fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
+    /// The element offset at the all-zero coordinate; every address adds to it.
     pub base: i64,
     pub strides: SmallVec<[i64; MAX_INLINE_RANK]>,
 }
 
 impl Layout {
+    /// The address of one iteration-space point: `base + sum(index * stride)`.
     #[must_use]
     pub fn offset_of(&self, coordinate: &[u64]) -> i64 {
         self.base
@@ -29,6 +31,7 @@ impl Layout {
                 .sum::<i64>()
     }
 
+    /// The stride along iteration axis `axis`; 0 past the stored axes, the same as a broadcast axis.
     #[must_use]
     pub fn stride(&self, axis: u16) -> i64 {
         self.strides.get(axis as usize).copied().unwrap_or(0)
@@ -194,6 +197,8 @@ pub const fn decode_split_shape_fits(
 /// descriptor. Neither backend's shape belongs in this module.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoundOp {
+    /// The program op this one answers for: its position in the `Vec<Op>`, and the id other bound
+    /// ops name it by in their operands.
     pub node: NodeId,
     /// This node's own element type, carried straight from the [`Op`] it
     /// was built from ([`Op::dtype`]) — an executor spells its buffers and
@@ -424,6 +429,8 @@ pub enum BoundOpKind {
         rows: u64,
         has_keep_rows: bool,
     },
+    /// The general map: at every point of `extents`, read each operand at its [`Layout`] address,
+    /// apply `body`, write one value. The bound form of [`Op::Elementwise`].
     Elementwise {
         body: ComposedBody,
         operands: BoundOperands,
@@ -443,6 +450,9 @@ pub enum BoundOpKind {
         twin_node: NodeId,
         twin_body: ComposedBody,
     },
+    /// The general fold: for each output point, combine `element_body` over the axes the output
+    /// drops with `reduce_op`, starting from `init`. A matmul is this kind with a product
+    /// `element_body` and `reduce_op: Add`. The bound form of [`Op::Reduce`].
     Reduce {
         /// The per-step combine of `operands` before reducing: the fused
         /// elementwise chain's own body when one or more were absorbed, a
@@ -841,6 +851,7 @@ impl BoundOp {
 }
 
 impl BoundOp {
+    /// Every `(node, layout, lookup)` operand of this op, whichever kind it is; a leaf has none.
     #[must_use]
     pub fn operands(&self) -> &[(NodeId, Layout, Option<Lookup>)] {
         match &self.kind {

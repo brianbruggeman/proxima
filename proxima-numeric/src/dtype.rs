@@ -5,6 +5,9 @@ use crate::format::NumericFormat;
 ///
 /// Every numeric type is the shared structural [`FloatLayout`], so a new element format is one
 /// layout constant, never a new dtype variant. `Bool` is the one element that is not a number.
+///
+/// A `DType` names one-number formats only. A block-quantized weight (`Block`) or an explicit-level
+/// format (`Levels`) is a [`NumericFormat`], which a `DType` cannot say.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DType {
     Bool,

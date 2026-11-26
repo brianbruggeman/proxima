@@ -19,7 +19,10 @@
 //! may select which family descriptions are compiled in, while the runtime
 //! still executes the same reified algebra.
 //!
-//! # Three op forms
+//! `docs/omega/08-the-ir.md` builds the IR from its lowest algebra up to how a backend lowers it;
+//! read it before changing a lowering.
+//!
+//! # Five op forms
 //!
 //! A composed [`Pipe`](proxima_primitives::pipe::Pipe) chain is already a
 //! tree, but it lives in the type system: `AndThen<A, B>` cannot be walked,
@@ -27,7 +30,7 @@
 //! same algebra reified, so fusion and placement can rewrite it after the
 //! shapes are known.
 //!
-//! Everything reduces to three op forms:
+//! Everything reduces to five op forms, two general and three leaves:
 //!
 //! - [`Op::Input`] — a leaf. Where data enters.
 //! - [`Op::Elementwise`] — n-ary elementwise. Arity 1 with a permuting index
@@ -35,6 +38,8 @@
 //!   data-dependent is a gather.
 //! - [`Op::Reduce`] — reduce, scan, scatter, contraction, and argmax, split
 //!   by [`Keep`] and by whether the output index pattern is data-dependent.
+//! - [`Op::Iota`] — a leaf. `output[i] = i`.
+//! - [`Op::Constant`] — a leaf. One literal in every element.
 //!
 //! `matmul` is a `Reduce(+)` over an `Elementwise(*)`; `softmax` is two
 //! reduces and three elementwise ops. Named operations are an *attribute*
@@ -43,7 +48,7 @@
 //!
 //! # Where the expressiveness actually lives
 //!
-//! Not in the three variants — in [`map`]. An [`IndexPattern`] relates an
+//! Not in the five variants — in [`map`]. An [`IndexPattern`] relates an
 //! iteration space to an operand's index space, and stride/dilation/offset
 //! in that einsum-style grammar is what makes convolution and windowing
 //! expressible without new op forms. Read that module first.

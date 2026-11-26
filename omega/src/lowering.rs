@@ -62,9 +62,15 @@ pub enum Binding {
 /// codec — the single source of truth `emit` (via the `quantized` slice it
 /// derives) and the Metal driver's `correct_packed_matmul_layouts` call both
 /// need, generalizing the Q4_K-only `BTreeSet<NodeId>` this crate carried
-/// before Q6_K support existed. `Codec` is `proxima_numeric::codec::Codec` — the
-/// source-neutral packed-layout identity (see that type's own doc); this
-/// crate's per-codec derivations (`cache_token`, `block_bytes`,
+/// before Q6_K support existed. `Codec` is `proxima_numeric::codec::Codec`, the
+/// historical name for `proxima_numeric::NumericFormat` — the
+/// source-neutral packed-layout identity (see that type's own doc).
+///
+/// This side table is where a weight operand's format lives today: a bound op's
+/// operand is a node, a layout and a lookup, with no format of its own
+/// (`docs/omega/08-the-ir.md`, section 5).
+///
+/// This crate's per-codec derivations (`cache_token`, `block_bytes`,
 /// `supports_pair_dot`, `rows_per_simdgroup`, `from_quantized_block`) live as
 /// free functions in `crate::identity` since `Codec` is foreign here and
 /// cannot carry inherent methods (guiding-principles §20, no blanket impls).

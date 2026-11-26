@@ -1442,16 +1442,17 @@ pub fn arena_named_input<'arena>(arena: &'arena StaticArena, name: &str) -> Opti
 /// parameter has no way to carry the packed case — a quantized weight has no
 /// legitimate `&[f32]` view to hand through it without dequantizing first,
 /// which would defeat the entire point (see [`matmul_q4k_f32`]'s doc on what
-/// dequantizing first costs). All three variants bind positionally, in the
+/// dequantizing first costs). Every variant binds positionally, in the
 /// same [`Op::Input`] program order [`evaluate`]'s `blocks` already uses --
-/// one binding convention, not three.
+/// one binding convention, not one per variant.
 ///
-/// `Packed`'s own `codec` is `proxima_numeric::codec::Codec` -- the one
-/// source-neutral codec identity `Codec`'s own doc names as replacing this
-/// type's former 14 separate per-codec discriminants (`Q4K`, `Q5K`, ...). A
+/// `Packed`'s own `codec` is `proxima_numeric::codec::Codec`, the historical
+/// name for `proxima_numeric::NumericFormat`: one three-arm enum (`Scalar`,
+/// `Block`, `Levels`) whose named formats (`Q4K`, `Q5K`, ...) are associated
+/// constants, not variants. A
 /// real `Packed` only ever carries a codec `codec_to_decodable_ggml_type`
 /// resolves to `Some` -- `gguf_tensor_as_packed_block`/`as_block`
-/// (`proxima-model-interop`) refuse the other 15 `Codec` variants at
+/// (`proxima-model-interop`) refuse every other format at
 /// construction time, so [`Self::block_layout`]/[`Self::matmul_f32_kernel`]/
 /// [`Self::dequantize_fn`] returning `None` for those is defensive, never a
 /// path a well-formed `Packed` reaches.
@@ -1487,7 +1488,7 @@ impl<'a> From<&'a [f32]> for QuantizedBlock<'a> {
 /// [`QuantizedBlock::Packed`] actually carries -- the single Codec->GgmlType
 /// table [`QuantizedBlock::block_layout`] composes down to instead of
 /// restating [`proxima_gguf::GgmlType::wire_shape`]'s own per-codec byte
-/// constants a second time. `None` for the 16 `Codec` variants this crate's
+/// constants a second time. `None` for every format this crate's
 /// packed-block construction sites never produce (see [`QuantizedBlock`]'s
 /// own doc). Free function, not an inherent method or a trait -- `Codec` is
 /// `proxima_numeric::codec::Codec`, foreign to this crate (guiding-principles

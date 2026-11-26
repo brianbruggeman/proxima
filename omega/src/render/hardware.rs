@@ -48,7 +48,7 @@ const fn hardware_table() -> [FloatLayout; HARDWARE_COUNT] {
 /// The hardware layouts, in `NAMED_LAYOUTS` order.
 pub(crate) const HARDWARE: [FloatLayout; HARDWARE_COUNT] = hardware_table();
 
-/// One row of [`HARDWARE`].
+/// One row of `HARDWARE`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HardwareScalar(u8);
 
@@ -81,7 +81,7 @@ impl HardwareScalar {
         })
     }
 
-    /// Its position in [`HARDWARE`]; a dialect's spelling table is indexed by it.
+    /// Its position in `HARDWARE`; a dialect's spelling table is indexed by it.
     #[must_use]
     pub fn index(self) -> usize {
         usize::from(self.0)

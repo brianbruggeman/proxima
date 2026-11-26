@@ -1307,7 +1307,10 @@ fn validate_input_contract(
     Ok(())
 }
 
-/// The CPU arm's plan state. `proxima_tensor::cpu` has no persistent
+/// The CPU arm's plan state. It wraps the proxima-tensor evaluator rather than lowering through
+/// [`Dialect`](crate::render::Dialect): execution calls `proxima_tensor::cpu`, and no text is rendered.
+///
+/// `proxima_tensor::cpu` has no persistent
 /// plan/execute split of its own — `evaluate_quantized_with_scratch`
 /// re-runs `infer`/`bind` every call — so "planning" here is exactly the
 /// caller-owned pieces that DO persist across calls: the program itself
