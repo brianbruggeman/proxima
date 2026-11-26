@@ -84,6 +84,7 @@ matrix=(
     "proxima-model-interop:std,cuda"
     "proxima-model-interop:std,proxima-autograd"
     "proxima-omega:"
+    "proxima-omega:@libtestrun:"
     "proxima-omega:@nodefault:std,cuda"
     "proxima-omega:cuda,wgpu-backend"
     "proxima-omega:wgpu-backend"
@@ -330,10 +331,15 @@ while IFS=: read -r crate features tier_features; do
         verb=(test --no-run)
         args=(-p "$crate" --lib)
     elif [ "$features" = "@libtestrun" ]; then
-        label="$crate lib test --features $tier_features"
         verb=(val)
         format_args=()
-        args=(-p "$crate" --lib --features "$tier_features")
+        if [ -n "$tier_features" ]; then
+            label="$crate lib test --features $tier_features"
+            args=(-p "$crate" --lib --features "$tier_features")
+        else
+            label="$crate lib test (default features)"
+            args=(-p "$crate" --lib)
+        fi
     elif [ "$features" = "@nodefault" ]; then
         label="$crate --all-targets --no-default-features --features $tier_features"
         args=(-p "$crate" --all-targets --no-default-features --features "$tier_features")
