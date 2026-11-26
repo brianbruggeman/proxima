@@ -23,11 +23,11 @@ The three losses are `mse` (`proxima-autograd/src/loss.rs:32`), `cross_entropy` 
 
 `differentiate` (`adjoint.rs:214`) takes the program and the loss node and returns a `Differentiated` (`:137`), which is the backward program plus the map from a forward node to its gradient node (`gradient_of`, `:163`). It is a graph transform: the backward pass is built once, and nothing is recorded per step.
 
-The step is a small elementwise graph over `(param, grad, m, v)` (`optimizer.rs:1-6`). `adam_step` (`:368`) appends them; `step_input` (`:336`) gives you the rank-0 `step` input that bias correction needs; `AdamOperands` (`:354`) is the four ids.
+The step is a small elementwise graph over `(param, grad, m, v)` (`optimizer.rs:1-6`). `adam_step` (`:364`) appends them; `step_input` (`:332`) gives you the rank-0 `step` input that bias correction needs; `AdamOperands` (`:350`) is the four ids.
 
 ## 2. The optimizer, as a TOML file
 
-`AdamConfig` (`optimizer.rs:233`) has four hyper-parameters and three layouts, and it is a config in both senses: a builder and a file. `proxima-autograd/examples/adam.toml:1` is the file this page uses:
+`AdamConfig` (`optimizer.rs:229`) has four hyper-parameters and three layouts, and it is a config in both senses: a builder and a file. `proxima-autograd/examples/adam.toml:1` is the file this page uses:
 
 ```toml
 learning_rate = 0.01
@@ -38,9 +38,9 @@ first_moment_layout = "float32"
 second_moment_layout = "float32"
 ```
 
-`AdamConfig::from_file` (`optimizer.rs:293`) loads and validates it, naming the field it refuses. The test loads this same file rather than a copy, so the example cannot drift out of date.
+`AdamConfig::from_file` (`optimizer.rs:289`) loads and validates it, naming the field it refuses. The test loads this same file rather than a copy, so the example cannot drift out of date.
 
-A zero step size never reaches a step: `Validate` (`optimizer.rs:317`) rejects it with a message that names `learning_rate`, and the test checks that the message contains that field name.
+A zero step size never reaches a step: `Validate` (`optimizer.rs:313`) rejects it with a message that names `learning_rate`, and the test checks that the message contains that field name.
 
 The test that proves both halves is `adam_config_from_file_loads_the_shipped_example_and_refuses_a_zero_step_size` (`proxima-autograd/src/optimizer_config.rs`):
 
@@ -59,7 +59,7 @@ The layouts matter for the same reason they matter in PyTorch's `foreach` fused 
 
 ## 3. One step on the GPU, checked against the CPU
 
-`train_step` (`train.rs:69`) and `train_step_with_arena` (`train.rs:110`) run one step; `fit` (`train.rs:171`) runs epochs over a batch list and returns the final `State` plus the loss per batch. `State` is `Vec<(String, Vec<f32>)>` (`train.rs:49`) — named buffers, the same binding-by-name idea as a plan's `[[bind]]`.
+`train_step` (`proxima-autograd/src/train.rs:69`) and `train_step_with_arena` (`proxima-autograd/src/train.rs:110`) run one step; `fit` (`proxima-autograd/src/train.rs:171`) runs epochs over a batch list and returns the final `State` plus the loss per batch. `State` is `Vec<(String, Vec<f32>)>` (`proxima-autograd/src/train.rs:49`) — named buffers, the same binding-by-name idea as a plan's `[[bind]]`.
 
 Training reaches a GPU through the same `plan_named`/`execute_plan_named` pair a forward pass uses; nothing in the training path knows about a device. `omega/tests/training_step_parity.rs` is where this is checked, with CPU as the oracle every GPU arm is compared against:
 
@@ -100,7 +100,7 @@ The dataset is a host-local path constant (`real_mnist_training.rs:65`); the tes
 ## 5. What omega does not do yet
 
 - There is no optimizer trait. `adam_step` and its three sibling configs are plain functions; adding a new optimizer is a new graph-building function (`optimizer.rs:1-14` explains why the step is written as a graph).
-- Only Adam has a file loader. `AdamConfig::from_file` exists (`optimizer.rs:293`); `SgdConfig` (`:632`), `RmspropConfig` (`:755`) and `AdamwConfig` (`:985`) have builders and env layering but no `from_file`. Adding one is the same six lines.
+- Only Adam has a file loader. `AdamConfig::from_file` exists (`optimizer.rs:289`); `SgdConfig` (`:628`), `RmspropConfig` (`:751`) and `AdamwConfig` (`:981`) have builders and env layering but no `from_file`. Adding one is the same six lines.
 - `fit` takes every batch in memory. Its signature is `batches: &[Vec<(&str, &[f32])>]` (`train.rs:177`), so a dataset larger than RAM needs a caller-driven loop around `train_step` instead. There is no streaming data loader.
 - No mixed-precision training path. The moments and the hyper-parameters have layouts, but the activations and gradients in the graph are float32; `numerics` is still recorded and not read (page 01, section 7).
 - Training lives in the library. `proximad`'s tensor route only evaluates a plan (`tools/proxima-cli/src/tensor_run.rs:94`), and nothing in the CLI submits a training step.

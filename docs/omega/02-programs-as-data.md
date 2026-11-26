@@ -20,7 +20,7 @@ backend = cpu
 softmax [2, 3] [0.3772, 0.3239, 0.2989, 0.3060, 0.3285, 0.3655]
 ```
 
-The rows sum to one, which is what the last of its fourteen nodes computes: node `n13` divides `n11` by the row sum `n12` (`proxima-tensor/src/spec/fixtures/matmul_silu_softmax.toml:133-139`).
+The rows sum to one, which is what the last of its fourteen nodes computes: node `n12` is the row sum and `n11` is divided by it in `n13` (`proxima-tensor/src/spec/fixtures/matmul_silu_softmax.toml:133-139`).
 
 Forget a `--bind` and the plan names the input you forgot, by the caller's key:
 
@@ -52,8 +52,8 @@ Every node also accepts an optional `name`. That name is identity: the backend b
 
 - `input` (`:130`) declares a leaf the caller supplies: `dtype` and `shape`. Its `name` is the key the backend binds it under, and it is the only node kind that may be a bind target (`program_spec.rs:262`).
 - `elementwise` (`:137`) computes an n-ary scalar map: `body` is a `ScalarOp` such as `add` or `multiply`, `inputs` lists the operands by id, and `maps` gives one addressing rule per operand.
-- `reduce` (`:146`) is a matmul and every other contraction: multiply, then sum over an axis. `body` is the scalar fold (`add`, `maximum`), `init` is the fold's identity (`ReduceInit`, `op.rs:141`), and `input` is the operand. `in_map` and `out_map` relate the operand's axes to the output's; `keep` says whether the reduced axis survives as a size-1 axis (`Keep`, `op.rs:159`).
-- `iota` (`:162`) is a leaf of `0, 1, 2, ...` up to `extent`; **`constant`** (`:171`) is a leaf of one repeated `value`, with `shape = []` meaning a rank-0 scalar that broadcasts into any consumer. These two are why a plan can run with no data at all, as page 00's did.
+- `reduce` (`:146`) is a matmul and every other contraction: multiply, then sum over an axis. `body` is the scalar fold (`add`, `maximum`), `init` is the fold's identity (`ReduceInit`, `op.rs:151`), and `input` is the operand. `in_map` and `out_map` relate the operand's axes to the output's; `keep` says whether the reduced axis survives as a size-1 axis (`Keep`, `op.rs:173`).
+- `iota` (`program_spec.rs:162`) is a leaf of `0, 1, 2, ...` up to `extent`; **`constant`** (`:171`) is a leaf of one repeated `value`, with `shape = []` meaning a rank-0 scalar that broadcasts into any consumer. These two are why a plan can run with no data at all, as page 00's did.
 
 ## 4. The map grammar
 
@@ -63,7 +63,7 @@ The table form is `Gather { gather, index_map, map, dim }` (`program_spec.rs:113
 
 ## 5. Bind name versus input name
 
-The two names are separate on purpose. `run.rs:64-77` finds the caller's tensor by `bind.name` and passes it to the backend under the input node's own `name`. An input node with no `name` cannot be bound at all: the lookup refuses it as `UnnamedInput` (`run.rs:87-93`). That split is what lets a serving caller use a short key like `x` while the graph keeps the name its weights were bound under.
+The two names are separate on purpose. `run.rs:64-77` finds the caller's tensor by `bind.name` and passes it to the backend under the input node's own `name`. An input node with no `name` cannot be bound at all: the lookup refuses it as `UnnamedInput` (`run.rs:91`). That split is what lets a serving caller use a short key like `x` while the graph keeps the name its weights were bound under.
 
 ## 6. The real specs are addressed by position
 
@@ -71,7 +71,7 @@ The eleven files in `proxima-tensor/specs/` are production shapes written as pla
 
 The distinction matters in practice: a bound plan is what a caller runs (`proxima tensor run`, a serving request), and a shape-addressed spec is what a shape or a lowering is proved against. Both appear in the pages that follow, and each page says which it means.
 
-The smallest real spec is `proxima-tensor/specs/rope.toml`: a pairwise rotation of `x: 2x4` by per-position `cos`/`sin` tables of shape `2x2`. Its two strided reads, `s,2*i->si` and `s,2*i+1->si` (`rope.toml:42` and `:50`), show the map form from section 4 doing real work: no gather node, and no intermediate even/odd split.
+The smallest real spec is `proxima-tensor/specs/rope.toml`: a pairwise rotation of `x: 2x4` by per-position `cos`/`sin` tables of shape `2x2`. Its two strided reads, `s,2*i->si` and `s,2*i+1->si` (`proxima-tensor/specs/rope.toml:42` and `:50`), show the map form from section 4 doing real work: no gather node, and no intermediate even/odd split.
 
 Its test computes the expected pair norm straight off the raw buffer at indices `2*i` and `2*i+1`, so a map that read `i` instead of `2*i` would fail on a different pair:
 

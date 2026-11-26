@@ -28,7 +28,7 @@ Ratios are omega over incumbent, so below 1.0x omega takes less time or memory. 
 
 The earlier row on this page, omega 21.08 vs 9.59 ms/token on Llama-3.2-1B f16 (2026-11-21, 2.2x slower), is superseded. omega's current path is flint, served through ragd, and the gap to llama.cpp is small or negative on one model and positive on another. Source for every row below: slot-0 `kv-epic/SCOREBOARD.md`, sections "flint (llm, MoE) vs llama.cpp b12110" and "other models and backends", read 2026-11-24.
 
-**flint, MoE, 4,069-token prompt, Metal, llama.cpp b12110.** The llama arm is `/opt/homebrew/bin/llama-server`, which reports `version: 0.9.0 (build 12110, commit cd959bae9)` on `MTL0: Apple M1 Max`. Launch line: `~/.cache/kvgate/proximaomega62/attn-fa/sb679/block10/run.sh:27`. Flash attention on both sides. Runs admitted only at load below 4.5, 2026-11-22 13:47-14:28 CST, n=1 per arm per run, 8 runs in all.
+**flint, MoE, 4,069-token prompt, Metal, llama.cpp b12110.** The llama arm is `/opt/homebrew/bin/llama-server`, which reports `version: 0.9.0 (build 12110, commit cd959bae9)` on `MTL0: Apple M1 Max`. Launch line: `~/.cache/kvgate/proximaomega62/attn-fa/sb679/block10/run.sh`, line 27. Flash attention on both sides. Runs admitted only at load below 4.5, 2026-11-22 13:47-14:28 CST, n=1 per arm per run, 8 runs in all.
 
 | metric, block 10 | omega | llama.cpp | ratio |
 |---|---|---|---|
@@ -73,7 +73,7 @@ TrainingProgress { progress: Progress { items_processed: 512, items_total: 32000
 TrainingProgress { progress: Progress { items_processed: 768, items_total: 320000 }, epoch: 1, epoch_total: 20, iteration: 3 }
 ```
 
-It keeps printing one such line per iteration; the run was stopped after the numbers below were taken. Read the schedule before any number: `items_total: 320000`, `epoch_total: 20`, batch 256 (`examples/mnist/src/training.rs:43`), an AdamW optimizer with cautious weight decay (`:64-65`), and a two-convolution model with dropout before its linear layers (`examples/mnist/src/model.rs:15-23`, `:34-40`). Page 03 trains a 784-128-10 MLP over 8,000 images for 4 epochs. **These are not the same workload**, so their wall clocks are not comparable and there is no accuracy number here to set beside page 03.
+It keeps printing one such line per iteration; the run was stopped after the numbers below were taken. Read the schedule before any number: `items_total: 320000`, `epoch_total: 20`, batch 256 (burn's `training.rs`, line 43), an AdamW optimizer with cautious weight decay (the same file, lines 64-65), and a two-convolution model with dropout before its linear layers (burn's `model.rs`, lines 15-23 and 34-40). Page 03 trains a 784-128-10 MLP over 8,000 images for 4 epochs. **These are not the same workload**, so their wall clocks are not comparable and there is no accuracy number here to set beside page 03.
 
 What the run does give is a rate, taken from the two timestamps the learner writes for itself:
 
@@ -89,7 +89,7 @@ grep -m1 "Iteration 50$" /tmp/burn-example-mnist/experiment.log
 
 49 iterations in 110.3 s is **2.25 s per 256-image iteration**. Other work ran on this machine while it trained, so that number is an upper bound on the time per step. At 1250 iterations its own schedule is about 47 minutes.
 
-**Gap.** A comparable training row needs burn configured to page 03's network and schedule — 784-128-10, 8,000 examples, batch 32, 4 epochs — which means editing `examples/mnist/src/model.rs` and `examples/mnist/src/training.rs:39-45`. Until that exists, burn has a measured rate and no accuracy number that could sit beside `0.9180`.
+**Gap.** A comparable training row needs burn configured to page 03's network and schedule — 784-128-10, 8,000 examples, batch 32, 4 epochs — which means editing burn's `examples/mnist/src/model.rs` and `examples/mnist/src/training.rs` (lines 39-45). Until that exists, burn has a measured rate and no accuracy number that could sit beside `0.9180`.
 
 ## 4. PyTorch
 

@@ -12,17 +12,17 @@ Two files in this crate pair are both named `generic_lowering.rs` — one in `pr
 
 | piece | function | what it does |
 |---|---|---|
-| log-mel front end | `stft_log_mel`, `proxima-tensor/src/spec/generic_lowering.rs:525` | frames the signal, runs a DFT against precomputed tables, clamps and rescales |
-| its configuration | `StftLogMelConfig`, `generic_lowering.rs:397` | window, `n_fft` (400), `hop` (160), floor, dynamic range, final scale/offset |
+| log-mel front end | `stft_log_mel`, `proxima-tensor/src/spec/generic_lowering.rs:1296` | frames the signal, runs a DFT against precomputed tables, clamps and rescales |
+| its configuration | `StftLogMelConfig`, `generic_lowering.rs:1168` | window, `n_fft` (400), `hop` (160), floor, dynamic range, final scale/offset |
 | cross-attention | `non_causal_attention_heads` (one builder, head-first), `generic_lowering.rs` | attention with no causal mask, for a decoder reading an encoder |
-| encoder convolution | `conv1d`, `proxima-autograd/src/conv.rs:223` | 1-D convolution with stride, padding and dilation, differentiable |
-| layer norm | `layer_norm`, `generic_lowering.rs:99` | affine normalisation |
-| rotary tables | `multi_axis_rope_tables`, `generic_lowering.rs:295` | per-axis rotary position tables |
-| layer taps | `tap_layers`, `generic_lowering.rs:337` | stack chosen intermediate layers as one tensor |
+| encoder convolution | `conv1d`, `proxima-autograd/src/conv.rs:205` | 1-D convolution with stride, padding and dilation, differentiable |
+| layer norm | `layer_norm`, `generic_lowering.rs:103` | affine normalisation |
+| rotary tables | `multi_axis_rope_tables`, `generic_lowering.rs:1066` | per-axis rotary position tables |
+| layer taps | `tap_layers`, `generic_lowering.rs:1108` | stack chosen intermediate layers as one tensor |
 
-Each row's test lives beside its function in the same file, on a shape that is not a whisper model — for the front end, `stft_log_mel_matches_a_direct_dft_reference_on_a_64_sample_signal` (`generic_lowering.rs:867`). The cross-attention test is in the other crate (`proxima-model-interop/src/generic_lowering.rs:82`), and the convolution's is `conv.rs:1904`.
+Each row's test lives beside its function in the same file, on a shape that is not a whisper model — for the front end, `stft_log_mel_matches_a_direct_dft_reference_on_a_64_sample_signal` (`generic_lowering.rs:1638`). The cross-attention test is in the other crate (`proxima-model-interop/src/generic_lowering.rs:82`), and the convolution's is `proxima-autograd/src/conv.rs:1931`.
 
-The front end is the part that is not a transformer at all, so here it is. `StftLogMelConfig` (`generic_lowering.rs:397`) carries exactly five numbers: `n_fft` 400 (`:401`), `hop` 160 (`:403`), a floor of `1e-10` (`:405`), a dynamic range of 8 decades (`:407`), and the final affine rescale `(x + 4) / 4` (`:409`, `:411`). Those are the whole "family default" the spec allows; everything else comes from the checkpoint's tensor names and `config.json`. The tables are built by `stft_tables` (`:487`), and padding the signal is the caller's job.
+The front end is the part that is not a transformer at all, so here it is. `StftLogMelConfig` (`generic_lowering.rs:1168`) carries exactly five numbers: `n_fft` 400 (`:1172`), `hop` 160 (`:1174`), a floor of `1e-10` (`:1176`), a dynamic range of 8 decades (`:1178`), and the final affine rescale `(x + 4) / 4` (`:1180`, `:1182`). Those are the whole "family default" the spec allows; everything else comes from the checkpoint's tensor names and `config.json`. The tables are built by `stft_tables` (`:1258`), and padding the signal is the caller's job.
 
 Run the front end's reference test. It compares the lowering against a direct DFT on 64 samples, the smallest input where a framing or bin error shows up:
 
@@ -53,7 +53,7 @@ SUMMARY  passed=3 failed=0 ignored=0 not_run=0  wall=2.406s discovered=203 run=3
 
 ## 3. What exists end to end, and what omega does not do yet
 
-Whisper transcribes today. `Model::load` and `Model::transcribe` (`proxima-model-interop/src/families/encoder_decoder_host.rs:687`) run the front end, the encoder, the cross-KV cache and the token loop on a checkpoint directory, on CPU or, when the serving settings passed to `with_settings` set `gpu_layers` to `GPU_LAYERS_ALL`, on Metal. The test `transcript::ids_and_text_match_the_reference` (`proxima-model-interop/tests/whisper.rs:1216`) transcribes a wav and asserts the token ids, the end-of-text stop and the text equal the reference. `proxima-model-interop/specs/whisper/SPEC.md:3` lists S8 (two modes from one graph set) and S11-S13 (training overfit, genericity audit, timed comparison) as open.
+Whisper transcribes today. `Model::load` and `Model::transcribe` (`proxima-model-interop/src/families/encoder_decoder_host.rs:1135`) run the front end, the encoder, the cross-KV cache and the token loop on a checkpoint directory, on CPU or, when the serving settings passed to `with_settings` set `gpu_layers` to `GPU_LAYERS_ALL`, on Metal. The test `transcript::ids_and_text_match_the_reference` (`proxima-model-interop/tests/whisper.rs:1350`) transcribes a wav and asserts the token ids, the end-of-text stop and the text equal the reference. `proxima-model-interop/specs/whisper/SPEC.md:3` lists S8 (two modes from one graph set) and S11-S13 (training overfit, genericity audit, timed comparison) as open.
 
 - A per-model profile is ruled out. The spec's second requirement (`proxima-model-interop/specs/whisper/SPEC.md:26`) forbids a per-model profile — no `whisper.toml`, no "whisper" branch in omega or interop. The intended path is one encoder-decoder template that fills its slots from `model.safetensors` names plus `config.json`. A template is more work than a profile, which is why it is not done.
 - It is slower than whisper.cpp on every measured row. Source: slot-0 `kv-epic/SCOREBOARD.md`, section "whisper (speech) vs whisper.cpp v1.9.5", read 2026-11-24, jfk.wav (11 s) on an M1 Max, token ids exact on both models.

@@ -112,6 +112,7 @@ matrix=(
     "proxima-numeric:std"
     "proxima-numeric:config"
     "proxima-numeric:@testrun:source_rules_scan"
+    "proxima-numeric:@testrun:doc_citations"
     "proxima-gguf:"
     "proxima-tokenizer:"
     "proxima-tokenizer:hf"

@@ -12,8 +12,8 @@ Page 05 already covered non-causal attention, multi-axis rotary tables and layer
 
 | piece | function | what it does |
 |---|---|---|
-| adaLN modulation | `modulate`, `proxima-tensor/src/spec/generic_lowering.rs:128` | `normed * (1 + scale) + shift`, with one `[d]` scale and shift per sample |
-| norm without affine | `layer_norm_no_affine`, `generic_lowering.rs:51` | normalise, then let the caller supply the affine as two nodes |
+| adaLN modulation | `modulate`, `proxima-tensor/src/spec/generic_lowering.rs:132` | `normed * (1 + scale) + shift`, with one `[d]` scale and shift per sample |
+| norm without affine | `layer_norm_no_affine`, `generic_lowering.rs:55` | normalise, then let the caller supply the affine as two nodes |
 
 `modulate` is four lines of graph and the reason it is a function rather than a layer type: `shift` and `scale` are caller-supplied nodes (`generic_lowering.rs:122-124`). In a diffusion model they come from the timestep embedding; in another model they could come from anywhere. The lowering never needs to know which.
 
@@ -42,7 +42,7 @@ PASS proxima-autograd generic_lowering_grad::modulate_gradient_matches_finite_di
 SUMMARY  passed=3 failed=0 ignored=0 not_run=0  wall=2.361s discovered=203 run=3 filtered=200 binaries=24
 ```
 
-The same file checks `non_causal_attention_heads` (one builder, head-first) for `q`, `k` and `v` (`proxima-autograd/src/generic_lowering_grad.rs:222`) and both rope and tap lowerings, so a diffusion graph built from these pieces is differentiable end to end without a second implementation.
+The same file checks `non_causal_attention_heads` (one builder, head-first) for `q`, `k` and `v` (test `non_causal_attention_gradient_matches_finite_differences_for_q_k_and_v`, `proxima-autograd/src/generic_lowering_grad.rs:222`) and both rope and tap lowerings, so a diffusion graph built from these pieces is differentiable end to end without a second implementation.
 
 ## 3. What omega does not do yet
 

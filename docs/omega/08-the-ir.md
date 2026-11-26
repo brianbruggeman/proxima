@@ -18,9 +18,9 @@ A program is a flat `Vec<Op>`. A reference is a `NodeId`, a position in that vec
 
 `ScalarOp` (`op.rs:77`) is the machine's scalar vocabulary: 17 variants, `Identity Add Subtract Multiply Divide Maximum Minimum Negate Reciprocal Exponential Logarithm SquareRoot Tanh Erf Greater Equal Select`. It is closed on purpose: `gelu` is several elementwise ops, not a variant (`op.rs:67-73`). `ScalarOp::arity` gives the operand count (`op.rs:112`); `is_associative` says whether a fold may be reordered (`op.rs:139`).
 
-Every op carries a `dtype: DType` (`Op::dtype`, `op.rs:331`). `DType` is `Bool` or `Layout(FloatLayout)` (`proxima-numeric/src/dtype.rs:12-15`). A `FloatLayout` is the structure of one number: `exponent_bits`, `mantissa_bits`, `specials`, `bias_override`, `sign`, `nan` (`proxima-numeric/src/float_layout.rs:93`). An integer is the layout with zero exponent bits (`float_layout.rs:88-90`). So a new element type is a layout constant, not a new variant (`dtype.rs:3-7`). Note the spelling: `DType::FLOAT32` is `FloatLayout::BF32` (`dtype.rs:72`, `float_layout.rs:164`), binary32 with exponent 8 and mantissa 23.
+Every op carries a `dtype: DType` (`Op::dtype`, `op.rs:331`). `DType` is `Bool` or `Layout(FloatLayout)` (`proxima-numeric/src/dtype.rs:12-15`). A `FloatLayout` (`proxima-numeric/src/float_layout.rs:93`) is the structure of one number: `exponent_bits`, `mantissa_bits`, `specials`, `bias_override`, `sign`, `nan`. An integer is the layout with zero exponent bits (`float_layout.rs:88-90`). So a new element type is a layout constant, not a new variant (`dtype.rs:3-7`). Note the spelling: `DType::FLOAT32` is `FloatLayout::BF32` (`dtype.rs:72`, `float_layout.rs:164`), binary32 with exponent 8 and mantissa 23.
 
-`DType` names only one-number formats. The wider `NumericFormat` also has `Block` (a run of codes under a shared scale, `BlockLayout`) and `Levels` (`proxima-numeric/src/format.rs:247-254`). A quantized weight such as Q4_K is a `NumericFormat`, and no `DType` can say it. Remember this for section 5.
+`DType` names only one-number formats. The wider `NumericFormat` also has `Block` (a run of codes under a shared scale, `BlockLayout`) and `Levels` (`proxima-numeric/src/format.rs:251-253`). A quantized weight such as Q4_K is a `NumericFormat`, and no `DType` can say it. Remember this for section 5.
 
 ## 2. Composition and addressing
 
@@ -55,7 +55,7 @@ let sum = append(&mut program, Op::Reduce(Reduce {
     keep: Keep::Reduce, name: Some("matmul".into()) }));
 ```
 
-Binding fuses the two into one op. The test `matmul_resolves_to_one_fused_op_not_two` asserts one `BoundOp`, kind `Reduce`, whose `element_body` is the multiply (`bind/tests.rs:1958-1985`). The crate says the same in one line: "`matmul` is a `Reduce(+)` over an `Elementwise(*)`" (`proxima-tensor/src/lib.rs:44`). There is no matmul op.
+Binding fuses the two into one op. The test `matmul_resolves_to_one_fused_op_not_two` asserts one `BoundOp`, kind `Reduce`, whose `element_body` is the multiply (`proxima-tensor/src/bind/tests.rs:1958-1985`). The crate says the same in one line: "`matmul` is a `Reduce(+)` over an `Elementwise(*)`" (`proxima-tensor/src/lib.rs:44`). There is no matmul op.
 
 ## 4. Fused forms
 
@@ -94,13 +94,13 @@ Each fused form's parameters sit on the variant, so a backend admits a form by d
 - A float operand: the `dtype` of the `BoundOp` or `Op::Input` that produced it.
 - A quantized weight: bytes that arrive beside the program. The CPU takes `QuantizedBlock::Packed { codec, bytes }` (`proxima-tensor/src/cpu/epilogue.rs:1460-1466`). Omega takes `PackedOperands = BTreeMap<NodeId, Codec>` (`omega/src/lowering.rs:77`). `Codec` is a re-export of `NumericFormat` (`proxima-numeric/src/lib.rs:46-48`).
 
-That is the gap behind the "no fixed weights" rule. The format exists, keyed by `NodeId` outside the op, so a lowering that needs it gets a side table or picks one in code. Until each bound operand carries its `NumericFormat`, a format cannot reach a kernel as a parameter of the op. `BlockQuantize` is the one kind that carries a layout (`:677`), and its own docs say it has no `NumericFormat` (`:794-795`).
+That is the gap behind the "no fixed weights" rule. The format exists, keyed by `NodeId` outside the op, so a lowering that needs it gets a side table or picks one in code. Until each bound operand carries its `NumericFormat`, a format cannot reach a kernel as a parameter of the op. `BlockQuantize` is the one kind that carries a layout (`proxima-tensor/src/bind/types_layout_boundop.rs:674`), and its own docs say it has no `NumericFormat` (`:793-794`).
 
 ## 6. Lowering is a transform into an instruction set
 
 Lowering reads a `BoundOp` and writes text in a target language. Two shared pieces already do this for numeric formats.
 
-**`Dialect`** (`omega/src/render/dialect.rs:28`) spells tokens only: scalar and integer type names, literals, casts, bit reinterpretation, five intrinsics (`Intrinsic`, `dialect.rs:14`), a function head, a declaration, a select, a branch. Three impls:
+**`Dialect`** (`omega/src/render/dialect.rs:28`) spells tokens only: scalar and integer type names, literals, casts, bit reinterpretation, five intrinsics (`Intrinsic`, `omega/src/render/dialect.rs:15`), a function head, a declaration, a select, a branch. Three impls:
 
 | target | type | impl |
 |---|---|---|
@@ -108,7 +108,7 @@ Lowering reads a `BoundOp` and writes text in a target language. Two shared piec
 | CUDA and HIP | `Cuda` | `omega/src/backend/cuda/dialect.rs:61` (one dialect; only the bfloat name differs, `:1-7`) |
 | WGSL | `Wgsl` | `omega/src/backend/wgpu/dialect.rs:30` |
 
-**`render::load` and `render::store`** (`omega/src/render/layout.rs:354`, `:551`) take a `FloatLayout` and render the function that decodes or encodes its code in integer steps, generic over `D: Dialect`. They are the CPU algorithm in `proxima_numeric::float_layout_codec::{decode, encode}` rendered step for step (`render/mod.rs:1-8`). Metal calls them at `omega/src/msl/layout_render.rs:145,155`; CUDA at `omega/src/cuda_layout.rs:28,44`. The only `Wgsl` callers are tests (`omega/src/layout_text_tests.rs:83,87`). `render::Refusal` says why a layout cannot be spelled (`render/refusal.rs:5`).
+**`render::load` and `render::store`** (`omega/src/render/layout.rs:354`, `:551`) take a `FloatLayout` and render the function that decodes or encodes its code in integer steps, generic over `D: Dialect`. They are the CPU algorithm in `proxima_numeric::float_layout_codec::{decode, encode}` rendered step for step (`omega/src/render/mod.rs:1-8`). Metal calls them at `omega/src/msl/layout_render.rs:145,155`; CUDA at `omega/src/cuda_layout.rs:28,44`. The only `Wgsl` callers are tests (`omega/src/layout_text_tests.rs:83,87`). `render::Refusal` says why a layout cannot be spelled (`omega/src/render/refusal.rs:5`).
 
 That is the target shape: a backend is a `Dialect` plus shared steps. Machines differ in facts, not code. Matrix-unit shapes and the formats they accept, wave width, shared-memory size and async copy are device data that the shared lowering reads. The instruction words are the dialect's spelling. If a backend lags its incumbent, the fix is a missing fact or schedule transform in the shared lowering, never a per-backend kernel.
 
