@@ -25,6 +25,7 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
+#![deny(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]
 // The wire format constants keep the sidecar's own variant spellings (`Q4K`, `Iq1S`, `Mxfp4`,
 // `Float16`): renaming them to upper case would rewrite 2600 call sites and every on-disk tag
 // spelling for no gain.

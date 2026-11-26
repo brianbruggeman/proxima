@@ -75,6 +75,8 @@ done
 # crate:@testrun:test-name is `cargo val -p crate --test test-name`: it RUNS one integration test
 # and needs a nonzero passed= count. It is selected whenever any crate is selected, even if its
 # own crate did not change, because its subject is the whole workspace (a source-rules scan).
+# crate:@doc: is `cargo doc --no-deps -p crate`: a crate root that denies rustdoc::broken_intra_doc_links
+# fails the build on a dead link, and nothing else runs rustdoc. It needs a zero exit.
 # crate:@nodefault:feature-set is `cargo check --all-targets --no-default-features`
 # plus those features: it compiles TEST targets for a feature set that excludes the
 # crate's default features (omega defaults to metal; std,cuda never builds with it).
@@ -113,6 +115,9 @@ matrix=(
     "proxima-numeric:config"
     "proxima-numeric:@testrun:source_rules_scan"
     "proxima-numeric:@testrun:doc_citations"
+    "proxima-tensor:@doc:"
+    "proxima-numeric:@doc:"
+    "proxima-omega:@doc:"
     "proxima-gguf:"
     "proxima-tokenizer:"
     "proxima-tokenizer:hf"
@@ -369,6 +374,11 @@ while IFS=: read -r crate features tier_features; do
         format_args=()
         label="$crate integration test $tier_features"
         args=(-p "$crate" --test "$tier_features")
+    elif [ "$features" = "@doc" ]; then
+        verb=(doc)
+        format_args=()
+        label="$crate rustdoc (--no-deps)"
+        args=(-p "$crate" --no-deps)
     elif [ "$features" = "@nodefault" ]; then
         label="$crate --all-targets --no-default-features --features $tier_features"
         args=(-p "$crate" --all-targets --no-default-features --features "$tier_features")
